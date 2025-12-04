@@ -1,0 +1,548 @@
+// src/modules/control/BurnerSystemController.cpp
+
+#include "modules/control/BurnerSystemController.h"
+#include "modules/control/SafetyInterlocks.h"
+#include "modules/control/CentralizedFailsafe.h"
+#include "modules/tasks/RelayControlTask.h"
+#include "config/SystemConstants.h"
+#include "events/SystemEventsGenerated.h"
+#include "shared/SharedRelayReadings.h"
+#include "shared/SharedSensorReadings.h"
+#include "shared/Temperature.h"
+#include "core/SystemResourceProvider.h"
+#include "LoggingMacros.h"
+#include <MutexGuard.h>
+
+static const char* TAG = "BurnerSysCtrl";
+
+BurnerSystemController::BurnerSystemController()
+    : currentMode_(BurnerMode::OFF)
+    , currentPower_(PowerLevel::HALF)
+    , currentTarget_(0)
+    , isActive_(false)
+    , inHeatRecoveryMode_(false)
+    , heatRecoveryStartTime_(0)
+    , inCooldownMode_(false)
+    , cooldownStartTime_(0)
+    , cooldownHeatingPumpWasOn_(false)
+    , cooldownWaterPumpWasOn_(false)
+{
+    mutex_ = xSemaphoreCreateMutex();
+    if (!mutex_) {
+        LOG_ERROR(TAG, "Failed to create mutex");
+    }
+}
+
+BurnerSystemController::~BurnerSystemController() {
+    if (mutex_) {
+        vSemaphoreDelete(mutex_);
+    }
+}
+
+Result<void> BurnerSystemController::initialize() {
+    LOG_INFO(TAG, "Initializing BurnerSystemController");
+    return Result<void>();
+}
+
+void BurnerSystemController::shutdown() {
+    LOG_INFO(TAG, "Shutting down BurnerSystemController");
+    deactivate();
+}
+
+Result<void> BurnerSystemController::activateHeatingMode(Temperature_t targetTemp, PowerLevel power) {
+    if (!mutex_) {
+        return Result<void>(SystemError::MUTEX_TIMEOUT, "Mutex not initialized");
+    }
+
+    MutexGuard lock(mutex_);
+
+    LOG_INFO(TAG, "Activating heating mode (target: %d, power: %d)", targetTemp, static_cast<int>(power));
+
+    // Cancel any pending cooldown (new mode takes over heat dissipation)
+    if (inCooldownMode_) {
+        LOG_INFO(TAG, "Cooldown cancelled - heating mode activation");
+        inCooldownMode_ = false;
+        cooldownHeatingPumpWasOn_ = false;
+        cooldownWaterPumpWasOn_ = false;
+    }
+
+    // Check pump protection for heating pump
+    auto pumpCheck = pumpCoordinator_.checkPumpChangeAllowed(PumpType::HEATING, true);
+    if (pumpCheck.isError()) {
+        LOG_WARN(TAG, "Heating pump change blocked: %s", pumpCheck.message());
+        return pumpCheck;
+    }
+
+    // Determine power level
+    PowerLevel actualPower = (power == PowerLevel::AUTO) ? PowerLevel::HALF : power;
+
+    // Build relay states for heating mode
+    // Heating pump ON, water pump OFF, burner in heating mode
+    auto relayStates = buildRelayStates(BurnerMode::HEATING, actualPower, true, false);
+
+    // Execute atomic batch command
+    auto batchResult = executeRelayBatch(relayStates);
+    if (batchResult.isError()) {
+        return batchResult;
+    }
+
+    // Record pump state change (for 30s protection)
+    pumpCoordinator_.recordPumpStateChange(PumpType::HEATING, true);
+    if (currentMode_ == BurnerMode::WATER) {
+        // Switched from water - record water pump going OFF
+        pumpCoordinator_.recordPumpStateChange(PumpType::WATER, false);
+    }
+
+    // Update internal state
+    currentMode_ = BurnerMode::HEATING;
+    currentPower_ = actualPower;
+    currentTarget_ = targetTemp;
+    isActive_ = true;
+
+    // Clear heat recovery mode (if was active)
+    if (inHeatRecoveryMode_) {
+        uint32_t recoveryDuration = millis() - heatRecoveryStartTime_;
+        LOG_INFO(TAG, "Heat recovery mode ended (duration: %lu s) - burner activated",
+                 recoveryDuration / 1000);
+        inHeatRecoveryMode_ = false;
+    }
+
+    LOG_INFO(TAG, "Heating mode activated successfully");
+    return Result<void>();
+}
+
+Result<void> BurnerSystemController::activateWaterMode(Temperature_t targetTemp, PowerLevel power) {
+    if (!mutex_) {
+        return Result<void>(SystemError::MUTEX_TIMEOUT, "Mutex not initialized");
+    }
+
+    MutexGuard lock(mutex_);
+
+    LOG_INFO(TAG, "Activating water mode (target: %d, power: %d)", targetTemp, static_cast<int>(power));
+
+    // Cancel any pending cooldown (new mode takes over heat dissipation)
+    if (inCooldownMode_) {
+        LOG_INFO(TAG, "Cooldown cancelled - water mode activation");
+        inCooldownMode_ = false;
+        cooldownHeatingPumpWasOn_ = false;
+        cooldownWaterPumpWasOn_ = false;
+    }
+
+    // Check pump protection for water pump
+    auto pumpCheck = pumpCoordinator_.checkPumpChangeAllowed(PumpType::WATER, true);
+    if (pumpCheck.isError()) {
+        LOG_WARN(TAG, "Water pump change blocked: %s", pumpCheck.message());
+        return pumpCheck;
+    }
+
+    // Determine power level
+    PowerLevel actualPower = (power == PowerLevel::AUTO) ? PowerLevel::FULL : power;
+
+    // Build relay states for water mode
+    // Water pump ON, heating pump OFF, burner in water mode
+    auto relayStates = buildRelayStates(BurnerMode::WATER, actualPower, false, true);
+
+    // Execute atomic batch command
+    auto batchResult = executeRelayBatch(relayStates);
+    if (batchResult.isError()) {
+        return batchResult;
+    }
+
+    // Record pump state changes (for 30s protection)
+    pumpCoordinator_.recordPumpStateChange(PumpType::WATER, true);
+    if (currentMode_ == BurnerMode::HEATING) {
+        // Switched from heating - record heating pump going OFF
+        pumpCoordinator_.recordPumpStateChange(PumpType::HEATING, false);
+    }
+
+    // Update internal state
+    currentMode_ = BurnerMode::WATER;
+    currentPower_ = actualPower;
+    currentTarget_ = targetTemp;
+    isActive_ = true;
+
+    // Clear heat recovery mode (water takes priority)
+    if (inHeatRecoveryMode_) {
+        LOG_INFO(TAG, "Heat recovery cancelled - water priority active");
+        inHeatRecoveryMode_ = false;
+    }
+
+    LOG_INFO(TAG, "Water mode activated successfully");
+    return Result<void>();
+}
+
+Result<void> BurnerSystemController::deactivate() {
+    if (!mutex_) {
+        return Result<void>(SystemError::MUTEX_TIMEOUT, "Mutex not initialized");
+    }
+
+    MutexGuard lock(mutex_);
+
+    if (!isActive_) {
+        LOG_DEBUG(TAG, "Already deactivated");
+        return Result<void>();
+    }
+
+    LOG_INFO(TAG, "Deactivating burner system");
+
+    // Build relay states: all burner relays OFF, pumps stay as they are (safety)
+    // Keep pumps running to dissipate heat
+    bool heatingPumpState = pumpCoordinator_.isPumpOn(PumpType::HEATING);
+    bool waterPumpState = pumpCoordinator_.isPumpOn(PumpType::WATER);
+
+    auto relayStates = buildRelayStates(BurnerMode::OFF, PowerLevel::HALF,
+                                       heatingPumpState, waterPumpState);
+
+    // Execute batch command
+    auto batchResult = executeRelayBatch(relayStates);
+    if (batchResult.isError()) {
+        return batchResult;
+    }
+
+    // Update state
+    isActive_ = false;
+    currentMode_ = BurnerMode::OFF;
+
+    // Start cooldown timer if any pump was running
+    if (heatingPumpState || waterPumpState) {
+        inCooldownMode_ = true;
+        cooldownStartTime_ = millis();
+        cooldownHeatingPumpWasOn_ = heatingPumpState;
+        cooldownWaterPumpWasOn_ = waterPumpState;
+        LOG_INFO(TAG, "Burner deactivated - cooldown started (pumps: H=%d W=%d, duration: %lu ms)",
+                 heatingPumpState, waterPumpState, SystemConstants::Timing::PUMP_COOLDOWN_MS);
+    } else {
+        LOG_INFO(TAG, "Burner deactivated (no pumps were running)");
+    }
+
+    return Result<void>();
+}
+
+Result<void> BurnerSystemController::switchToHeatRecovery() {
+    if (!mutex_) {
+        return Result<void>(SystemError::MUTEX_TIMEOUT, "Mutex not initialized");
+    }
+
+    MutexGuard lock(mutex_);
+
+    LOG_INFO(TAG, "Attempting heat recovery mode switch");
+
+    // 1. Check temperature conditions (is it worth switching?)
+    auto& sensors = SRP::getSensorReadings();
+    Temperature_t boilerOutput = sensors.boilerTempOutput;
+    Temperature_t boilerReturn = sensors.boilerTempReturn;
+    Temperature_t differential = tempSub(boilerOutput, boilerReturn);
+
+    // Minimum boiler output temperature (35°C)
+    if (tempLess(boilerOutput, tempFromWhole(35))) {
+        char tempBuf[16];
+        formatTemp(tempBuf, sizeof(tempBuf), boilerOutput);
+        LOG_INFO(TAG, "Heat recovery skipped - boiler too cold (%s < 35°C)", tempBuf);
+        return Result<void>(SystemError::INVALID_PARAMETER,
+                           "Boiler temperature too low for heat recovery");
+    }
+
+    // Minimum differential (10°C)
+    if (tempLess(differential, tempFromWhole(10))) {
+        char diffBuf[16];
+        formatTemp(diffBuf, sizeof(diffBuf), differential);
+        LOG_INFO(TAG, "Heat recovery skipped - differential too low (%s < 10°C)", diffBuf);
+        return Result<void>(SystemError::INVALID_PARAMETER,
+                           "Insufficient temperature differential");
+    }
+
+    // 2. Check pump protection (can we switch to heating pump?)
+    auto pumpCheck = pumpCoordinator_.checkPumpChangeAllowed(PumpType::HEATING, true);
+    if (pumpCheck.isError()) {
+        LOG_WARN(TAG, "Heat recovery blocked by pump protection: %s", pumpCheck.message().c_str());
+        return pumpCheck;
+    }
+
+    // 3. Build relay states: heating pump ON, water pump OFF, burner OFF
+    auto relayStates = buildRelayStates(BurnerMode::OFF, PowerLevel::HALF, true, false);
+
+    // 4. Execute atomic batch command
+    auto batchResult = executeRelayBatch(relayStates);
+    if (batchResult.isError()) {
+        return batchResult;
+    }
+
+    // 5. Record pump state changes
+    pumpCoordinator_.recordPumpStateChange(PumpType::HEATING, true);
+    pumpCoordinator_.recordPumpStateChange(PumpType::WATER, false);
+
+    // 6. Enter heat recovery mode
+    inHeatRecoveryMode_ = true;
+    heatRecoveryStartTime_ = millis();
+    isActive_ = false;  // Burner not active (using residual heat only)
+    currentMode_ = BurnerMode::HEATING;  // Heating circulation but no burner
+
+    char boilerBuf[16], diffBuf[16];
+    formatTemp(boilerBuf, sizeof(boilerBuf), boilerOutput);
+    formatTemp(diffBuf, sizeof(diffBuf), differential);
+    LOG_INFO(TAG, "Heat recovery mode active - using residual heat (boiler: %s, diff: %s)",
+             boilerBuf, diffBuf);
+
+    return Result<void>();
+}
+
+bool BurnerSystemController::shouldActivateHeatingBurner() const {
+    if (!mutex_) return true;  // Fail-safe: allow activation
+
+    MutexGuard lock(mutex_);
+
+    // Not in heat recovery - always allow burner activation
+    if (!inHeatRecoveryMode_) {
+        return true;
+    }
+
+    auto& sensors = SRP::getSensorReadings();
+    Temperature_t boilerOutput = sensors.boilerTempOutput;
+    uint32_t elapsed = millis() - heatRecoveryStartTime_;
+
+    // Check if residual heat exhausted (two conditions - either triggers exit)
+
+    // Condition 1: Time-based minimum (2 minutes)
+    if (elapsed >= 120000) {  // 2 minutes
+        LOG_INFO(TAG, "Heat recovery time expired (%lu s) - allowing burner activation",
+                 elapsed / 1000);
+        // Don't clear flag here - will be cleared when burner activates
+        return true;
+    }
+
+    // Condition 2: Temperature-based (boiler below 40°C)
+    if (tempLess(boilerOutput, tempFromWhole(40))) {
+        char tempBuf[16];
+        formatTemp(tempBuf, sizeof(tempBuf), boilerOutput);
+        LOG_INFO(TAG, "Heat recovery heat exhausted (boiler: %s < 40°C) - allowing burner activation",
+                 tempBuf);
+        // Don't clear flag here - will be cleared when burner activates
+        return true;
+    }
+
+    // Still have residual heat - block burner activation
+    char tempBuf[16];
+    formatTemp(tempBuf, sizeof(tempBuf), boilerOutput);
+    LOG_DEBUG(TAG, "Heat recovery active - blocking burner (time: %lu/120 s, boiler: %s)",
+              elapsed / 1000, tempBuf);
+
+    return false;  // Don't activate burner yet (using residual heat)
+}
+
+Result<void> BurnerSystemController::emergencyShutdown(const char* reason) {
+    LOG_ERROR(TAG, "EMERGENCY SHUTDOWN: %s", reason);
+
+    // Bypass mutex - emergency takes priority
+    // Turn off ALL relays immediately
+    RelayControlTask::setAllRelays(false);
+
+    // Update state (best-effort)
+    if (mutex_ && xSemaphoreTake(mutex_, 0) == pdTRUE) {
+        isActive_ = false;
+        currentMode_ = BurnerMode::OFF;
+        xSemaphoreGive(mutex_);
+    }
+
+    return Result<void>();
+}
+
+bool BurnerSystemController::isActive() const {
+    if (!mutex_) return false;
+    MutexGuard lock(mutex_);
+    return isActive_;
+}
+
+BurnerMode BurnerSystemController::getCurrentMode() const {
+    if (!mutex_) return BurnerMode::OFF;
+    MutexGuard lock(mutex_);
+    return currentMode_;
+}
+
+PowerLevel BurnerSystemController::getCurrentPowerLevel() const {
+    if (!mutex_) return PowerLevel::HALF;
+    MutexGuard lock(mutex_);
+    return currentPower_;
+}
+
+Temperature_t BurnerSystemController::getCurrentTargetTemp() const {
+    if (!mutex_) return 0;
+    MutexGuard lock(mutex_);
+    return currentTarget_;
+}
+
+// ============================================================================
+// Private Methods
+// ============================================================================
+
+std::vector<bool> BurnerSystemController::buildRelayStates(BurnerMode mode, PowerLevel power,
+                                                           bool heatingPump, bool waterPump) {
+    // RYN4 relay mapping (8 relays):
+    // Relay 1: HEATING_PUMP
+    // Relay 2: WATER_PUMP
+    // Relay 3: BURNER_ENABLE (heating mode)
+    // Relay 4: POWER_SELECT (1=half, 0=full)
+    // Relay 5: WATER_MODE
+    // Relay 6-8: Unused
+
+    std::vector<bool> states(8, false);
+
+    // Pumps
+    states[0] = heatingPump;  // Relay 1
+    states[1] = waterPump;    // Relay 2
+
+    // Burner control relays (mutually exclusive)
+    if (mode == BurnerMode::HEATING) {
+        states[2] = true;   // BURNER_ENABLE ON
+        states[4] = false;  // WATER_MODE OFF
+    } else if (mode == BurnerMode::WATER) {
+        states[2] = false;  // BURNER_ENABLE OFF
+        states[4] = true;   // WATER_MODE ON
+    } else {
+        // OFF mode
+        states[2] = false;  // BURNER_ENABLE OFF
+        states[4] = false;  // WATER_MODE OFF
+    }
+
+    // Power select (relay 4)
+    states[3] = (power == PowerLevel::HALF);  // 1=half power, 0=full power
+
+    return states;
+}
+
+Result<void> BurnerSystemController::executeRelayBatch(const std::vector<bool>& states) {
+    // Use RelayControlTask batch command (single Modbus transaction)
+    bool success = RelayControlTask::setMultipleRelays(states);
+
+    if (!success) {
+        LOG_ERROR(TAG, "Batch relay command failed");
+        return Result<void>(SystemError::RELAY_OPERATION_FAILED,
+                           "Batch relay command failed");
+    }
+
+    LOG_DEBUG(TAG, "Batch relay command succeeded (R1:%d R2:%d R3:%d R4:%d R5:%d)",
+              states[0], states[1], states[2], states[3], states[4]);
+
+    return Result<void>();
+}
+
+Result<void> BurnerSystemController::setPowerLevel(PowerLevel power) {
+    if (!mutex_) {
+        return Result<void>(SystemError::NOT_INITIALIZED, "Mutex not initialized");
+    }
+
+    MutexGuard lock(mutex_);
+
+    if (!isActive_) {
+        return Result<void>(SystemError::INVALID_PARAMETER, "Burner not active");
+    }
+
+    if (currentPower_ == power) {
+        return Result<void>();  // Already at requested power level
+    }
+
+    LOG_INFO(TAG, "Changing power level from %s to %s",
+             currentPower_ == PowerLevel::HALF ? "HALF" : "FULL",
+             power == PowerLevel::HALF ? "HALF" : "FULL");
+
+    // Only POWER_SELECT relay changes - use single relay command (not batch)
+    // Relay 4 (index 3): 1=half power, 0=full power
+    bool success = RelayControlTask::setRelayState(3, power == PowerLevel::HALF);
+
+    if (!success) {
+        LOG_ERROR(TAG, "Failed to set power level relay");
+        return Result<void>(SystemError::RELAY_OPERATION_FAILED, "Power level relay failed");
+    }
+
+    currentPower_ = power;
+    return Result<void>();
+}
+
+Result<void> BurnerSystemController::performSafetyCheck() {
+    // Check emergency stop
+    if (!SafetyInterlocks::checkEmergencyStop()) {
+        emergencyShutdown("Emergency stop triggered");
+        return Result<void>(SystemError::EMERGENCY_STOP, "Emergency stop is active");
+    }
+
+    // Check temperature limits
+    if (!SafetyInterlocks::checkTemperatureLimits(SystemConstants::Temperature::MAX_BOILER_TEMP_C)) {
+        emergencyShutdown("Temperature limits exceeded");
+        return Result<void>(SystemError::TEMPERATURE_CRITICAL, "Temperature limits exceeded");
+    }
+
+    // Check critical system errors
+    if (!SafetyInterlocks::checkSystemErrors()) {
+        return Result<void>(SystemError::SYSTEM_FAILSAFE_TRIGGERED, "Critical system errors detected");
+    }
+
+    // Check if boiler is enabled (not an error - just skip burner operations)
+    EventBits_t systemStateBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
+    if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED)) {
+        return Result<void>();  // Not an error - boiler is disabled
+    }
+
+    return Result<void>();
+}
+
+bool BurnerSystemController::checkAndHandleCooldown() {
+    if (!mutex_) return false;
+
+    MutexGuard lock(mutex_);
+
+    if (!inCooldownMode_) {
+        return false;
+    }
+
+    // Safety check: don't turn off pumps if burner has been reactivated
+    // (This should not happen - activation should cancel cooldown, but belt-and-suspenders)
+    if (isActive_) {
+        LOG_WARN(TAG, "Cooldown aborted - burner is active (should have been cancelled)");
+        inCooldownMode_ = false;
+        cooldownHeatingPumpWasOn_ = false;
+        cooldownWaterPumpWasOn_ = false;
+        return false;
+    }
+
+    uint32_t elapsed = millis() - cooldownStartTime_;
+    if (elapsed < SystemConstants::Timing::PUMP_COOLDOWN_MS) {
+        // Still in cooldown
+        return false;
+    }
+
+    // Cooldown complete - turn off pumps
+    LOG_INFO(TAG, "Cooldown complete (%lu ms) - turning off pumps", elapsed);
+
+    // Build relay states: all OFF
+    auto relayStates = buildRelayStates(BurnerMode::OFF, PowerLevel::HALF, false, false);
+
+    // Round 19 Issue #2: Only record state changes if batch command succeeds
+    // If command fails, don't record phantom state - retry on next call
+    auto result = executeRelayBatch(relayStates);
+    if (result.isError()) {
+        LOG_ERROR(TAG, "Failed to turn off pumps after cooldown: %s - will retry", result.message());
+        // DO NOT clear cooldown state or record pump changes
+        // Will retry on next checkAndHandleCooldown() call
+        return false;
+    }
+
+    // Batch command succeeded - record pump state changes for motor protection
+    if (cooldownHeatingPumpWasOn_) {
+        pumpCoordinator_.recordPumpStateChange(PumpType::HEATING, false);
+    }
+    if (cooldownWaterPumpWasOn_) {
+        pumpCoordinator_.recordPumpStateChange(PumpType::WATER, false);
+    }
+
+    // Clear cooldown state
+    inCooldownMode_ = false;
+    cooldownHeatingPumpWasOn_ = false;
+    cooldownWaterPumpWasOn_ = false;
+
+    return true;
+}
+
+bool BurnerSystemController::isInCooldown() const {
+    if (!mutex_) return false;
+    MutexGuard lock(mutex_);
+    return inCooldownMode_;
+}

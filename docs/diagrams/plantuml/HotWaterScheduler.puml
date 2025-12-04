@@ -1,0 +1,253 @@
+@startuml HotWaterScheduler
+!include theme.puml
+
+title Hot Water Scheduler with Pre-Heating - STATE DIAGRAM\n⚠️ FUTURE FEATURE - NOT YET IMPLEMENTED ⚠️
+
+note as Warning
+  **⚠️ ASPIRATIONAL DIAGRAM ⚠️**
+
+  This diagram shows planned pre-heating functionality
+  that is NOT YET IMPLEMENTED in the codebase.
+
+  **Current Implementation:**
+  - Basic schedule checking (30s interval)
+  - Simple ON/OFF scheduling
+  - NO pre-heating calculation
+  - NO estimated ready time
+
+  **Future Enhancement:**
+  When implemented, this will enable:
+  - Smart pre-heating before scheduled times
+  - Heating rate calculation (1°C/min)
+  - Safety margin (10% or 5 min)
+  - MQTT status with estimated ready time
+  - Heat recovery optimization
+end note
+
+[*] --> IDLE : Task Start
+
+state IDLE {
+    IDLE : Entry: Clear all requests
+    IDLE : Do: Wait for timer
+    IDLE : Timer: 30 seconds
+}
+
+IDLE --> CHECK_SCHEDULES : Timer fired
+
+state CHECK_SCHEDULES {
+    [*] --> ReadRTC
+    ReadRTC --> ValidateTime : DS3231 now()
+    ValidateTime --> CheckVacation : Valid time
+    ValidateTime --> IDLE : Invalid RTC
+
+    CheckVacation --> VacationActive : Vacation mode ON
+    CheckVacation --> ScanSchedules : Normal mode
+
+    VacationActive --> IDLE : Skip all schedules
+
+    ScanSchedules --> CheckCurrent : Is schedule active now?
+    CheckCurrent --> InSchedule : Yes, within window
+    CheckCurrent --> LookAhead : No, check upcoming
+
+    InSchedule --> SCHEDULED : Enter active schedule
+
+    LookAhead --> ScanNext60 : Scan next 60 minutes
+    ScanNext60 --> FoundUpcoming : Schedule found
+    ScanNext60 --> NoUpcoming : No schedules
+
+    FoundUpcoming --> CALCULATE_PREHEAT : Need pre-heat?
+    NoUpcoming --> IDLE : Nothing to do
+}
+
+state CALCULATE_PREHEAT {
+    [*] --> GetCurrentTemp
+    GetCurrentTemp --> ReadSensors : SharedSensorReadings
+    ReadSensors --> GetTargetTemp : wHeaterTempTank
+
+    GetTargetTemp --> ReadSettings : SystemSettings
+    ReadSettings --> CalcDelta : wHeaterConfTempLimitHigh
+
+    CalcDelta --> ComputeTime : targetTemp - currentTemp
+    ComputeTime --> DivideByRate : delta / waterHeatingRate (1°C/min)
+
+    DivideByRate --> AddSafetyMargin : base time calculated
+    AddSafetyMargin --> ApplyLimits : +10% or +5min
+
+    ApplyLimits --> CheckMaxTime : Cap at 90 minutes
+    CheckMaxTime --> CompareSchedule : final time
+
+    CompareSchedule --> TooEarly : > minutesUntilSchedule
+    CompareSchedule --> TimeToStart : <= minutesUntilSchedule
+
+    TooEarly --> IDLE : Wait more
+    TimeToStart --> PRE_HEATING : Start now
+}
+
+state PRE_HEATING {
+    [*] --> SetPreHeatFlag
+    SetPreHeatFlag --> RecordStartTime : isPreheating = true
+    RecordStartTime --> RequestWaterHeat : preheatStartTime = millis()
+
+    RequestWaterHeat --> SetBurnerRequest : Via BurnerRequestManager
+    SetBurnerRequest --> PublishStatus : WATER_REQUEST + temp
+
+    PublishStatus --> MonitorTemp : MQTT update
+    MonitorTemp --> CheckProgress : Every 30s
+
+    CheckProgress --> StillPreHeating : Temp < target
+    CheckProgress --> TargetReached : Temp >= target
+    CheckProgress --> ScheduleTime : Time for schedule
+
+    StillPreHeating --> CalculateRemaining : Minutes left
+    CalculateRemaining --> UpdateStatus : Update MQTT
+    UpdateStatus --> MonitorTemp : Continue
+
+    TargetReached --> MAINTAINING : Hold temperature
+    ScheduleTime --> SCHEDULED : Transition
+}
+
+state MAINTAINING {
+    [*] --> HoldTemperature
+    HoldTemperature --> MinimalHeat : At target early
+    MinimalHeat --> CheckScheduleStart : Monitor time
+
+    CheckScheduleStart --> StillWaiting : Not yet
+    CheckScheduleStart --> ScheduleActive : Time reached
+
+    StillWaiting --> MinimalHeat : Maintain
+    ScheduleActive --> SCHEDULED : Enter schedule
+}
+
+state SCHEDULED {
+    [*] --> ActiveSchedule
+    ActiveSchedule --> MaintainWater : Hold target temp
+    MaintainWater --> MonitorSchedule : Check time
+
+    MonitorSchedule --> WithinWindow : Still active
+    MonitorSchedule --> ScheduleEnd : Time expired
+
+    WithinWindow --> MaintainWater : Continue
+    ScheduleEnd --> ClearRequest : Stop heating
+
+    ClearRequest --> CheckNextSchedule : Look ahead
+    CheckNextSchedule --> IDLE : No upcoming
+    CheckNextSchedule --> CALCULATE_PREHEAT : Next found
+}
+
+' Main transitions
+CHECK_SCHEDULES --> IDLE : No action
+CHECK_SCHEDULES --> CALCULATE_PREHEAT : Upcoming found
+CHECK_SCHEDULES --> SCHEDULED : Already active
+
+CALCULATE_PREHEAT --> IDLE : Too early
+CALCULATE_PREHEAT --> PRE_HEATING : Time to start
+
+PRE_HEATING --> MAINTAINING : Target reached
+PRE_HEATING --> SCHEDULED : Schedule time
+
+MAINTAINING --> SCHEDULED : Schedule starts
+SCHEDULED --> IDLE : Complete
+SCHEDULED --> CALCULATE_PREHEAT : Next schedule
+
+' Vacation mode
+IDLE --> VACATION : Vacation ON
+PRE_HEATING --> VACATION : Vacation ON
+MAINTAINING --> VACATION : Vacation ON
+SCHEDULED --> VACATION : Vacation ON
+
+state VACATION {
+    [*] --> SuspendAll
+    SuspendAll --> ClearRequests : Cancel heating
+    ClearRequests --> WaitEnd : No schedules
+    WaitEnd --> CheckVacationOff : Monitor flag
+    CheckVacationOff --> WaitEnd : Still on
+    CheckVacationOff --> IDLE : Vacation OFF
+}
+
+VACATION --> IDLE : Resume normal
+
+' MQTT overrides
+IDLE --> MANUAL_OVERRIDE : MQTT command
+PRE_HEATING --> MANUAL_OVERRIDE : MQTT command
+MAINTAINING --> MANUAL_OVERRIDE : MQTT command
+SCHEDULED --> MANUAL_OVERRIDE : MQTT command
+
+state MANUAL_OVERRIDE {
+    [*] --> ParseCommand
+    ParseCommand --> ForceOn : "on" command
+    ParseCommand --> ForceOff : "off" command
+    ParseCommand --> ScheduleChange : Add/remove/edit
+
+    ForceOn --> SCHEDULED : Immediate heat
+    ForceOff --> IDLE : Cancel all
+    ScheduleChange --> CHECK_SCHEDULES : Re-evaluate
+}
+
+' Error handling
+PRE_HEATING --> ERROR : Sensor fail
+MAINTAINING --> ERROR : Sensor fail
+SCHEDULED --> ERROR : Sensor fail
+
+state ERROR {
+    [*] --> LogError
+    LogError --> SafeMode : To FRAM
+    SafeMode --> NotifyMQTT : Error status
+    NotifyMQTT --> WaitRecovery : Monitor
+    WaitRecovery --> IDLE : Sensor OK
+}
+
+ERROR --> IDLE : Recovery
+
+note right of CALCULATE_PREHEAT
+  **Pre-heat Calculation Example:**
+
+  Current temp: 40°C
+  Target temp: 60°C
+  Delta: 20°C
+  Heating rate: 1°C/min (configurable)
+  Base time: 20 minutes
+
+  Safety margin: +10% = 2 min
+  Total pre-heat: 22 minutes
+
+  Schedule start: 06:30
+  Pre-heat start: 06:08
+  Estimated ready: 06:30
+end note
+
+note right of PRE_HEATING
+  **MQTT Pre-heat Status:**
+  {
+    "preheating": true,
+    "scheduleName": "Morning",
+    "waterTemp": 45.5,
+    "targetTemp": 60.0,
+    "estimatedReady": "06:25",
+    "minutesRemaining": 15,
+    "heatingRate": 1.0
+  }
+
+  Published every 30s
+  during pre-heating
+end note
+
+note bottom of MAINTAINING
+  **Pre-heated and Ready:**
+  - Target temperature reached early
+  - Minimal heat cycles to maintain
+  - Ready for immediate use
+  - Efficient - no wasted energy
+  - Smart - learns from history (future)
+end note
+
+note bottom of VACATION
+  **Vacation Mode:**
+  - All schedules ignored
+  - No pre-heating
+  - Manual control only
+  - Pump exercise continues
+    (separate timer)
+  - Battery savings
+end note
+
+@enduml
