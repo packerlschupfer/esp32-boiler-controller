@@ -1,0 +1,145 @@
+@startuml BurnerSystemController
+!include theme.puml
+
+title BurnerSystemController - H1 Refactoring Architecture\nUnified Burner + Pump Control with Atomic Operations
+
+' Main controller class
+class BurnerSystemController <<Singleton>> {
+    - currentMode: Mode
+    - burnerState: BurnerState
+    - pumpStates: PumpStates
+    - mutex: SemaphoreHandle_t
+    --
+    + **Public API**
+    + activateHeatingMode(): bool
+    + activateWaterMode(): bool
+    + deactivate(): bool
+    + switchMode(Mode): bool
+    + getCurrentMode(): Mode
+    --
+    - **Internal Methods**
+    - buildRelayBatch(): RelayBatch
+    - executeBatch(RelayBatch): bool
+    - checkPumpProtection(): bool
+    - startCooldown(): void
+}
+
+enum Mode {
+    IDLE
+    HEATING
+    WATER
+    COOLDOWN
+    HEAT_RECOVERY
+}
+
+class PumpCoordinator {
+    - lastPumpOnTime: uint32_t
+    - pumpRunning: bool
+    --
+    + canStartPump(): bool
+    + recordPumpStart(): void
+    + get30sProtection(): bool
+}
+
+class RelayBatch {
+    + relays[8]: RelayState
+    + count: int
+    --
+    + addRelay(id, state): void
+    + execute(): bool
+}
+
+class RYN4Device {
+    + setMultipleRelays(batch): bool
+    + getRelayState(id): RelayState
+    + readAllStates(): bool
+}
+
+enum RelayId {
+    HEATING_PUMP = 1
+    WATER_PUMP = 2
+    BURNER_ENABLE = 3
+    POWER_SELECT = 4
+    WATER_MODE = 5
+    VALVE = 6
+    ALARM = 7
+    SPARE = 8
+}
+
+' Control request sources
+class HeatingControlTask {
+    + requestHeating(): void
+}
+
+class WheaterControlTask {
+    + requestWater(): void
+}
+
+class MQTTManager {
+    + sendCommand(cmd): void
+}
+
+' Relationships
+BurnerSystemController *-- Mode
+BurnerSystemController *-- PumpCoordinator
+BurnerSystemController --> RelayBatch : creates
+RelayBatch --> RYN4Device : executes on
+RYN4Device --> RelayId : controls
+
+HeatingControlTask ..> BurnerSystemController : calls
+WheaterControlTask ..> BurnerSystemController : calls
+MQTTManager ..> BurnerSystemController : calls
+
+note left of BurnerSystemController
+  **H1 Refactoring Benefits:**
+  ✓ Single source of truth
+  ✓ Atomic relay operations
+  ✓ Thread-safe with mutex
+  ✓ Eliminates race conditions
+  ✓ Make-before-break switching
+end note
+
+note right of PumpCoordinator
+  **30s Motor Protection:**
+  Prevents rapid pump cycling
+  that damages motor windings
+
+  Enforced by hardware timer
+  Cannot be bypassed
+end note
+
+note bottom of RelayBatch
+  **Atomic Batch Operations:**
+  All relays updated in single
+  Modbus transaction
+
+  Example Heating Mode:
+  R1: ON (Heating Pump)
+  R3: ON (Burner)
+  R4: ON/OFF (Power)
+  R5: OFF (Water Mode)
+end note
+
+note as N1
+  **Heat Recovery Mode:**
+  After water heating completes,
+  if boiler temp ≥35°C and
+  differential ≥10°C,
+  automatically switch to
+  heating pump to use
+  residual heat for space heating
+end note
+
+note as N2
+  **Cooldown Management:**
+  When burner stops:
+  1. Keep pumps running
+  2. Monitor boiler temperature
+  3. Stop when temp drops OR timeout
+  4. Safely dissipates residual heat
+end note
+
+BurnerSystemController .. N1
+BurnerSystemController .. N2
+
+@enduml

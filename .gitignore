@@ -1,0 +1,20 @@
+# Claude workspace - ignore only logs
+.claude/logs/
+
+# Build artifacts
+.pio/
+
+# IDE configuration
+.vscode/
+
+# Credentials and secrets
+credentials.ini
+
+# Log files
+*.log
+*.txt
+!credentials.example.ini
+
+# Build scripts (keep .example versions)
+scripts/my_*.json
+scripts/custom_parameters.json
