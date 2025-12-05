@@ -383,7 +383,6 @@ public:
     
     static int& getPidFactorSpaceHeating();
     static int& getPidFactorWaterHeating();
-    static struct RelayConfig* getRelayConfigs();
 };
 
 // Convenience macros for even shorter access (optional)

@@ -121,10 +121,6 @@ int& SystemResourceProvider::getPidFactorWaterHeating() {
     return pidFactorWaterHeating;
 }
 
-RelayConfig* SystemResourceProvider::getRelayConfigs() {
-    return relayConfigs;
-}
-
 // Service accessors - use gSystemInitializer (ServiceContainer removed)
 
 MB8ART* SystemResourceProvider::getMB8ART() {
