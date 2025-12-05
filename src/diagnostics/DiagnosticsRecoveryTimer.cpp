@@ -5,8 +5,8 @@
 #include "LoggingMacros.h"
 #include <esp_log.h>
 
+static const char* TAG = "DiagnosticsRecovery";
 static TimerHandle_t recoveryTimer = nullptr;
-static const char* TAG = "DiagRecovery";
 
 /**
  * @brief Timer callback to restore normal diagnostic operation

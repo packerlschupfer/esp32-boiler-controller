@@ -29,6 +29,8 @@
 #include "modules/tasks/NTPTask.h"
 #include <esp_log.h>
 
+static const char* TAG = "Main";
+
 // BurnerSystemController is created in SystemInitializer and passed to WheaterControlTask via parameter
 
 // Task function declarations are now in header files
@@ -230,19 +232,19 @@ void setup() {
     
     // Early initialization of critical singletons to prevent deadlock
     // Force singleton initialization in main thread before any tasks start
-    LOG_INFO(LOG_TAG_MAIN, "Pre-initializing critical singletons...");
+    LOG_INFO(TAG, "Pre-initializing critical singletons...");
     SharedResourceManager::getInstance();  // Initialize SharedResourceManager singleton
     // ServiceContainer removed - services accessed via SRP and gSystemInitializer
     
     // Phase 3: Create and run SystemInitializer
     // Use logger for banner output with proper line endings
-    LOG_INFO(LOG_TAG_MAIN, "");
-    LOG_INFO(LOG_TAG_MAIN, "==== ESPlan Boiler Controller ====");
-    LOG_INFO(LOG_TAG_MAIN, "%s v%s", PROJECT_NAME, FIRMWARE_VERSION);
-    LOG_INFO(LOG_TAG_MAIN, "==================================");
-    LOG_INFO(LOG_TAG_MAIN, "");
+    LOG_INFO(TAG, "");
+    LOG_INFO(TAG, "==== ESPlan Boiler Controller ====");
+    LOG_INFO(TAG, "%s v%s", PROJECT_NAME, FIRMWARE_VERSION);
+    LOG_INFO(TAG, "==================================");
+    LOG_INFO(TAG, "");
     
-    LOG_INFO(LOG_TAG_MAIN, "About to create SystemInitializer...");
+    LOG_INFO(TAG, "About to create SystemInitializer...");
     
     gSystemInitializer = new SystemInitializer();
     if (!gSystemInitializer) {
@@ -254,7 +256,7 @@ void setup() {
         }
     }
     
-    LOG_INFO(LOG_TAG_MAIN, "SystemInitializer created, about to call initializeSystem()...");
+    LOG_INFO(TAG, "SystemInitializer created, about to call initializeSystem()...");
     
     // Run system initialization
     auto result = gSystemInitializer->initializeSystem();
@@ -299,7 +301,7 @@ void setup() {
     // and passed to WheaterControlTask via parameter (Pattern B: parameter passing)
 
     // Initialize NTPTask for network time synchronization
-    LOG_INFO(LOG_TAG_MAIN, "Initializing NTPTask...");
+    LOG_INFO(TAG, "Initializing NTPTask...");
 
     // Enable watchdog with sufficient timeout for NTP operations (5s sync + margin)
     TaskManager::WatchdogConfig ntpWdtConfig = TaskManager::WatchdogConfig::enabled(
@@ -315,13 +317,13 @@ void setup() {
         2,     // Priority - same as monitoring task
         0,     // Core 0
         ntpWdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "NTPTask created successfully");
+        LOG_INFO(TAG, "NTPTask created successfully");
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to create NTPTask (non-critical)");
+        LOG_WARN(TAG, "Failed to create NTPTask (non-critical)");
     }
     
     // Initialize TimerSchedulerTask (generic scheduler for water and space heating)
-    LOG_INFO(LOG_TAG_MAIN, "Initializing TimerSchedulerTask...");
+    LOG_INFO(TAG, "Initializing TimerSchedulerTask...");
 
     TaskManager::WatchdogConfig timerWdtConfig = TaskManager::WatchdogConfig::disabled();
     if (SRP::getTaskManager().startTaskPinned(
@@ -332,15 +334,15 @@ void setup() {
         2,     // Priority - same as monitoring task
         0,     // Core 0
         timerWdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "TimerSchedulerTask created successfully");
+        LOG_INFO(TAG, "TimerSchedulerTask created successfully");
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to create TimerSchedulerTask (non-critical)");
+        LOG_WARN(TAG, "Failed to create TimerSchedulerTask (non-critical)");
     }
     
-    LOG_INFO(LOG_TAG_MAIN, "==================================");
-    LOG_INFO(LOG_TAG_MAIN, "System initialization complete!");
-    LOG_INFO(LOG_TAG_MAIN, "Free heap: %d bytes", ESP.getFreeHeap());
-    LOG_INFO(LOG_TAG_MAIN, "==================================");
+    LOG_INFO(TAG, "==================================");
+    LOG_INFO(TAG, "System initialization complete!");
+    LOG_INFO(TAG, "Free heap: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "==================================");
     
     // Wait for logs to output before re-enabling rate limiting
     #ifndef LOG_NO_CUSTOM_LOGGER
@@ -349,7 +351,7 @@ void setup() {
     
     // Re-enable rate limiting with higher limit for normal operation
     Logger::getInstance().setMaxLogsPerSecond(200);  // Increased from 100 to prevent drops
-    LOG_INFO(LOG_TAG_MAIN, "Rate limiting enabled: 200 logs/second");
+    LOG_INFO(TAG, "Rate limiting enabled: 200 logs/second");
     
     // Restore normal logging levels after startup
     restoreNormalLogging();
@@ -382,10 +384,10 @@ void handleRuntimeTasks() {
             size_t minFreeHeap = ESP.getMinFreeHeap();
             
             if (freeHeap < 15000) {
-                LOG_WARN(LOG_TAG_MAIN, "LOW MEMORY WARNING: Free: %d, Min: %d bytes", 
+                LOG_WARN(TAG, "LOW MEMORY WARNING: Free: %d, Min: %d bytes", 
                          freeHeap, minFreeHeap);
             } else {
-                LOG_DEBUG(LOG_TAG_MAIN, "Memory status: Free: %d, Min: %d bytes", 
+                LOG_DEBUG(TAG, "Memory status: Free: %d, Min: %d bytes", 
                           freeHeap, minFreeHeap);
             }
         }
@@ -396,7 +398,7 @@ void handleRuntimeTasks() {
             static uint32_t lastLowMemoryWarning = 0;
             if (now - lastLowMemoryWarning > 10000) {  // Warn every 10s when memory is low
                 lastLowMemoryWarning = now;
-                LOG_WARN(LOG_TAG_MAIN, "LOW MEMORY WARNING: Free: %d bytes", currentFreeHeap);
+                LOG_WARN(TAG, "LOW MEMORY WARNING: Free: %d bytes", currentFreeHeap);
             }
         }
     }
@@ -457,7 +459,7 @@ void configureLibraryLogging() {
     logger.setTagLevel("WheaterControl", ESP_LOG_WARN);  // Reduced from INFO
     logger.setTagLevel("PIDControl", ESP_LOG_WARN);     // Reduced from INFO
     logger.setTagLevel("SystemInit", ESP_LOG_INFO);     // Keep for startup tracking
-    logger.setTagLevel(LOG_TAG_MAIN, ESP_LOG_INFO);     // Keep for main flow
+    logger.setTagLevel(TAG, ESP_LOG_INFO);     // Keep for main flow
     logger.setTagLevel("HWScheduler", ESP_LOG_WARN);    // Reduced from INFO
     logger.setTagLevel("NTPTask", ESP_LOG_WARN);        // Reduced from INFO
     logger.setTagLevel("NTPClient", ESP_LOG_WARN);      // Reduced from DEBUG
@@ -542,7 +544,7 @@ void configureLibraryLogging() {
         logger.setTagLevel("MON", ESP_LOG_WARN);             // Reduced from INFO
     #endif
     
-    LOG_INFO(LOG_TAG_MAIN, "Library logging configured - Critical: INFO, Hardware: %s, Network: WARN, Utility: ERROR",
+    LOG_INFO(TAG, "Library logging configured - Critical: INFO, Hardware: %s, Network: WARN, Utility: ERROR",
              #if defined(MB8ART_DEBUG)
              "MB8ART:DEBUG"
              #elif defined(RYN4_DEBUG)
@@ -566,7 +568,7 @@ void setQuietMode() {
     logger.setTagLevel("HeatingControl", ESP_LOG_WARN);
     logger.setTagLevel("WheaterControl", ESP_LOG_WARN);
     logger.setTagLevel("SystemInit", ESP_LOG_WARN);
-    logger.setTagLevel(LOG_TAG_MAIN, ESP_LOG_WARN);
+    logger.setTagLevel(TAG, ESP_LOG_WARN);
     
     // Silence everything else
     logger.setTagLevel("MB8ART", ESP_LOG_ERROR);
@@ -575,7 +577,7 @@ void setQuietMode() {
     logger.setTagLevel("ModbusDevice", ESP_LOG_NONE);
     logger.setTagLevel("ModbusRTU", ESP_LOG_NONE);
     
-    LOG_WARN(LOG_TAG_MAIN, "Quiet mode enabled - minimal logging");
+    LOG_WARN(TAG, "Quiet mode enabled - minimal logging");
     #endif
 }
 
@@ -601,7 +603,7 @@ void setVerboseMode() {
     logger.setTagLevel("SemaphoreGuard", ESP_LOG_WARN);
     logger.setTagLevel("MutexGuard", ESP_LOG_WARN);
     
-    LOG_INFO(LOG_TAG_MAIN, "Verbose mode enabled - detailed logging");
+    LOG_INFO(TAG, "Verbose mode enabled - detailed logging");
     #endif
 }
 
@@ -612,7 +614,7 @@ void enableLibraryDebug(const char* libName) {
     Logger& logger = Logger::getInstance();
     logger.setTagLevel(libName, ESP_LOG_DEBUG);
     
-    LOG_INFO(LOG_TAG_MAIN, "Debug logging enabled for library: %s", libName);
+    LOG_INFO(TAG, "Debug logging enabled for library: %s", libName);
     
     // Also enable related tags for common libraries
     if (strcmp(libName, "MB8ART") == 0) {
@@ -654,10 +656,10 @@ void handleMQTTLogCommand(const char* command, const char* payload) {
             
             if (strcmp(lib, "global") == 0) {
                 Logger::getInstance().setLogLevel(logLevel);
-                LOG_INFO(LOG_TAG_MAIN, "Global log level set to %s", level);
+                LOG_INFO(TAG, "Global log level set to %s", level);
             } else {
                 Logger::getInstance().setTagLevel(lib, logLevel);
-                LOG_INFO(LOG_TAG_MAIN, "Log level for %s set to %s", lib, level);
+                LOG_INFO(TAG, "Log level for %s set to %s", lib, level);
             }
         }
     }
@@ -668,7 +670,7 @@ void restoreNormalLogging() {
     #ifndef LOG_NO_CUSTOM_LOGGER
     Logger& logger = Logger::getInstance();
     
-    LOG_INFO(LOG_TAG_MAIN, "Restoring normal logging levels after startup...");
+    LOG_INFO(TAG, "Restoring normal logging levels after startup...");
     
     // Restore system components based on debug flags
     #ifdef CONTROL_MODULE_DEBUG
@@ -750,6 +752,6 @@ void restoreNormalLogging() {
         logger.setTagLevel("MON", ESP_LOG_INFO);
     #endif
     
-    LOG_INFO(LOG_TAG_MAIN, "Normal logging levels restored");
+    LOG_INFO(TAG, "Normal logging levels restored");
     #endif
 }

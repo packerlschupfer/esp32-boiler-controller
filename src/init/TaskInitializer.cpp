@@ -44,9 +44,11 @@
 // Config
 #include "config/ProjectConfig.h"
 
+
+static const char* TAG = "TaskInitializer";
 Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing tasks...");
-    LOG_DEBUG(LOG_TAG_MAIN, "Starting task initialization at %lu ms", millis());
+    LOG_INFO(TAG, "Initializing tasks...");
+    LOG_DEBUG(TAG, "Starting task initialization at %lu ms", millis());
 
     /*
      * WATCHDOG PATTERN DOCUMENTATION:
@@ -66,12 +68,12 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
     initializeOTATask();
 
     // Start ModbusCoordinator
-    LOG_INFO(LOG_TAG_MAIN, "Starting Modbus coordinator for sensor synchronization...");
+    LOG_INFO(TAG, "Starting Modbus coordinator for sensor synchronization...");
     auto& modbusCoordinator = ModbusCoordinator::getInstance();
     if (!modbusCoordinator.start()) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to start ModbusCoordinator - sensors will run uncoordinated");
+        LOG_ERROR(TAG, "Failed to start ModbusCoordinator - sensors will run uncoordinated");
     } else {
-        LOG_INFO(LOG_TAG_MAIN, "ModbusCoordinator started successfully");
+        LOG_INFO(TAG, "ModbusCoordinator started successfully");
     }
 
     // Initialize sensor tasks
@@ -84,18 +86,18 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
     #ifdef ENABLE_MQTT
     if (MQTTTask::init()) {
         if (MQTTTask::start()) {
-            LOG_INFO(LOG_TAG_MAIN, "MQTT task started successfully");
+            LOG_INFO(TAG, "MQTT task started successfully");
         } else {
-            LOG_WARN(LOG_TAG_MAIN, "Failed to start MQTT task");
+            LOG_WARN(TAG, "Failed to start MQTT task");
         }
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to initialize MQTT task");
+        LOG_WARN(TAG, "Failed to initialize MQTT task");
     }
     #endif
 
     // Persistent Storage task
-    LOG_INFO(LOG_TAG_MAIN, "Starting persistent storage task...");
-    LOG_INFO(LOG_TAG_MAIN, "Free heap before persistent storage: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Starting persistent storage task...");
+    LOG_INFO(TAG, "Free heap before persistent storage: %d bytes", ESP.getFreeHeap());
 
     TaskManager::WatchdogConfig storageWdtConfig = TaskManager::WatchdogConfig::disabled();
 
@@ -106,24 +108,24 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
         nullptr,
         PRIORITY_CONTROL_TASK - 1,
         storageWdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "Persistent storage task created successfully");
+        LOG_INFO(TAG, "Persistent storage task created successfully");
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to create persistent storage task");
+        LOG_WARN(TAG, "Failed to create persistent storage task");
     }
 
     // Fallback: Ensure BurnerControlTask is created
     TaskHandle_t existingBurnerTask = SRP::getTaskManager().getTaskHandleByName("BurnerControl");
     if (existingBurnerTask == nullptr && initializer->burnerSystemController_ != nullptr) {
-        LOG_WARN(LOG_TAG_MAIN, "BurnerControlTask not created by background task - creating now as fallback");
+        LOG_WARN(TAG, "BurnerControlTask not created by background task - creating now as fallback");
         auto burnerResult = initializeBurnerControlTask(initializer);
         if (burnerResult.isError()) {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to create BurnerControlTask in fallback: %s",
+            LOG_ERROR(TAG, "Failed to create BurnerControlTask in fallback: %s",
                       ErrorHandler::errorToString(burnerResult.error()));
         } else {
-            LOG_INFO(LOG_TAG_MAIN, "BurnerControlTask created successfully via fallback");
+            LOG_INFO(TAG, "BurnerControlTask created successfully via fallback");
         }
     } else if (existingBurnerTask != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "BurnerControlTask already exists - skipping fallback creation");
+        LOG_INFO(TAG, "BurnerControlTask already exists - skipping fallback creation");
     }
 
     // Initialize pump control tasks
@@ -147,66 +149,66 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
     for (const char* taskName : criticalTasks) {
         TaskHandle_t handle = SRP::getTaskManager().getTaskHandleByName(taskName);
         if (handle == nullptr) {
-            LOG_ERROR(LOG_TAG_MAIN, "CRITICAL: Task '%s' not running after initialization!", taskName);
+            LOG_ERROR(TAG, "CRITICAL: Task '%s' not running after initialization!", taskName);
             criticalTasksOk = false;
         } else {
             eTaskState state = eTaskGetState(handle);
             if (state == eDeleted || state == eInvalid) {
-                LOG_ERROR(LOG_TAG_MAIN, "CRITICAL: Task '%s' has invalid state %d!", taskName, (int)state);
+                LOG_ERROR(TAG, "CRITICAL: Task '%s' has invalid state %d!", taskName, (int)state);
                 criticalTasksOk = false;
             } else {
-                LOG_DEBUG(LOG_TAG_MAIN, "Task '%s' verified running (state=%d)", taskName, (int)state);
+                LOG_DEBUG(TAG, "Task '%s' verified running (state=%d)", taskName, (int)state);
             }
         }
     }
 
     if (!criticalTasksOk) {
-        LOG_ERROR(LOG_TAG_MAIN, "One or more critical tasks failed to start - system may be unstable!");
+        LOG_ERROR(TAG, "One or more critical tasks failed to start - system may be unstable!");
         // Don't return error - let system continue in degraded mode
         // CentralizedFailsafe will handle individual component failures
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Task initialization complete");
+    LOG_INFO(TAG, "Task initialization complete");
     return Result<void>();
 }
 
 void TaskInitializer::initializeRelayControlTask(SystemInitializer* initializer) {
     if (initializer->ryn4_ != nullptr) {
-        LOG_DEBUG(LOG_TAG_MAIN, "About to start relay control task at %lu ms", millis());
-        LOG_INFO(LOG_TAG_MAIN, "Starting relay control task...");
-        LOG_INFO(LOG_TAG_MAIN, "RYN4 pointer: %p, initialized: %s",
+        LOG_DEBUG(TAG, "About to start relay control task at %lu ms", millis());
+        LOG_INFO(TAG, "Starting relay control task...");
+        LOG_INFO(TAG, "RYN4 pointer: %p, initialized: %s",
                  (void*)initializer->ryn4_, initializer->ryn4_->isInitialized() ? "YES" : "NO");
 
         if (!RelayControlTask::init(initializer->ryn4_)) {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to initialize relay control task - init() returned false");
+            LOG_ERROR(TAG, "Failed to initialize relay control task - init() returned false");
         } else if (!RelayControlTask::start()) {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to start relay control task - start() returned false");
+            LOG_ERROR(TAG, "Failed to start relay control task - start() returned false");
         } else {
-            LOG_INFO(LOG_TAG_MAIN, "Relay control task started successfully");
+            LOG_INFO(TAG, "Relay control task started successfully");
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     } else {
-        LOG_ERROR(LOG_TAG_MAIN, "Cannot start relay control task - ryn4_ is NULL");
+        LOG_ERROR(TAG, "Cannot start relay control task - ryn4_ is NULL");
     }
 }
 
 void TaskInitializer::initializeOTATask() {
-    LOG_DEBUG(LOG_TAG_MAIN, "About to start OTA task at %lu ms", millis());
-    LOG_INFO(LOG_TAG_MAIN, "Starting OTA task...");
+    LOG_DEBUG(TAG, "About to start OTA task at %lu ms", millis());
+    LOG_INFO(TAG, "Starting OTA task...");
     if (!OTATask::init()) {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to initialize OTA task");
+        LOG_WARN(TAG, "Failed to initialize OTA task");
     } else if (!OTATask::start()) {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to start OTA task");
+        LOG_WARN(TAG, "Failed to start OTA task");
     } else {
-        LOG_INFO(LOG_TAG_MAIN, "OTA task started successfully");
+        LOG_INFO(TAG, "OTA task started successfully");
     }
-    LOG_DEBUG(LOG_TAG_MAIN, "OTA task done at %lu ms", millis());
+    LOG_DEBUG(TAG, "OTA task done at %lu ms", millis());
 }
 
 void TaskInitializer::initializeSensorTasks(SystemInitializer* initializer) {
     // Initialize ANDRTF3 task
     if (initializer->andrtf3_ != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "Starting ANDRTF3 room temperature sensor task...");
+        LOG_INFO(TAG, "Starting ANDRTF3 room temperature sensor task...");
         TaskManager::WatchdogConfig andrtf3WdtConfig = TaskManager::WatchdogConfig::disabled();
 
         if (SRP::getTaskManager().startTaskPinned(
@@ -217,26 +219,26 @@ void TaskInitializer::initializeSensorTasks(SystemInitializer* initializer) {
             PRIORITY_SENSOR_TASK,
             1,
             andrtf3WdtConfig)) {
-            LOG_INFO(LOG_TAG_MAIN, "ANDRTF3 task started successfully");
+            LOG_INFO(TAG, "ANDRTF3 task started successfully");
         } else {
-            LOG_WARN(LOG_TAG_MAIN, "Failed to start ANDRTF3 task - inside temperature unavailable");
+            LOG_WARN(TAG, "Failed to start ANDRTF3 task - inside temperature unavailable");
         }
     } else {
-        LOG_INFO(LOG_TAG_MAIN, "Skipping ANDRTF3 task - device not available");
+        LOG_INFO(TAG, "Skipping ANDRTF3 task - device not available");
     }
 
     // Start SpaceHeatingPIDTask after ANDRTF3
     if (initializer->heatingControl_ != nullptr) {
         vTaskDelay(pdMS_TO_TICKS(200));
-        LOG_INFO(LOG_TAG_MAIN, "Starting SpaceHeatingPID task...");
+        LOG_INFO(TAG, "Starting SpaceHeatingPID task...");
         initializer->heatingControl_->startSpaceHeatingPIDTask();
-        LOG_INFO(LOG_TAG_MAIN, "SpaceHeatingPID task started");
+        LOG_INFO(TAG, "SpaceHeatingPID task started");
     }
 }
 
 void TaskInitializer::initializeControlTasks(SystemInitializer* initializer) {
     // Main control task
-    LOG_INFO(LOG_TAG_MAIN, "Starting main control task...");
+    LOG_INFO(TAG, "Starting main control task...");
 
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::disabled();
 
@@ -247,9 +249,9 @@ void TaskInitializer::initializeControlTasks(SystemInitializer* initializer) {
         nullptr,
         PRIORITY_CONTROL_TASK,
         wdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "Control task created successfully");
+        LOG_INFO(TAG, "Control task created successfully");
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to create control task");
+        LOG_WARN(TAG, "Failed to create control task");
     }
 
     // Check device readiness but don't block - tasks will wait internally for devices
@@ -259,12 +261,12 @@ void TaskInitializer::initializeControlTasks(SystemInitializer* initializer) {
                         SystemEvents::DeviceReady::ALL_CRITICAL_READY;
 
     if (devicesReady) {
-        LOG_INFO(LOG_TAG_MAIN, "Essential devices ready - starting control tasks");
+        LOG_INFO(TAG, "Essential devices ready - starting control tasks");
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Devices not yet ready (MB8ART:%d RYN4:%d) - tasks will wait internally",
+        LOG_WARN(TAG, "Devices not yet ready (MB8ART:%d RYN4:%d) - tasks will wait internally",
                  (deviceBits & SystemEvents::DeviceReady::MB8ART_READY) ? 1 : 0,
                  (deviceBits & SystemEvents::DeviceReady::RYN4_READY) ? 1 : 0);
-        LOG_INFO(LOG_TAG_MAIN, "Starting control tasks - they will defer operation until devices ready");
+        LOG_INFO(TAG, "Starting control tasks - they will defer operation until devices ready");
     }
 
     // Initialize HeatingControlTask (will wait for devices internally)
@@ -279,13 +281,13 @@ void TaskInitializer::initializeControlTasks(SystemInitializer* initializer) {
     // Initialize BurnerControlTask (will wait for devices internally)
     // BurnerControlTask uses BurnerSystemController via SRP, no direct pointer needed
     if (initializer->burnerSystemController_ != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "Starting burner control task...");
+        LOG_INFO(TAG, "Starting burner control task...");
         auto result = initializeBurnerControlTask(initializer);
         if (result.isError()) {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to initialize burner control task: %s",
+            LOG_ERROR(TAG, "Failed to initialize burner control task: %s",
                      ErrorHandler::errorToString(result.error()));
         } else {
-            LOG_INFO(LOG_TAG_MAIN, "Burner control task initialized successfully");
+            LOG_INFO(TAG, "Burner control task initialized successfully");
         }
     }
 }
@@ -297,29 +299,29 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     // Pumps are now controlled exclusively via BurnerSystemController batch commands
     // This ensures atomic pump+burner activation in a single Modbus transaction
     // Cooldown (pump running after burner stops) is handled by BurnerSystemController
-    LOG_INFO(LOG_TAG_MAIN, "Pump control centralized in BurnerSystemController - no separate tasks");
+    LOG_INFO(TAG, "Pump control centralized in BurnerSystemController - no separate tasks");
 }
 
 void TaskInitializer::initializeMonitoringTask() {
     #if ENABLE_MONITORING_TASK
-    LOG_INFO(LOG_TAG_MAIN, "Starting monitoring task...");
+    LOG_INFO(TAG, "Starting monitoring task...");
     if (!MonitoringTask::init()) {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to initialize monitoring task");
+        LOG_WARN(TAG, "Failed to initialize monitoring task");
     } else if (!MonitoringTask::start()) {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to start monitoring task");
+        LOG_WARN(TAG, "Failed to start monitoring task");
     } else {
-        LOG_INFO(LOG_TAG_MAIN, "Monitoring task started successfully");
+        LOG_INFO(TAG, "Monitoring task started successfully");
     }
     #endif
 }
 
 void TaskInitializer::createMB8ARTTasks(SystemInitializer* initializer) {
     if (initializer->mb8art_ == nullptr) {
-        LOG_ERROR(LOG_TAG_MAIN, "Cannot create MB8ART tasks - device is null");
+        LOG_ERROR(TAG, "Cannot create MB8ART tasks - device is null");
         return;
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Creating MB8ART tasks...");
+    LOG_INFO(TAG, "Creating MB8ART tasks...");
 
     // Create MB8ART processing task
     TaskManager::WatchdogConfig mb8artProcWdtConfig = TaskManager::WatchdogConfig::disabled();
@@ -332,9 +334,9 @@ void TaskInitializer::createMB8ARTTasks(SystemInitializer* initializer) {
         PRIORITY_MB8ART_PROCESSING_TASK,
         1,
         mb8artProcWdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "MB8ART processing task created successfully on core 1");
+        LOG_INFO(TAG, "MB8ART processing task created successfully on core 1");
     } else {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create MB8ART processing task");
+        LOG_ERROR(TAG, "Failed to create MB8ART processing task");
         return;
     }
 
@@ -349,29 +351,29 @@ void TaskInitializer::createMB8ARTTasks(SystemInitializer* initializer) {
         PRIORITY_MODBUS_CONTROL_TASK,
         1,
         mb8artWdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "MB8ART data acquisition task created successfully on core 1");
+        LOG_INFO(TAG, "MB8ART data acquisition task created successfully on core 1");
     } else {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create MB8ART data acquisition task");
+        LOG_ERROR(TAG, "Failed to create MB8ART data acquisition task");
     }
 }
 
 void TaskInitializer::createHeatingControlTask(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "createHeatingControlTask() called");
+    LOG_INFO(TAG, "createHeatingControlTask() called");
 
     if (initializer->heatingControl_ == nullptr) {
-        LOG_ERROR(LOG_TAG_MAIN, "Cannot create heating control task - heatingControl_ is NULL!");
-        LOG_ERROR(LOG_TAG_MAIN, "Check initialization order in SystemInitializer::initializeControlModules()");
+        LOG_ERROR(TAG, "Cannot create heating control task - heatingControl_ is NULL!");
+        LOG_ERROR(TAG, "Check initialization order in SystemInitializer::initializeControlModules()");
         return;
     }
 
     // Check if task already exists
     TaskHandle_t existingTask = SRP::getTaskManager().getTaskHandleByName("HeatingControl");
     if (existingTask != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "Heating control task already exists at handle %p", existingTask);
+        LOG_INFO(TAG, "Heating control task already exists at handle %p", existingTask);
         return;
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Creating heating control task with stack size %d...", STACK_SIZE_CONTROL_TASK);
+    LOG_INFO(TAG, "Creating heating control task with stack size %d...", STACK_SIZE_CONTROL_TASK);
 
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::disabled();
 
@@ -382,23 +384,23 @@ void TaskInitializer::createHeatingControlTask(SystemInitializer* initializer) {
         nullptr,
         PRIORITY_CONTROL_TASK,
         wdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "Heating control task created successfully");
+        LOG_INFO(TAG, "Heating control task created successfully");
     } else {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create heating control task");
+        LOG_ERROR(TAG, "Failed to create heating control task");
     }
 }
 
 void TaskInitializer::createWaterControlTask(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "createWaterControlTask() called");
+    LOG_INFO(TAG, "createWaterControlTask() called");
 
     // Check if task already exists
     TaskHandle_t existingTask = SRP::getTaskManager().getTaskHandleByName("WheaterControl");
     if (existingTask != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "Water control task already exists at handle %p", existingTask);
+        LOG_INFO(TAG, "Water control task already exists at handle %p", existingTask);
         return;
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Creating water control task with stack size %d...", STACK_SIZE_WHEATER_CONTROL_TASK);
+    LOG_INFO(TAG, "Creating water control task with stack size %d...", STACK_SIZE_WHEATER_CONTROL_TASK);
 
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::disabled();
 
@@ -410,60 +412,60 @@ void TaskInitializer::createWaterControlTask(SystemInitializer* initializer) {
         initializer->burnerSystemController_,  // Pass controller to task
         PRIORITY_CONTROL_TASK,
         wdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "Water control task created successfully");
+        LOG_INFO(TAG, "Water control task created successfully");
     } else {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create water control task");
+        LOG_ERROR(TAG, "Failed to create water control task");
     }
 }
 
 void TaskInitializer::createBurnerControlTask(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "createBurnerControlTask() called");
+    LOG_INFO(TAG, "createBurnerControlTask() called");
 
     if (initializer->burnerSystemController_ == nullptr) {
-        LOG_ERROR(LOG_TAG_MAIN, "Cannot create burner control task - burnerSystemController_ is NULL!");
-        LOG_ERROR(LOG_TAG_MAIN, "Check initialization order in SystemInitializer::initializeControlModules()");
+        LOG_ERROR(TAG, "Cannot create burner control task - burnerSystemController_ is NULL!");
+        LOG_ERROR(TAG, "Check initialization order in SystemInitializer::initializeControlModules()");
         return;
     }
 
     // Check if task already exists
     TaskHandle_t existingTask = SRP::getTaskManager().getTaskHandleByName("BurnerControl");
     if (existingTask != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "Burner control task already exists at handle %p", existingTask);
+        LOG_INFO(TAG, "Burner control task already exists at handle %p", existingTask);
         return;
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Creating burner control task...");
+    LOG_INFO(TAG, "Creating burner control task...");
 
     auto result = initializeBurnerControlTask(initializer);
     if (result.isError()) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create burner control task: %s",
+        LOG_ERROR(TAG, "Failed to create burner control task: %s",
                  ErrorHandler::errorToString(result.error()));
     }
 }
 
 Result<void> TaskInitializer::initializeBurnerControlTask(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "=== BurnerControlTask Initialization Started ===");
-    LOG_INFO(LOG_TAG_MAIN, "Free heap before task creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "=== BurnerControlTask Initialization Started ===");
+    LOG_INFO(TAG, "Free heap before task creation: %d bytes", ESP.getFreeHeap());
 
     // Check if task already exists
     TaskHandle_t existingTask = SRP::getTaskManager().getTaskHandleByName("BurnerControl");
     if (existingTask != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "BurnerControl task already exists at handle %p - skipping creation", existingTask);
+        LOG_INFO(TAG, "BurnerControl task already exists at handle %p - skipping creation", existingTask);
         return Result<void>();
     }
 
     if (initializer->burnerSystemController_ == nullptr) {
-        LOG_ERROR(LOG_TAG_MAIN, "BurnerSystemController is NULL - cannot create task!");
+        LOG_ERROR(TAG, "BurnerSystemController is NULL - cannot create task!");
         return Result<void>(SystemError::INVALID_PARAMETER, "BurnerSystemController not initialized");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "BurnerSystemController pointer valid: %p", initializer->burnerSystemController_);
-    LOG_INFO(LOG_TAG_MAIN, "Stack size: %d bytes, Priority: %d, Core: 1",
+    LOG_INFO(TAG, "BurnerSystemController pointer valid: %p", initializer->burnerSystemController_);
+    LOG_INFO(TAG, "Stack size: %d bytes, Priority: %d, Core: 1",
              STACK_SIZE_BURNER_CONTROL_TASK, PRIORITY_BURNER_CONTROL_TASK);
 
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::disabled();
 
-    LOG_INFO(LOG_TAG_MAIN, "Calling startTaskPinned for BurnerControlTask...");
+    LOG_INFO(TAG, "Calling startTaskPinned for BurnerControlTask...");
 
     // BurnerControlTask uses BurnerSystemController via SRP, no direct parameter needed
     if (!SRP::getTaskManager().startTaskPinned(
@@ -474,31 +476,31 @@ Result<void> TaskInitializer::initializeBurnerControlTask(SystemInitializer* ini
         PRIORITY_BURNER_CONTROL_TASK,  // Safety-critical: priority 4
         1,
         wdtConfig)) {
-        LOG_ERROR(LOG_TAG_MAIN, "startTaskPinned FAILED for BurnerControlTask!");
-        LOG_ERROR(LOG_TAG_MAIN, "Free heap after failure: %d bytes", ESP.getFreeHeap());
+        LOG_ERROR(TAG, "startTaskPinned FAILED for BurnerControlTask!");
+        LOG_ERROR(TAG, "Free heap after failure: %d bytes", ESP.getFreeHeap());
         return Result<void>(SystemError::TASK_CREATE_FAILED, "Failed to start BurnerControlTask");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "startTaskPinned succeeded, getting task handle...");
+    LOG_INFO(TAG, "startTaskPinned succeeded, getting task handle...");
 
     TaskHandle_t taskHandle = SRP::getTaskManager().getTaskHandleByName("BurnerControl");
     if (taskHandle == nullptr) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to get BurnerControlTask handle after creation!");
+        LOG_ERROR(TAG, "Failed to get BurnerControlTask handle after creation!");
         return Result<void>(SystemError::TASK_CREATE_FAILED, "Failed to get BurnerControlTask handle");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Task handle obtained: %p", taskHandle);
+    LOG_INFO(TAG, "Task handle obtained: %p", taskHandle);
 
     // Track the task handle for cleanup
     initializer->registerTask(taskHandle, "BurnerControl");
-    LOG_INFO(LOG_TAG_MAIN, "Task registered for cleanup");
+    LOG_INFO(TAG, "Task registered for cleanup");
 
     // Update global task handle through SRP
     SRP::getBurnerTaskHandle() = taskHandle;
-    LOG_INFO(LOG_TAG_MAIN, "Global task handle updated");
+    LOG_INFO(TAG, "Global task handle updated");
 
-    LOG_INFO(LOG_TAG_MAIN, "=== BurnerControlTask Initialization Complete ===");
-    LOG_INFO(LOG_TAG_MAIN, "Free heap after task creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "=== BurnerControlTask Initialization Complete ===");
+    LOG_INFO(TAG, "Free heap after task creation: %d bytes", ESP.getFreeHeap());
 
     return Result<void>();
 }

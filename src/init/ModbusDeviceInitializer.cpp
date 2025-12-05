@@ -44,6 +44,8 @@
 // ModbusInitRAII for RAII task parameter management
 #include "ModbusInitRAII.h"
 
+
+static const char* TAG = "ModbusDeviceInitializer";
 // External globals
 extern rtstorage::RuntimeStorage* gRuntimeStorage;
 
@@ -54,17 +56,17 @@ namespace HAL {
 }
 
 Result<void> ModbusDeviceInitializer::initializeDevices(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing Modbus devices...");
+    LOG_INFO(TAG, "Initializing Modbus devices...");
 
     // ========== Initialize Hardware Mapping Bindings ==========
-    LOG_INFO(LOG_TAG_MAIN, "Initializing unified hardware mapping bindings...");
+    LOG_INFO(TAG, "Initializing unified hardware mapping bindings...");
     RelayBindings::initialize();
     SensorBindings::initialize();
     ANDRTF3Bindings::initialize();
-    LOG_INFO(LOG_TAG_MAIN, "Hardware mapping bindings initialized");
+    LOG_INFO(TAG, "Hardware mapping bindings initialized");
 
     // ModbusRTU now supports proper watchdog control - disable during device initialization
-    LOG_INFO(LOG_TAG_MAIN, "Disabling ModbusRTU watchdog for device initialization...");
+    LOG_INFO(TAG, "Disabling ModbusRTU watchdog for device initialization...");
     SRP::getModbusMaster().setWatchdogEnabled(false);
 
     // Configure ESP-IDF log levels for noisy libraries
@@ -100,21 +102,21 @@ Result<void> ModbusDeviceInitializer::initializeDevices(SystemInitializer* initi
 
     // Log status and initialize RuntimeStorage if both critical devices are ready
     if (mb8artInitialized && ryn4Initialized) {
-        LOG_INFO(LOG_TAG_MAIN, "All Modbus devices initialized successfully");
+        LOG_INFO(TAG, "All Modbus devices initialized successfully");
 
         // Initialize CriticalDataStorage (RuntimeStorage already initialized earlier)
         initializeCriticalDataStorage(initializer);
 
         // Configure HAL
-        LOG_INFO(LOG_TAG_MAIN, "Configuring HAL with all devices...");
+        LOG_INFO(TAG, "Configuring HAL with all devices...");
         HAL::configureHardwareAbstractionLayer(initializer->mb8art_, initializer->ryn4_,
                                                 initializer->ds3231_, initializer->andrtf3_);
 
         // Re-enable ModbusRTU watchdog
-        LOG_INFO(LOG_TAG_MAIN, "Re-enabling ModbusRTU watchdog...");
+        LOG_INFO(TAG, "Re-enabling ModbusRTU watchdog...");
         SRP::getModbusMaster().setWatchdogEnabled(true);
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Some Modbus devices need background initialization - MB8ART: %s, RYN4: %s",
+        LOG_WARN(TAG, "Some Modbus devices need background initialization - MB8ART: %s, RYN4: %s",
                  mb8artInitialized ? "OK" : "PENDING",
                  ryn4Initialized ? "OK" : "PENDING");
     }
@@ -122,7 +124,7 @@ Result<void> ModbusDeviceInitializer::initializeDevices(SystemInitializer* initi
     // Create background monitoring task
     createBackgroundMonitoringTask(initializer, mb8artInitialized, ryn4Initialized);
 
-    LOG_INFO(LOG_TAG_MAIN, "Modbus device initialization phase completed");
+    LOG_INFO(TAG, "Modbus device initialization phase completed");
     return Result<void>();
 }
 
@@ -136,12 +138,12 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
     }
 
     // Bind hardware config and sensor pointers (unified mapping)
-    LOG_INFO(LOG_TAG_MAIN, "Binding MB8ART sensor pointers...");
+    LOG_INFO(TAG, "Binding MB8ART sensor pointers...");
     initializer->mb8art_->setHardwareConfig(SensorHardware::CONFIGS.data());
     initializer->mb8art_->bindSensorPointers(SensorBindings::getBindingArray());
 
     // Configure MB8ART with event group
-    LOG_INFO(LOG_TAG_MAIN, "Configuring MB8ART with device ready event group...");
+    LOG_INFO(TAG, "Configuring MB8ART with device ready event group...");
     initializer->mb8art_->setEventGroup(initializer->deviceReadyEventGroup_,
                                          SystemEvents::DeviceReady::MB8ART_READY,
                                          SystemEvents::DeviceReady::MB8ART_ERROR);
@@ -150,20 +152,20 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
     // No ServiceContainer registration needed
 
     // Initialize MB8ART
-    LOG_INFO(LOG_TAG_MAIN, "Initializing MB8ART device...");
+    LOG_INFO(TAG, "Initializing MB8ART device...");
 
     const uint32_t INITIAL_RETRIES = 2;
     const uint32_t RETRY_DELAY_MS = 250;
     uint32_t retryCount = 0;
 
-    LOG_INFO(LOG_TAG_MAIN, "Attempting initial MB8ART connection...");
+    LOG_INFO(TAG, "Attempting initial MB8ART connection...");
     while (retryCount < INITIAL_RETRIES) {
         unsigned long startTime = millis();
         IDeviceInstance::DeviceResult<void> result = initializer->mb8art_->initialize();
         unsigned long initTime = millis() - startTime;
 
         if (result.isOk()) {
-            LOG_INFO(LOG_TAG_MAIN, "MB8ART initialized successfully after %lu attempts", retryCount + 1);
+            LOG_INFO(TAG, "MB8ART initialized successfully after %lu attempts", retryCount + 1);
             outInitialized = true;
             break;
         } else {
@@ -172,10 +174,10 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
                 // Get error info - show device error code if mapping doesn't provide useful info
                 SystemError mappedError = LibraryErrorMapper::mapDeviceError(result.error());
                 if (mappedError == SystemError::SUCCESS || mappedError == SystemError::UNKNOWN_ERROR) {
-                    LOG_WARN(LOG_TAG_MAIN, "MB8ART init attempt %lu failed (%lu ms, device error %d) - retrying...",
+                    LOG_WARN(TAG, "MB8ART init attempt %lu failed (%lu ms, device error %d) - retrying...",
                              retryCount, initTime, static_cast<int>(result.error()));
                 } else {
-                    LOG_WARN(LOG_TAG_MAIN, "MB8ART init attempt %lu failed (%lu ms): %s - retrying...",
+                    LOG_WARN(TAG, "MB8ART init attempt %lu failed (%lu ms): %s - retrying...",
                              retryCount, initTime, ErrorHandler::errorToString(mappedError));
                 }
                 vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
@@ -184,12 +186,12 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
     }
 
     if (!outInitialized) {
-        LOG_WARN(LOG_TAG_MAIN, "MB8ART not available after initial attempts - will retry in background");
+        LOG_WARN(TAG, "MB8ART not available after initial attempts - will retry in background");
     }
 
     // Create MB8ART tasks if device was initialized
     if (outInitialized && initializer->mb8art_ != nullptr) {
-        LOG_INFO(LOG_TAG_MAIN, "Creating MB8ART processing task...");
+        LOG_INFO(TAG, "Creating MB8ART processing task...");
         TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::disabled();
 
         if (SRP::getTaskManager().startTaskPinned(
@@ -200,16 +202,16 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
             PRIORITY_MB8ART_PROCESSING_TASK,
             1,
             wdtConfig)) {
-            LOG_INFO(LOG_TAG_MAIN, "MB8ART processing task created successfully");
+            LOG_INFO(TAG, "MB8ART processing task created successfully");
         } else {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to create MB8ART processing task");
+            LOG_ERROR(TAG, "Failed to create MB8ART processing task");
             delete initializer->mb8art_;
             initializer->mb8art_ = nullptr;
             outInitialized = false;
         }
 
         if (initializer->mb8art_ != nullptr) {
-            LOG_INFO(LOG_TAG_MAIN, "Creating MB8ART data acquisition task...");
+            LOG_INFO(TAG, "Creating MB8ART data acquisition task...");
             TaskManager::WatchdogConfig mb8artWdtConfig = TaskManager::WatchdogConfig::disabled();
 
             if (SRP::getTaskManager().startTaskPinned(
@@ -220,9 +222,9 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
                 PRIORITY_MODBUS_CONTROL_TASK,
                 1,
                 mb8artWdtConfig)) {
-                LOG_INFO(LOG_TAG_MAIN, "MB8ART data acquisition task created successfully");
+                LOG_INFO(TAG, "MB8ART data acquisition task created successfully");
             } else {
-                LOG_ERROR(LOG_TAG_MAIN, "Failed to create MB8ART data acquisition task");
+                LOG_ERROR(TAG, "Failed to create MB8ART data acquisition task");
                 delete initializer->mb8art_;
                 initializer->mb8art_ = nullptr;
                 outInitialized = false;
@@ -234,20 +236,20 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
 }
 
 void ModbusDeviceInitializer::initializeANDRTF3(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "=== Starting ANDRTF3 Initialization ===");
+    LOG_INFO(TAG, "=== Starting ANDRTF3 Initialization ===");
 
-    LOG_INFO(LOG_TAG_MAIN, "Creating ANDRTF3 instance for address 0x%02X...", ANDRTF3_ADDRESS);
+    LOG_INFO(TAG, "Creating ANDRTF3 instance for address 0x%02X...", ANDRTF3_ADDRESS);
 
     initializer->andrtf3_ = new andrtf3::ANDRTF3(ANDRTF3_ADDRESS);
     if (!initializer->andrtf3_) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to allocate memory for ANDRTF3");
+        LOG_ERROR(TAG, "Failed to allocate memory for ANDRTF3");
         return;
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "ANDRTF3 instance created successfully");
+    LOG_INFO(TAG, "ANDRTF3 instance created successfully");
 
     // Bind temperature pointers (unified mapping)
-    LOG_INFO(LOG_TAG_MAIN, "Binding ANDRTF3 temperature pointers...");
+    LOG_INFO(TAG, "Binding ANDRTF3 temperature pointers...");
     initializer->andrtf3_->bindTemperaturePointers(ANDRTF3Bindings::insideTempPtr,
                                                     ANDRTF3Bindings::insideTempValidPtr);
 
@@ -256,43 +258,43 @@ void ModbusDeviceInitializer::initializeANDRTF3(SystemInitializer* initializer) 
     config.timeout = 1000;
     config.retries = 3;
     initializer->andrtf3_->setConfig(config);
-    LOG_INFO(LOG_TAG_MAIN, "ANDRTF3 configured with timeout=%dms, retries=%d", config.timeout, config.retries);
+    LOG_INFO(TAG, "ANDRTF3 configured with timeout=%dms, retries=%d", config.timeout, config.retries);
 
     // ANDRTF3 is accessed via SystemInitializer member pointer or SRP
     // No ServiceContainer registration needed
 
     // Test connection
-    LOG_INFO(LOG_TAG_MAIN, "Testing ANDRTF3 connection...");
+    LOG_INFO(TAG, "Testing ANDRTF3 connection...");
     if (initializer->andrtf3_->readTemperature()) {
-        LOG_INFO(LOG_TAG_MAIN, "ANDRTF3 connection test passed");
+        LOG_INFO(TAG, "ANDRTF3 connection test passed");
         int16_t initialTemp = initializer->andrtf3_->getTemperature();
         float tempCelsius = initialTemp / 10.0f;
-        LOG_INFO(LOG_TAG_MAIN, "Initial temperature: %.1f°C", tempCelsius);
+        LOG_INFO(TAG, "Initial temperature: %.1f°C", tempCelsius);
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "ANDRTF3 connection test failed - sensor may not be connected");
+        LOG_WARN(TAG, "ANDRTF3 connection test failed - sensor may not be connected");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "ANDRTF3 initialization section complete");
+    LOG_INFO(TAG, "ANDRTF3 initialization section complete");
 }
 
 Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initializer, bool& outInitialized) {
     outInitialized = false;
 
-    LOG_INFO(LOG_TAG_MAIN, "Creating RYN4 instance for address 0x%02X...", RYN4_ADDRESS);
+    LOG_INFO(TAG, "Creating RYN4 instance for address 0x%02X...", RYN4_ADDRESS);
     initializer->ryn4_ = new RYN4(RYN4_ADDRESS, "RYN41");
     if (!initializer->ryn4_) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to allocate memory for RYN4");
+        LOG_ERROR(TAG, "Failed to allocate memory for RYN4");
         return Result<void>(SystemError::MEMORY_ALLOCATION_FAILED, "Failed to create RYN4 device");
     }
-    LOG_INFO(LOG_TAG_MAIN, "RYN4 instance created successfully");
+    LOG_INFO(TAG, "RYN4 instance created successfully");
 
     // Bind hardware config and relay pointers (unified mapping)
-    LOG_INFO(LOG_TAG_MAIN, "Binding RYN4 relay pointers...");
+    LOG_INFO(TAG, "Binding RYN4 relay pointers...");
     initializer->ryn4_->setHardwareConfig(RelayHardware::CONFIGS.data());
     initializer->ryn4_->bindRelayPointers(RelayBindings::getPointerArray());
 
     // Configure with event group
-    LOG_INFO(LOG_TAG_MAIN, "Configuring RYN4 with device ready event group...");
+    LOG_INFO(TAG, "Configuring RYN4 with device ready event group...");
     initializer->ryn4_->setEventGroup(initializer->deviceReadyEventGroup_,
                                        SystemEvents::DeviceReady::RYN4_READY,
                                        SystemEvents::DeviceReady::RYN4_ERROR);
@@ -301,7 +303,7 @@ Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initiali
     // No ServiceContainer registration needed
 
     // Create RYN4 processing task first
-    LOG_INFO(LOG_TAG_MAIN, "Creating RYN4 processing task...");
+    LOG_INFO(TAG, "Creating RYN4 processing task...");
     TaskManager::WatchdogConfig ryn4ProcWdtConfig = TaskManager::WatchdogConfig::disabled();
 
     if (SRP::getTaskManager().startTaskPinned(
@@ -312,9 +314,9 @@ Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initiali
         PRIORITY_RYN4_PROCESSING_TASK,
         1,
         ryn4ProcWdtConfig)) {
-        LOG_INFO(LOG_TAG_MAIN, "RYN4 processing task created successfully on core 1");
+        LOG_INFO(TAG, "RYN4 processing task created successfully on core 1");
     } else {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create RYN4 processing task");
+        LOG_ERROR(TAG, "Failed to create RYN4 processing task");
         delete initializer->ryn4_;
         initializer->ryn4_ = nullptr;
         return Result<void>(SystemError::TASK_CREATE_FAILED, "RYN4 processing task creation failed");
@@ -324,37 +326,37 @@ Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initiali
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // Initialize RYN4
-    LOG_INFO(LOG_TAG_MAIN, "Initializing RYN4 device...");
+    LOG_INFO(TAG, "Initializing RYN4 device...");
 
     const uint32_t INITIAL_RETRIES = 2;
     const uint32_t RETRY_DELAY_MS = 250;
     uint32_t retryCount = 0;
 
-    LOG_DEBUG(LOG_TAG_MAIN, "About to log 'Attempting initial RYN4 connection' at %lu ms", millis());
-    LOG_INFO(LOG_TAG_MAIN, "Attempting initial RYN4 connection...");
-    LOG_DEBUG(LOG_TAG_MAIN, "After logging 'Attempting initial RYN4 connection' at %lu ms", millis());
+    LOG_DEBUG(TAG, "About to log 'Attempting initial RYN4 connection' at %lu ms", millis());
+    LOG_INFO(TAG, "Attempting initial RYN4 connection...");
+    LOG_DEBUG(TAG, "After logging 'Attempting initial RYN4 connection' at %lu ms", millis());
 
     // Configure RYN4 to reset relays and verify states for safety
     RYN4::InitConfig ryn4InitConfig;
     ryn4InitConfig.resetRelaysOnInit = true;
     ryn4InitConfig.skipRelayStateRead = false;  // Verify relay states after reset
-    LOG_INFO(LOG_TAG_MAIN, "RYN4 InitConfig: resetRelaysOnInit=%s, skipRelayStateRead=%s",
+    LOG_INFO(TAG, "RYN4 InitConfig: resetRelaysOnInit=%s, skipRelayStateRead=%s",
              ryn4InitConfig.resetRelaysOnInit ? "true" : "false",
              ryn4InitConfig.skipRelayStateRead ? "true" : "false");
 
     while (retryCount < INITIAL_RETRIES) {
         unsigned long startTime = millis();
-        LOG_DEBUG(LOG_TAG_MAIN, "About to call ryn4->initialize() at %lu ms", startTime);
+        LOG_DEBUG(TAG, "About to call ryn4->initialize() at %lu ms", startTime);
 
         IDeviceInstance::DeviceResult<void> result = initializer->ryn4_->initialize(ryn4InitConfig);
 
         unsigned long endTime = millis();
         unsigned long initTime = endTime - startTime;
-        LOG_DEBUG(LOG_TAG_MAIN, "ryn4->initialize() returned after %lu ms (start:%lu, end:%lu)",
+        LOG_DEBUG(TAG, "ryn4->initialize() returned after %lu ms (start:%lu, end:%lu)",
                  initTime, startTime, endTime);
 
         if (result.isOk()) {
-            LOG_INFO(LOG_TAG_MAIN, "RYN4 initialized successfully after %lu attempts", retryCount + 1);
+            LOG_INFO(TAG, "RYN4 initialized successfully after %lu attempts", retryCount + 1);
             outInitialized = true;
             break;
         } else {
@@ -363,10 +365,10 @@ Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initiali
                 // Get error info - show device error code if mapping doesn't provide useful info
                 SystemError mappedError = LibraryErrorMapper::mapDeviceError(result.error());
                 if (mappedError == SystemError::SUCCESS || mappedError == SystemError::UNKNOWN_ERROR) {
-                    LOG_WARN(LOG_TAG_MAIN, "RYN4 init attempt %lu failed (%lu ms, device error %d) - retrying...",
+                    LOG_WARN(TAG, "RYN4 init attempt %lu failed (%lu ms, device error %d) - retrying...",
                              retryCount, initTime, static_cast<int>(result.error()));
                 } else {
-                    LOG_WARN(LOG_TAG_MAIN, "RYN4 init attempt %lu failed (%lu ms): %s - retrying...",
+                    LOG_WARN(TAG, "RYN4 init attempt %lu failed (%lu ms): %s - retrying...",
                              retryCount, initTime, ErrorHandler::errorToString(mappedError));
                 }
                 vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
@@ -375,7 +377,7 @@ Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initiali
     }
 
     if (!outInitialized) {
-        LOG_WARN(LOG_TAG_MAIN, "RYN4 not available after initial attempts - will retry in background");
+        LOG_WARN(TAG, "RYN4 not available after initial attempts - will retry in background");
     }
 
     return Result<void>();
@@ -386,29 +388,29 @@ void ModbusDeviceInitializer::initializeCriticalDataStorage(SystemInitializer* i
     // This function only handles CriticalDataStorage which depends on RuntimeStorage
 
     if (!initializer->runtimeStorage_) {
-        LOG_WARN(LOG_TAG_MAIN, "RuntimeStorage not available - skipping CriticalDataStorage init");
+        LOG_WARN(TAG, "RuntimeStorage not available - skipping CriticalDataStorage init");
         return;
     }
 
     // Initialize CriticalDataStorage
-    LOG_INFO(LOG_TAG_MAIN, "Initializing CriticalDataStorage...");
+    LOG_INFO(TAG, "Initializing CriticalDataStorage...");
     if (CriticalDataStorage::begin()) {
-        LOG_INFO(LOG_TAG_MAIN, "CriticalDataStorage initialized successfully");
+        LOG_INFO(TAG, "CriticalDataStorage initialized successfully");
 
         if (CriticalDataStorage::hasEmergencyState()) {
             auto emergencyState = CriticalDataStorage::getEmergencyState();
-            LOG_WARN(LOG_TAG_MAIN, "Previous emergency state detected at timestamp %lu, reason=%d",
+            LOG_WARN(TAG, "Previous emergency state detected at timestamp %lu, reason=%d",
                     emergencyState.timestamp, emergencyState.reason);
         }
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to initialize CriticalDataStorage");
+        LOG_WARN(TAG, "Failed to initialize CriticalDataStorage");
     }
 }
 
 void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* initializer,
                                                               bool mb8artInitialized,
                                                               bool ryn4Initialized) {
-    LOG_INFO(LOG_TAG_MAIN, "Creating background device monitoring task...");
+    LOG_INFO(TAG, "Creating background device monitoring task...");
 
     // Create a structure to pass initialization state to the task
     struct ModbusInitState {
@@ -438,11 +440,11 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
         [](void* param) {
             ModbusInitState* state = (ModbusInitState*)param;
 
-            LOG_INFO(LOG_TAG_MAIN, "Background Modbus verification task started");
+            LOG_INFO(TAG, "Background Modbus verification task started");
 
             // Verify SystemInitializer is valid
             if (state->initializer == nullptr) {
-                LOG_ERROR(LOG_TAG_MAIN, "SystemInitializer is NULL in background task!");
+                LOG_ERROR(TAG, "SystemInitializer is NULL in background task!");
                 delete state;
                 vTaskDelete(NULL);
                 return;
@@ -456,7 +458,7 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
             bool ryn4Ready = state->ryn4Done || (state->ryn4 != nullptr && state->ryn4->isInitialized());
             bool andrtf3Ready = state->andrtf3Done || (state->andrtf3 != nullptr && state->andrtf3->isConnected());
 
-            LOG_INFO(LOG_TAG_MAIN, "Device status - MB8ART:%s RYN4:%s ANDRTF3:%s",
+            LOG_INFO(TAG, "Device status - MB8ART:%s RYN4:%s ANDRTF3:%s",
                      mb8artReady ? "OK" : "FAIL",
                      ryn4Ready ? "OK" : "FAIL",
                      andrtf3Ready ? "OK" : "FAIL");
@@ -468,11 +470,11 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
                 bool waterExists = SRP::getTaskManager().getTaskHandleByName("WheaterControl") != nullptr;
 
                 if (!burnerExists || !heatingExists || !waterExists) {
-                    LOG_WARN(LOG_TAG_MAIN, "Some control tasks missing - Burner:%d Heating:%d Water:%d",
+                    LOG_WARN(TAG, "Some control tasks missing - Burner:%d Heating:%d Water:%d",
                              burnerExists, heatingExists, waterExists);
                 }
 
-                LOG_INFO(LOG_TAG_MAIN, "Background verification complete - all devices ready");
+                LOG_INFO(TAG, "Background verification complete - all devices ready");
             } else {
                 // Devices not ready during synchronous init - wait briefly for async completion
                 const TickType_t DEVICE_READY_TIMEOUT = pdMS_TO_TICKS(2000);  // 2 seconds max
@@ -485,17 +487,17 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
                 );
 
                 if ((readyBits & SystemEvents::DeviceReady::ALL_CRITICAL_READY) == SystemEvents::DeviceReady::ALL_CRITICAL_READY) {
-                    LOG_INFO(LOG_TAG_MAIN, "Devices became ready after async wait");
+                    LOG_INFO(TAG, "Devices became ready after async wait");
                 } else {
                     // Log error but don't try to recreate - synchronous init should have handled this
-                    LOG_ERROR(LOG_TAG_MAIN, "Device init incomplete - MB8ART:%d RYN4:%d (bits:0x%02X)",
+                    LOG_ERROR(TAG, "Device init incomplete - MB8ART:%d RYN4:%d (bits:0x%02X)",
                              (readyBits & SystemEvents::DeviceReady::MB8ART_READY) ? 1 : 0,
                              (readyBits & SystemEvents::DeviceReady::RYN4_READY) ? 1 : 0,
                              readyBits);
                 }
             }
 
-            LOG_INFO(LOG_TAG_MAIN, "Background verification task completed");
+            LOG_INFO(TAG, "Background verification task completed");
             delete state;
             vTaskDelete(NULL);
         },
@@ -505,7 +507,7 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
         1,
         nullptr
     ) != pdPASS) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create background Modbus initialization task!");
+        LOG_ERROR(TAG, "Failed to create background Modbus initialization task!");
     } else {
         initState.release();
     }

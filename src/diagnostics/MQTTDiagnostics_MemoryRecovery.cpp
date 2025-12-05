@@ -5,6 +5,8 @@
 #include "SemaphoreGuard.h"
 #include <esp_log.h>
 
+static const char* TAG = "MQTTDiagnostics";
+
 /**
  * @brief Clear diagnostics buffers and reduce memory usage during emergency
  * 
@@ -18,7 +20,6 @@
  * @return Estimated bytes of memory freed
  */
 size_t MQTTDiagnostics::clearDiagnosticsBuffers() {
-    const char* TAG = "MQTTDiag";
     size_t memoryFreed = 0;
     
     // Get instance - if not created, nothing to clear
@@ -127,8 +128,8 @@ void MQTTDiagnostics::restoreNormalOperation() {
     if (!guard.hasLock()) {
         return;
     }
-    
-    LOG_INFO("MQTTDiag", "Restoring normal diagnostic operation");
+
+    LOG_INFO(TAG, "Restoring normal diagnostic operation");
     
     // Restore original intervals
     diag->intervals.health = 60000;        // 1 minute
@@ -147,7 +148,7 @@ void MQTTDiagnostics::restoreNormalOperation() {
         eTaskState taskState = eTaskGetState(diag->taskHandle);
         if (taskState == eSuspended) {
             vTaskResume(diag->taskHandle);
-            LOG_INFO("MQTTDiag", "Diagnostics task resumed");
+            LOG_INFO(TAG, "Diagnostics task resumed");
         }
     }
 }

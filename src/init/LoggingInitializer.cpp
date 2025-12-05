@@ -10,16 +10,18 @@
 #include <Logger.h>
 #endif
 
+static const char* TAG = "LoggingInitializer";
+
 Result<void> LoggingInitializer::initialize() {
-    LOG_DEBUG(LOG_TAG_MAIN, "LoggingInitializer::initialize called at %lu ms", millis());
-    LOG_INFO(LOG_TAG_MAIN, "Initializing logging system...");
+    LOG_DEBUG(TAG, "LoggingInitializer::initialize called at %lu ms", millis());
+    LOG_INFO(TAG, "Initializing logging system...");
 
 #if defined(LOG_MODE_DEBUG_FULL) && !defined(LOG_MODE_DEBUG_SELECTIVE)
     esp_log_level_set("*", ESP_LOG_DEBUG);
-    LOG_INFO(LOG_TAG_MAIN, "Log mode: DEBUG FULL");
+    LOG_INFO(TAG, "Log mode: DEBUG FULL");
 #elif defined(LOG_MODE_DEBUG_SELECTIVE)
     esp_log_level_set("*", ESP_LOG_INFO);
-    LOG_INFO(LOG_TAG_MAIN, "Log mode: DEBUG SELECTIVE");
+    LOG_INFO(TAG, "Log mode: DEBUG SELECTIVE");
 
     suppressVerboseLogs();
     configureSelectiveDebug();
@@ -44,7 +46,7 @@ Result<void> LoggingInitializer::initialize() {
 #else
     // Release mode - minimal logging
     esp_log_level_set("*", ESP_LOG_INFO);
-    LOG_INFO(LOG_TAG_MAIN, "Log mode: RELEASE");
+    LOG_INFO(TAG, "Log mode: RELEASE");
 
     // Suppress verbose ESP32 HAL logs in release mode
     esp_log_level_set("esp32-hal-uart", ESP_LOG_ERROR);
@@ -60,9 +62,9 @@ Result<void> LoggingInitializer::initialize() {
     esp_log_level_set("task_wdt", ESP_LOG_NONE);
 
 #ifndef LOG_NO_CUSTOM_LOGGER
-    Logger::getInstance().setTagLevel(LOG_TAG_MAIN, ESP_LOG_INFO);
+    Logger::getInstance().setTagLevel(TAG, ESP_LOG_INFO);
 #else
-    esp_log_level_set(LOG_TAG_MAIN, ESP_LOG_INFO);
+    esp_log_level_set(TAG, ESP_LOG_INFO);
 #endif
 
     return Result<void>();
@@ -99,9 +101,9 @@ void LoggingInitializer::suppressVerboseLogs() {
 void LoggingInitializer::configureSelectiveDebug() {
 #ifdef MAIN_DEBUG
 #ifndef LOG_NO_CUSTOM_LOGGER
-    Logger::getInstance().setTagLevel(LOG_TAG_MAIN, ESP_LOG_DEBUG);
+    Logger::getInstance().setTagLevel(TAG, ESP_LOG_DEBUG);
 #else
-    esp_log_level_set(LOG_TAG_MAIN, ESP_LOG_DEBUG);
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
 #endif
 #endif
 

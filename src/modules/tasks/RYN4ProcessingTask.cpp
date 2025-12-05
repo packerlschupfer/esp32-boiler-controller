@@ -9,10 +9,11 @@
 #include <IDeviceInstance.h>
 #include "events/SystemEventsGenerated.h"
 
+static const char* TAG = "RYN4ProcessingTask";
+
 void RYN4ProcessingTask(void* parameter) {
     auto* ryn4 = static_cast<RYN4*>(parameter);
-    const char* TAG = "RYN4Proc";
-    
+
     if (!ryn4) {
         LOG_ERROR(TAG, "Started with null RYN4 instance");
         vTaskDelete(NULL);

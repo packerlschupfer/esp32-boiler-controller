@@ -16,6 +16,8 @@
 #include "config/SystemConstants.h"
 #include "LoggingMacros.h"
 
+static const char* TAG = "OTA";
+
 // Event bits for OTA operations
 enum OTAEventBits : uint32_t {
     OTA_EVENT_NETWORK_CONNECTED = (1 << 0),
@@ -97,12 +99,12 @@ static void onNetworkStateChange() {
 // }
 
 void OTATask::taskFunction(void* pvParameters) {
-    LOG_INFO(LOG_TAG_OTA, "OTA task starting");
+    LOG_INFO(TAG, "OTA task starting");
     
     // Create event group for OTA events
     otaEventGroup = xEventGroupCreate();
     if (!otaEventGroup) {
-        LOG_ERROR(LOG_TAG_OTA, "Failed to create OTA event group");
+        LOG_ERROR(TAG, "Failed to create OTA event group");
         vTaskDelete(nullptr);
         return;
     }
@@ -117,7 +119,7 @@ void OTATask::taskFunction(void* pvParameters) {
     );
     
     if (!otaCheckTimer) {
-        LOG_ERROR(LOG_TAG_OTA, "Failed to create OTA check timer");
+        LOG_ERROR(TAG, "Failed to create OTA check timer");
         vEventGroupDelete(otaEventGroup);
         vTaskDelete(nullptr);
         return;
@@ -130,7 +132,7 @@ void OTATask::taskFunction(void* pvParameters) {
     // Check initial network state
     networkConnected = EthernetManager::isConnected();
     if (networkConnected) {
-        LOG_INFO(LOG_TAG_OTA, "Network already connected, starting OTA checks");
+        LOG_INFO(TAG, "Network already connected, starting OTA checks");
         xTimerStart(otaCheckTimer, 0);
     }
     
@@ -138,7 +140,7 @@ void OTATask::taskFunction(void* pvParameters) {
     auto& resourceManager = SharedResourceManager::getInstance();
     EventGroupHandle_t systemStateEventGroup = resourceManager.getEventGroup(SharedResourceManager::EventGroups::SYSTEM_STATE);
     
-    LOG_INFO(LOG_TAG_OTA, "OTA task running");
+    LOG_INFO(TAG, "OTA task running");
     
     const EventBits_t ALL_EVENTS = 
         OTA_EVENT_NETWORK_CONNECTED | OTA_EVENT_NETWORK_DISCONNECTED |
@@ -169,39 +171,39 @@ void OTATask::taskFunction(void* pvParameters) {
         
         // Handle network connected event
         if (events & OTA_EVENT_NETWORK_CONNECTED) {
-            LOG_INFO(LOG_TAG_OTA, "Network connected - enabling OTA updates");
+            LOG_INFO(TAG, "Network connected - enabling OTA updates");
             // Timer already started in onNetworkStateChange
         }
         
         // Handle network disconnected event
         if (events & OTA_EVENT_NETWORK_DISCONNECTED) {
-            LOG_INFO(LOG_TAG_OTA, "Network disconnected - OTA updates disabled");
+            LOG_INFO(TAG, "Network disconnected - OTA updates disabled");
             // Timer already stopped in onNetworkStateChange
         }
         
         // Handle OTA check event
         if (events & OTA_EVENT_CHECK_UPDATE) {
             if (networkConnected && !OTATask::otaUpdateInProgress) {
-                LOG_DEBUG(LOG_TAG_OTA, "Checking for OTA updates");
+                LOG_DEBUG(TAG, "Checking for OTA updates");
                 OTAManager::handleUpdates();
             }
         }
         
         // Handle update started event
         if (events & OTA_EVENT_UPDATE_STARTED) {
-            LOG_INFO(LOG_TAG_OTA, "OTA update in progress");
+            LOG_INFO(TAG, "OTA update in progress");
             // Could update LED status here
         }
         
         // Handle update completed event
         if (events & OTA_EVENT_UPDATE_COMPLETED) {
-            LOG_INFO(LOG_TAG_OTA, "OTA update finished successfully");
+            LOG_INFO(TAG, "OTA update finished successfully");
             // System will likely reboot soon
         }
         
         // Handle update error event
         if (events & OTA_EVENT_UPDATE_ERROR) {
-            LOG_ERROR(LOG_TAG_OTA, "OTA update failed");
+            LOG_ERROR(TAG, "OTA update failed");
             // Could indicate error via LED
         }
     }
@@ -218,12 +220,12 @@ void OTATask::taskFunction(void* pvParameters) {
 
 // Initialization and start methods
 bool OTATask::init() {
-    LOG_INFO(LOG_TAG_OTA, "Initializing OTA task");
+    LOG_INFO(TAG, "Initializing OTA task");
     
     // Create status mutex
     OTATask::otaStatusMutex = xSemaphoreCreateMutex();
     if (OTATask::otaStatusMutex == nullptr) {
-        LOG_ERROR(LOG_TAG_OTA, "Failed to create status mutex");
+        LOG_ERROR(TAG, "Failed to create status mutex");
         return false;
     }
     
@@ -240,12 +242,12 @@ bool OTATask::init() {
     OTAManager::setEndCallback(OTATask::onOTAEnd);
     OTAManager::setErrorCallback(OTATask::onOTAError);
     
-    LOG_INFO(LOG_TAG_OTA, "OTA task initialized");
+    LOG_INFO(TAG, "OTA task initialized");
     return true;
 }
 
 bool OTATask::start() {
-    LOG_INFO(LOG_TAG_OTA, "Starting OTA task");
+    LOG_INFO(TAG, "Starting OTA task");
     
     // Use TaskManager for proper watchdog integration
     // Task will manually register watchdog from its own context
@@ -267,10 +269,10 @@ bool OTATask::start() {
     }
     
     if (!result) {
-        LOG_ERROR(LOG_TAG_OTA, "Failed to create OTA task");
+        LOG_ERROR(TAG, "Failed to create OTA task");
         return false;
     }
     
-    LOG_INFO(LOG_TAG_OTA, "OTA task started");
+    LOG_INFO(TAG, "OTA task started");
     return true;
 }

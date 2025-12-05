@@ -7,7 +7,8 @@
 #include <algorithm>
 #include <numeric>
 
-static const char* LOG_TAG_PID_TUNER = "PIDAutoTuner";
+
+static const char* TAG = "PIDAutoTuner";
 
 PIDAutoTuner::PIDAutoTuner()
     : setpoint(0)
@@ -21,7 +22,7 @@ PIDAutoTuner::PIDAutoTuner()
     
     mutex = xSemaphoreCreateMutex();
     if (mutex == nullptr) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Failed to create mutex");
+        LOG_ERROR(TAG, "Failed to create mutex");
     }
 }
 
@@ -35,12 +36,12 @@ bool PIDAutoTuner::startTuning(float targetSetpoint, float relayAmplitude,
                                 float relayHysteresis, TuningMethod tuningMethod) {
     SemaphoreGuard guard(mutex, pdMS_TO_TICKS(100));
     if (!guard.hasLock()) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Failed to acquire mutex");
+        LOG_ERROR(TAG, "Failed to acquire mutex");
         return false;
     }
     
     if (state != TuningState::IDLE) {
-        LOG_WARN(LOG_TAG_PID_TUNER, "Tuning already in progress");
+        LOG_WARN(TAG, "Tuning already in progress");
         return false;
     }
     
@@ -64,7 +65,7 @@ bool PIDAutoTuner::startTuning(float targetSetpoint, float relayAmplitude,
     lastSwitchTime = 0;
     result = TuningResult();
     
-    LOG_INFO(LOG_TAG_PID_TUNER, "Starting PID auto-tuning: setpoint=%.1f, amplitude=%.1f, hysteresis=%.1f",
+    LOG_INFO(TAG, "Starting PID auto-tuning: setpoint=%.1f, amplitude=%.1f, hysteresis=%.1f",
              setpoint, outputStep, hysteresis);
     
     return true;
@@ -73,7 +74,7 @@ bool PIDAutoTuner::startTuning(float targetSetpoint, float relayAmplitude,
 float PIDAutoTuner::update(float currentTemp, float currentTime) {
     SemaphoreGuard guard(mutex, pdMS_TO_TICKS(100));
     if (!guard.hasLock()) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Failed to acquire mutex");
+        LOG_ERROR(TAG, "Failed to acquire mutex");
         return 0.0f;
     }
     
@@ -89,7 +90,7 @@ float PIDAutoTuner::update(float currentTemp, float currentTime) {
     
     // Check for timeout
     if ((currentTime - startTime) > MAX_TUNING_TIME) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Auto-tuning timeout");
+        LOG_ERROR(TAG, "Auto-tuning timeout");
         state = TuningState::FAILED;
         return 0.0f;
     }
@@ -105,17 +106,17 @@ float PIDAutoTuner::update(float currentTemp, float currentTime) {
     
     // Check if we have enough cycles
     if (hasEnoughCycles()) {
-        LOG_INFO(LOG_TAG_PID_TUNER, "Sufficient oscillation cycles detected, analyzing...");
+        LOG_INFO(TAG, "Sufficient oscillation cycles detected, analyzing...");
         state = TuningState::ANALYZING;
         
         if (analyzeOscillations()) {
             calculatePIDParameters();
             state = TuningState::COMPLETE;
-            LOG_INFO(LOG_TAG_PID_TUNER, "Auto-tuning complete: Kp=%.3f, Ki=%.3f, Kd=%.3f",
+            LOG_INFO(TAG, "Auto-tuning complete: Kp=%.3f, Ki=%.3f, Kd=%.3f",
                      result.Kp, result.Ki, result.Kd);
         } else {
             state = TuningState::FAILED;
-            LOG_ERROR(LOG_TAG_PID_TUNER, "Failed to analyze oscillations");
+            LOG_ERROR(TAG, "Failed to analyze oscillations");
         }
         
         return 0.0f;
@@ -131,7 +132,7 @@ void PIDAutoTuner::stopTuning() {
     }
     
     if (state == TuningState::RELAY_TEST) {
-        LOG_INFO(LOG_TAG_PID_TUNER, "Auto-tuning stopped by user");
+        LOG_INFO(TAG, "Auto-tuning stopped by user");
         state = TuningState::IDLE;
     }
 }
@@ -212,7 +213,7 @@ void PIDAutoTuner::detectPeaksAndTroughs(float currentTemp, float currentTime) {
             // Found a peak at previous point
             peakTimes.push_back(oscillationData[n-2].time);
             peakValues.push_back(prev);
-            LOG_DEBUG(LOG_TAG_PID_TUNER, "Peak detected at t=%.1f, value=%.2f", 
+            LOG_DEBUG(TAG, "Peak detected at t=%.1f, value=%.2f", 
                      oscillationData[n-2].time - startTime, prev);
         }
         
@@ -221,7 +222,7 @@ void PIDAutoTuner::detectPeaksAndTroughs(float currentTemp, float currentTime) {
             // Found a trough at previous point
             troughTimes.push_back(oscillationData[n-2].time);
             troughValues.push_back(prev);
-            LOG_DEBUG(LOG_TAG_PID_TUNER, "Trough detected at t=%.1f, value=%.2f", 
+            LOG_DEBUG(TAG, "Trough detected at t=%.1f, value=%.2f", 
                      oscillationData[n-2].time - startTime, prev);
         }
     }
@@ -229,21 +230,21 @@ void PIDAutoTuner::detectPeaksAndTroughs(float currentTemp, float currentTime) {
 
 bool PIDAutoTuner::analyzeOscillations() {
     if (peakTimes.size() < 2 || troughTimes.size() < 2) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Insufficient oscillation data");
+        LOG_ERROR(TAG, "Insufficient oscillation data");
         return false;
     }
     
     // Calculate average period
     float avgPeriod = calculateAveragePeriod();
     if (avgPeriod <= 0) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Invalid oscillation period");
+        LOG_ERROR(TAG, "Invalid oscillation period");
         return false;
     }
     
     // Calculate amplitude
     float amplitude = calculateAmplitude();
     if (amplitude <= 0) {
-        LOG_ERROR(LOG_TAG_PID_TUNER, "Invalid oscillation amplitude");
+        LOG_ERROR(TAG, "Invalid oscillation amplitude");
         return false;
     }
     
@@ -253,7 +254,7 @@ bool PIDAutoTuner::analyzeOscillations() {
     result.ultimateGain = (4.0f * outputStep) / (static_cast<float>(M_PI) * amplitude);
     result.ultimatePeriod = avgPeriod;
     
-    LOG_INFO(LOG_TAG_PID_TUNER, "Ultimate gain Ku=%.3f, Ultimate period Tu=%.1f seconds",
+    LOG_INFO(TAG, "Ultimate gain Ku=%.3f, Ultimate period Tu=%.1f seconds",
              result.ultimateGain, result.ultimatePeriod);
     
     return true;
