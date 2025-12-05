@@ -29,16 +29,10 @@ void handleModbusSensorData() {
         auto dataResult = mb8art->getData(IDeviceInstance::DeviceDataType::TEMPERATURE);
 
         if (dataResult.isOk()) {
-            if (xSemaphoreTake(SRP::getSensorReadingsMutex(), MUTEX_TIMEOUT)) {
-                for (size_t i = 0; i < dataResult.value().size() && i < SRP::getSensorMappings().size(); ++i) {
-                    if (SRP::getSensorMappings()[i].isActive) {
-                        *SRP::getSensorMappings()[i].sharedVariable = Utils::roundF(dataResult.value()[i], 1);
-                        *SRP::getSensorMappings()[i].validityFlag = true;  // Mark sensor as valid
-                        xEventGroupSetBits(SRP::getSensorEventGroup(), SRP::getSensorMappings()[i].updateBit);
-                    }
-                }
-                xSemaphoreGive(SRP::getSensorReadingsMutex());
-            }
+            // NOTE: With unified mapping architecture, MB8ART library writes DIRECTLY
+            // to SharedSensorReadings via bound pointers. This task is now redundant.
+            // Data is already in SharedSensorReadings - no copy needed.
+            LOG_DEBUG("SensorTask", "Sensor data updated (via MB8ART direct binding)");
         } else {
             LOG_ERROR("SensorTask", "Modbus data retrieval failed");
             xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);

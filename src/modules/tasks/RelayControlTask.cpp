@@ -7,6 +7,7 @@
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
 #include "config/RelayIndices.h"  // For RelayIndex constants
+#include "shared/RelayBindings.h"  // For RelayBindings::getStatePtr
 #include "ryn4/RelayDefs.h"
 #include <SemaphoreGuard.h>
 #include <esp_task_wdt.h>
@@ -17,6 +18,7 @@
 #include "core/SharedResourceManager.h"
 #include "events/SystemEventsGenerated.h"
 #include "shared/RelayFunctionDefs.h"
+#include "shared/SharedRelayReadings.h"
 #include "modules/control/CentralizedFailsafe.h"
 
 // No external declarations needed - using SRP methods
@@ -995,19 +997,19 @@ void RelayControlTask::getStatistics(uint32_t& processed, uint32_t& failed) {
 }
 
 // Helper method to update SharedRelayReadings immediately
+// NOTE: With unified mapping, RYN4 library writes DIRECTLY to SharedRelayReadings
+// via bound pointers. This function is now redundant but kept for explicit updates.
 void RelayControlTask::updateSharedRelayReadings(uint8_t relayIndex, bool state) {
-    if (SRP::takeRelayReadingsMutex(pdMS_TO_TICKS(100))) {
-        // Map relay states to shared structure based on RelayConfigurations.cpp
-        switch (relayIndex) {
-            case 1: SRP::getRelayReadings().relayHeatingPump = state; break;          // Heating pump
-            case 2: SRP::getRelayReadings().relayWaterPump = state; break;         // Water pump
-            case 3: SRP::getRelayReadings().relayBurnerEnable = state; break;   // Burner Enable
-            case 4: SRP::getRelayReadings().relayHalfPower = state; break;      // Power Level
-            case 5: SRP::getRelayReadings().relayWaterMode = state; break;    // Water Mode
-            case 6: SRP::getRelayReadings().relayValve = state; break;          // Valve
-            case 7: SRP::getRelayReadings().relaySpare = state; break;          // Spare
-            // Relay 8 is also spare, not tracked in SharedRelayReadings
-        }
+    // Relay index is 1-based, convert to 0-based for array access
+    if (relayIndex < 1 || relayIndex > 8) {
+        return;
+    }
+
+    uint8_t arrayIndex = relayIndex - 1;
+    bool* statePtr = RelayBindings::getStatePtr(arrayIndex);
+
+    if (statePtr != nullptr && SRP::takeRelayReadingsMutex(pdMS_TO_TICKS(100))) {
+        *statePtr = state;
         SRP::giveRelayReadingsMutex();
         
         // Also set the relay event bit to notify other tasks

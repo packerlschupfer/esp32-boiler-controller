@@ -353,35 +353,12 @@ void updateSensorData(const std::vector<float>& temperatureData) {
         "SensorReadings-MB8ART"
     );
     if (guard) {
-        // Use the sensor mappings from SystemResourceProvider
-        const auto& mappings = SRP::getSensorMappings();
+        // NOTE: With unified mapping architecture, MB8ART library writes DIRECTLY
+        // to SharedSensorReadings via bound pointers during sensor reads.
+        // This code is now redundant - data is already in SharedSensorReadings.
+        // Keeping minimal logging for monitoring purposes.
 
-        // Update temperatures based on the mapping (channels 0-6)
-        for (size_t i = 0; i < temperatureData.size() && i < mappings.size(); i++) {
-            if (mappings[i].isActive) {
-                float rawValue = temperatureData[i];
-
-                // Debug log the raw value
-                LOG_DEBUG("MB8ARTTask", "Channel %d raw value: %.0f", i, rawValue);
-
-                // The getData() method returns temperature values directly in °C
-                // No need to divide by 100 or 10 - that's already done by the library
-                float tempValue = rawValue;
-
-                // Enhanced debug logging to diagnose the issue
-                LOG_DEBUG("MB8ARTTask", "Ch%d: value=%d.%02d°C (direct from getData)", i,
-                          (int)tempValue, abs((int)(tempValue * 100) % 100));
-
-                // Convert float to fixed-point Temperature_t and apply offset
-                Temperature_t fixedTemp = tempFromFloat(tempValue);
-                Temperature_t offset = getChannelOffset(i);
-                *mappings[i].sharedVariable = fixedTemp + offset;
-                *mappings[i].validityFlag = true;
-
-
-                xEventGroupSetBits(SRP::getSensorEventGroup(), mappings[i].updateBit);
-            }
-        }
+        LOG_DEBUG("MB8ARTTask", "Temperature data available (%d channels)", temperatureData.size());
 
         // Handle channel 7 as pressure sensor (if present in data)
 #ifdef USE_REAL_PRESSURE_SENSOR
