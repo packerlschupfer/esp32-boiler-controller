@@ -6,7 +6,6 @@
 #include "config/SystemConstants.h"
 #include "config/SystemSettingsStruct.h"
 #include <atomic>
-#include "shared/TempSensorMapping.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"
 #include "shared/Pressure.h"

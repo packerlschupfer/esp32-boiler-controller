@@ -52,7 +52,6 @@
 #include "shared/SharedResources.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
-#include "shared/RelayConfigurations.h"
 
 // HAL includes
 #include "hal/HardwareAbstractionLayer.h"

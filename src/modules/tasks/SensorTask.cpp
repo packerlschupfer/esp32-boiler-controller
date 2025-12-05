@@ -2,7 +2,6 @@
 #include "SensorTask.h"
 #include "events/SystemEventsGenerated.h"
 #include "shared/SharedSensorReadings.h"
-#include "shared/TempSensorMapping.h"
 #include "config/SystemConstants.h"
 #include "LoggingMacros.h"
 #include "freertos/FreeRTOS.h"

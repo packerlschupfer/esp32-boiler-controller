@@ -8,8 +8,6 @@
 #include <esp32ModbusRTU.h>
 #include <ModbusRegistry.h>
 #include "monitoring/HealthMonitor.h"
-#include "shared/RelayConfigurations.h"
-#include "shared/TempSensorMapping.h"
 #include <RuntimeStorage.h>
 #include "init/SystemInitializer.h"
 
