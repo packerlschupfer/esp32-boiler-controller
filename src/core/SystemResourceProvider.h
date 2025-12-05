@@ -18,8 +18,6 @@
 struct SharedSensorReadings;
 struct SharedRelayReadings;
 struct SystemSettings;
-struct TempSensorMapping;
-namespace base { struct BaseRelayMapping; }
 namespace modbus { class ModbusDevice; }
 namespace rtstorage { class RuntimeStorage; }
 namespace andrtf3 { class ANDRTF3; }
@@ -373,9 +371,6 @@ public:
     static EventBits_t& getRelayAllUpdateBits();
     static EventBits_t& getRelayAllErrorBits();
     
-    // Configuration arrays
-    static std::vector<base::BaseRelayMapping>& getRelayConfigurations();
-    static std::vector<TempSensorMapping>& getSensorMappings();
     
     // Task handles
     static TaskHandle_t& getBurnerTaskHandle();

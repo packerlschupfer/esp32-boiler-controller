@@ -38,12 +38,9 @@ extern HealthMonitor* gHealthMonitor;
 extern EventGroupHandle_t xGeneralSystemEventGroup;
 extern EventBits_t relayAllUpdateBits;
 extern EventBits_t relayAllErrorBits;
-extern std::vector<base::BaseRelayMapping> relayConfigurations;
-extern std::vector<TempSensorMapping> sensorMappings;
 extern TaskHandle_t burnerTaskHandle;
 extern int pidFactorSpaceHeating;
 extern int pidFactorWaterHeating;
-extern struct RelayConfig relayConfigs[];
 extern rtstorage::RuntimeStorage* gRuntimeStorage;
 
 // Global SystemInitializer pointer - used for service access (ServiceContainer removed)
@@ -101,13 +98,6 @@ EventBits_t& SystemResourceProvider::getRelayAllErrorBits() {
     return relayAllErrorBits;
 }
 
-std::vector<base::BaseRelayMapping>& SystemResourceProvider::getRelayConfigurations() {
-    return relayConfigurations;
-}
-
-std::vector<TempSensorMapping>& SystemResourceProvider::getSensorMappings() {
-    return sensorMappings;
-}
 
 TaskHandle_t& SystemResourceProvider::getBurnerTaskHandle() {
     return burnerTaskHandle;
