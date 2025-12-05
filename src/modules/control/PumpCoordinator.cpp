@@ -84,9 +84,9 @@ bool PumpCoordinator::isPumpOn(PumpType pump) const {
     auto& readings = SRP::getRelayReadings();
 
     if (pump == PumpType::HEATING) {
-        return readings.relayHpump;
+        return readings.relayHeatingPump;
     } else {
-        return readings.relayWhpump;
+        return readings.relayWaterPump;
     }
 }
 

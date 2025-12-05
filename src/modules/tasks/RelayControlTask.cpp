@@ -1007,11 +1007,11 @@ void RelayControlTask::updateSharedRelayReadings(uint8_t relayIndex, bool state)
     if (SRP::takeRelayReadingsMutex(pdMS_TO_TICKS(100))) {
         // Map relay states to shared structure based on RelayConfigurations.cpp
         switch (relayIndex) {
-            case 1: SRP::getRelayReadings().relayHpump = state; break;          // Heating pump
-            case 2: SRP::getRelayReadings().relayWhpump = state; break;         // Water pump
+            case 1: SRP::getRelayReadings().relayHeatingPump = state; break;          // Heating pump
+            case 2: SRP::getRelayReadings().relayWaterPump = state; break;         // Water pump
             case 3: SRP::getRelayReadings().relayBurnerEnable = state; break;   // Burner Enable
             case 4: SRP::getRelayReadings().relayHalfPower = state; break;      // Power Level
-            case 5: SRP::getRelayReadings().relayWheaterMode = state; break;    // Water Mode
+            case 5: SRP::getRelayReadings().relayWaterMode = state; break;    // Water Mode
             case 6: SRP::getRelayReadings().relayValve = state; break;          // Valve
             case 7: SRP::getRelayReadings().relaySpare = state; break;          // Spare
             // Relay 8 is also spare, not tracked in SharedRelayReadings

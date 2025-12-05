@@ -16,12 +16,12 @@ struct SharedSensorReadings {
     bool isBoilerTempReturnValid = false;
 
     // Water heater readings (in tenths of degrees Celsius)
-    Temperature_t wHeaterTempTank = 0;
-    Temperature_t wHeaterTempOutput = 0;
-    Temperature_t wHeaterTempReturn = 0;
-    bool isWHeaterTempTankValid = false;
-    bool isWHeaterTempOutputValid = false;
-    bool isWHeaterTempReturnValid = false;
+    Temperature_t waterHeaterTempTank = 0;    // Renamed from wHeaterTempTank
+    Temperature_t waterHeaterTempOutput = 0;  // Renamed from wHeaterTempOutput
+    Temperature_t waterHeaterTempReturn = 0;  // Renamed from wHeaterTempReturn
+    bool isWaterHeaterTempTankValid = false;  // Renamed from isWHeaterTempTankValid
+    bool isWaterHeaterTempOutputValid = false; // Renamed from isWHeaterTempOutputValid
+    bool isWaterHeaterTempReturnValid = false; // Renamed from isWHeaterTempReturnValid
 
     // Heating system readings (in tenths of degrees Celsius)
     Temperature_t heatingTempReturn = 0;

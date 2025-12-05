@@ -314,8 +314,8 @@ void CentralizedFailsafe::saveEmergencyState() {
         );
         if (guard) {
             savedState.burnerActive = SRP::getRelayReadings().relayBurnerEnable;
-            savedState.heatingPumpActive = SRP::getRelayReadings().relayHpump;
-            savedState.waterPumpActive = SRP::getRelayReadings().relayWhpump;
+            savedState.heatingPumpActive = SRP::getRelayReadings().relayHeatingPump;
+            savedState.waterPumpActive = SRP::getRelayReadings().relayWaterPump;
         }
     }
 

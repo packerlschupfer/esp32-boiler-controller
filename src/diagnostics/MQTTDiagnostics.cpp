@@ -506,9 +506,9 @@ void MQTTDiagnostics::collectSensorInfo(JsonDocument& doc) {
         temps["boiler_return"]["value"] = String(floatBuffer.c_str());
         temps["boiler_return"]["valid"] = SRP::getSensorReadings().isBoilerTempReturnValid;
 
-        formatFloatDiag(floatBuffer.data(), floatBuffer.size(), tempToFloat(SRP::getSensorReadings().wHeaterTempTank), 1);
+        formatFloatDiag(floatBuffer.data(), floatBuffer.size(), tempToFloat(SRP::getSensorReadings().waterHeaterTempTank), 1);
         temps["water_tank"]["value"] = String(floatBuffer.c_str());
-        temps["water_tank"]["valid"] = SRP::getSensorReadings().isWHeaterTempTankValid;
+        temps["water_tank"]["valid"] = SRP::getSensorReadings().isWaterHeaterTempTankValid;
 
         formatFloatDiag(floatBuffer.data(), floatBuffer.size(), tempToFloat(SRP::getSensorReadings().outsideTemp), 1);
         temps["outside"]["value"] = String(floatBuffer.c_str());
@@ -541,10 +541,10 @@ void MQTTDiagnostics::collectRelayInfo(JsonDocument& doc) {
         JsonObject relays = doc["relays"].to<JsonObject>();
 
         // Map individual relay states
-        relays["heating_pump"] = SRP::getRelayReadings().relayHpump;
-        relays["water_pump"] = SRP::getRelayReadings().relayWhpump;
+        relays["heating_pump"] = SRP::getRelayReadings().relayHeatingPump;
+        relays["water_pump"] = SRP::getRelayReadings().relayWaterPump;
         relays["burner_enable"] = SRP::getRelayReadings().relayBurnerEnable;
-        relays["water_mode"] = SRP::getRelayReadings().relayWheaterMode;
+        relays["water_mode"] = SRP::getRelayReadings().relayWaterMode;
         relays["half_power"] = SRP::getRelayReadings().relayHalfPower;
         relays["valve"] = SRP::getRelayReadings().relayValve;
         relays["spare"] = SRP::getRelayReadings().relaySpare;

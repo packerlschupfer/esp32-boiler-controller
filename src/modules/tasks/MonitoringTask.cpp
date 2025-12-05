@@ -477,10 +477,10 @@ static void logSensorStatus() {
                  readings.isBoilerTempOutputValid ? abs(readings.boilerTempOutput % 10) : 9,
                  readings.isBoilerTempReturnValid ? readings.boilerTempReturn / 10 : -99,
                  readings.isBoilerTempReturnValid ? abs(readings.boilerTempReturn % 10) : 9,
-                 readings.isWHeaterTempTankValid ? readings.wHeaterTempTank / 10 : -99,
-                 readings.isWHeaterTempTankValid ? abs(readings.wHeaterTempTank % 10) : 9,
-                 readings.isWHeaterTempOutputValid ? readings.wHeaterTempOutput / 10 : -99,
-                 readings.isWHeaterTempOutputValid ? abs(readings.wHeaterTempOutput % 10) : 9);
+                 readings.isWaterHeaterTempTankValid ? readings.waterHeaterTempTank / 10 : -99,
+                 readings.isWaterHeaterTempTankValid ? abs(readings.waterHeaterTempTank % 10) : 9,
+                 readings.isWaterHeaterTempOutputValid ? readings.waterHeaterTempOutput / 10 : -99,
+                 readings.isWaterHeaterTempOutputValid ? abs(readings.waterHeaterTempOutput % 10) : 9);
 
         LOG_DEBUG(LOG_TAG_MONITORING, "Env O:%d.%d I:%d.%d HR:%d.%d WR:%d.%d",
                  readings.isOutsideTempValid ? readings.outsideTemp / 10 : -99,
@@ -489,8 +489,8 @@ static void logSensorStatus() {
                  readings.isInsideTempValid ? abs(readings.insideTemp % 10) : 9,
                  readings.isHeatingTempReturnValid ? readings.heatingTempReturn / 10 : -99,
                  readings.isHeatingTempReturnValid ? abs(readings.heatingTempReturn % 10) : 9,
-                 readings.isWHeaterTempReturnValid ? readings.wHeaterTempReturn / 10 : -99,
-                 readings.isWHeaterTempReturnValid ? abs(readings.wHeaterTempReturn % 10) : 9);
+                 readings.isWaterHeaterTempReturnValid ? readings.waterHeaterTempReturn / 10 : -99,
+                 readings.isWaterHeaterTempReturnValid ? abs(readings.waterHeaterTempReturn % 10) : 9);
 
         SRP::giveSensorReadingsMutex();
     }
@@ -510,11 +510,11 @@ static void logRelayStatus() {
 
         // Compact relay status - single line with all states
         LOG_DEBUG(LOG_TAG_MONITORING, "Rly HP:%d WP:%d B:%d HP:%d WM:%d V:%d S:%d",
-                 relays.relayHpump,
-                 relays.relayWhpump,
+                 relays.relayHeatingPump,
+                 relays.relayWaterPump,
                  relays.relayBurnerEnable,
                  relays.relayHalfPower,
-                 relays.relayWheaterMode,
+                 relays.relayWaterMode,
                  relays.relayValve,
                  relays.relaySpare);
 

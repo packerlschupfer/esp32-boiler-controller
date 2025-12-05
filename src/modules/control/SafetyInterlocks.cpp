@@ -157,7 +157,7 @@ bool SafetyInterlocks::verifyTemperatureSensors(uint8_t minRequiredSensors) {
         // Count valid sensors
         if (readings.isBoilerTempOutputValid) validSensors++;
         if (readings.isBoilerTempReturnValid) validSensors++;
-        if (readings.isWHeaterTempTankValid) validSensors++;
+        if (readings.isWaterHeaterTempTankValid) validSensors++;
         if (readings.isInsideTempValid) validSensors++;
 
         // Check sensor update timestamps
@@ -246,10 +246,10 @@ bool SafetyInterlocks::checkTemperatureLimits(Temperature_t maxAllowedTemp) {
         }
 
         // Check water heater temperature
-        if (readings.isWHeaterTempTankValid) {
-            if (readings.wHeaterTempTank >= SystemConstants::Temperature::WATER_MAX_SAFE_TEMP_C) {
+        if (readings.isWaterHeaterTempTankValid) {
+            if (readings.waterHeaterTempTank >= SystemConstants::Temperature::WATER_MAX_SAFE_TEMP_C) {
                 char tempBuf[16], limitBuf[16];
-                formatTemp(tempBuf, sizeof(tempBuf), readings.wHeaterTempTank);
+                formatTemp(tempBuf, sizeof(tempBuf), readings.waterHeaterTempTank);
                 formatTemp(limitBuf, sizeof(limitBuf), SystemConstants::Temperature::WATER_MAX_SAFE_TEMP_C);
                 LOG_WARN(TAG, "Water heater temp %s°C exceeds limit %s°C",
                          tempBuf, limitBuf);

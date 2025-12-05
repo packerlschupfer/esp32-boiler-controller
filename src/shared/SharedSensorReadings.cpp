@@ -10,12 +10,12 @@ SharedSensorReadings sharedSensorReadings = {
     .isBoilerTempReturnValid = false,
 
     // Water heater readings
-    .wHeaterTempTank = TEMP_INVALID,
-    .wHeaterTempOutput = TEMP_INVALID,
-    .wHeaterTempReturn = TEMP_INVALID,
-    .isWHeaterTempTankValid = false,
-    .isWHeaterTempOutputValid = false,
-    .isWHeaterTempReturnValid = false,
+    .waterHeaterTempTank = TEMP_INVALID,
+    .waterHeaterTempOutput = TEMP_INVALID,
+    .waterHeaterTempReturn = TEMP_INVALID,
+    .isWaterHeaterTempTankValid = false,
+    .isWaterHeaterTempOutputValid = false,
+    .isWaterHeaterTempReturnValid = false,
 
     // Heating system readings
     .heatingTempReturn = TEMP_INVALID,

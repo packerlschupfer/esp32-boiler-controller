@@ -170,7 +170,7 @@ void BurnerControlTask(void* parameter) {
             if (guard) {
                 SharedSensorReadings readings = SRP::getSensorReadings();
                 if (readings.isBoilerTempOutputValid || readings.isBoilerTempReturnValid ||
-                    readings.isWHeaterTempTankValid || readings.isInsideTempValid) {
+                    readings.isWaterHeaterTempTankValid || readings.isInsideTempValid) {
                     burnerState.sensorsReady = true;
                     LOG_INFO(TAG, "Sensors ready - valid readings available");
                 }

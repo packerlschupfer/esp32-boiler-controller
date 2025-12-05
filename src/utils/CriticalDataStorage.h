@@ -175,11 +175,11 @@ public:
         // Get relay states
         auto& relays = SRP::getRelayReadings();
         state.activeRelays = 0;
-        if (relays.relayHpump) state.activeRelays |= (1 << 0);
-        if (relays.relayWhpump) state.activeRelays |= (1 << 1);
+        if (relays.relayHeatingPump) state.activeRelays |= (1 << 0);
+        if (relays.relayWaterPump) state.activeRelays |= (1 << 1);
         if (relays.relayBurnerEnable) state.activeRelays |= (1 << 2);
         if (relays.relayHalfPower) state.activeRelays |= (1 << 3);
-        if (relays.relayWheaterMode) state.activeRelays |= (1 << 4);
+        if (relays.relayWaterMode) state.activeRelays |= (1 << 4);
         if (relays.relayValve) state.activeRelays |= (1 << 5);
         if (relays.relaySpare) state.activeRelays |= (1 << 6);
 

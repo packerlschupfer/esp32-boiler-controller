@@ -11,12 +11,12 @@
 std::vector<base::BaseRelayMapping> relayConfigurations = {
     // Relay 1: Heating Circulation Pump - NORMAL LOGIC
     // Start with relay OFF (pump OFF)
-    {1, &SRP::getRelayReadings().relayHpump, ryn4::RELAY1_OPEN_BIT, ryn4::RELAY1_CLOSE_BIT, 
+    {1, &SRP::getRelayReadings().relayHeatingPump, ryn4::RELAY1_OPEN_BIT, ryn4::RELAY1_CLOSE_BIT, 
      ryn4::RELAY1_STATUS_BIT, ryn4::RELAY1_UPDATE_BIT, ryn4::RELAY1_ERROR_BIT, false, false},
     
     // Relay 2: Water Heating Circulation Pump - NORMAL LOGIC
     // Start with relay OFF (pump OFF)
-    {2, &SRP::getRelayReadings().relayWhpump, ryn4::RELAY2_OPEN_BIT, ryn4::RELAY2_CLOSE_BIT, 
+    {2, &SRP::getRelayReadings().relayWaterPump, ryn4::RELAY2_OPEN_BIT, ryn4::RELAY2_CLOSE_BIT, 
      ryn4::RELAY2_STATUS_BIT, ryn4::RELAY2_UPDATE_BIT, ryn4::RELAY2_ERROR_BIT, false, false},
     
     // Relay 3: Burner Enable - NORMAL LOGIC
@@ -37,7 +37,7 @@ std::vector<base::BaseRelayMapping> relayConfigurations = {
     // When ON: Enables water heating mode (disables hardware over-temp safety)
     // When OFF: Normal heating mode with hardware safety active
     // Start with relay OFF (safety enabled)
-    {5, &SRP::getRelayReadings().relayWheaterMode, ryn4::RELAY5_OPEN_BIT, ryn4::RELAY5_CLOSE_BIT, 
+    {5, &SRP::getRelayReadings().relayWaterMode, ryn4::RELAY5_OPEN_BIT, ryn4::RELAY5_CLOSE_BIT, 
      ryn4::RELAY5_STATUS_BIT, ryn4::RELAY5_UPDATE_BIT, ryn4::RELAY5_ERROR_BIT, false, false},
     
     // Relay 6: Valve - NORMAL LOGIC

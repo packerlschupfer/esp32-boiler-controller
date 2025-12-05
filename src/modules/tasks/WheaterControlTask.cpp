@@ -74,10 +74,10 @@ static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const
 
     // Calculate target based on water tank temperature + delta
     // Boiler needs to be hotter than the tank to charge it effectively
-    boilerTarget = tempAdd(readings.wHeaterTempTank, chargeDelta);
+    boilerTarget = tempAdd(readings.waterHeaterTempTank, chargeDelta);
 
     char tankBuf[16], deltaBuf[16], targetBuf[16];
-    formatTemp(tankBuf, sizeof(tankBuf), readings.wHeaterTempTank);
+    formatTemp(tankBuf, sizeof(tankBuf), readings.waterHeaterTempTank);
     formatTemp(deltaBuf, sizeof(deltaBuf), chargeDelta);
     formatTemp(targetBuf, sizeof(targetBuf), boilerTarget);
     LOG_DEBUG(TAG, "Boiler target = tank(%s) + delta(%s) = %s°C",
@@ -475,11 +475,11 @@ static bool checkIfWaterHeatingNeededEvent() {
         SharedSensorReadings readings = SRP::getSensorReadings();
         SystemSettings& settings = SRP::getSystemSettings();
 
-        if (readings.isWHeaterTempTankValid &&
+        if (readings.isWaterHeaterTempTankValid &&
             (settings.wHeaterConfTempLimitHigh > 0) &&
             (settings.wHeaterConfTempLimitLow > 0)) {  // Ensure valid thresholds
 
-            Temperature_t currentTemp = readings.wHeaterTempTank;
+            Temperature_t currentTemp = readings.waterHeaterTempTank;
             Temperature_t lowLimit = settings.wHeaterConfTempLimitLow;   // Start heating below this
             Temperature_t highLimit = settings.wHeaterConfTempLimitHigh; // Stop heating above this
 

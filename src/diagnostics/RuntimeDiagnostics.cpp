@@ -253,8 +253,8 @@ void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
         }
         
         // Water temperatures
-        if (SRP::getSensorReadings().isWHeaterTempTankValid) {
-            output("  Water Heater Tank Temp: %.1f°C", SRP::getSensorReadings().wHeaterTempTank);
+        if (SRP::getSensorReadings().isWaterHeaterTempTankValid) {
+            output("  Water Heater Tank Temp: %.1f°C", SRP::getSensorReadings().waterHeaterTempTank);
         } else {
             output("  Water Heater Tank Temp: INVALID");
         }

@@ -117,8 +117,8 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
                                                  validateSensorReading(readings.boilerTempOutput);
                 currentStatus.boilerReturnValid = readings.isBoilerTempReturnValid &&
                                                  validateSensorReading(readings.boilerTempReturn);
-                currentStatus.waterTempValid = readings.isWHeaterTempTankValid &&
-                                              validateSensorReading(readings.wHeaterTempTank);
+                currentStatus.waterTempValid = readings.isWaterHeaterTempTankValid &&
+                                              validateSensorReading(readings.waterHeaterTempTank);
                 currentStatus.roomTempValid = readings.isInsideTempValid &&
                                              validateSensorReading(readings.insideTemp);
                 currentStatus.outsideTempValid = readings.isOutsideTempValid &&

@@ -256,9 +256,9 @@ bool StateManager::isSensorValid(SensorChannel channel) {
     switch (channel) {
         case SensorChannel::BOILER_OUTPUT:   return readings.isBoilerTempOutputValid;
         case SensorChannel::BOILER_RETURN:   return readings.isBoilerTempReturnValid;
-        case SensorChannel::WATER_TANK:      return readings.isWHeaterTempTankValid;
-        case SensorChannel::WATER_OUTPUT:    return readings.isWHeaterTempOutputValid;
-        case SensorChannel::WATER_RETURN:    return readings.isWHeaterTempReturnValid;
+        case SensorChannel::WATER_TANK:      return readings.isWaterHeaterTempTankValid;
+        case SensorChannel::WATER_OUTPUT:    return readings.isWaterHeaterTempOutputValid;
+        case SensorChannel::WATER_RETURN:    return readings.isWaterHeaterTempReturnValid;
         case SensorChannel::HEATING_RETURN:  return readings.isHeatingTempReturnValid;
         case SensorChannel::OUTSIDE_TEMP:    return readings.isOutsideTempValid;
         case SensorChannel::INSIDE_TEMP:     return readings.isInsideTempValid;

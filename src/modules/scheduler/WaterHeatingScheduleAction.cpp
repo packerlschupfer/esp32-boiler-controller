@@ -74,7 +74,7 @@ void WaterHeatingScheduleAction::onPreheatingStart(const TimerSchedule& schedule
     Temperature_t currentTemp = tempFromWhole(20);  // Default 20.0°C if sensor unavailable
 
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {
-        currentTemp = SRP::getSensorReadings().wHeaterTempTank;
+        currentTemp = SRP::getSensorReadings().waterHeaterTempTank;
         SRP::giveSensorReadingsMutex();
     }
 

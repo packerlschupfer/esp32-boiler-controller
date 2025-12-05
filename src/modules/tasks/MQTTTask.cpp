@@ -1051,7 +1051,7 @@ void MQTTTask::publishSensorData() {
     JsonObject temps = doc["t"].to<JsonObject>();  // temperatures
     temps["bo"] = sensors.boilerTempOutput;     // boiler output
     temps["br"] = sensors.boilerTempReturn;     // boiler return  
-    temps["wt"] = sensors.wHeaterTempTank;      // water tank
+    temps["wt"] = sensors.waterHeaterTempTank;      // water tank
     temps["hr"] = sensors.heatingTempReturn;    // heating return
     temps["o"] = sensors.outsideTemp;           // outside
     
@@ -1081,10 +1081,10 @@ void MQTTTask::publishSensorData() {
         // Bit 0: burner, 1: heating_pump, 2: water_pump, 3: half_power, 4: water_mode
         uint8_t relayBits = 0;
         if (relays.relayBurnerEnable) relayBits |= 0x01;
-        if (relays.relayHpump) relayBits |= 0x02;
-        if (relays.relayWhpump) relayBits |= 0x04;
+        if (relays.relayHeatingPump) relayBits |= 0x02;
+        if (relays.relayWaterPump) relayBits |= 0x04;
         if (relays.relayHalfPower) relayBits |= 0x08;
-        if (relays.relayWheaterMode) relayBits |= 0x10;
+        if (relays.relayWaterMode) relayBits |= 0x10;
         
         doc["r"] = relayBits;  // relays as single byte
     }

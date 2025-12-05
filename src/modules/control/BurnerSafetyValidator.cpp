@@ -60,10 +60,10 @@ BurnerSafetyValidator::ValidationResult BurnerSafetyValidator::validateBurnerOpe
         return ValidationResult::TEMPERATURE_EXCEEDED;
     }
     
-    if (readings.isWHeaterTempTankValid && 
-        readings.wHeaterTempTank > config.maxWaterTemp) {
+    if (readings.isWaterHeaterTempTankValid && 
+        readings.waterHeaterTempTank > config.maxWaterTemp) {
         char tempBuf[16], limitBuf[16];
-        formatTemp(tempBuf, sizeof(tempBuf), readings.wHeaterTempTank);
+        formatTemp(tempBuf, sizeof(tempBuf), readings.waterHeaterTempTank);
         formatTemp(limitBuf, sizeof(limitBuf), config.maxWaterTemp);
         LOG_ERROR(TAG, "Water temp %s exceeds limit %s", tempBuf, limitBuf);
         return ValidationResult::TEMPERATURE_EXCEEDED;
@@ -203,9 +203,9 @@ bool BurnerSafetyValidator::validatePumpOperation(uint8_t pumpId, bool requireFl
         );
         if (guard) {
             if (pumpId == 1) {  // Heating pump
-                pumpRelayOn = SRP::getRelayReadings().relayHpump;
+                pumpRelayOn = SRP::getRelayReadings().relayHeatingPump;
             } else if (pumpId == 2) {  // Water pump
-                pumpRelayOn = SRP::getRelayReadings().relayWhpump;
+                pumpRelayOn = SRP::getRelayReadings().relayWaterPump;
             }
         }
     }
@@ -252,9 +252,9 @@ uint8_t BurnerSafetyValidator::validateTemperatureSensors(
         }
     }
 
-    if (readings.isWHeaterTempTankValid) {
-        if (readings.wHeaterTempTank >= SystemConstants::Temperature::SensorRange::WATER_TANK_SENSOR_MIN &&
-            readings.wHeaterTempTank <= SystemConstants::Temperature::SensorRange::WATER_TANK_SENSOR_MAX) {
+    if (readings.isWaterHeaterTempTankValid) {
+        if (readings.waterHeaterTempTank >= SystemConstants::Temperature::SensorRange::WATER_TANK_SENSOR_MIN &&
+            readings.waterHeaterTempTank <= SystemConstants::Temperature::SensorRange::WATER_TANK_SENSOR_MAX) {
             validCount++;
         }
     }
