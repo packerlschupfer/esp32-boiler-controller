@@ -10,27 +10,29 @@
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
 
+static const char* TAG = "OTA";
+
 // OTA callback implementations
 void OTATask::onOTAStart() {
-    LOG_INFO(LOG_TAG_OTA, "OTA update starting");
+    LOG_INFO(TAG, "OTA update starting");
 
     {
         SemaphoreGuard guard(otaStatusMutex, pdMS_TO_TICKS(100));
         if (guard.hasLock()) {
             otaUpdateInProgress = true;
         } else {
-            LOG_ERROR(LOG_TAG_OTA, "Failed to acquire OTA status mutex on start");
+            LOG_ERROR(TAG, "Failed to acquire OTA status mutex on start");
         }
     }
 
     // Round 21: Save critical state before OTA update
-    LOG_INFO(LOG_TAG_OTA, "Saving critical state before OTA...");
+    LOG_INFO(TAG, "Saving critical state before OTA...");
 
     // Save runtime counters to FRAM
     if (CriticalDataStorage::saveRuntimeCounters()) {
-        LOG_INFO(LOG_TAG_OTA, "Runtime counters saved");
+        LOG_INFO(TAG, "Runtime counters saved");
     } else {
-        LOG_WARN(LOG_TAG_OTA, "Failed to save runtime counters");
+        LOG_WARN(TAG, "Failed to save runtime counters");
     }
 
     // Log OTA event to safety log
@@ -45,14 +47,14 @@ void OTATask::onOTAStart() {
 }
 
 void OTATask::onOTAEnd() {
-    LOG_INFO(LOG_TAG_OTA, "OTA update ended");
+    LOG_INFO(TAG, "OTA update ended");
 
     {
         SemaphoreGuard guard(otaStatusMutex, pdMS_TO_TICKS(100));
         if (guard.hasLock()) {
             otaUpdateInProgress = false;
         } else {
-            LOG_ERROR(LOG_TAG_OTA, "Failed to acquire OTA status mutex on end");
+            LOG_ERROR(TAG, "Failed to acquire OTA status mutex on end");
         }
     }
 
@@ -62,7 +64,7 @@ void OTATask::onOTAEnd() {
     // Indicate OTA complete with LED
     // StatusLed::setPattern(2, 500, 1000);  // Double blink
 
-    LOG_INFO(LOG_TAG_OTA, "OTA update successful - system will restart");
+    LOG_INFO(TAG, "OTA update successful - system will restart");
 }
 
 void OTATask::onOTAProgress(unsigned int progress, unsigned int total) {
@@ -71,7 +73,7 @@ void OTATask::onOTAProgress(unsigned int progress, unsigned int total) {
 
     // Only log at 10% intervals to reduce spam
     if (percent != lastPercent && percent % 10 == 0) {
-        LOG_INFO(LOG_TAG_OTA, "OTA progress: %u%%", percent);
+        LOG_INFO(TAG, "OTA progress: %u%%", percent);
         lastPercent = percent;
     }
 
@@ -90,14 +92,14 @@ void OTATask::onOTAError(ota_error_t error) {
         default: break;
     }
 
-    LOG_ERROR(LOG_TAG_OTA, "OTA error: %s (code: %d)", errorStr, error);
+    LOG_ERROR(TAG, "OTA error: %s (code: %d)", errorStr, error);
 
     {
         SemaphoreGuard guard(otaStatusMutex, pdMS_TO_TICKS(100));
         if (guard.hasLock()) {
             otaUpdateInProgress = false;
         } else {
-            LOG_ERROR(LOG_TAG_OTA, "Failed to acquire OTA status mutex on error");
+            LOG_ERROR(TAG, "Failed to acquire OTA status mutex on error");
         }
     }
 

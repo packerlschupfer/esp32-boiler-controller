@@ -27,7 +27,8 @@
 #include "modules/tasks/MQTTTask.h"
 #include "config/PIDControllerIDs.h"
 
-static const char* LOG_TAG_HEATING_CONTROL = "HeatingControl";
+
+static const char* TAG = "HeatingControl";
 
 // Bounded mutex timeout - NEVER use MUTEX_TIMEOUT to prevent deadlock
 static constexpr TickType_t MUTEX_TIMEOUT = pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS);
@@ -83,13 +84,13 @@ void HeatingControlModule::initialize() {
     if (taskStateMutex_ == nullptr) {
         taskStateMutex_ = xSemaphoreCreateMutex();
         if (!taskStateMutex_) {
-            LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Failed to create task state mutex");
+            LOG_ERROR(TAG, "Failed to create task state mutex");
         }
     }
     if (pidGainsMutex_ == nullptr) {
         pidGainsMutex_ = xSemaphoreCreateMutex();
         if (!pidGainsMutex_) {
-            LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Failed to create PID gains mutex");
+            LOG_ERROR(TAG, "Failed to create PID gains mutex");
         }
     }
 
@@ -98,17 +99,17 @@ void HeatingControlModule::initialize() {
     pidKp = settings.spaceHeatingKp;
     pidKi = settings.spaceHeatingKi;
     pidKd = settings.spaceHeatingKd;
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "Loaded space heating PID gains: Kp=%.2f, Ki=%.4f, Kd=%.2f",
+    LOG_INFO(TAG, "Loaded space heating PID gains: Kp=%.2f, Ki=%.4f, Kd=%.2f",
              pidKp, pidKi, pidKd);
 
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "HeatingControlModule initialized.");
+    LOG_INFO(TAG, "HeatingControlModule initialized.");
 
     // Restore PID state from FRAM if available
     if (fixedPointPID) {
         if (fixedPointPID->restoreState(PID_CONTROLLER_SPACE_HEATING)) {
-            LOG_INFO(LOG_TAG_HEATING_CONTROL, "Space heating PID state restored from FRAM");
+            LOG_INFO(TAG, "Space heating PID state restored from FRAM");
         } else {
-            LOG_INFO(LOG_TAG_HEATING_CONTROL, "No saved PID state found, starting fresh");
+            LOG_INFO(TAG, "No saved PID state found, starting fresh");
         }
     }
 
@@ -122,7 +123,7 @@ bool HeatingControlModule::startAutoTuning(Temperature_t setpoint) {
     {
         MutexGuard guard(taskStateMutex_, pdMS_TO_TICKS(100));
         if (!guard.hasLock()) {
-            LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Failed to acquire task state mutex for auto-tune start");
+            LOG_ERROR(TAG, "Failed to acquire task state mutex for auto-tune start");
             return false;
         }
         if (isAutoTuning || !autoTuner) {
@@ -134,14 +135,14 @@ bool HeatingControlModule::startAutoTuning(Temperature_t setpoint) {
     EventBits_t systemState = SRP::getSystemStateEventBits();
     if (!(systemState & SystemEvents::SystemState::BOILER_ENABLED) ||
         !(systemState & SystemEvents::SystemState::HEATING_ENABLED)) {
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Cannot start auto-tuning: system not enabled");
+        LOG_ERROR(TAG, "Cannot start auto-tuning: system not enabled");
         return false;
     }
 
     // Check for errors
     EventBits_t errorBits = xEventGroupGetBits(SRP::getErrorNotificationEventGroup());
     if (errorBits & SystemEvents::Error::ANY_ACTIVE) {
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Cannot start auto-tuning: errors present");
+        LOG_ERROR(TAG, "Cannot start auto-tuning: errors present");
         return false;
     }
 
@@ -163,7 +164,7 @@ bool HeatingControlModule::startAutoTuning(Temperature_t setpoint) {
     }
 
     if (!sensorValid) {
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Cannot start auto-tuning: boiler temp sensor invalid");
+        LOG_ERROR(TAG, "Cannot start auto-tuning: boiler temp sensor invalid");
         return false;
     }
 
@@ -171,20 +172,20 @@ bool HeatingControlModule::startAutoTuning(Temperature_t setpoint) {
     if (currentBoilerTemp < SystemConstants::PID::Autotune::MIN_BOILER_TEMP) {
         char tempBuf[16];
         formatTemp(tempBuf, sizeof(tempBuf), currentBoilerTemp);
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Cannot start auto-tuning: boiler temp too low (%s°C, min 15°C)", tempBuf);
+        LOG_ERROR(TAG, "Cannot start auto-tuning: boiler temp too low (%s°C, min 15°C)", tempBuf);
         return false;
     }
 
     if (currentBoilerTemp > SystemConstants::PID::Autotune::MAX_BOILER_TEMP) {
         char tempBuf[16];
         formatTemp(tempBuf, sizeof(tempBuf), currentBoilerTemp);
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Cannot start auto-tuning: boiler temp too high (%s°C, max 75°C)", tempBuf);
+        LOG_ERROR(TAG, "Cannot start auto-tuning: boiler temp too high (%s°C, max 75°C)", tempBuf);
         return false;
     }
 
     char tempBuf[16];
     formatTemp(tempBuf, sizeof(tempBuf), currentBoilerTemp);
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "Pre-tuning check passed: boiler temp %s°C", tempBuf);
+    LOG_INFO(TAG, "Pre-tuning check passed: boiler temp %s°C", tempBuf);
 
     // Start auto-tuning with configurable parameters from SystemSettings
     autoTuneSetpoint = setpoint;
@@ -202,7 +203,7 @@ bool HeatingControlModule::startAutoTuning(Temperature_t setpoint) {
         default: method = PIDAutoTuner::TuningMethod::TYREUS_LUYBEN; break;
     }
 
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "Auto-tune config: amplitude=%.1f%%, hysteresis=%.1f°C, method=%ld",
+    LOG_INFO(TAG, "Auto-tune config: amplitude=%.1f%%, hysteresis=%.1f°C, method=%ld",
              settings.autotuneRelayAmplitude, settings.autotuneHysteresis, (long)settings.autotuneMethod);
 
     if (autoTuner->startTuning(setpointFloat, settings.autotuneRelayAmplitude,
@@ -218,7 +219,7 @@ bool HeatingControlModule::startAutoTuning(Temperature_t setpoint) {
         xEventGroupClearBits(SRP::getHeatingEventGroup(),
             SystemEvents::HeatingEvent::AUTOTUNE_COMPLETE | SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
         formatTemp(tempBuf, sizeof(tempBuf), setpoint);
-        LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID auto-tuning started with setpoint: %s°C", tempBuf);
+        LOG_INFO(TAG, "PID auto-tuning started with setpoint: %s°C", tempBuf);
         return true;
     }
 
@@ -242,7 +243,7 @@ void HeatingControlModule::stopAutoTuning() {
         autoTuner->stopTuning();
         xEventGroupClearBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
         xEventGroupSetBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
-        LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID auto-tuning stopped by user");
+        LOG_INFO(TAG, "PID auto-tuning stopped by user");
     }
 }
 
@@ -286,7 +287,7 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(const Shared
     formatTemp(insideBuf, sizeof(insideBuf), readings.insideTemp);
     formatTemp(outsideBuf, sizeof(outsideBuf), readings.outsideTemp);
     formatTemp(resultBuf, sizeof(resultBuf), result);
-    LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "Calculated target temp: %s, based on inside: %s, outside: %s", 
+    LOG_DEBUG(TAG, "Calculated target temp: %s, based on inside: %s, outside: %s", 
              resultBuf, insideBuf, outsideBuf);
     return result;
 }
@@ -313,19 +314,19 @@ bool HeatingControlModule::checkHeatingConditions(const SharedSensorReadings& re
     formatTemp(insideBuf, sizeof(insideBuf), readings.insideTemp);
     formatTemp(targetBuf, sizeof(targetBuf), targetTemperature);
     formatTemp(hystBuf, sizeof(hystBuf), hysteresis);
-    LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "Heating required: %s (inside: %s, target: %s, hyst: %s)",
+    LOG_DEBUG(TAG, "Heating required: %s (inside: %s, target: %s, hyst: %s)",
              heatingRequired ? "Yes" : "No", insideBuf, targetBuf, hystBuf);
     return heatingRequired;
 }
 
 void HeatingControlModule::startHeating() {
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "Starting heating...");
+    LOG_INFO(TAG, "Starting heating...");
     xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::HEATING_ON);
     // Add additional hardware control logic to start heating if needed
 }
 
 void HeatingControlModule::stopHeating() {
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "Stopping heating...");
+    LOG_INFO(TAG, "Stopping heating...");
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::HEATING_ON);
 
     // Reset PID controller to prevent integral windup carryover
@@ -335,7 +336,7 @@ void HeatingControlModule::stopHeating() {
 void HeatingControlModule::resetPID() {
     if (fixedPointPID != nullptr) {
         fixedPointPID->reset();
-        LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID controller reset");
+        LOG_INFO(TAG, "PID controller reset");
     }
 }
 
@@ -346,9 +347,9 @@ void HeatingControlModule::setPIDGains(float kp, float ki, float kd) {
         pidKp = kp;
         pidKi = ki;
         pidKd = kd;
-        LOG_INFO(LOG_TAG_HEATING_CONTROL, "Space heating PID gains updated: Kp=%.2f, Ki=%.4f, Kd=%.2f", kp, ki, kd);
+        LOG_INFO(TAG, "Space heating PID gains updated: Kp=%.2f, Ki=%.4f, Kd=%.2f", kp, ki, kd);
     } else {
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Failed to acquire mutex for PID gains update");
+        LOG_ERROR(TAG, "Failed to acquire mutex for PID gains update");
     }
 }
 
@@ -393,7 +394,7 @@ void HeatingControlModule::startSpaceHeatingPIDTask() {
     );
     
     if (!result) {
-        LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Failed to create SpaceHeatingPID task");
+        LOG_ERROR(TAG, "Failed to create SpaceHeatingPID task");
     }
 }
 
@@ -407,9 +408,9 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
 
     // NOTE: NOT registering with ESP-IDF hardware watchdog.
     // This task has long wait intervals (5+ seconds) and uses software monitoring via feedWatchdog() calls.
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "SpaceHeatingPID task using software monitoring only");
+    LOG_INFO(TAG, "SpaceHeatingPID task using software monitoring only");
 
-    LOG_INFO(LOG_TAG_HEATING_CONTROL, "SpaceHeatingPID task started, PID interval: %lu ms (sensor: %lu ms × factor: %d)",
+    LOG_INFO(TAG, "SpaceHeatingPID task started, PID interval: %lu ms (sensor: %lu ms × factor: %d)",
              pidInterval, sensorInterval, (int)self->pidFactorSpaceHeating);
 
     // ============================================================================
@@ -475,7 +476,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
         if (controlBits & SystemEvents::ControlRequest::PID_SAVE) {
             SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::PID_SAVE);
             if (self->fixedPointPID && self->fixedPointPID->saveState(PID_CONTROLLER_SPACE_HEATING)) {
-                LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID state saved to FRAM on request");
+                LOG_INFO(TAG, "PID state saved to FRAM on request");
             }
         }
         
@@ -510,7 +511,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
 
             // Safety check: abort if sensor invalid or stale during tuning
             if (!sensorValid) {
-                LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Auto-tuning aborted: boiler temp sensor invalid");
+                LOG_ERROR(TAG, "Auto-tuning aborted: boiler temp sensor invalid");
                 self->stopAutoTuning();
                 MQTTTask::publish("status/boiler/pid_autotune/results",
                     "{\"state\":\"failed\",\"reason\":\"sensor_invalid\"}", 0, true);
@@ -522,7 +523,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
             // Safety check: abort if sensor data is stale (critical for accurate tuning)
             if (StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT)) {
                 uint32_t age = StateManager::getSensorAge(StateManager::SensorChannel::BOILER_OUTPUT);
-                LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Auto-tuning aborted: sensor data stale (%lu ms)", age);
+                LOG_ERROR(TAG, "Auto-tuning aborted: sensor data stale (%lu ms)", age);
                 self->stopAutoTuning();
                 MQTTTask::publish("status/boiler/pid_autotune/results",
                     "{\"state\":\"failed\",\"reason\":\"sensor_stale\"}", 0, true);
@@ -535,7 +536,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
             if (boilerTemp > SystemConstants::PID::Autotune::MAX_TEMP_EXCURSION) {
                 char tempBuf[16];
                 formatTemp(tempBuf, sizeof(tempBuf), boilerTemp);
-                LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Auto-tuning ABORTED: temperature excursion! %s°C > 80°C limit",
+                LOG_ERROR(TAG, "Auto-tuning ABORTED: temperature excursion! %s°C > 80°C limit",
                          tempBuf);
                 self->stopAutoTuning();
                 // Turn off burner immediately
@@ -614,7 +615,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
 
                     if (paramsValid) {
                         xEventGroupSetBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_COMPLETE);
-                        LOG_INFO(LOG_TAG_HEATING_CONTROL, "Auto-tuning complete! Kp=%.2f, Ki=%.4f, Kd=%.2f",
+                        LOG_INFO(TAG, "Auto-tuning complete! Kp=%.2f, Ki=%.4f, Kd=%.2f",
                                 results.Kp, results.Ki, results.Kd);
 
                         // Apply new parameters via PIDControlModule
@@ -625,7 +626,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
                             // Save to persistent storage in FRAM
                             CriticalDataStorage::savePIDTuning(0, results.Kp, results.Ki, results.Kd,
                                                               -100.0f, 100.0f, true);
-                            LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID tuning saved to FRAM");
+                            LOG_INFO(TAG, "PID tuning saved to FRAM");
                         }
 
                         // Publish results via MQTT
@@ -639,7 +640,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
                     } else {
                         // Results out of acceptable range - don't apply
                         xEventGroupSetBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
-                        LOG_ERROR(LOG_TAG_HEATING_CONTROL,
+                        LOG_ERROR(TAG,
                             "Auto-tuning results rejected: %s (Kp=%.2f, Ki=%.4f, Kd=%.2f, Ku=%.2f, Tu=%.1f)",
                             validationError, results.Kp, results.Ki, results.Kd,
                             results.ultimateGain, results.ultimatePeriod);
@@ -653,7 +654,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
                         MQTTTask::publish("status/boiler/pid_autotune/results", buffer, 0, true);
                     }
                 } else {
-                    LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Auto-tuning failed - invalid results");
+                    LOG_ERROR(TAG, "Auto-tuning failed - invalid results");
                     xEventGroupSetBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
                     MQTTTask::publish("status/boiler/pid_autotune/results",
                         "{\"state\":\"failed\",\"reason\":\"invalid_results\"}", 0, true);
@@ -671,7 +672,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
                 }
                 xEventGroupClearBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
                 xEventGroupSetBits(SRP::getHeatingEventGroup(), SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
-                LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Auto-tuning failed: %s",
+                LOG_ERROR(TAG, "Auto-tuning failed: %s",
                          self->autoTuner->getStatusMessage());
             }
             
@@ -741,7 +742,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
 
             if (shouldReset) {
                 self->fixedPointPID->reset();
-                LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID integral reset: %s", resetReason);
+                LOG_INFO(TAG, "PID integral reset: %s", resetReason);
             }
         }
 
@@ -755,10 +756,10 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
 
         // Use StateManager for staleness and validity checks
         if (StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT)) {
-            LOG_ERROR(LOG_TAG_HEATING_CONTROL, "Sensor data too old: %lu ms",
+            LOG_ERROR(TAG, "Sensor data too old: %lu ms",
                       StateManager::getSensorAge(StateManager::SensorChannel::BOILER_OUTPUT));
         } else if (!StateManager::isSensorValid(StateManager::SensorChannel::BOILER_OUTPUT)) {
-            LOG_WARN(LOG_TAG_HEATING_CONTROL, "Boiler output temp sensor invalid");
+            LOG_WARN(TAG, "Boiler output temp sensor invalid");
         } else {
             SharedSensorReadings readings = StateManager::getSensorReadingsCopy();
             boilerOutputTemp = readings.boilerTempOutput;
@@ -766,12 +767,12 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
         }
 
         if (!sensorDataValid) {
-            ErrorHandler::logError(LOG_TAG_HEATING_CONTROL, SystemError::SENSOR_INVALID_DATA,
+            ErrorHandler::logError(TAG, SystemError::SENSOR_INVALID_DATA,
                                   "Cannot proceed with PID - sensor data unavailable or stale");
             // Reset PID integral to prevent windup during sensor outage
             if (self->fixedPointPID != nullptr) {
                 self->fixedPointPID->reset();
-                LOG_INFO(LOG_TAG_HEATING_CONTROL, "PID integral reset: sensor data invalid");
+                LOG_INFO(TAG, "PID integral reset: sensor data invalid");
             }
             (void)SRP::getTaskManager().feedWatchdog();
             vTaskDelay(effectivePidInterval);
@@ -845,10 +846,10 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
             formatTemp(targetBuf, sizeof(targetBuf), currentTargetTemp);
             formatTemp(currentBuf, sizeof(currentBuf), boilerOutputTemp);
             formatTemp(adjustBuf, sizeof(adjustBuf), adjustmentFixed);
-            LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "Fixed-point PID - Target: %s, Current: %s, Adjustment: %s (%.2f°C)", 
+            LOG_DEBUG(TAG, "Fixed-point PID - Target: %s, Current: %s, Adjustment: %s (%.2f°C)", 
                      targetBuf, currentBuf, adjustBuf, adjustment);
         } else {
-            ErrorHandler::logError(LOG_TAG_HEATING_CONTROL, SystemError::NOT_INITIALIZED, "Fixed-point PID controller not available");
+            ErrorHandler::logError(TAG, SystemError::NOT_INITIALIZED, "Fixed-point PID controller not available");
             (void)SRP::getTaskManager().feedWatchdog();
             vTaskDelay(effectivePidInterval);
             continue;
@@ -877,17 +878,17 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
             // Burner should be ON - set appropriate power level
             if (adjustmentLevel >= SystemConstants::PID::MIN_ADJUSTMENT_LEVEL_FOR_HIGH) {
                 powerBitsToSet = SystemEvents::BurnerRequest::POWER_HIGH;
-                LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "PID level %lu -> HIGH power", adjustmentLevel);
+                LOG_DEBUG(TAG, "PID level %lu -> HIGH power", adjustmentLevel);
             } else {
                 powerBitsToSet = SystemEvents::BurnerRequest::POWER_LOW;
-                LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "PID level %lu -> LOW power", adjustmentLevel);
+                LOG_DEBUG(TAG, "PID level %lu -> LOW power", adjustmentLevel);
             }
 
             // Use atomic update to prevent race condition with WaterHeatingPIDTask
             BurnerRequestManager::atomicUpdateBits(powerBitsToSet, clearBits);
         } else {
             // PID says no heating needed - clear power bits atomically
-            LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "PID level %lu -> Burner OFF (below threshold)", adjustmentLevel);
+            LOG_DEBUG(TAG, "PID level %lu -> Burner OFF (below threshold)", adjustmentLevel);
             BurnerRequestManager::atomicUpdateBits(0, clearBits);
         }
 
@@ -897,7 +898,7 @@ void HeatingControlModule::SpaceHeatingPIDTask(void* parameter) {
         TickType_t currentTickTime = xTaskGetTickCount();
         if (currentTickTime - lastSaveTime > pdMS_TO_TICKS(5 * 60 * 1000)) {
             if (self->fixedPointPID && self->fixedPointPID->saveState(PID_CONTROLLER_SPACE_HEATING)) {
-                LOG_DEBUG(LOG_TAG_HEATING_CONTROL, "PID state saved to FRAM");
+                LOG_DEBUG(TAG, "PID state saved to FRAM");
                 lastSaveTime = currentTickTime;
             }
         }

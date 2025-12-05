@@ -9,7 +9,7 @@
 #include "LoggingMacros.h"
 #include <MutexGuard.h>
 
-static const char* TAG = "PumpCoord";
+static const char* TAG = "PumpCoordinator";
 
 PumpCoordinator::PumpCoordinator()
     : minStateDurationMs_(30000)  // 30 seconds default

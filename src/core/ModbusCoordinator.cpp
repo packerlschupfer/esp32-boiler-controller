@@ -3,7 +3,7 @@
 #include "utils/MutexRetryHelper.h"
 #include <algorithm>
 
-static const char* TAG = "ModbusCoord";
+static const char* TAG = "ModbusCoordinator";
 
 // Define static members
 constexpr uint32_t ModbusCoordinator::ANDRTF3_TICKS[];

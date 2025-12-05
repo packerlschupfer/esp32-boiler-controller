@@ -20,6 +20,8 @@
 #include "modules/control/BurnerSystemController.h"
 #include "modules/control/WheaterControlModule.h"
 
+static const char* TAG = "WaterControlTask";
+
 // Constants
 #define DEFAULT_WHEATER_BOILER_TARGET tempFromFloat(65.0f)
 #define MIN_BOILER_TEMP tempFromFloat(30.0f)
@@ -58,7 +60,6 @@ static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const
  * @return Boiler target temperature (clamped to MIN_BOILER_TEMP..MAX_BOILER_TEMP)
  */
 static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const SharedSensorReadings& readings) {
-    const char* TAG = "WaterTarget";
     Temperature_t boilerTarget;
 
     // Round 15 Issue #10 fix: Check for NaN/Inf before converting float to Temperature_t
@@ -102,8 +103,6 @@ static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const
 static BurnerSystemController* burnerSystemController = nullptr;
 
 void WheaterControlTask(void *parameter) {
-    const char* TAG = "WheaterControlTask";
-
     // Receive BurnerSystemController via parameter (Pattern B: parameter passing)
     burnerSystemController = static_cast<BurnerSystemController*>(parameter);
     if (burnerSystemController) {
@@ -229,8 +228,7 @@ static void processTimerCallback(TimerHandle_t xTimer) {
 
 static void safetyCheckCallback(TimerHandle_t xTimer) {
     (void)xTimer;
-    const char* TAG = "WaterSafety";
-    
+
     // Safety check - ensure we haven't missed sensor updates for too long
     if (waterState.state == WheaterOn) {
         // Check if sensors are still available
@@ -258,7 +256,6 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
 }
 
 static void processWaterHeatingState() {
-    const char* TAG = "WaterProcess";
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
     
     // Check if both boiler and water heating are enabled
@@ -468,7 +465,6 @@ static void processWaterHeatingState() {
 
 static bool checkIfWaterHeatingNeededEvent() {
     bool heatingNeeded = waterState.lastHeatingNeeded; // Default to current state
-    const char* TAG = "WheaterControlTask";
 
     // Get sensor readings with mutex protection
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {

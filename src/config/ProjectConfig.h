@@ -287,21 +287,8 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // ==========================
 // Log Tags
 // ==========================
-#define LOG_TAG_MAIN "MAIN"
-#define LOG_TAG_OTA "OTA"
-#define LOG_TAG_ETH "ETH"
-#define LOG_TAG_MONITORING "MON"
-#define LOG_TAG_SENSOR "SENS"
-#define LOG_TAG_MODBUS "MODBUS"
-#define LOG_TAG_MODBUS_CONTROL "MbCtrl"
-#define LOG_TAG_MODBUS_STATUS "MbStat"
-#define LOG_TAG_RELAY "RELAY"
-#define LOG_TAG_RELAY_CONTROL "RlyCtrl"
-#define LOG_TAG_RELAY_STATUS "RlyStat"
-#define LOG_TAG_RYN4 "RYN4"
-#define LOG_TAG_MB8ART "MB8ART"
-// #define LOG_TAG_BLE_SENSOR "BLESensor"  // BLE removed
-#define LOG_TAG_MQTT "MQTT"
+// LOG_TAG_* defines removed - using modern C++ pattern: static const char* TAG = "ModuleName";
+// Each module now defines its own TAG constant at file scope.
 
 // Optional: Debug mode specific buffer sizes
 #if defined(LOG_MODE_DEBUG_FULL)

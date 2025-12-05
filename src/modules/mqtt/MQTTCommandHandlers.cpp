@@ -28,7 +28,9 @@
 #include <cstring>
 #include <ctype.h>
 
-static const char* LOG_TAG_MQTT_CMD = "MQTTCmd";
+
+static const char* TAG = "MQTT";
+static const char* TAG_CMD = "MQTTCmd";
 
 // External function declarations (defined in other compilation units)
 extern void triggerCriticalAlert();  // Defined in MonitoringTask.cpp
@@ -115,18 +117,18 @@ namespace MQTTCommandHandlers {
 void handleSystemCommand(const char* payload) {
     if (strcmp(payload, "on") == 0 || strcmp(payload, "enable") == 0 || strcmp(payload, "1") == 0) {
         StateManager::setBoilerEnabled(true);  // Atomic: updates event bits + settings
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Enable boiler system");
+        LOG_INFO(TAG_CMD, "Remote command: Enable boiler system");
         MQTTTask::publish(MQTT_STATUS_SYSTEM, "enabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "off") == 0 || strcmp(payload, "disable") == 0 || strcmp(payload, "0") == 0) {
         StateManager::setBoilerEnabled(false);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Disable boiler system");
+        LOG_INFO(TAG_CMD, "Remote command: Disable boiler system");
         MQTTTask::publish(MQTT_STATUS_SYSTEM, "disabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "reboot") == 0 || strcmp(payload, "restart") == 0 || strcmp(payload, "reset") == 0) {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Remote command: System reboot requested");
+        LOG_WARN(TAG_CMD, "Remote command: System reboot requested");
         MQTTTask::publish(MQTT_STATUS_SYSTEM, "rebooting", 0, true, MQTTPriority::PRIORITY_HIGH);
 
         // Round 21: Save critical state before reboot
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Saving state before reboot...");
+        LOG_INFO(TAG_CMD, "Saving state before reboot...");
         CriticalDataStorage::saveRuntimeCounters();
         CriticalDataStorage::logSafetyEvent(
             0x02,  // Event type: System reboot
@@ -142,32 +144,32 @@ void handleSystemCommand(const char* payload) {
 void handleHeatingCommand(const char* payload) {
     if (strcmp(payload, "on") == 0 || strcmp(payload, "enable") == 0 || strcmp(payload, "1") == 0) {
         StateManager::setHeatingEnabled(true);  // Atomic: updates event bits + settings
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Enable heating");
+        LOG_INFO(TAG_CMD, "Remote command: Enable heating");
         MQTTTask::publish(MQTT_STATUS_HEATING, "enabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "off") == 0 || strcmp(payload, "disable") == 0 || strcmp(payload, "0") == 0) {
         StateManager::setHeatingEnabled(false);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Disable heating");
+        LOG_INFO(TAG_CMD, "Remote command: Disable heating");
         MQTTTask::publish(MQTT_STATUS_HEATING, "disabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "override_on") == 0) {
         // Clear the OFF override flag (allow heating)
         StateManager::setHeatingOverrideOff(false);
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::HEATING_ON_OVERRIDE);
         SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Override heating ON (clearing summer mode)");
+        LOG_INFO(TAG_CMD, "Remote command: Override heating ON (clearing summer mode)");
         MQTTTask::publish(MQTT_STATUS_HEATING, "override_on", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "override_off") == 0) {
         // Set the OFF override flag (summer mode - block heating)
         StateManager::setHeatingOverrideOff(true);
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE);
         SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::HEATING_ON_OVERRIDE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Override heating OFF (summer mode enabled)");
+        LOG_INFO(TAG_CMD, "Remote command: Override heating OFF (summer mode enabled)");
         MQTTTask::publish(MQTT_STATUS_HEATING, "override_off", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "normal") == 0) {
         // Clear all override flags (return to normal operation)
         StateManager::setHeatingOverrideOff(false);
         SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE |
                                            SystemEvents::ControlRequest::HEATING_ON_OVERRIDE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Heating normal mode (overrides cleared)");
+        LOG_INFO(TAG_CMD, "Remote command: Heating normal mode (overrides cleared)");
         MQTTTask::publish(MQTT_STATUS_HEATING, "normal", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else {
         // Try to parse as temperature value for room target
@@ -178,12 +180,12 @@ void handleHeatingCommand(const char* payload) {
             if (tempValue >= 15.0f && tempValue <= 30.0f) {
                 SystemSettings& settings = SRP::getSystemSettings();
                 settings.targetTemperatureInside = tempFromFloat(tempValue);
-                LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Set room target to %.1f°C", tempValue);
+                LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C", tempValue);
                 char response[32];
                 snprintf(response, sizeof(response), "target:%.1f", tempValue);
                 MQTTTask::publish(MQTT_STATUS_HEATING, response, 0, true, MQTTPriority::PRIORITY_HIGH);
             } else {
-                LOG_WARN(LOG_TAG_MQTT_CMD, "Invalid room target temp %.1f (must be 15-30°C)", tempValue);
+                LOG_WARN(TAG_CMD, "Invalid room target temp %.1f (must be 15-30°C)", tempValue);
             }
         }
         // If parsing failed, silently ignore (unknown command)
@@ -195,19 +197,19 @@ void handleRoomTargetCommand(const char* payload) {
     float tempValue = strtof(payload, &endptr);
     // Check if parsing succeeded (endptr moved past the number)
     if (endptr == payload || (*endptr != '\0' && !isspace(*endptr))) {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Invalid room target format: %s", payload);
+        LOG_WARN(TAG_CMD, "Invalid room target format: %s", payload);
         MQTTTask::publish(MQTT_STATUS_HEATING "/target", "error:invalid_format", 0, false, MQTTPriority::PRIORITY_HIGH);
         return;
     }
     if (tempValue >= 15.0f && tempValue <= 30.0f) {
         SystemSettings& settings = SRP::getSystemSettings();
         settings.targetTemperatureInside = tempFromFloat(tempValue);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Set room target to %.1f°C", tempValue);
+        LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C", tempValue);
         char response[32];
         snprintf(response, sizeof(response), "%.1f", tempValue);
         MQTTTask::publish(MQTT_STATUS_HEATING "/target", response, 0, true, MQTTPriority::PRIORITY_HIGH);
     } else {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Invalid room target temp %.1f (must be 15-30°C)", tempValue);
+        LOG_WARN(TAG_CMD, "Invalid room target temp %.1f (must be 15-30°C)", tempValue);
         MQTTTask::publish(MQTT_STATUS_HEATING "/target", "error:invalid_range", 0, false, MQTTPriority::PRIORITY_HIGH);
     }
 }
@@ -215,40 +217,40 @@ void handleRoomTargetCommand(const char* payload) {
 void handleWaterCommand(const char* payload) {
     if (strcmp(payload, "on") == 0 || strcmp(payload, "enable") == 0 || strcmp(payload, "1") == 0) {
         StateManager::setWaterEnabled(true);  // Atomic: updates event bits + settings
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Enable water heating");
+        LOG_INFO(TAG_CMD, "Remote command: Enable water heating");
         MQTTTask::publish(MQTT_STATUS_WATER, "enabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "off") == 0 || strcmp(payload, "disable") == 0 || strcmp(payload, "0") == 0) {
         StateManager::setWaterEnabled(false);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Disable water heating");
+        LOG_INFO(TAG_CMD, "Remote command: Disable water heating");
         MQTTTask::publish(MQTT_STATUS_WATER, "disabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "override_on") == 0) {
         // Clear the OFF override flag (allow water heating)
         StateManager::setWaterOverrideOff(false);
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::WATER_ON_OVERRIDE);
         SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::WATER_OFF_OVERRIDE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Override water heating ON (clearing block)");
+        LOG_INFO(TAG_CMD, "Remote command: Override water heating ON (clearing block)");
         MQTTTask::publish(MQTT_STATUS_WATER, "override_on", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "override_off") == 0) {
         // Set the OFF override flag (block water heating)
         StateManager::setWaterOverrideOff(true);
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::WATER_OFF_OVERRIDE);
         SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::WATER_ON_OVERRIDE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Override water heating OFF (blocked)");
+        LOG_INFO(TAG_CMD, "Remote command: Override water heating OFF (blocked)");
         MQTTTask::publish(MQTT_STATUS_WATER, "override_off", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "normal") == 0) {
         // Clear all override flags (return to normal operation)
         StateManager::setWaterOverrideOff(false);
         SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::WATER_OFF_OVERRIDE |
                                            SystemEvents::ControlRequest::WATER_ON_OVERRIDE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Water heating normal mode (overrides cleared)");
+        LOG_INFO(TAG_CMD, "Remote command: Water heating normal mode (overrides cleared)");
         MQTTTask::publish(MQTT_STATUS_WATER, "normal", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "priority_on") == 0 || strcmp(payload, "priority_enable") == 0) {
         StateManager::setWaterPriorityEnabled(true);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Enable water heating priority");
+        LOG_INFO(TAG_CMD, "Remote command: Enable water heating priority");
         MQTTTask::publish(MQTT_STATUS_WATER_PRIORITY, "enabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "priority_off") == 0 || strcmp(payload, "priority_disable") == 0) {
         StateManager::setWaterPriorityEnabled(false);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Disable water heating priority");
+        LOG_INFO(TAG_CMD, "Remote command: Disable water heating priority");
         MQTTTask::publish(MQTT_STATUS_WATER_PRIORITY, "disabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     }
 }
@@ -256,11 +258,11 @@ void handleWaterCommand(const char* payload) {
 void handlePIDAutotuneCommand(const char* payload) {
     if (strcmp(payload, "start") == 0) {
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::PID_AUTOTUNE);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Start PID auto-tuning");
+        LOG_INFO(TAG_CMD, "Remote command: Start PID auto-tuning");
         MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE, "starting", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "stop") == 0) {
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::PID_AUTOTUNE_STOP);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Remote command: Stop PID auto-tuning");
+        LOG_INFO(TAG_CMD, "Remote command: Stop PID auto-tuning");
         MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE, "stopping", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "status") == 0) {
         EventBits_t heatingBits = xEventGroupGetBits(SRP::getHeatingEventGroup());
@@ -273,7 +275,7 @@ void handlePIDAutotuneCommand(const char* payload) {
             status = "failed";
         }
         MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE, status, 0, true, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "PID auto-tuning status: %s", status);
+        LOG_INFO(TAG_CMD, "PID auto-tuning status: %s", status);
     } else if (strcmp(payload, "params") == 0) {
         const SystemSettings& settings = SRP::getSystemSettings();
         // Use getLogBuffer() which provides 256 bytes, sufficient for PID params JSON (~180 bytes)
@@ -288,14 +290,14 @@ void handlePIDAutotuneCommand(const char* payload) {
                 settings.autotuneRelayAmplitude, settings.autotuneHysteresis, (long)settings.autotuneMethod);
             // Check for buffer overflow (snprintf returns required size, not written size)
             if (written < 0 || static_cast<size_t>(written) >= buffer.size()) {
-                LOG_ERROR(LOG_TAG_MQTT_CMD, "PID params JSON truncated! needed=%d, available=%d", written, buffer.size());
+                LOG_ERROR(TAG_CMD, "PID params JSON truncated! needed=%d, available=%d", written, buffer.size());
                 MQTTTask::publish(MQTT_STATUS_PID_PARAMS, "{\"error\":\"buffer_overflow\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
             } else {
                 MQTTTask::publish(MQTT_STATUS_PID_PARAMS, buffer.c_str(), 0, true, MQTTPriority::PRIORITY_HIGH);
-                LOG_INFO(LOG_TAG_MQTT_CMD, "Published PID parameters (%d bytes)", written);
+                LOG_INFO(TAG_CMD, "Published PID parameters (%d bytes)", written);
             }
         } else {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for PID params");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for PID params");
         }
     }
 }
@@ -303,7 +305,7 @@ void handlePIDAutotuneCommand(const char* payload) {
 void handleStatusCommand() {
     // This calls the static method in MQTTTask - would need to be refactored
     // For now, just signal that status was requested
-    LOG_INFO(LOG_TAG_MQTT_CMD, "Status request received");
+    LOG_INFO(TAG_CMD, "Status request received");
     // The actual publishing is done by publishSystemState() in MQTTTask
 }
 
@@ -319,7 +321,7 @@ void handleFRAMErrorsCommand(const char* payload) {
 
         auto buffer = MemoryPools::getTempBuffer();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for FRAM error stats");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM error stats");
             return;
         }
 
@@ -329,15 +331,15 @@ void handleFRAMErrorsCommand(const char* payload) {
                  stats.oldestErrorTime, stats.uniqueErrors);
 
         MQTTTask::publish(MQTT_STATUS_FRAM_ERRORS_STATS, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Published FRAM error statistics");
+        LOG_INFO(TAG_CMD, "Published FRAM error statistics");
     }
     else if (strcmp(payload, "clear") == 0) {
         ErrorLogFRAM::clear();
         MQTTTask::publish(MQTT_STATUS_FRAM_ERRORS_CLEARED, "ok", 0, true, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Cleared FRAM error log");
+        LOG_INFO(TAG_CMD, "Cleared FRAM error log");
     }
     else {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Unknown FRAM error command: %s", payload);
+        LOG_WARN(TAG_CMD, "Unknown FRAM error command: %s", payload);
         MQTTTask::publish(MQTT_STATUS_FRAM_ERRORS_ERROR, "unknown_command", 0, false, MQTTPriority::PRIORITY_HIGH);
     }
 }
@@ -352,7 +354,7 @@ void handleFRAMCommand(const char* payload) {
     if (strcmp(payload, "status") == 0) {
         auto buffer = MemoryPools::getTempBuffer();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for FRAM status");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM status");
             return;
         }
 
@@ -367,12 +369,12 @@ void handleFRAMCommand(const char* payload) {
                  integrity ? "true" : "false");
 
         MQTTTask::publish(MQTT_STATUS_FRAM_STATUS, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Published FRAM status");
+        LOG_INFO(TAG_CMD, "Published FRAM status");
     }
     else if (strcmp(payload, "counters") == 0) {
         auto buffer = MemoryPools::getTempBuffer();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for FRAM counters");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM counters");
             return;
         }
 
@@ -386,12 +388,12 @@ void handleFRAMCommand(const char* payload) {
                  b, h, w, e);
 
         MQTTTask::publish(MQTT_STATUS_FRAM_COUNTERS, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Published FRAM counters");
+        LOG_INFO(TAG_CMD, "Published FRAM counters");
     }
     else if (strcmp(payload, "runtime") == 0) {
         auto buffer = MemoryPools::getTempBuffer();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for FRAM runtime");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM runtime");
             return;
         }
 
@@ -405,7 +407,7 @@ void handleFRAMCommand(const char* payload) {
                  t, h, w, b);
 
         MQTTTask::publish(MQTT_STATUS_FRAM_RUNTIME, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Published FRAM runtime hours");
+        LOG_INFO(TAG_CMD, "Published FRAM runtime hours");
     }
     else if (strcmp(payload, "reset_counters") == 0) {
         (void)storage->setCounter(rtstorage::COUNTER_BURNER_STARTS, 0);
@@ -414,25 +416,25 @@ void handleFRAMCommand(const char* payload) {
         (void)storage->setCounter(rtstorage::COUNTER_ERROR_COUNT, 0);
 
         MQTTTask::publish(MQTT_STATUS_FRAM_COUNTERS_RESET, "ok", 0, true, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Reset FRAM counters");
+        LOG_INFO(TAG_CMD, "Reset FRAM counters");
     }
     else if (strcmp(payload, "format") == 0) {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "FRAM format requested via MQTT");
+        LOG_WARN(TAG_CMD, "FRAM format requested via MQTT");
         if (storage->format()) {
             MQTTTask::publish(MQTT_STATUS_FRAM_FORMATTED, "ok", 0, true, MQTTPriority::PRIORITY_HIGH);
-            LOG_INFO(LOG_TAG_MQTT_CMD, "FRAM formatted successfully");
+            LOG_INFO(TAG_CMD, "FRAM formatted successfully");
         } else {
             MQTTTask::publish(MQTT_STATUS_FRAM_ERROR, "format_failed", 0, false, MQTTPriority::PRIORITY_HIGH);
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to format FRAM");
+            LOG_ERROR(TAG_CMD, "Failed to format FRAM");
         }
     }
     else if (strcmp(payload, "save_pid") == 0) {
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
         MQTTTask::publish(MQTT_STATUS_FRAM_PID_SAVE, "requested", 0, true, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Requested PID parameters save to FRAM");
+        LOG_INFO(TAG_CMD, "Requested PID parameters save to FRAM");
     }
     else {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Unknown FRAM command: %s", payload);
+        LOG_WARN(TAG_CMD, "Unknown FRAM command: %s", payload);
         MQTTTask::publish(MQTT_STATUS_FRAM_ERROR, "unknown_command", 0, false, MQTTPriority::PRIORITY_HIGH);
     }
 }
@@ -440,11 +442,11 @@ void handleFRAMCommand(const char* payload) {
 void handleErrorCommand(const char* topic, const char* payload) {
     // Validate inputs
     if (!topic) {
-        LOG_ERROR(LOG_TAG_MQTT_CMD, "Invalid error command: null topic");
+        LOG_ERROR(TAG_CMD, "Invalid error command: null topic");
         return;
     }
 
-    LOG_INFO(LOG_TAG_MQTT_CMD, "Error command on %s: %s", topic, payload ? payload : "(empty)");
+    LOG_INFO(TAG_CMD, "Error command on %s: %s", topic, payload ? payload : "(empty)");
 
     // Extract the command from the topic (after "errors/")
     const char* lastSlash = strrchr(topic, '/');
@@ -466,13 +468,13 @@ void handleErrorCommand(const char* topic, const char* payload) {
         // Export errors as JSON
         auto buffer = MemoryPools::getString();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for error list");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for error list");
             return;
         }
 
         if (ErrorLogFRAM::exportToJson(buffer.data(), buffer.size(), count)) {
             MQTTTask::publish(MQTT_STATUS_ERRORS_LIST, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-            LOG_INFO(LOG_TAG_MQTT_CMD, "Published error list with %d entries", count);
+            LOG_INFO(TAG_CMD, "Published error list with %d entries", count);
         } else {
             MQTTTask::publish(MQTT_STATUS_ERRORS_ERROR, "export_failed", 0, false, MQTTPriority::PRIORITY_HIGH);
         }
@@ -480,14 +482,14 @@ void handleErrorCommand(const char* topic, const char* payload) {
     else if (strcmp(command, "clear") == 0) {
         ErrorLogFRAM::clear();
         MQTTTask::publish(MQTT_STATUS_ERRORS_CLEARED, "ok", 0, true, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Cleared error log");
+        LOG_INFO(TAG_CMD, "Cleared error log");
     }
     else if (strcmp(command, "stats") == 0) {
         ErrorLogFRAM::ErrorStats stats = ErrorLogFRAM::getStats();
 
         auto buffer = MemoryPools::getTempBuffer();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for error stats");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for error stats");
             return;
         }
 
@@ -497,7 +499,7 @@ void handleErrorCommand(const char* topic, const char* payload) {
                  stats.oldestErrorTime, stats.uniqueErrors);
 
         MQTTTask::publish(MQTT_STATUS_ERRORS_STATS, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Published error statistics");
+        LOG_INFO(TAG_CMD, "Published error statistics");
     }
     else if (strcmp(command, "critical") == 0) {
         // Get critical errors
@@ -519,28 +521,28 @@ void handleErrorCommand(const char* topic, const char* payload) {
 
         auto buffer = MemoryPools::getString();
         if (!buffer) {
-            LOG_ERROR(LOG_TAG_MQTT_CMD, "Failed to allocate buffer for critical errors");
+            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for critical errors");
             return;
         }
 
         serializeJson(doc, buffer.data(), buffer.size());
         MQTTTask::publish(MQTT_STATUS_ERRORS_CRITICAL, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Published %zu critical errors", errCount);
+        LOG_INFO(TAG_CMD, "Published %zu critical errors", errCount);
     }
     else if (strcmp(command, "dump") == 0) {
         // Trigger critical alert in monitoring task which will dump error log
         ::triggerCriticalAlert();
         MQTTTask::publish(MQTT_STATUS_ERRORS_DUMP, "triggered", 0, false, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(LOG_TAG_MQTT_CMD, "Triggered error log dump via critical alert");
+        LOG_INFO(TAG_CMD, "Triggered error log dump via critical alert");
     }
     else {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Unknown error command: %s", command);
+        LOG_WARN(TAG_CMD, "Unknown error command: %s", command);
         MQTTTask::publish(MQTT_STATUS_ERRORS_ERROR, "unknown_command", 0, false, MQTTPriority::PRIORITY_HIGH);
     }
 }
 
 void handleSchedulerCommand(const char* topic, const char* payload) {
-    LOG_INFO(LOG_TAG_MQTT_CMD, "Scheduler command on %s: %s", topic, payload);
+    LOG_INFO(TAG_CMD, "Scheduler command on %s: %s", topic, payload);
 
     const char* lastSlash = strrchr(topic, '/');
     if (!lastSlash) return;
@@ -552,19 +554,19 @@ void handleSchedulerCommand(const char* topic, const char* payload) {
 
 void routeControlCommand(const char* topic, const char* payload) {
     if (!topic || !payload) {
-        LOG_ERROR(LOG_TAG_MQTT_CMD, "Invalid control command: null %s", !topic ? "topic" : "payload");
+        LOG_ERROR(TAG_CMD, "Invalid control command: null %s", !topic ? "topic" : "payload");
         return;
     }
 
     // Deduplication check - prevents double-execution on MQTT QoS retries
     uint32_t cmdHash = hashCommand(topic, payload);
     if (isDuplicateCommand(cmdHash)) {
-        LOG_DEBUG(LOG_TAG_MQTT_CMD, "Duplicate command ignored: %s", topic);
+        LOG_DEBUG(TAG_CMD, "Duplicate command ignored: %s", topic);
         return;
     }
     recordCommand(cmdHash);
 
-    LOG_INFO(LOG_TAG_MQTT_CMD, "Control command on %s: %s", topic, payload);
+    LOG_INFO(TAG_CMD, "Control command on %s: %s", topic, payload);
 
     // Extract the command from the topic (after "cmd/boiler/")
     const char* lastSlash = strrchr(topic, '/');
@@ -600,7 +602,7 @@ void routeControlCommand(const char* topic, const char* payload) {
         handleErrorCommand(topic, payload);
     }
     else {
-        LOG_WARN(LOG_TAG_MQTT_CMD, "Unknown control command: %s", command);
+        LOG_WARN(TAG_CMD, "Unknown control command: %s", command);
         MQTTTask::publish(MQTT_STATUS_ERROR, "unknown_command", 0, false, MQTTPriority::PRIORITY_HIGH);
     }
 }

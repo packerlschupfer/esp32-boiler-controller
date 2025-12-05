@@ -5,10 +5,11 @@
 #include "core/SystemResourceProvider.h"
 #include <TaskManager.h>
 
+static const char* TAG = "MB8ARTProcessingTask";
+
 void MB8ARTProcessingTask(void* parameter) {
     auto* mb8art = static_cast<MB8ART*>(parameter);
-    const char* TAG = "MB8ARTProc";
-    
+
     if (!mb8art) {
         LOG_ERROR(TAG, "Started with null MB8ART instance");
         vTaskDelete(NULL);

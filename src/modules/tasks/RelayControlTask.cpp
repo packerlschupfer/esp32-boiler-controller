@@ -21,6 +21,8 @@
 #include "shared/SharedRelayReadings.h"
 #include "modules/control/CentralizedFailsafe.h"
 
+
+static const char* TAG = "RelayControl";
 // No external declarations needed - using SRP methods
 
 
@@ -60,26 +62,26 @@ static char logBuffer[128];  // Max ~80 chars for relay state logging
 
 bool RelayControlTask::init(RYN4* device) {
     if (initialized) {
-        LOG_WARN(LOG_TAG_RYN4, "Relay control task already initialized");
+        LOG_WARN(TAG, "Relay control task already initialized");
         return true;
     }
     
     if (!device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Invalid device pointer");
+        LOG_ERROR(TAG, "Invalid device pointer");
         return false;
     }
     
     // Create mutex
     taskMutex = xSemaphoreCreateMutex();
     if (!taskMutex) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to create task mutex");
+        LOG_ERROR(TAG, "Failed to create task mutex");
         return false;
     }
 
     // Round 20 Issue #6: Create mutex for relay state array protection
     relayStateMutex_ = xSemaphoreCreateMutex();
     if (!relayStateMutex_) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to create relay state mutex");
+        LOG_ERROR(TAG, "Failed to create relay state mutex");
         vSemaphoreDelete(taskMutex);
         taskMutex = nullptr;
         return false;
@@ -94,18 +96,18 @@ bool RelayControlTask::init(RYN4* device) {
     ryn4Device = device;
     initialized = true;
     
-    LOG_INFO(LOG_TAG_RYN4, "Relay control task initialized");
+    LOG_INFO(TAG, "Relay control task initialized");
     return true;
 }
 
 bool RelayControlTask::start() {
     if (!initialized) {
-        LOG_ERROR(LOG_TAG_RYN4, "Not init");
+        LOG_ERROR(TAG, "Not init");
         return false;
     }
     
     if (running) {
-        LOG_WARN(LOG_TAG_RYN4, "Already running");
+        LOG_WARN(TAG, "Already running");
         return true;
     }
     
@@ -127,9 +129,9 @@ bool RelayControlTask::start() {
         // Retrieve the task handle after creation
         taskHandle = SRP::getTaskManager().getTaskHandleByName("RelayControl");
         running = true;
-        LOG_INFO(LOG_TAG_RYN4, "Started, handle: %p", taskHandle);
+        LOG_INFO(TAG, "Started, handle: %p", taskHandle);
     } else {
-        LOG_ERROR(LOG_TAG_RYN4, "Start failed");
+        LOG_ERROR(TAG, "Start failed");
     }
     
     return success;
@@ -137,7 +139,7 @@ bool RelayControlTask::start() {
 
 void RelayControlTask::stop() {
     if (!running || !taskHandle) {
-        LOG_WARN(LOG_TAG_RYN4, "Not running");
+        LOG_WARN(TAG, "Not running");
         return;
     }
     
@@ -152,20 +154,20 @@ void RelayControlTask::stop() {
         taskHandle = nullptr;
     }
     
-    LOG_INFO(LOG_TAG_RYN4, "Stopped");
+    LOG_INFO(TAG, "Stopped");
 }
 
 void RelayControlTask::taskFunction(void* pvParameters) {
-    LOG_INFO(LOG_TAG_RYN4, "RelayControlTask started on core %d - waiting for RYN4", xPortGetCoreID());
+    LOG_INFO(TAG, "RelayControlTask started on core %d - waiting for RYN4", xPortGetCoreID());
     
     // Check if ryn4Device is valid
     if (!ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "ryn4Device is NULL! Cannot proceed");
+        LOG_ERROR(TAG, "ryn4Device is NULL! Cannot proceed");
         vTaskDelete(nullptr);
         return;
     }
     
-    LOG_INFO(LOG_TAG_RYN4, "ryn4Device pointer: %p, initialized: %s", 
+    LOG_INFO(TAG, "ryn4Device pointer: %p, initialized: %s", 
              (void*)ryn4Device, ryn4Device->isInitialized() ? "YES" : "NO");
     
     // Register with watchdog - this is a safety-critical task controlling physical relays
@@ -175,7 +177,7 @@ void RelayControlTask::taskFunction(void* pvParameters) {
     );
 
     if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("RelayControlTask", wdtConfig)) {
-        LOG_ERROR(LOG_TAG_RYN4, "WDT reg failed - entering degraded mode");
+        LOG_ERROR(TAG, "WDT reg failed - entering degraded mode");
         // Critical task without watchdog protection - enter degraded mode
         CentralizedFailsafe::triggerFailsafe(
             CentralizedFailsafe::FailsafeLevel::DEGRADED,
@@ -183,7 +185,7 @@ void RelayControlTask::taskFunction(void* pvParameters) {
             "RelayControlTask watchdog registration failed"
         );
     } else {
-        LOG_INFO(LOG_TAG_RYN4, "WDT OK %lums", SystemConstants::System::WDT_RELAY_CONTROL_MS);
+        LOG_INFO(TAG, "WDT OK %lums", SystemConstants::System::WDT_RELAY_CONTROL_MS);
     }
     
     // Wait before first watchdog feed to ensure task is fully initialized
@@ -197,7 +199,7 @@ void RelayControlTask::taskFunction(void* pvParameters) {
     
     while (!ryn4Device->isInitialized() && running) {
         if (!waitLogged) {
-            LOG_INFO(LOG_TAG_RYN4, "Wait RYN4...");
+            LOG_INFO(TAG, "Wait RYN4...");
             waitLogged = true;
         }
         
@@ -223,40 +225,40 @@ void RelayControlTask::taskFunction(void* pvParameters) {
         static TickType_t lastLogTime = 0;
         TickType_t now = xTaskGetTickCount();
         if (now - lastLogTime > pdMS_TO_TICKS(10000)) {  // Log every 10 seconds
-            LOG_WARN(LOG_TAG_RYN4, "Still waiting for RYN4 initialization (next check in %d seconds)...",
+            LOG_WARN(TAG, "Still waiting for RYN4 initialization (next check in %d seconds)...",
                      pdTICKS_TO_MS(waitTime) / 1000);
             lastLogTime = now;
         }
     }
     
     if (!running) {
-        LOG_INFO(LOG_TAG_RYN4, "Task stopped before initialization complete");
+        LOG_INFO(TAG, "Task stopped before initialization complete");
         taskHandle = nullptr;
         vTaskDelete(nullptr);
         return;
     }
     
-    LOG_INFO(LOG_TAG_RYN4, "RYN4 initialized, starting command processing");
+    LOG_INFO(TAG, "RYN4 initialized, starting command processing");
     
     // Read initial relay states
-    LOG_INFO(LOG_TAG_RYN4, "Reading initial relay states...");
+    LOG_INFO(TAG, "Reading initial relay states...");
     
     // Log stack usage before getData call
     UBaseType_t stackHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-    LOG_INFO(LOG_TAG_RYN4, "Stack high water mark before getData: %d words", stackHighWaterMark);
+    LOG_INFO(TAG, "Stack high water mark before getData: %d words", stackHighWaterMark);
     
     auto stateResult = ryn4Device->getData(IDeviceInstance::DeviceDataType::RELAY_STATE);
     
     // Log stack usage after getData call
     stackHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-    LOG_INFO(LOG_TAG_RYN4, "Stack high water mark after getData: %d words", stackHighWaterMark);
+    LOG_INFO(TAG, "Stack high water mark after getData: %d words", stackHighWaterMark);
     
     if (stateResult.isOk() && stateResult.value().size() >= 8) {
         // Round 20 Issue #6: Protect state array access with mutex
         if (xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
             for (int i = 0; i < 8; i++) {
                 currentRelayStates[i] = stateResult.value()[i] > 0.5f;
-                LOG_INFO(LOG_TAG_RYN4, "Initial state - Relay %d: %s",
+                LOG_INFO(TAG, "Initial state - Relay %d: %s",
                          i + 1, currentRelayStates[i] ? "ON" : "OFF");
             }
             xSemaphoreGive(relayStateMutex_);
@@ -267,10 +269,10 @@ void RelayControlTask::taskFunction(void* pvParameters) {
         EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
         if (relayStatusEventGroup) {
             xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::SYNCHRONIZED | SystemEvents::RelayStatus::COMM_OK);
-            LOG_INFO(LOG_TAG_RYN4, "Relay status synchronized");
+            LOG_INFO(TAG, "Relay status synchronized");
         }
     } else {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to read initial relay states - isOk: %s, size: %d",
+        LOG_ERROR(TAG, "Failed to read initial relay states - isOk: %s, size: %d",
                  stateResult.isOk() ? "true" : "false",
                  stateResult.isOk() ? stateResult.value().size() : 0);
     }
@@ -294,7 +296,7 @@ void RelayControlTask::taskFunction(void* pvParameters) {
         processRelayRequests();
     }
     
-    LOG_INFO(LOG_TAG_RYN4, "End P:%lu F:%lu",
+    LOG_INFO(TAG, "End P:%lu F:%lu",
              commandsProcessed, commandsFailed);
     
     // Clean up
@@ -305,26 +307,26 @@ void RelayControlTask::taskFunction(void* pvParameters) {
 bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
     // Check if device is offline
     if (!ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Cannot control relay - ryn4Device is NULL!");
+        LOG_ERROR(TAG, "Cannot control relay - ryn4Device is NULL!");
         return false;
     }
     
-    LOG_DEBUG(LOG_TAG_RYN4, "ryn4Device pointer: %p", (void*)ryn4Device);
+    LOG_DEBUG(TAG, "ryn4Device pointer: %p", (void*)ryn4Device);
     
     if (ryn4Device->isModuleOffline()) {
-        LOG_ERROR(LOG_TAG_RYN4, "Cannot control relay - device is offline");
+        LOG_ERROR(TAG, "Cannot control relay - device is offline");
         return false;
     }
     
     // Check if device is initialized
     if (!ryn4Device->isInitialized()) {
-        LOG_ERROR(LOG_TAG_RYN4, "Cannot control relay - device not initialized");
+        LOG_ERROR(TAG, "Cannot control relay - device not initialized");
         return false;
     }
     
     // Always check rate limit for relay protection (no longer conditional)
     if (!checkRateLimit(relayIndex)) {
-        LOG_WARN(LOG_TAG_RYN4, "Rate limit exceeded for relay %d", relayIndex);
+        LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
         return false;
     }
 
@@ -335,12 +337,12 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
         return false;
     }
 
-    LOG_INFO(LOG_TAG_RYN4, "Setting relay %d to %s", relayIndex, state ? "ON" : "OFF");
+    LOG_INFO(TAG, "Setting relay %d to %s", relayIndex, state ? "ON" : "OFF");
     
     // Get the update event group from RYN4
     EventGroupHandle_t updateEventGroup = ryn4Device->getUpdateEventGroup();
     if (!updateEventGroup) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to get update event group");
+        LOG_ERROR(TAG, "Failed to get update event group");
         return false;
     }
     
@@ -350,35 +352,35 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
         xEventGroupClearBits(updateEventGroup, relayUpdateBit);
         
         #if defined(LOG_MODE_DEBUG_FULL)
-        LOG_DEBUG(LOG_TAG_RYN4, "Cleared update bit 0x%08X for relay %d", 
+        LOG_DEBUG(TAG, "Cleared update bit 0x%08X for relay %d", 
                  relayUpdateBit, relayIndex);
         #endif
     }
     
     // Acquire device mutex using RAII
-    LOG_DEBUG(LOG_TAG_RYN4, "Attempting to acquire device mutex...");
+    LOG_DEBUG(TAG, "Attempting to acquire device mutex...");
     auto guard = MutexRetryHelper::acquireGuard(ryn4Device->getMutexInterface(), "RYN4-SetRelay", pdMS_TO_TICKS(1000));
     if (!guard) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to acquire device mutex");
+        LOG_ERROR(TAG, "Failed to acquire device mutex");
         return false;
     }
-    LOG_DEBUG(LOG_TAG_RYN4, "Device mutex acquired successfully");
+    LOG_DEBUG(TAG, "Device mutex acquired successfully");
 
     // Note: In RYN4 terminology: OPEN = relay ON (energized), CLOSE = relay OFF (de-energized)
     ryn4::RelayAction action = state ? ryn4::RelayAction::OPEN : ryn4::RelayAction::CLOSE;
 
-    LOG_DEBUG(LOG_TAG_RYN4, "About to call controlRelayVerified(%d, %s) on device %p",
+    LOG_DEBUG(TAG, "About to call controlRelayVerified(%d, %s) on device %p",
              relayIndex, state ? "OPEN" : "CLOSE", (void*)ryn4Device);
 
     // Use verified relay control - confirms state change via readback
     ryn4::RelayErrorCode result = ryn4Device->controlRelayVerified(relayIndex, action);
     // Mutex released automatically when guard goes out of scope
 
-    LOG_DEBUG(LOG_TAG_RYN4, "controlRelayVerified returned: %d", static_cast<int>(result));
+    LOG_DEBUG(TAG, "controlRelayVerified returned: %d", static_cast<int>(result));
 
     if (result == ryn4::RelayErrorCode::SUCCESS) {
         #ifdef ENABLE_RELAY_EVENT_LOGGING
-        LOG_DEBUG(LOG_TAG_RELAY, "[CMD] Relay %d: %s (verified)", relayIndex, state ? "OPEN" : "CLOSE");
+        LOG_DEBUG(TAG, "[CMD] Relay %d: %s (verified)", relayIndex, state ? "OPEN" : "CLOSE");
         #endif
 
         // controlRelayVerified already verified the state, update our tracking
@@ -392,7 +394,7 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
         // Update pump protection timestamp for relays 1 and 2 (heating and water pumps)
         if (relayIndex >= 1 && relayIndex <= 2) {
             pumpLastStateChangeTime[relayIndex - 1] = xTaskGetTickCount();
-            LOG_DEBUG(LOG_TAG_RYN4, "Pump %d protection timer reset (30s until next change allowed)", relayIndex);
+            LOG_DEBUG(TAG, "Pump %d protection timer reset (30s until next change allowed)", relayIndex);
         }
 
         // Immediately update SharedRelayReadings - moved before logging for faster update
@@ -405,18 +407,18 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
         // Track success for health monitoring
         checkRelayHealthAndEscalate(relayIndex, true);
 
-        LOG_DEBUG(LOG_TAG_RYN4, "Relay %d state verified and command completed", relayIndex);
+        LOG_DEBUG(TAG, "Relay %d state verified and command completed", relayIndex);
         return true;
     } else if (result == ryn4::RelayErrorCode::TIMEOUT) {
         commandsFailed++;
-        LOG_WARN(LOG_TAG_RYN4, "Relay %d verification timeout", relayIndex);
+        LOG_WARN(TAG, "Relay %d verification timeout", relayIndex);
 
         // Track failure for health monitoring and potential escalation
         checkRelayHealthAndEscalate(relayIndex, false);
         return false;
     } else {
         commandsFailed++;
-        LOG_ERROR(LOG_TAG_RYN4, "Relay %d control failed: %d", relayIndex, static_cast<int>(result));
+        LOG_ERROR(TAG, "Relay %d control failed: %d", relayIndex, static_cast<int>(result));
 
         // Track failure for health monitoring and potential escalation
         checkRelayHealthAndEscalate(relayIndex, false);
@@ -427,7 +429,7 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
 // NEW METHOD: Process toggle relay (from v2)
 bool RelayControlTask::processToggleRelay(uint8_t relayIndex) {
     // Get current state
-    //         LOG_ERROR(LOG_TAG_RYN4, "Invalid relay index for toggle");
+    //         LOG_ERROR(TAG, "Invalid relay index for toggle");
     //     }
     //     return false;
     // }
@@ -436,7 +438,7 @@ bool RelayControlTask::processToggleRelay(uint8_t relayIndex) {
         IDeviceInstance::DeviceDataType::RELAY_STATE);
     
     if (!result.isOk() || result.value().size() < relayIndex) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to get current state for toggle");
+        LOG_ERROR(TAG, "Failed to get current state for toggle");
         return false;
     }
     
@@ -447,7 +449,7 @@ bool RelayControlTask::processToggleRelay(uint8_t relayIndex) {
 
 // NEW METHOD: Process set all relays (from v2)
 bool RelayControlTask::processSetAllRelays(bool state) {
-    LOG_INFO(LOG_TAG_RYN4, "Setting all relays to %s", state ? "ON" : "OFF");
+    LOG_INFO(TAG, "Setting all relays to %s", state ? "ON" : "OFF");
 
     std::array<bool, 8> states;
     for (int i = 0; i < 8; i++) {
@@ -459,12 +461,12 @@ bool RelayControlTask::processSetAllRelays(bool state) {
 
 // NEW METHOD: Process set multiple relays with smart update detection (from v2)
 bool RelayControlTask::processSetMultipleRelays(const std::array<bool, 8>& states) {
-    LOG_INFO(LOG_TAG_RYN4, "Setting multiple relays");
+    LOG_INFO(TAG, "Setting multiple relays");
 
     // Get the update event group
     EventGroupHandle_t updateEventGroup = ryn4Device->getUpdateEventGroup();
     if (!updateEventGroup) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to get update event group");
+        LOG_ERROR(TAG, "Failed to get update event group");
         return false;
     }
 
@@ -485,7 +487,7 @@ bool RelayControlTask::processSetMultipleRelays(const std::array<bool, 8>& state
             if (currentState != states[i]) {
                 expectedChangeBits |= ryn4::RELAY_UPDATE_BITS[i];
                 #if defined(LOG_MODE_DEBUG_FULL)
-                LOG_DEBUG(LOG_TAG_RYN4, "Relay %zu will change: %s -> %s",
+                LOG_DEBUG(TAG, "Relay %zu will change: %s -> %s",
                          i + 1, currentState ? "ON" : "OFF", states[i] ? "ON" : "OFF");
                 #endif
             }
@@ -493,19 +495,19 @@ bool RelayControlTask::processSetMultipleRelays(const std::array<bool, 8>& state
 
         // If no changes expected, we're done
         if (expectedChangeBits == 0) {
-            LOG_INFO(LOG_TAG_RYN4, "No relay state changes needed");
+            LOG_INFO(TAG, "No relay state changes needed");
             return true;
         }
     } else {
         // If we can't get current state, expect all relays might update
         expectedChangeBits = relayAllUpdateBits;
-        LOG_DEBUG(LOG_TAG_RYN4, "Could not get current states, expecting all relays to update");
+        LOG_DEBUG(TAG, "Could not get current states, expecting all relays to update");
     }
     
     // Acquire device mutex using RAII
     auto guard = MutexRetryHelper::acquireGuard(ryn4Device->getMutexInterface(), "RYN4-SetMultiple", pdMS_TO_TICKS(1000));
     if (!guard) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to acquire device mutex");
+        LOG_ERROR(TAG, "Failed to acquire device mutex");
         return false;
     }
 
@@ -521,7 +523,7 @@ bool RelayControlTask::processSetMultipleRelays(const std::array<bool, 8>& state
             offset += snprintf(logBuffer + offset, sizeof(logBuffer) - offset,
                              "R%zu:%s ", i + 1, states[i] ? "ON" : "OFF");
         }
-        LOG_INFO(LOG_TAG_RELAY, "%s (verified)", logBuffer);
+        LOG_INFO(TAG, "%s (verified)", logBuffer);
         #endif
 
         // Update state tracking for all relays
@@ -539,13 +541,13 @@ bool RelayControlTask::processSetMultipleRelays(const std::array<bool, 8>& state
             updateSharedRelayReadings(i + 1, states[i]);
         }
 
-        LOG_DEBUG(LOG_TAG_RYN4, "Multi-relay batch command verified");
+        LOG_DEBUG(TAG, "Multi-relay batch command verified");
         return true;
     } else if (result == ryn4::RelayErrorCode::TIMEOUT) {
-        LOG_WARN(LOG_TAG_RYN4, "Multi-relay verification timeout");
+        LOG_WARN(TAG, "Multi-relay verification timeout");
         return false;
     } else {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to set multiple relays: error %d",
+        LOG_ERROR(TAG, "Failed to set multiple relays: error %d",
                  static_cast<int>(result));
         return false;
     }
@@ -558,7 +560,7 @@ bool RelayControlTask::processToggleAllRelays() {
         IDeviceInstance::DeviceDataType::RELAY_STATE);
 
     if (!result.isOk() || result.value().size() != 8) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to get current states for toggle all");
+        LOG_ERROR(TAG, "Failed to get current states for toggle all");
         return false;
     }
 
@@ -611,7 +613,7 @@ void RelayControlTask::updateRateLimitCounters() {
         memset(toggleCount, 0, sizeof(toggleCount));
         rateWindowStart = now;
         #if defined(LOG_MODE_DEBUG_FULL)
-        LOG_DEBUG(LOG_TAG_RYN4, "Rate limit counters reset");
+        LOG_DEBUG(TAG, "Rate limit counters reset");
         #endif
     }
 }
@@ -655,7 +657,7 @@ bool RelayControlTask::checkPumpProtection(uint8_t relayIndex, bool desiredState
 
         static TickType_t lastBlockLog[2] = {0, 0};
         if (now - lastBlockLog[pumpIdx] > pdMS_TO_TICKS(5000)) {  // Log every 5s max
-            LOG_WARN(LOG_TAG_RYN4, "Pump %d state change blocked by motor protection - %lu ms remaining",
+            LOG_WARN(TAG, "Pump %d state change blocked by motor protection - %lu ms remaining",
                      relayIndex, remainingMs);
             lastBlockLog[pumpIdx] = now;
         }
@@ -713,7 +715,7 @@ void RelayControlTask::waitForRelayRequests() {
     );
     
     if (bits != 0) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Relay request event received: 0x%08X", bits);
+        LOG_DEBUG(TAG, "Relay request event received: 0x%08X", bits);
     }
     // If timeout (bits == 0), that's fine - we'll feed watchdog and check again
 }
@@ -751,7 +753,7 @@ void RelayControlTask::monitorSystemState() {
     
     if (currentMode != lastMode) {
         #if defined(LOG_MODE_DEBUG_SELECTIVE) || defined(LOG_MODE_DEBUG_FULL)
-        LOG_INFO(LOG_TAG_RYN4, "System mode changed: %s", 
+        LOG_INFO(TAG, "System mode changed: %s", 
                  currentMode == 1 ? "HEATING" : (currentMode == 2 ? "WATER" : "OFF"));
         #endif
         lastMode = currentMode;
@@ -763,7 +765,7 @@ void RelayControlTask::monitorSystemState() {
     
     if (burnerActive != lastBurnerActive) {
         #if defined(LOG_MODE_DEBUG_SELECTIVE) || defined(LOG_MODE_DEBUG_FULL)
-        LOG_INFO(LOG_TAG_RYN4, "Burner state changed: %s", burnerActive ? "ACTIVE" : "INACTIVE");
+        LOG_INFO(TAG, "Burner state changed: %s", burnerActive ? "ACTIVE" : "INACTIVE");
         #endif
         lastBurnerActive = burnerActive;
     }
@@ -775,7 +777,7 @@ void RelayControlTask::processRelayRequests() {
     EventGroupHandle_t relayRequestEventGroup = resourceManager.getEventGroup(SharedResourceManager::EventGroups::RELAY_REQUEST);
     
     if (!relayRequestEventGroup) {
-        LOG_ERROR(LOG_TAG_RYN4, "Failed to get relay request event group!");
+        LOG_ERROR(TAG, "Failed to get relay request event group!");
         return;
     }
     
@@ -791,18 +793,18 @@ void RelayControlTask::processRelayRequests() {
         return;  // No requests pending
     }
     
-    LOG_DEBUG(LOG_TAG_RYN4, "processRelayRequests: Got request bits: 0x%08X", requestBits);
+    LOG_DEBUG(TAG, "processRelayRequests: Got request bits: 0x%08X", requestBits);
     
     // Process heating pump requests
     if (requestBits & SystemEvents::RelayRequest::HEATING_PUMP_ON) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing heating pump ON request");
+        LOG_DEBUG(TAG, "Processing heating pump ON request");
         if (setRelayState(RelayFunction::HEATING_PUMP, true)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::HEATING_PUMP_ON);
         }
     }
     
     if (requestBits & SystemEvents::RelayRequest::HEATING_PUMP_OFF) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing heating pump OFF request");
+        LOG_DEBUG(TAG, "Processing heating pump OFF request");
         if (setRelayState(RelayFunction::HEATING_PUMP, false)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::HEATING_PUMP_OFF);
         }
@@ -810,26 +812,26 @@ void RelayControlTask::processRelayRequests() {
     
     // Process water pump requests
     if (requestBits & SystemEvents::RelayRequest::WATER_PUMP_ON) {
-        LOG_INFO(LOG_TAG_RYN4, "Processing water pump ON request for relay %d", RelayFunction::WATER_PUMP);
+        LOG_INFO(TAG, "Processing water pump ON request for relay %d", RelayFunction::WATER_PUMP);
         
         // Log current state before attempting change
         // Round 20 Issue #6: Protect state array read with mutex
         if (relayStatesKnown.load() && xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-            LOG_INFO(LOG_TAG_RYN4, "Current water pump state before command: %s",
+            LOG_INFO(TAG, "Current water pump state before command: %s",
                      currentRelayStates[RelayFunction::WATER_PUMP - 1] ? "ON" : "OFF");
             xSemaphoreGive(relayStateMutex_);
         }
         
         if (setRelayState(RelayFunction::WATER_PUMP, true)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_PUMP_ON);
-            LOG_INFO(LOG_TAG_RYN4, "Water pump ON request completed");
+            LOG_INFO(TAG, "Water pump ON request completed");
         } else {
-            LOG_ERROR(LOG_TAG_RYN4, "Water pump ON request FAILED");
+            LOG_ERROR(TAG, "Water pump ON request FAILED");
         }
     }
     
     if (requestBits & SystemEvents::RelayRequest::WATER_PUMP_OFF) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing water pump OFF request");
+        LOG_DEBUG(TAG, "Processing water pump OFF request");
         if (setRelayState(RelayFunction::WATER_PUMP, false)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_PUMP_OFF);
         }
@@ -837,14 +839,14 @@ void RelayControlTask::processRelayRequests() {
     
     // Process burner requests
     if (requestBits & SystemEvents::RelayRequest::BURNER_ENABLE) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing burner ON request");
+        LOG_DEBUG(TAG, "Processing burner ON request");
         if (setRelayState(RelayFunction::BURNER_ENABLE, true)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::BURNER_ENABLE);
         }
     }
     
     if (requestBits & SystemEvents::RelayRequest::BURNER_DISABLE) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing burner OFF request");
+        LOG_DEBUG(TAG, "Processing burner OFF request");
         if (setRelayState(RelayFunction::BURNER_ENABLE, false)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::BURNER_DISABLE);
         }
@@ -852,14 +854,14 @@ void RelayControlTask::processRelayRequests() {
     
     // Process power select requests
     if (requestBits & SystemEvents::RelayRequest::POWER_HALF) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing half power request");
+        LOG_DEBUG(TAG, "Processing half power request");
         if (setRelayState(RelayFunction::POWER_SELECT, true)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::POWER_HALF);
         }
     }
     
     if (requestBits & SystemEvents::RelayRequest::POWER_FULL) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing full power request");
+        LOG_DEBUG(TAG, "Processing full power request");
         if (setRelayState(RelayFunction::POWER_SELECT, false)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::POWER_FULL);
         }
@@ -867,14 +869,14 @@ void RelayControlTask::processRelayRequests() {
     
     // Process water mode requests
     if (requestBits & SystemEvents::RelayRequest::WATER_MODE_ON) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing water mode ON request");
+        LOG_DEBUG(TAG, "Processing water mode ON request");
         if (setRelayState(RelayFunction::WATER_MODE, true)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_MODE_ON);
         }
     }
     
     if (requestBits & SystemEvents::RelayRequest::WATER_MODE_OFF) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Processing water mode OFF request");
+        LOG_DEBUG(TAG, "Processing water mode OFF request");
         if (setRelayState(RelayFunction::WATER_MODE, false)) {
             xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_MODE_OFF);
         }
@@ -884,16 +886,16 @@ void RelayControlTask::processRelayRequests() {
 // Keep all the existing public methods below...
 
 bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
-    LOG_DEBUG(LOG_TAG_RYN4, "setRelayState called: relay=%d, state=%s", relayIndex, state ? "ON" : "OFF");
+    LOG_DEBUG(TAG, "setRelayState called: relay=%d, state=%s", relayIndex, state ? "ON" : "OFF");
 
     if (!initialized || !ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized: init=%d, device=%p",
+        LOG_ERROR(TAG, "Task not initialized: init=%d, device=%p",
                   initialized, (void*)ryn4Device);
         return false;
     }
 
     if (relayIndex < 1 || relayIndex > 8) {
-        LOG_ERROR(LOG_TAG_RYN4, "Invalid relay index: %d", relayIndex);
+        LOG_ERROR(TAG, "Invalid relay index: %d", relayIndex);
         return false;
     }
     
@@ -905,68 +907,68 @@ bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
         currentState = currentRelayStates[relayIndex - 1];
         xSemaphoreGive(relayStateMutex_);
     }
-    LOG_DEBUG(LOG_TAG_RYN4, "State check: known=%d, current[%d]=%s, desired=%s",
+    LOG_DEBUG(TAG, "State check: known=%d, current[%d]=%s, desired=%s",
               statesKnown, relayIndex-1,
               currentState ? "ON" : "OFF",
               state ? "ON" : "OFF");
 
     if (statesKnown && currentState == state) {
-        LOG_DEBUG(LOG_TAG_RYN4, "Relay %d already in desired state (%s), skipping command",
+        LOG_DEBUG(TAG, "Relay %d already in desired state (%s), skipping command",
                   relayIndex, state ? "ON" : "OFF");
         return true;  // Already in desired state, no action needed
     }
     
     // Directly process the relay command using the verified method
-    LOG_INFO(LOG_TAG_RYN4, "Setting relay %d to %s (direct call)", relayIndex, state ? "ON" : "OFF");
+    LOG_INFO(TAG, "Setting relay %d to %s (direct call)", relayIndex, state ? "ON" : "OFF");
     return processSingleRelay(relayIndex, state);
 }
 
 bool RelayControlTask::setAllRelays(bool state) {
     if (!initialized || !ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized");
+        LOG_ERROR(TAG, "Task not initialized");
         return false;
     }
     
     // Directly process the command without queue
-    LOG_INFO(LOG_TAG_RYN4, "Setting all relays to %s (direct call)", state ? "ON" : "OFF");
+    LOG_INFO(TAG, "Setting all relays to %s (direct call)", state ? "ON" : "OFF");
     return processSetAllRelays(state);
 }
 
 bool RelayControlTask::setMultipleRelays(const std::array<bool, 8>& states) {
     if (!initialized || !ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized");
+        LOG_ERROR(TAG, "Task not initialized");
         return false;
     }
 
     // Directly process the command without queue
-    LOG_INFO(LOG_TAG_RYN4, "Setting multiple relays (direct call)");
+    LOG_INFO(TAG, "Setting multiple relays (direct call)");
     return processSetMultipleRelays(states);
 }
 
 bool RelayControlTask::toggleRelay(uint8_t relayIndex) {
     if (!initialized || !ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized");
+        LOG_ERROR(TAG, "Task not initialized");
         return false;
     }
 
     if (relayIndex < 1 || relayIndex > 8) {
-        LOG_ERROR(LOG_TAG_RYN4, "Invalid relay index: %d", relayIndex);
+        LOG_ERROR(TAG, "Invalid relay index: %d", relayIndex);
         return false;
     }
     
     // Directly process the command without queue
-    LOG_INFO(LOG_TAG_RYN4, "Toggling relay %d (direct call)", relayIndex);
+    LOG_INFO(TAG, "Toggling relay %d (direct call)", relayIndex);
     return processToggleRelay(relayIndex);
 }
 
 bool RelayControlTask::toggleAllRelays() {
     if (!initialized || !ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized");
+        LOG_ERROR(TAG, "Task not initialized");
         return false;
     }
     
     // Directly process the command without queue
-    LOG_INFO(LOG_TAG_RYN4, "Toggling all relays (direct call)");
+    LOG_INFO(TAG, "Toggling all relays (direct call)");
     return processToggleAllRelays();
 }
 
@@ -1021,7 +1023,7 @@ void RelayControlTask::updateSharedRelayReadings(uint8_t relayIndex, bool state)
             xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::SYNCHRONIZED | SystemEvents::RelayStatus::COMM_OK);
         }
         
-        LOG_DEBUG(LOG_TAG_RYN4, "SharedRelayReadings updated for relay %d = %s",
+        LOG_DEBUG(TAG, "SharedRelayReadings updated for relay %d = %s",
                  relayIndex, state ? "ON" : "OFF");
     }
 }
@@ -1036,19 +1038,19 @@ void RelayControlTask::checkRelayHealthAndEscalate(uint8_t relayIndex, bool succ
     if (success) {
         // Reset consecutive failure counter on success
         if (consecutiveFailures[idx] > 0) {
-            LOG_INFO(LOG_TAG_RYN4, "Relay %d recovered after %d failures", relayIndex, consecutiveFailures[idx]);
+            LOG_INFO(TAG, "Relay %d recovered after %d failures", relayIndex, consecutiveFailures[idx]);
             consecutiveFailures[idx] = 0;
         }
     } else {
         // Increment failure counter
         consecutiveFailures[idx]++;
 
-        LOG_WARN(LOG_TAG_RYN4, "Relay %d consecutive failures: %d/%d",
+        LOG_WARN(TAG, "Relay %d consecutive failures: %d/%d",
                  relayIndex, consecutiveFailures[idx], MAX_CONSECUTIVE_FAILURES);
 
         // Check if escalation threshold reached
         if (consecutiveFailures[idx] >= MAX_CONSECUTIVE_FAILURES) {
-            LOG_ERROR(LOG_TAG_RYN4, "CRITICAL: Relay %d failed %d consecutive times - escalating to failsafe",
+            LOG_ERROR(TAG, "CRITICAL: Relay %d failed %d consecutive times - escalating to failsafe",
                      relayIndex, consecutiveFailures[idx]);
 
             // Set relay error bit

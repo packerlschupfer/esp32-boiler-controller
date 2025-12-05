@@ -32,6 +32,8 @@
 #include <RuntimeStorage.h>
 #include "modules/mqtt/MQTTCommandHandlers.h"
 
+static const char* TAG = "MQTT";
+
 // Static member definitions (must match MQTTTask.h)
 TaskHandle_t MQTTTask::taskHandle_ = nullptr;
 bool MQTTTask::isRunning_ = false;
@@ -89,7 +91,7 @@ namespace {
 
         // Round 14 Issue #14: Stop retrying after max attempts
         if (subscriptionRetryAttempts >= MAX_SUBSCRIPTION_RETRIES) {
-            LOG_ERROR(LOG_TAG_MQTT, "Max subscription retries (%d) exceeded - giving up",
+            LOG_ERROR(TAG, "Max subscription retries (%d) exceeded - giving up",
                      MAX_SUBSCRIPTION_RETRIES);
             // Stop the timer
             if (subscriptionRetryTimer) {
@@ -99,7 +101,7 @@ namespace {
         }
 
         subscriptionRetryAttempts++;
-        LOG_DEBUG(LOG_TAG_MQTT, "Subscription retry attempt %d/%d",
+        LOG_DEBUG(TAG, "Subscription retry attempt %d/%d",
                  subscriptionRetryAttempts, MAX_SUBSCRIPTION_RETRIES);
 
         if (mqttTaskEventGroup) {
@@ -133,13 +135,13 @@ static void mqttEventCallback(MQTTManager::MQTTEvent event, void* data) {
     
     switch (event) {
         case MQTTManager::MQTTEvent::CONNECTED:
-            LOG_INFO(LOG_TAG_MQTT, "MQTT connected event received");
+            LOG_INFO(TAG, "MQTT connected event received");
             xEventGroupSetBits(mqttTaskEventGroup, MQTT_TASK_CONNECTED);
             // Reconnect state is now managed internally by MQTTManager
             break;
             
         case MQTTManager::MQTTEvent::DISCONNECTED:
-            LOG_WARN(LOG_TAG_MQTT, "MQTT disconnected event received");
+            LOG_WARN(TAG, "MQTT disconnected event received");
             xEventGroupSetBits(mqttTaskEventGroup, MQTT_TASK_DISCONNECTED);
             break;
             
@@ -150,7 +152,7 @@ static void mqttEventCallback(MQTTManager::MQTTEvent event, void* data) {
         case MQTTManager::MQTTEvent::ERROR:
             if (data) {
                 auto* errorData = static_cast<MQTTManager::ErrorEventData*>(data);
-                LOG_ERROR(LOG_TAG_MQTT, "MQTT error: %s", errorData->message);
+                LOG_ERROR(TAG, "MQTT error: %s", errorData->message);
             }
             break;
             
@@ -179,8 +181,8 @@ static void healthPublishTimerCallback(TimerHandle_t xTimer) {
 
 // Initialize MQTT (implementation from MQTTTask.cpp)
 void MQTTTask::initializeMQTT() {
-    LOG_INFO(LOG_TAG_MQTT, "=== MQTT INITIALIZATION STARTING ===");
-    LOG_INFO(LOG_TAG_MQTT, "Initializing MQTT with event-driven API...");
+    LOG_INFO(TAG, "=== MQTT INITIALIZATION STARTING ===");
+    LOG_INFO(TAG, "Initializing MQTT with event-driven API...");
     
     SemaphoreGuard guard(mqttMutex_);
 
@@ -208,8 +210,8 @@ void MQTTTask::initializeMQTT() {
     static char client_id[64];
     snprintf(client_id, sizeof(client_id), "esplan-%s", DEVICE_HOSTNAME);
     
-    LOG_INFO(LOG_TAG_MQTT, "MQTT URI: %s", mqtt_uri);
-    LOG_INFO(LOG_TAG_MQTT, "Client ID: %s", client_id);
+    LOG_INFO(TAG, "MQTT URI: %s", mqtt_uri);
+    LOG_INFO(TAG, "Client ID: %s", client_id);
 
     // Initialize connection using builder pattern
     auto config = MQTTConfig(mqtt_uri)
@@ -220,13 +222,13 @@ void MQTTTask::initializeMQTT() {
 
     auto result = mqttManager_->begin(config);
     if (!result.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "MQTT initialization failed with error");
+        LOG_ERROR(TAG, "MQTT initialization failed with error");
         // Don't delete - MQTTManager is now a singleton
         mqttManager_ = nullptr;
         return;
     }
 
-    LOG_INFO(LOG_TAG_MQTT, "MQTT initialized with event-driven API");
+    LOG_INFO(TAG, "MQTT initialized with event-driven API");
 }
 
 // Process MQTT messages using new non-blocking API
@@ -241,12 +243,12 @@ void MQTTTask::processMQTT() {
 void MQTTTask::taskFunction(void* parameter) {
     (void)parameter;
     
-    LOG_INFO(LOG_TAG_MQTT, "MQTTTask started on core %d", xPortGetCoreID());
+    LOG_INFO(TAG, "MQTTTask started on core %d", xPortGetCoreID());
     
     // Create event group for task synchronization
     mqttTaskEventGroup = xEventGroupCreate();
     if (!mqttTaskEventGroup) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to create event group");
+        LOG_ERROR(TAG, "Failed to create event group");
         vTaskDelete(NULL);
         return;
     }
@@ -275,7 +277,7 @@ void MQTTTask::taskFunction(void* parameter) {
     );
     
     if (!sensorPublishTimer || !healthPublishTimer) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to create timers");
+        LOG_ERROR(TAG, "Failed to create timers");
         // Cleanup any timer that was created
         if (sensorPublishTimer) {
             xTimerDelete(sensorPublishTimer, 0);
@@ -290,19 +292,19 @@ void MQTTTask::taskFunction(void* parameter) {
     }
     
     // Wait for network connection
-    LOG_INFO(LOG_TAG_MQTT, "Waiting for network connection...");
+    LOG_INFO(TAG, "Waiting for network connection...");
     while (!EthernetManager::isConnected()) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     
     // Network is up, proceed immediately
-    LOG_INFO(LOG_TAG_MQTT, "Network up, initializing MQTT...");
+    LOG_INFO(TAG, "Network up, initializing MQTT...");
     
     // Initialize MQTT
     initializeMQTT();
 
     if (mqttManager_ == nullptr) {
-        LOG_ERROR(LOG_TAG_MQTT, "MQTT initialization failed");
+        LOG_ERROR(TAG, "MQTT initialization failed");
         // Round 14 Issue #10: Cleanup timers before deleting task
         if (sensorPublishTimer) {
             xTimerDelete(sensorPublishTimer, 0);
@@ -323,13 +325,13 @@ void MQTTTask::taskFunction(void* parameter) {
     // Connect to MQTT broker
     auto connectResult = mqttManager_->connect();
     if (!connectResult.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Initial MQTT connection failed");
+        LOG_ERROR(TAG, "Initial MQTT connection failed");
     }
     
     // Start timers
     if (xTimerStart(sensorPublishTimer, pdMS_TO_TICKS(100)) != pdPASS ||
         xTimerStart(healthPublishTimer, pdMS_TO_TICKS(100)) != pdPASS) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to start timers");
+        LOG_ERROR(TAG, "Failed to start timers");
         // Cleanup timers
         xTimerDelete(sensorPublishTimer, 0);
         xTimerDelete(healthPublishTimer, 0);
@@ -346,9 +348,9 @@ void MQTTTask::taskFunction(void* parameter) {
     );
 
     if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("MQTTTask", wdtConfig)) {
-        LOG_ERROR(LOG_TAG_MQTT, "WDT reg failed");
+        LOG_ERROR(TAG, "WDT reg failed");
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "WDT OK %lums", SystemConstants::System::WDT_MQTT_TASK_MS);
+        LOG_INFO(TAG, "WDT OK %lums", SystemConstants::System::WDT_MQTT_TASK_MS);
         (void)SRP::getTaskManager().feedWatchdog();  // Feed immediately
     }
     
@@ -381,7 +383,7 @@ void MQTTTask::taskFunction(void* parameter) {
         
         // Handle connection events
         if (events & MQTT_TASK_CONNECTED) {
-            LOG_INFO(LOG_TAG_MQTT, "MQTT connected");
+            LOG_INFO(TAG, "MQTT connected");
 
             // Reset circuit breaker state on successful connection
             consecutiveDisconnects_.store(0);
@@ -390,14 +392,14 @@ void MQTTTask::taskFunction(void* parameter) {
             // Signal MQTT operational to other tasks (e.g., PersistentStorageTask)
             SRP::setSystemStateEventBits(SystemEvents::SystemState::MQTT_OPERATIONAL);
             // Debug: confirm operational bit was set
-            LOG_INFO(LOG_TAG_MQTT, "MQTT_OPERATIONAL bit set");
+            LOG_INFO(TAG, "MQTT_OPERATIONAL bit set");
 
             // Always re-subscribe on connect (subscriptions may be lost after reconnect)
             vTaskDelay(pdMS_TO_TICKS(500)); // Small delay for stability
             bool wasSetup = subscriptionsSetup;
             setupSubscriptions();
             subscriptionsSetup = true;
-            LOG_INFO(LOG_TAG_MQTT, "Subscriptions %s", wasSetup ? "refreshed on reconnect" : "setup completed");
+            LOG_INFO(TAG, "Subscriptions %s", wasSetup ? "refreshed on reconnect" : "setup completed");
 
             // Publish online status and device info
             auto ipStr = ETH.localIP().toString();
@@ -417,12 +419,12 @@ void MQTTTask::taskFunction(void* parameter) {
                 char response[32];
                 snprintf(response, sizeof(response), "%.1f", targetTemp);
                 MQTTTask::publish(MQTT_STATUS_HEATING "/target", response, 0, true, MQTTPriority::PRIORITY_HIGH);
-                LOG_INFO(LOG_TAG_MQTT, "Published initial room target: %.1f°C", targetTemp);
+                LOG_INFO(TAG, "Published initial room target: %.1f°C", targetTemp);
             }
         }
 
         if (events & MQTT_TASK_DISCONNECTED) {
-            LOG_WARN(LOG_TAG_MQTT, "MQTT disconnected");
+            LOG_WARN(TAG, "MQTT disconnected");
             subscriptionsSetup = false;
             failedSubscriptions = 0;  // Reset failed subscriptions on disconnect
             subscriptionRetryAttempts = 0;  // Round 14 Issue #14: Reset retry counter
@@ -438,7 +440,7 @@ void MQTTTask::taskFunction(void* parameter) {
             if (disconnects >= MAX_RECONNECT_ATTEMPTS && !circuitBreakerOpen_.exchange(true)) {
                 // Only first thread to set circuitBreakerOpen enters here
                 circuitBreakerCooldownEnd_ = millis() + CIRCUIT_BREAKER_COOLDOWN_MS;
-                LOG_ERROR(LOG_TAG_MQTT, "Circuit breaker OPEN: %d consecutive failures, "
+                LOG_ERROR(TAG, "Circuit breaker OPEN: %d consecutive failures, "
                          "cooldown for %lu minutes",
                          disconnects, CIRCUIT_BREAKER_COOLDOWN_MS / 60000);
 
@@ -451,7 +453,7 @@ void MQTTTask::taskFunction(void* parameter) {
 
         // Circuit breaker: check if cooldown has expired
         if (circuitBreakerOpen_.load() && millis() >= circuitBreakerCooldownEnd_) {
-            LOG_INFO(LOG_TAG_MQTT, "Circuit breaker cooldown expired - resuming reconnection");
+            LOG_INFO(TAG, "Circuit breaker cooldown expired - resuming reconnection");
             circuitBreakerOpen_.store(false);
             consecutiveDisconnects_.store(0);
 
@@ -467,7 +469,7 @@ void MQTTTask::taskFunction(void* parameter) {
                 // Attempt immediate reconnection
                 auto result = mqttManager_->connect();
                 if (!result.isOk()) {
-                    LOG_WARN(LOG_TAG_MQTT, "Reconnection attempt after cooldown failed");
+                    LOG_WARN(TAG, "Reconnection attempt after cooldown failed");
                 }
             }
         }
@@ -475,7 +477,7 @@ void MQTTTask::taskFunction(void* parameter) {
         // Handle subscription retry
         if ((events & MQTT_TASK_RETRY_SUBSCRIPTIONS) && mqttManager_ && mqttManager_->isConnected()) {
             if (failedSubscriptions != 0) {
-                LOG_INFO(LOG_TAG_MQTT, "Retrying failed subscriptions (mask: 0x%02X)", failedSubscriptions);
+                LOG_INFO(TAG, "Retrying failed subscriptions (mask: 0x%02X)", failedSubscriptions);
                 retryFailedSubscriptions();
             }
         }
@@ -498,7 +500,7 @@ void MQTTTask::taskFunction(void* parameter) {
             // Handle sensor publishing
             if (events & MQTT_TASK_PUBLISH_SENSORS) {
                 publishSensorData();
-                LOG_DEBUG(LOG_TAG_MQTT, "Published sensor data (timer)");
+                LOG_DEBUG(TAG, "Published sensor data (timer)");
             }
             
             // Handle health publishing
@@ -507,7 +509,7 @@ void MQTTTask::taskFunction(void* parameter) {
                 // Note: publishSystemState() is NOT called periodically
                 // It's only published on connect and when state actually changes
                 // (state changes are published by handleControlCommand when processing commands)
-                LOG_DEBUG(LOG_TAG_MQTT, "Published system health (timer)");
+                LOG_DEBUG(TAG, "Published system health (timer)");
             }
             
             // Event-driven sensor publishing removed - rely on 10-second timer interval
@@ -533,7 +535,7 @@ void MQTTTask::taskFunction(void* parameter) {
                     uint8_t util = getQueueUtilization();
 
                     if (totalDropped > 0 || underPressure || !highMetrics.isHealthy() || !normalMetrics.isHealthy()) {
-                        LOG_INFO(LOG_TAG_MQTT, "Queue health: util=%u%% pressure=%s H[%u/%u drop:%lu] N[%u/%u drop:%lu]",
+                        LOG_INFO(TAG, "Queue health: util=%u%% pressure=%s H[%u/%u drop:%lu] N[%u/%u drop:%lu]",
                                  util, underPressure ? "YES" : "no",
                                  highPriorityQueue_->getMessagesWaiting(), HIGH_PRIORITY_QUEUE_SIZE,
                                  highMetrics.getTotalDropped(),
@@ -565,7 +567,7 @@ bool MQTTTask::init() {
 
     mqttMutex_ = xSemaphoreCreateMutex();
     if (mqttMutex_ == nullptr) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to create mutex");
+        LOG_ERROR(TAG, "Failed to create mutex");
         return false;
     }
     
@@ -583,7 +585,7 @@ bool MQTTTask::init() {
     normalPriorityQueue_ = QueueManager::getInstance().createQueue("mqtt_normal_priority", normalPriorityConfig);
     
     if (!highPriorityQueue_ || !normalPriorityQueue_) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to create queues");
+        LOG_ERROR(TAG, "Failed to create queues");
         return false;
     }
     
@@ -619,7 +621,7 @@ bool MQTTTask::start() {
     }
     
     if (!result) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to create task");
+        LOG_ERROR(TAG, "Failed to create task");
         return false;
     }
     
@@ -685,10 +687,10 @@ bool MQTTTask::publish(const char* topic, const char* payload, int qos, bool ret
         if (mqttManager_ && mqttManager_->isConnected()) {
             auto result = mqttManager_->publish(topic, payload, qos, retain);
             if (result.isOk()) {
-                LOG_INFO(LOG_TAG_MQTT, "CRITICAL message bypassed queue: %s", topic);
+                LOG_INFO(TAG, "CRITICAL message bypassed queue: %s", topic);
                 return true;
             }
-            LOG_WARN(LOG_TAG_MQTT, "CRITICAL message bypass failed, falling back to queue: %s", topic);
+            LOG_WARN(TAG, "CRITICAL message bypass failed, falling back to queue: %s", topic);
             // Fall through to queue the message
         }
     }
@@ -702,7 +704,7 @@ bool MQTTTask::publish(const char* topic, const char* payload, int qos, bool ret
 
         uint32_t now = millis();
         if (now - lastThrottleLogTime > 10000) {  // Log every 10 seconds
-            LOG_WARN(LOG_TAG_MQTT, "Backpressure active: throttled %lu messages", throttledCount);
+            LOG_WARN(TAG, "Backpressure active: throttled %lu messages", throttledCount);
             lastThrottleLogTime = now;
             throttledCount = 0;
         }
@@ -741,7 +743,7 @@ bool MQTTTask::publish(const char* topic, const char* payload, int qos, bool ret
         if (now - queueHealthTracking.lastDropLogTime > MQTTConstants::QUEUE_DROP_LOG_INTERVAL_MS) {
             queueHealthTracking.lastDropLogTime = now;
             if (queueHealthTracking.droppedHighPriority > 0 || queueHealthTracking.droppedNormalPriority > 0) {
-                LOG_WARN(LOG_TAG_MQTT, "MQTT queue overflow - dropped H:%lu N:%lu messages",
+                LOG_WARN(TAG, "MQTT queue overflow - dropped H:%lu N:%lu messages",
                          queueHealthTracking.droppedHighPriority, queueHealthTracking.droppedNormalPriority);
                 queueHealthTracking.droppedHighPriority = 0;
                 queueHealthTracking.droppedNormalPriority = 0;
@@ -810,7 +812,7 @@ bool MQTTTask::isUnderPressure() {
             if (generalEventGroup) {
                 xEventGroupClearBits(generalEventGroup, SystemEvents::GeneralSystem::MQTT_QUEUE_PRESSURE);
             }
-            LOG_INFO(LOG_TAG_MQTT, "Queue pressure released (util: %u%%)", util);
+            LOG_INFO(TAG, "Queue pressure released (util: %u%%)", util);
         }
     } else {
         // Enter pressure state when exceeding threshold
@@ -821,7 +823,7 @@ bool MQTTTask::isUnderPressure() {
             if (generalEventGroup) {
                 xEventGroupSetBits(generalEventGroup, SystemEvents::GeneralSystem::MQTT_QUEUE_PRESSURE);
             }
-            LOG_WARN(LOG_TAG_MQTT, "Queue pressure HIGH (util: %u%%) - throttling non-critical messages", util);
+            LOG_WARN(TAG, "Queue pressure HIGH (util: %u%%) - throttling non-critical messages", util);
         }
     }
 
@@ -870,7 +872,7 @@ void MQTTTask::processPublishQueue() {
     UBaseType_t totalItems = highQueueItems + normalQueueItems;
     
     if (now - lastLogTime > 30000 && totalItems > 0) {  // Log every 30 seconds only if items exist
-        LOG_DEBUG(LOG_TAG_MQTT, "Queue: h:%d, n:%d", highQueueItems, normalQueueItems);
+        LOG_DEBUG(TAG, "Queue: h:%d, n:%d", highQueueItems, normalQueueItems);
         lastLogTime = now;
     }
     
@@ -891,13 +893,13 @@ void MQTTTask::processPublishQueue() {
         auto result = mqttManager_->publish(request.topic, request.payload, request.qos, request.retain);
 
         if (!result.isOk()) {
-            LOG_WARN(LOG_TAG_MQTT, "Failed to publish high priority to %s", request.topic);
+            LOG_WARN(TAG, "Failed to publish high priority to %s", request.topic);
 
             // If connection lost, put message back and stop processing
             if (result.error() == MQTTError::CONNECTION_FAILED) {
                 // Can't put back in front with ManagedQueue - message is lost
                 // This is acceptable as the queue will handle overflow based on strategy
-                LOG_ERROR(LOG_TAG_MQTT, "Connection lost, dropping message to %s", request.topic);
+                LOG_ERROR(TAG, "Connection lost, dropping message to %s", request.topic);
 
                 // Propagate connection loss to monitoring systems
                 SRP::clearSystemStateEventBits(SystemEvents::SystemState::MQTT_OPERATIONAL);
@@ -907,7 +909,7 @@ void MQTTTask::processPublishQueue() {
                 return;  // Stop all processing if connection lost
             }
         } else {
-            LOG_DEBUG(LOG_TAG_MQTT, "Published high priority to %s", request.topic);
+            LOG_DEBUG(TAG, "Published high priority to %s", request.topic);
         }
 
         processed++;
@@ -927,13 +929,13 @@ void MQTTTask::processPublishQueue() {
         auto result = mqttManager_->publish(request.topic, request.payload, request.qos, request.retain);
         
         if (!result.isOk()) {
-            LOG_WARN(LOG_TAG_MQTT, "Failed to publish normal priority to %s", request.topic);
+            LOG_WARN(TAG, "Failed to publish normal priority to %s", request.topic);
             
             // If connection lost, put message back and stop processing
             if (result.error() == MQTTError::CONNECTION_FAILED) {
                 // Can't put back in front with ManagedQueue - message is lost
                 // This is acceptable as the queue will handle overflow based on strategy
-                LOG_ERROR(LOG_TAG_MQTT, "Connection lost, dropping message to %s", request.topic);
+                LOG_ERROR(TAG, "Connection lost, dropping message to %s", request.topic);
 
                 // Propagate connection loss to monitoring systems
                 SRP::clearSystemStateEventBits(SystemEvents::SystemState::MQTT_OPERATIONAL);
@@ -943,7 +945,7 @@ void MQTTTask::processPublishQueue() {
                 break;
             }
         } else {
-            LOG_DEBUG(LOG_TAG_MQTT, "Published normal priority to %s", request.topic);
+            LOG_DEBUG(TAG, "Published normal priority to %s", request.topic);
         }
         
         normalProcessed++;
@@ -956,7 +958,7 @@ void MQTTTask::processPublishQueue() {
     }
     
     if ((processed + normalProcessed) > 0) {
-        LOG_DEBUG(LOG_TAG_MQTT, "Processed %d high, %d normal priority messages. Remaining: high:%d, normal:%d", 
+        LOG_DEBUG(TAG, "Processed %d high, %d normal priority messages. Remaining: high:%d, normal:%d", 
                   processed, normalProcessed, 
                   highPriorityQueue_->getMessagesWaiting(), 
                   normalPriorityQueue_->getMessagesWaiting());
@@ -970,7 +972,7 @@ void MQTTTask::publishSystemStatus() {
     
     SemaphoreGuard guard(mqttMutex_, pdMS_TO_TICKS(100));
     if (!guard.hasLock()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to acquire mutex for status publish");
+        LOG_ERROR(TAG, "Failed to acquire mutex for status publish");
         return;
     }
     
@@ -1001,13 +1003,13 @@ void MQTTTask::publishSystemStatus() {
     
     auto buffer = MemoryPools::getLogBuffer();
     if (!buffer) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to allocate buffer for health data");
+        LOG_ERROR(TAG, "Failed to allocate buffer for health data");
         return;
     }
 
     size_t written = serializeJson(doc, buffer.data(), buffer.size());
     if (written == 0 || written >= buffer.size()) {
-        LOG_ERROR(LOG_TAG_MQTT, "JSON serialization failed or truncated for health data");
+        LOG_ERROR(TAG, "JSON serialization failed or truncated for health data");
         return;
     }
 
@@ -1021,7 +1023,7 @@ void MQTTTask::publishSystemState() {
     //     bit3:water_enabled, bit4:water_on, bit5:water_priority
     // Individual state topics are published by handleControlCommand() when state changes
     // This function is kept for compatibility but does nothing - state is in sensor data
-    LOG_DEBUG(LOG_TAG_MQTT, "System state included in sensor data 's' field");
+    LOG_DEBUG(TAG, "System state included in sensor data 's' field");
 }
 
 void MQTTTask::publishSensorData() {
@@ -1032,7 +1034,7 @@ void MQTTTask::publishSensorData() {
     // Get sensor data with timeout to avoid blocking
     SemaphoreGuard guard(SRP::getSensorReadingsMutex(), pdMS_TO_TICKS(100));
     if (!guard.hasLock()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to acquire sensor mutex for MQTT publish");
+        LOG_ERROR(TAG, "Failed to acquire sensor mutex for MQTT publish");
         return;
     }
     
@@ -1121,13 +1123,13 @@ void MQTTTask::publishSensorData() {
     // Use the larger JSON buffer pool for sensor data
     auto buffer = MemoryPools::jsonBufferPool.allocate();
     if (!buffer) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to allocate buffer for sensor data");
+        LOG_ERROR(TAG, "Failed to allocate buffer for sensor data");
         return;
     }
 
     size_t written = serializeJson(doc, buffer->data, sizeof(buffer->data));
     if (written == 0 || written >= sizeof(buffer->data)) {
-        LOG_ERROR(LOG_TAG_MQTT, "JSON serialization failed or truncated (wrote %zu/%zu bytes)",
+        LOG_ERROR(TAG, "JSON serialization failed or truncated (wrote %zu/%zu bytes)",
                  written, sizeof(buffer->data));
         MemoryPools::jsonBufferPool.deallocate(buffer);
         return;
@@ -1144,7 +1146,7 @@ void MQTTTask::publishSensorData() {
 static void scheduleSubscriptionRetry() {
     if (failedSubscriptions != 0 && subscriptionRetryTimer) {
         xTimerStart(subscriptionRetryTimer, 0);
-        LOG_INFO(LOG_TAG_MQTT, "Scheduled subscription retry in %lu ms", SUBSCRIPTION_RETRY_DELAY_MS);
+        LOG_INFO(TAG, "Scheduled subscription retry in %lu ms", SUBSCRIPTION_RETRY_DELAY_MS);
     }
 }
 
@@ -1160,12 +1162,12 @@ void MQTTTask::retryFailedSubscriptions() {
     if (failedSubscriptions & SUB_TEST_ECHO) {
         auto result = mqttManager_->subscribe("test/echo",
             [](const String& topic, const String& payload) {
-                LOG_INFO(LOG_TAG_MQTT, "Echo test: %s", payload.c_str());
+                LOG_INFO(TAG, "Echo test: %s", payload.c_str());
                 MQTTTask::publish("test/response", payload.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
             }, 0);
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_TEST_ECHO;
-            LOG_INFO(LOG_TAG_MQTT, "Retry: test/echo succeeded");
+            LOG_INFO(TAG, "Retry: test/echo succeeded");
         }
     }
 
@@ -1179,7 +1181,7 @@ void MQTTTask::retryFailedSubscriptions() {
             }, 0);
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_CMD;
-            LOG_INFO(LOG_TAG_MQTT, "Retry: %s succeeded", cmdTopic);
+            LOG_INFO(TAG, "Retry: %s succeeded", cmdTopic);
         }
     }
 
@@ -1189,11 +1191,11 @@ void MQTTTask::retryFailedSubscriptions() {
         snprintf(configTopic, sizeof(configTopic), "%s/+", MQTT_CONFIG_PREFIX);
         auto result = mqttManager_->subscribe(configTopic,
             [](const String& topic, const String& payload) {
-                LOG_INFO(LOG_TAG_MQTT, "Configuration update on %s: %s", topic.c_str(), payload.c_str());
+                LOG_INFO(TAG, "Configuration update on %s: %s", topic.c_str(), payload.c_str());
             }, 0);
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_CONFIG;
-            LOG_INFO(LOG_TAG_MQTT, "Retry: %s succeeded", configTopic);
+            LOG_INFO(TAG, "Retry: %s succeeded", configTopic);
         }
     }
 
@@ -1205,7 +1207,7 @@ void MQTTTask::retryFailedSubscriptions() {
             }, 0);
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_ERRORS;
-            LOG_INFO(LOG_TAG_MQTT, "Retry: errors/+ succeeded");
+            LOG_INFO(TAG, "Retry: errors/+ succeeded");
         }
     }
 
@@ -1219,16 +1221,16 @@ void MQTTTask::retryFailedSubscriptions() {
             }, 0);
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_SCHEDULER;
-            LOG_INFO(LOG_TAG_MQTT, "Retry: %s succeeded", schedulerTopic);
+            LOG_INFO(TAG, "Retry: %s succeeded", schedulerTopic);
         }
     }
 
     // Schedule another retry if still have failures
     if (failedSubscriptions != 0) {
-        LOG_WARN(LOG_TAG_MQTT, "Still have failed subscriptions (0x%02X) - scheduling retry", failedSubscriptions);
+        LOG_WARN(TAG, "Still have failed subscriptions (0x%02X) - scheduling retry", failedSubscriptions);
         scheduleSubscriptionRetry();
     } else if (previousFailures != 0) {
-        LOG_INFO(LOG_TAG_MQTT, "All subscriptions recovered!");
+        LOG_INFO(TAG, "All subscriptions recovered!");
         // Round 14 Issue #14: Reset retry counter on full recovery
         subscriptionRetryAttempts = 0;
     }
@@ -1236,7 +1238,7 @@ void MQTTTask::retryFailedSubscriptions() {
 
 void MQTTTask::setupSubscriptions() {
     if (!mqttManager_ || !mqttManager_->isConnected()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Cannot setup subscriptions - MQTT not connected");
+        LOG_ERROR(TAG, "Cannot setup subscriptions - MQTT not connected");
         return;
     }
 
@@ -1248,27 +1250,27 @@ void MQTTTask::setupSubscriptions() {
     // - MQTT_EVENT_SUBSCRIBED callback fires when SUBACK received
     // - Use MQTTManager::isSubscriptionConfirmed(topic) to verify broker acknowledged
     // - Retry mechanism handles transient failures and broker rejections
-    LOG_INFO(LOG_TAG_MQTT, "Setting up MQTT subscriptions...");
+    LOG_INFO(TAG, "Setting up MQTT subscriptions...");
 
     // Subscribe to test topic
-    LOG_INFO(LOG_TAG_MQTT, "Step 1/5: Subscribing to test/echo");
+    LOG_INFO(TAG, "Step 1/5: Subscribing to test/echo");
 
     auto result = mqttManager_->subscribe("test/echo",
         [](const String& topic, const String& payload) {
-            LOG_INFO(LOG_TAG_MQTT, "Echo test: %s", payload.c_str());
+            LOG_INFO(TAG, "Echo test: %s", payload.c_str());
             // Echo back the message
             MQTTTask::publish("test/response", payload.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
         }, 0);  // QoS 0
 
     if (!result.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to subscribe to test/echo, error: %d", static_cast<int>(result.error()));
+        LOG_ERROR(TAG, "Failed to subscribe to test/echo, error: %d", static_cast<int>(result.error()));
         failedSubscriptions |= SUB_TEST_ECHO;
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "Successfully subscribed to test/echo");
+        LOG_INFO(TAG, "Successfully subscribed to test/echo");
     }
 
     // Subscribe to command topics
-    LOG_INFO(LOG_TAG_MQTT, "Step 2/5: Subscribing to %s/+", MQTT_CMD_PREFIX);
+    LOG_INFO(TAG, "Step 2/5: Subscribing to %s/+", MQTT_CMD_PREFIX);
 
     char cmdTopic[64];
     snprintf(cmdTopic, sizeof(cmdTopic), "%s/+", MQTT_CMD_PREFIX);
@@ -1279,32 +1281,32 @@ void MQTTTask::setupSubscriptions() {
         }, 0);  // QoS 0
 
     if (!result.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to subscribe to %s, error: %d", cmdTopic, static_cast<int>(result.error()));
+        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", cmdTopic, static_cast<int>(result.error()));
         failedSubscriptions |= SUB_CMD;
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "Successfully subscribed to %s", cmdTopic);
+        LOG_INFO(TAG, "Successfully subscribed to %s", cmdTopic);
     }
 
     // Subscribe to configuration updates
-    LOG_INFO(LOG_TAG_MQTT, "Step 3/5: Subscribing to %s/+", MQTT_CONFIG_PREFIX);
+    LOG_INFO(TAG, "Step 3/5: Subscribing to %s/+", MQTT_CONFIG_PREFIX);
 
     char configTopic[64];
     snprintf(configTopic, sizeof(configTopic), "%s/+", MQTT_CONFIG_PREFIX);
 
     result = mqttManager_->subscribe(configTopic,
         [](const String& topic, const String& payload) {
-            LOG_INFO(LOG_TAG_MQTT, "Configuration update on %s: %s", topic.c_str(), payload.c_str());
+            LOG_INFO(TAG, "Configuration update on %s: %s", topic.c_str(), payload.c_str());
         }, 0);  // QoS 0
 
     if (!result.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to subscribe to %s, error: %d", configTopic, static_cast<int>(result.error()));
+        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", configTopic, static_cast<int>(result.error()));
         failedSubscriptions |= SUB_CONFIG;
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "Successfully subscribed to %s", configTopic);
+        LOG_INFO(TAG, "Successfully subscribed to %s", configTopic);
     }
 
     // Subscribe to error management commands
-    LOG_INFO(LOG_TAG_MQTT, "Step 4/5: Subscribing to errors/+");
+    LOG_INFO(TAG, "Step 4/5: Subscribing to errors/+");
 
     result = mqttManager_->subscribe("errors/+",
         [](const String& topic, const String& payload) {
@@ -1312,14 +1314,14 @@ void MQTTTask::setupSubscriptions() {
         }, 0);  // QoS 0
 
     if (!result.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to subscribe to errors/+, error: %d", static_cast<int>(result.error()));
+        LOG_ERROR(TAG, "Failed to subscribe to errors/+, error: %d", static_cast<int>(result.error()));
         failedSubscriptions |= SUB_ERRORS;
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "Successfully subscribed to errors/+");
+        LOG_INFO(TAG, "Successfully subscribed to errors/+");
     }
 
     // Subscribe to scheduler commands
-    LOG_INFO(LOG_TAG_MQTT, "Step 5/5: Subscribing to %s/+", MQTT_CMD_SCHEDULER_PREFIX);
+    LOG_INFO(TAG, "Step 5/5: Subscribing to %s/+", MQTT_CMD_SCHEDULER_PREFIX);
 
     char schedulerTopic[64];
     snprintf(schedulerTopic, sizeof(schedulerTopic), "%s/+", MQTT_CMD_SCHEDULER_PREFIX);
@@ -1330,18 +1332,18 @@ void MQTTTask::setupSubscriptions() {
         }, 0);  // QoS 0
 
     if (!result.isOk()) {
-        LOG_ERROR(LOG_TAG_MQTT, "Failed to subscribe to %s, error: %d", schedulerTopic, static_cast<int>(result.error()));
+        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", schedulerTopic, static_cast<int>(result.error()));
         failedSubscriptions |= SUB_SCHEDULER;
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "Successfully subscribed to %s", schedulerTopic);
+        LOG_INFO(TAG, "Successfully subscribed to %s", schedulerTopic);
     }
 
     // Schedule retry if any subscriptions failed
     if (failedSubscriptions != 0) {
-        LOG_WARN(LOG_TAG_MQTT, "Some subscriptions failed (0x%02X) - scheduling retry", failedSubscriptions);
+        LOG_WARN(TAG, "Some subscriptions failed (0x%02X) - scheduling retry", failedSubscriptions);
         scheduleSubscriptionRetry();
     } else {
-        LOG_INFO(LOG_TAG_MQTT, "MQTT subscriptions setup complete - all done!");
+        LOG_INFO(TAG, "MQTT subscriptions setup complete - all done!");
     }
 
     // Persistent Storage parameter topics are handled by PersistentStorageTask

@@ -18,11 +18,13 @@
 #include "shared/SharedI2CInitializer.h"
 #include "DS3231Controller.h"
 
+
+static const char* TAG = "HardwareInitializer";
 // External globals
 extern rtstorage::RuntimeStorage* gRuntimeStorage;
 
 Result<void> HardwareInitializer::initialize(SystemInitializer* initializer) {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing hardware interfaces...");
+    LOG_INFO(TAG, "Initializing hardware interfaces...");
 
     // Initialize RS485/Modbus
     auto result = initializeModbus();
@@ -39,7 +41,7 @@ Result<void> HardwareInitializer::initialize(SystemInitializer* initializer) {
     // Initialize RuntimeStorage (FRAM)
     initializeFRAM(initializer->runtimeStorage_);
 
-    LOG_INFO(LOG_TAG_MAIN, "Hardware initialized successfully");
+    LOG_INFO(TAG, "Hardware initialized successfully");
     return Result<void>();
 }
 
@@ -48,32 +50,32 @@ Result<void> HardwareInitializer::initializeModbus() {
     // This prevents the WS3081 transceiver from being stuck in transmit mode
     pinMode(RS485_TX_PIN, OUTPUT);
     digitalWrite(RS485_TX_PIN, LOW);
-    LOG_INFO(LOG_TAG_MAIN, "Set TX pin (GPIO%d) to LOW before UART init", RS485_TX_PIN);
+    LOG_INFO(TAG, "Set TX pin (GPIO%d) to LOW before UART init", RS485_TX_PIN);
 
     // Small delay to let the pin settle
     vTaskDelay(pdMS_TO_TICKS(10));
 
     // Initialize RS485 serial for Modbus
     Serial1.begin(RS485_BAUD_RATE, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
-    LOG_INFO(LOG_TAG_MAIN, "Serial1 initialized with RX:GPIO%d, TX:GPIO%d",
+    LOG_INFO(TAG, "Serial1 initialized with RX:GPIO%d, TX:GPIO%d",
              RS485_RX_PIN, RS485_TX_PIN);
 
     // Delay to ensure serial port and WS3081 transceiver are fully initialized
     vTaskDelay(pdMS_TO_TICKS(100));
-    LOG_INFO(LOG_TAG_MAIN, "Serial1 ready, initializing Modbus master...");
+    LOG_INFO(TAG, "Serial1 ready, initializing Modbus master...");
 
     // CRITICAL: Set the global ModbusRTU instance for ModbusDevice base class
-    LOG_INFO(LOG_TAG_MAIN, "Setting global ModbusRTU instance...");
+    LOG_INFO(TAG, "Setting global ModbusRTU instance...");
     modbus::ModbusRegistry::getInstance().setModbusRTU(&SRP::getModbusMaster());
 
     // Small delay to ensure globalModbusRTU is properly set
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // Register global handlers for routing responses to devices
-    LOG_INFO(LOG_TAG_MAIN, "Registering Modbus onData callback...");
+    LOG_INFO(TAG, "Registering Modbus onData callback...");
     SRP::getModbusMaster().onData([](uint8_t serverAddress, esp32Modbus::FunctionCode fc,
                                      uint16_t address, const uint8_t* data, size_t length) {
-        LOG_DEBUG(LOG_TAG_MAIN, "Modbus data received - Addr: 0x%02X, FC: %d, StartAddr: 0x%04X, Len: %d",
+        LOG_DEBUG(TAG, "Modbus data received - Addr: 0x%02X, FC: %d, StartAddr: 0x%04X, Len: %d",
                   serverAddress, fc, address, length);
 
         // Use the global ModbusDevice routing function
@@ -81,18 +83,18 @@ Result<void> HardwareInitializer::initializeModbus() {
     });
 
     SRP::getModbusMaster().onError([](esp32Modbus::Error error) {
-        LOG_ERROR(LOG_TAG_MAIN, "Modbus communication error: %d", static_cast<int>(error));
+        LOG_ERROR(TAG, "Modbus communication error: %d", static_cast<int>(error));
     });
 
-    LOG_INFO(LOG_TAG_MAIN, "Modbus callbacks registered successfully");
+    LOG_INFO(TAG, "Modbus callbacks registered successfully");
 
     // Start the Modbus RTU task on core 1 to avoid interference with BLE on core 0
     SRP::getModbusMaster().begin(1);  // Pin to core 1
-    LOG_INFO(LOG_TAG_MAIN, "Modbus master initialized and started on core 1");
+    LOG_INFO(TAG, "Modbus master initialized and started on core 1");
 
     // Brief delay for ModbusRTU task to initialize its queue
     vTaskDelay(pdMS_TO_TICKS(100));
-    LOG_INFO(LOG_TAG_MAIN, "Modbus RTU task should now be fully initialized");
+    LOG_INFO(TAG, "Modbus RTU task should now be fully initialized");
 
     return Result<void>();
 }
@@ -106,11 +108,11 @@ void HardwareInitializer::initializeTimezone() {
     // - DST ends last Sunday in October at 3:00
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();
-    LOG_INFO(LOG_TAG_MAIN, "System timezone set to CET/CEST");
+    LOG_INFO(TAG, "System timezone set to CET/CEST");
 }
 
 bool HardwareInitializer::initializeRTC(DS3231Controller*& ds3231) {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing DS3231 RTC...");
+    LOG_INFO(TAG, "Initializing DS3231 RTC...");
     SharedI2CInitializer::ensureI2CInitialized();
 
     // Suppress "Bus already started" warning from Adafruit library's redundant Wire.begin() call
@@ -118,7 +120,7 @@ bool HardwareInitializer::initializeRTC(DS3231Controller*& ds3231) {
 
     ds3231 = new DS3231Controller();
     if (!ds3231 || !ds3231->begin()) {
-        LOG_WARN(LOG_TAG_MAIN, "DS3231 not found - RTC features will be unavailable");
+        LOG_WARN(TAG, "DS3231 not found - RTC features will be unavailable");
         delete ds3231;
         ds3231 = nullptr;
         return false;
@@ -127,13 +129,13 @@ bool HardwareInitializer::initializeRTC(DS3231Controller*& ds3231) {
     // Verify DS3231 communication
     DateTime checkTime = ds3231->now();
     if (!checkTime.isValid() || checkTime.year() < 2020 || checkTime.year() > 2100) {
-        LOG_WARN(LOG_TAG_MAIN, "DS3231 returns invalid time - RTC features will be unavailable");
+        LOG_WARN(TAG, "DS3231 returns invalid time - RTC features will be unavailable");
         delete ds3231;
         ds3231 = nullptr;
         return false;
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "DS3231 initialized: %04d-%02d-%02d %02d:%02d:%02d",
+    LOG_INFO(TAG, "DS3231 initialized: %04d-%02d-%02d %02d:%02d:%02d",
              checkTime.year(), checkTime.month(), checkTime.day(),
              checkTime.hour(), checkTime.minute(), checkTime.second());
 
@@ -150,21 +152,21 @@ bool HardwareInitializer::initializeRTC(DS3231Controller*& ds3231) {
     time_t rtcTime = mktime(&timeinfo);
     struct timeval tv = { .tv_sec = rtcTime, .tv_usec = 0 };
     if (settimeofday(&tv, nullptr) == 0) {
-        LOG_INFO(LOG_TAG_MAIN, "System time set from RTC");
+        LOG_INFO(TAG, "System time set from RTC");
     } else {
-        LOG_WARN(LOG_TAG_MAIN, "Failed to set system time from RTC");
+        LOG_WARN(TAG, "Failed to set system time from RTC");
     }
 
     return true;
 }
 
 bool HardwareInitializer::initializeFRAM(rtstorage::RuntimeStorage*& storage) {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing RuntimeStorage (FRAM)...");
+    LOG_INFO(TAG, "Initializing RuntimeStorage (FRAM)...");
     storage = new rtstorage::RuntimeStorage();
     gRuntimeStorage = storage;
 
     if (!storage || !storage->begin(Wire, 0x50)) {
-        LOG_WARN(LOG_TAG_MAIN, "RuntimeStorage (FRAM) not found - runtime data will not persist");
+        LOG_WARN(TAG, "RuntimeStorage (FRAM) not found - runtime data will not persist");
         delete storage;
         storage = nullptr;
         gRuntimeStorage = nullptr;
@@ -173,11 +175,11 @@ bool HardwareInitializer::initializeFRAM(rtstorage::RuntimeStorage*& storage) {
 
     // Verify FRAM integrity
     if (!storage->verifyIntegrity()) {
-        LOG_WARN(LOG_TAG_MAIN, "FRAM data corrupted - formatting...");
+        LOG_WARN(TAG, "FRAM data corrupted - formatting...");
         if (storage->format()) {
-            LOG_INFO(LOG_TAG_MAIN, "FRAM formatted successfully");
+            LOG_INFO(TAG, "FRAM formatted successfully");
         } else {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to format FRAM");
+            LOG_ERROR(TAG, "Failed to format FRAM");
             delete storage;
             storage = nullptr;
             gRuntimeStorage = nullptr;
@@ -186,6 +188,6 @@ bool HardwareInitializer::initializeFRAM(rtstorage::RuntimeStorage*& storage) {
     }
 
     uint32_t framSize = storage->getSize();
-    LOG_INFO(LOG_TAG_MAIN, "RuntimeStorage initialized: %lu bytes available", framSize);
+    LOG_INFO(TAG, "RuntimeStorage initialized: %lu bytes available", framSize);
     return true;
 }

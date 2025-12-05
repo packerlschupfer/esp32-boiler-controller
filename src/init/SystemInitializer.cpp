@@ -11,7 +11,7 @@
 #include "LoggingMacros.h"
 #include "events/SystemEventsGenerated.h"
 
-// TAG is defined but not used directly - using LOG_TAG_MAIN instead
+// TAG is defined but not used directly - using TAG instead
 #ifndef LOG_NO_CUSTOM_LOGGER
 #include <Logger.h>
 #include <ConsoleBackend.h>
@@ -61,6 +61,8 @@
 #include <sys/time.h>
 #include <RuntimeStorage.h>
 
+
+static const char* TAG = "SystemInitializer";
 // Type alias to avoid IntelliSense confusion with namespace/class naming
 using RuntimeStoragePtr = class rtstorage::RuntimeStorage*;
 
@@ -92,8 +94,8 @@ SystemInitializer::~SystemInitializer() {
 }
 
 Result<void> SystemInitializer::initializeSystem() {
-    LOG_DEBUG(LOG_TAG_MAIN, "initializeSystem() called!");
-    LOG_INFO(LOG_TAG_MAIN, "Starting system initialization...");
+    LOG_DEBUG(TAG, "initializeSystem() called!");
+    LOG_INFO(TAG, "Starting system initialization...");
     
     // Initialize logging
     auto result = initializeLogging();
@@ -111,20 +113,20 @@ Result<void> SystemInitializer::initializeSystem() {
     currentStage_ = InitStage::SHARED_RESOURCES;
     
     // Initialize TaskManager watchdog
-    LOG_INFO(LOG_TAG_MAIN, "Initializing TaskManager watchdog...");
+    LOG_INFO(TAG, "Initializing TaskManager watchdog...");
     if (!SRP::getTaskManager().initWatchdog(30, true)) {  // 30 second timeout, panic on timeout
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to initialize TaskManager watchdog");
+        LOG_ERROR(TAG, "Failed to initialize TaskManager watchdog");
         return Result<void>(SystemError::WATCHDOG_INIT_FAILED, "Failed to initialize TaskManager watchdog");
     }
-    LOG_INFO(LOG_TAG_MAIN, "TaskManager watchdog initialized successfully");
+    LOG_INFO(TAG, "TaskManager watchdog initialized successfully");
     
     // Initialize ESP-IDF Task Watchdog via Watchdog class
-    LOG_INFO(LOG_TAG_MAIN, "Initializing ESP-IDF Task Watchdog...");
+    LOG_INFO(TAG, "Initializing ESP-IDF Task Watchdog...");
     if (!Watchdog::quickInit(30, true)) {  // 30 second timeout, panic on timeout
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to initialize ESP-IDF Task Watchdog");
+        LOG_ERROR(TAG, "Failed to initialize ESP-IDF Task Watchdog");
         // This is not fatal as it might already be initialized
     } else {
-        LOG_INFO(LOG_TAG_MAIN, "ESP-IDF Task Watchdog initialized successfully");
+        LOG_INFO(TAG, "ESP-IDF Task Watchdog initialized successfully");
     }
     
     // Initialize hardware
@@ -147,10 +149,10 @@ Result<void> SystemInitializer::initializeSystem() {
     result = initializeNetworkAsync();
     if (result.isError()) {
         // Network failure is not critical for basic operation, but set degraded mode
-        LOG_ERROR(LOG_TAG_MAIN, "Network initialization failed: %s - operating in degraded mode",
+        LOG_ERROR(TAG, "Network initialization failed: %s - operating in degraded mode",
                  result.message().c_str());
         SRP::setSystemStateEventBits(SystemEvents::SystemState::DEGRADED_MODE);
-        ErrorHandler::logError(LOG_TAG_MAIN, result.error(),
+        ErrorHandler::logError(TAG, result.error(),
                               "Network unavailable - operating in degraded mode");
     }
     currentStage_ = InitStage::NETWORK;
@@ -168,21 +170,21 @@ Result<void> SystemInitializer::initializeSystem() {
     result = initializeMQTT();
     if (result.isError()) {
         // MQTT failure is not critical but set degraded mode for monitoring
-        LOG_ERROR(LOG_TAG_MAIN, "MQTT initialization failed: %s - monitoring unavailable",
+        LOG_ERROR(TAG, "MQTT initialization failed: %s - monitoring unavailable",
                  result.message().c_str());
         SRP::setSystemStateEventBits(SystemEvents::SystemState::DEGRADED_MODE);
-        ErrorHandler::logError(LOG_TAG_MAIN, result.error(),
+        ErrorHandler::logError(TAG, result.error(),
                               "MQTT monitoring unavailable");
     }
     #else
-    LOG_INFO(LOG_TAG_MAIN, "Skipping MQTT initialization - handled by event-driven task");
+    LOG_INFO(TAG, "Skipping MQTT initialization - handled by event-driven task");
     #endif
     currentStage_ = InitStage::MQTT;
     
     // Initialize tasks
-    LOG_DEBUG(LOG_TAG_MAIN, "About to call initializeTasks at %lu ms", millis());
+    LOG_DEBUG(TAG, "About to call initializeTasks at %lu ms", millis());
     result = initializeTasks();
-    LOG_DEBUG(LOG_TAG_MAIN, "initializeTasks returned at %lu ms", millis());
+    LOG_DEBUG(TAG, "initializeTasks returned at %lu ms", millis());
     if (result.isError()) {
         cleanup();
         return result;
@@ -190,8 +192,8 @@ Result<void> SystemInitializer::initializeSystem() {
     currentStage_ = InitStage::TASKS;
     
     currentStage_ = InitStage::COMPLETE;
-    LOG_INFO(LOG_TAG_MAIN, "System initialization complete!");
-    LOG_INFO(LOG_TAG_MAIN, "Free heap: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "System initialization complete!");
+    LOG_INFO(TAG, "Free heap: %d bytes", ESP.getFreeHeap());
     
     return Result<void>();
 }
@@ -202,7 +204,7 @@ Result<void> SystemInitializer::initializeLogging() {
 }
 
 Result<void> SystemInitializer::initializeSharedResources() {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing shared resources...");
+    LOG_INFO(TAG, "Initializing shared resources...");
 
     // SharedResourceManager is a singleton - access directly, no ServiceContainer needed
     auto& resourceManager = SharedResourceManager::getInstance();
@@ -217,13 +219,13 @@ Result<void> SystemInitializer::initializeSharedResources() {
     // No need to initialize legacy global pointers
 
     // Create device ready event group for synchronization
-    LOG_INFO(LOG_TAG_MAIN, "Creating device ready event group...");
+    LOG_INFO(TAG, "Creating device ready event group...");
     deviceReadyEventGroup_ = xEventGroupCreate();
     if (!deviceReadyEventGroup_) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to create device ready event group");
+        LOG_ERROR(TAG, "Failed to create device ready event group");
         return Result<void>(SystemError::MEMORY_ALLOCATION_FAILED, "Failed to create device ready event group");
     }
-    LOG_INFO(LOG_TAG_MAIN, "Device ready event group created successfully");
+    LOG_INFO(TAG, "Device ready event group created successfully");
 
     // Clear any stale event bits from previous runs (prevents spurious actions on startup)
     // IMPORTANT: Do this BEFORE setting initial states
@@ -253,20 +255,20 @@ Result<void> SystemInitializer::initializeSharedResources() {
             clearedCount++;
         }
     }
-    LOG_INFO(LOG_TAG_MAIN, "Cleared stale event bits from %d event groups", clearedCount);
+    LOG_INFO(TAG, "Cleared stale event bits from %d event groups", clearedCount);
 
     // Initialize StateManager - this syncs enable states from settings to event bits
     // AFTER clearing stale bits but BEFORE tasks start
     StateManager::initialize();
 
     SystemSettings& settings = SRP::getSystemSettings();
-    LOG_INFO(LOG_TAG_MAIN, "Initial system states set - Boiler:%s, Heating:%s, Water:%s",
+    LOG_INFO(TAG, "Initial system states set - Boiler:%s, Heating:%s, Water:%s",
              settings.boilerEnabled ? "EN" : "DIS",
              settings.heatingEnabled ? "EN" : "DIS",
              settings.waterEnabled ? "EN" : "DIS");
 
-    LOG_INFO(LOG_TAG_MAIN, "Shared resources initialized successfully");
-    LOG_INFO(LOG_TAG_MAIN, "Total resources: %d (EventGroups: %d, Mutexes: %d)", 
+    LOG_INFO(TAG, "Shared resources initialized successfully");
+    LOG_INFO(TAG, "Total resources: %d (EventGroups: %d, Mutexes: %d)", 
              resourceManager.getTotalResourceCount(),
              resourceManager.getResourceCount(SharedResourceManager::ResourceType::EVENT_GROUP),
              resourceManager.getResourceCount(SharedResourceManager::ResourceType::MUTEX));
@@ -294,7 +296,7 @@ bool SystemInitializer::createMutex(SemaphoreHandle_t* mutex, const char* name) 
     if (*mutex == nullptr) {
         *mutex = xSemaphoreCreateMutex();
         if (*mutex == nullptr) {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to create %s mutex!", name);
+            LOG_ERROR(TAG, "Failed to create %s mutex!", name);
             return false;
         }
         createdMutexes_.push_back({mutex, name});
@@ -306,7 +308,7 @@ bool SystemInitializer::createEventGroup(EventGroupHandle_t* group, const char* 
     if (*group == nullptr) {
         *group = xEventGroupCreate();
         if (*group == nullptr) {
-            LOG_ERROR(LOG_TAG_MAIN, "Failed to create %s event group!", name);
+            LOG_ERROR(TAG, "Failed to create %s event group!", name);
             return false;
         }
         createdEventGroups_.push_back({group, name});
@@ -321,7 +323,7 @@ void SystemInitializer::registerTask(TaskHandle_t handle, const char* name) {
 }
 
 void SystemInitializer::cleanup() {
-    LOG_WARN(LOG_TAG_MAIN, "Performing system cleanup from stage: %d", static_cast<int>(currentStage_));
+    LOG_WARN(TAG, "Performing system cleanup from stage: %d", static_cast<int>(currentStage_));
     
     // Cleanup in reverse order of initialization
     if (currentStage_ >= InitStage::TASKS) {
@@ -353,24 +355,24 @@ void SystemInitializer::cleanup() {
     }
     
     currentStage_ = InitStage::NONE;
-    LOG_INFO(LOG_TAG_MAIN, "System cleanup complete");
+    LOG_INFO(TAG, "System cleanup complete");
 }
 
 // Cleanup methods
 void SystemInitializer::cleanupTasks() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up tasks...");
+    LOG_INFO(TAG, "Cleaning up tasks...");
     
     for (const auto& task : createdTasks_) {
         if (task.handle != nullptr) {
             vTaskDelete(task.handle);
-            LOG_INFO(LOG_TAG_MAIN, "Deleted task: %s", task.name);
+            LOG_INFO(TAG, "Deleted task: %s", task.name);
         }
     }
     createdTasks_.clear();
 }
 
 void SystemInitializer::cleanupMQTT() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up MQTT...");
+    LOG_INFO(TAG, "Cleaning up MQTT...");
 
     if (mqttManager_ != nullptr) {
         if (mqttManager_->isConnected()) {
@@ -382,7 +384,7 @@ void SystemInitializer::cleanupMQTT() {
 }
 
 void SystemInitializer::cleanupControlModules() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up control modules...");
+    LOG_INFO(TAG, "Cleaning up control modules...");
 
     // Cleanup singletons first (they may hold FreeRTOS resources like mutexes)
     BurnerRequestManager::cleanup();
@@ -396,7 +398,7 @@ void SystemInitializer::cleanupControlModules() {
 }
 
 void SystemInitializer::cleanupModbusDevices() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up Modbus devices...");
+    LOG_INFO(TAG, "Cleaning up Modbus devices...");
     
     if (runtimeStorage_ != nullptr) {
         delete runtimeStorage_;
@@ -426,18 +428,18 @@ void SystemInitializer::cleanupModbusDevices() {
 }
 
 void SystemInitializer::cleanupNetwork() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up network...");
+    LOG_INFO(TAG, "Cleaning up network...");
     // EthernetManager cleanup if needed
 }
 
 void SystemInitializer::cleanupHardware() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up hardware...");
+    LOG_INFO(TAG, "Cleaning up hardware...");
     // NOTE: modbusMaster cleanup is handled in main.cpp
     Serial1.end();
 }
 
 void SystemInitializer::cleanupSharedResources() {
-    LOG_INFO(LOG_TAG_MAIN, "Cleaning up shared resources...");
+    LOG_INFO(TAG, "Cleaning up shared resources...");
     
     // Get SharedResourceManager to clean up all resources
     auto& resourceManager = SharedResourceManager::getInstance();
@@ -479,18 +481,18 @@ void SystemInitializer::createBurnerControlTask() {
 }
 
 Result<void> SystemInitializer::initializeControlModules() {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing control modules...");
+    LOG_INFO(TAG, "Initializing control modules...");
     
     // Initialize centralized failsafe system first
-    LOG_INFO(LOG_TAG_MAIN, "Initializing centralized failsafe system...");
+    LOG_INFO(TAG, "Initializing centralized failsafe system...");
     CentralizedFailsafe::initialize();
     
     // Initialize temperature sensor fallback system
-    LOG_INFO(LOG_TAG_MAIN, "Initializing temperature sensor fallback...");
+    LOG_INFO(TAG, "Initializing temperature sensor fallback...");
     TemperatureSensorFallback::initialize();
     
     // Initialize burner request manager for thread-safe operations
-    LOG_INFO(LOG_TAG_MAIN, "Initializing burner request manager...");
+    LOG_INFO(TAG, "Initializing burner request manager...");
     BurnerRequestManager::initialize();
 
     // Get shared resources from SharedResourceManager
@@ -528,32 +530,32 @@ Result<void> SystemInitializer::initializeControlModules() {
     // and PumpControlModule::WaterPumpTask
 
     // Create BurnerSystemController (unified burner + pump control - H1 refactoring)
-    LOG_INFO(LOG_TAG_MAIN, "Creating BurnerSystemController...");
+    LOG_INFO(TAG, "Creating BurnerSystemController...");
     burnerSystemController_ = new BurnerSystemController();
     if (!burnerSystemController_) {
-        LOG_ERROR(LOG_TAG_MAIN, "Failed to allocate BurnerSystemController!");
+        LOG_ERROR(TAG, "Failed to allocate BurnerSystemController!");
         // Non-fatal - system can still operate with legacy pump tasks
     } else {
         auto initResult = burnerSystemController_->initialize();
         if (initResult.isError()) {
-            LOG_ERROR(LOG_TAG_MAIN, "BurnerSystemController init failed: %s", initResult.message().c_str());
+            LOG_ERROR(TAG, "BurnerSystemController init failed: %s", initResult.message().c_str());
             delete burnerSystemController_;
             burnerSystemController_ = nullptr;
         } else {
-            LOG_INFO(LOG_TAG_MAIN, "BurnerSystemController initialized successfully");
+            LOG_INFO(TAG, "BurnerSystemController initialized successfully");
         }
     }
 
     // Control modules are accessed via SystemInitializer member pointers or SRP
     // No ServiceContainer registration needed
 
-    LOG_INFO(LOG_TAG_MAIN, "Control modules initialized successfully");
+    LOG_INFO(TAG, "Control modules initialized successfully");
     return Result<void>();
 }
 
 Result<void> SystemInitializer::initializeMQTT() {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing MQTT...");
-    LOG_INFO(LOG_TAG_MAIN, "Free heap before MQTT creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Initializing MQTT...");
+    LOG_INFO(TAG, "Free heap before MQTT creation: %d bytes", ESP.getFreeHeap());
     
     #ifdef ENABLE_MQTT
     // Get MQTT manager singleton instance
@@ -582,10 +584,10 @@ Result<void> SystemInitializer::initializeMQTT() {
     // MQTTManager is accessed via SystemInitializer::getMQTTManager() or SRP
     // No ServiceContainer registration needed
 
-    LOG_INFO(LOG_TAG_MAIN, "MQTT manager initialized - Server: %s, Client ID: %s",
+    LOG_INFO(TAG, "MQTT manager initialized - Server: %s, Client ID: %s",
              mqttUri, MQTT_CLIENT_ID);
     #else
-    LOG_INFO(LOG_TAG_MAIN, "MQTT disabled in build configuration");
+    LOG_INFO(TAG, "MQTT disabled in build configuration");
     #endif
     
     return Result<void>();

@@ -14,7 +14,7 @@
 #include "LoggingMacros.h"
 #include <MutexGuard.h>
 
-static const char* TAG = "BurnerSysCtrl";
+static const char* TAG = "BurnerSystemController";
 
 BurnerSystemController::BurnerSystemController()
     : currentMode_(BurnerMode::OFF)

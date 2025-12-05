@@ -19,6 +19,8 @@
 #include <Watchdog.h>
 #include "freertos/semphr.h"
 
+
+static const char* TAG = "MB8ART";
 // Task configuration constants from SystemConstants
 // Timing strategy:
 // - MB8ART: 2.5s (critical boiler temperatures need faster updates)
@@ -47,7 +49,7 @@ static constexpr bool USE_MODBUS_COORDINATOR = true;
 void MB8ARTCombinedTaskEventDriven(void* parameter) {
     MB8ART* mb8art = static_cast<MB8ART*>(parameter);
     if (!mb8art) {
-        LOG_ERROR(LOG_TAG_MB8ART, "MB8ART device is null");
+        LOG_ERROR(TAG, "MB8ART device is null");
         vTaskDelete(NULL);
         return;
     }
@@ -65,12 +67,12 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
     uint32_t errorCount = 0;
     uint32_t errorsThisPeriod = 0;  // Track errors in current reporting period
     
-    LOG_INFO(LOG_TAG_MB8ART, "MB8ART Combined Task started (async event-driven)");
-    LOG_INFO(LOG_TAG_MB8ART, "Device in async mode - waiting for temperature updates");
+    LOG_INFO(TAG, "MB8ART Combined Task started (async event-driven)");
+    LOG_INFO(TAG, "Device in async mode - waiting for temperature updates");
     
     // In async mode, MB8ART automatically sends temperature updates
     // We don't need a timer to trigger reads
-    LOG_INFO(LOG_TAG_MB8ART, "MB8ART in async mode - no polling timer needed");
+    LOG_INFO(TAG, "MB8ART in async mode - no polling timer needed");
     
     // Register with watchdog after initialization is complete
     // Timeout should be 4x sensor read interval to allow for delays
@@ -81,9 +83,9 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
         watchdogTimeout
     );
     if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("MB8ART", wdtConfig)) {
-        LOG_ERROR(LOG_TAG_MB8ART, "Failed to register with watchdog");
+        LOG_ERROR(TAG, "Failed to register with watchdog");
     } else {
-        LOG_INFO(LOG_TAG_MB8ART, "Successfully registered with watchdog (%lu ms timeout)", watchdogTimeout);
+        LOG_INFO(TAG, "Successfully registered with watchdog (%lu ms timeout)", watchdogTimeout);
         (void)SRP::getTaskManager().feedWatchdog();  // Feed immediately after registration
     }
     
@@ -91,11 +93,11 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
         // Register with ModbusCoordinator
         auto& coordinator = ModbusCoordinator::getInstance();
         if (!coordinator.registerSensor(ModbusCoordinator::SensorType::MB8ART, mb8artTaskHandle)) {
-            LOG_ERROR(LOG_TAG_MB8ART, "Failed to register with ModbusCoordinator");
+            LOG_ERROR(TAG, "Failed to register with ModbusCoordinator");
             vTaskDelete(NULL);
             return;
         }
-        LOG_INFO(LOG_TAG_MB8ART, "Registered with ModbusCoordinator - waiting for coordinated reads");
+        LOG_INFO(TAG, "Registered with ModbusCoordinator - waiting for coordinated reads");
     }
     
     // Main event loop - async event-driven with periodic requests
@@ -129,13 +131,13 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
                 consecutiveCoordinatorTimeouts++;
                 if (consecutiveCoordinatorTimeouts >= MAX_COORDINATOR_TIMEOUTS) {
                     // Coordinator failed for 60s+ - signal failure for monitoring/recovery
-                    LOG_ERROR(LOG_TAG_MB8ART, "COORDINATOR FAILURE: No notification in %ds - signaling error",
+                    LOG_ERROR(TAG, "COORDINATOR FAILURE: No notification in %ds - signaling error",
                               consecutiveCoordinatorTimeouts * 30);
                     xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);
                     // Note: Direct read fallback removed - caused bus contention with coordinator
                     // Recovery requires coordinator restart or system reboot
                 } else {
-                    LOG_WARN(LOG_TAG_MB8ART, "No coordinator notification in 30s (timeout %d/%d)",
+                    LOG_WARN(TAG, "No coordinator notification in 30s (timeout %d/%d)",
                              consecutiveCoordinatorTimeouts, MAX_COORDINATOR_TIMEOUTS);
                 }
             } else {
@@ -156,7 +158,7 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
             auto reqResult = mb8art->requestTemperatures();
             (void)SRP::getTaskManager().feedWatchdog();  // Feed after Modbus operation
             if (!reqResult) {
-                LOG_WARN(LOG_TAG_MB8ART, "Failed to request temperatures");
+                LOG_WARN(TAG, "Failed to request temperatures");
                 errorCount++;
                 errorsThisPeriod++;
             }
@@ -177,7 +179,7 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
 
                 // Only log every 10th successful read to reduce log spam
                 if ((readCount % 10) == 0) {
-                    LOG_DEBUG(LOG_TAG_MB8ART, "Processed %zu temperature values (read #%lu)",
+                    LOG_DEBUG(TAG, "Processed %zu temperature values (read #%lu)",
                               result.value().size(), readCount);
                 }
 
@@ -186,7 +188,7 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
             } else {
                 errorCount++;
                 errorsThisPeriod++;
-                LOG_ERROR(LOG_TAG_MB8ART, "Failed to get temperature data - error: %d",
+                LOG_ERROR(TAG, "Failed to get temperature data - error: %d",
                           static_cast<int>(result.error()));
                 xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);
             }
@@ -194,7 +196,7 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
         
         // Check for stale data (no updates for > 5 seconds)
         if ((currentTime - xLastDataTime) > pdMS_TO_TICKS(5000)) {
-            LOG_WARN(LOG_TAG_MB8ART, "No temperature updates for 5 seconds - data may be stale");
+            LOG_WARN(TAG, "No temperature updates for 5 seconds - data may be stale");
             xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);
             errorCount++;
             errorsThisPeriod++;
@@ -208,19 +210,19 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
             // Only log statistics if there were errors in this period or in debug mode
             if (errorsThisPeriod > 0) {
                 float successRate = readCount > 0 ? (100.0f * readCount / (readCount + errorCount)) : 0.0f;
-                LOG_INFO(LOG_TAG_MB8ART, "Statistics - Reads: %lu, Errors: %lu (Period: %lu), Success rate: %d.%d%%",
+                LOG_INFO(TAG, "Statistics - Reads: %lu, Errors: %lu (Period: %lu), Success rate: %d.%d%%",
                          readCount, errorCount, errorsThisPeriod,
                          (int)successRate, (int)(successRate * 10) % 10);
             } else {
                 float successRate = readCount > 0 ? (100.0f * readCount / (readCount + errorCount)) : 0.0f;
-                LOG_DEBUG(LOG_TAG_MB8ART, "Statistics - Reads: %lu, Errors: %lu, Success rate: %d.%d%%",
+                LOG_DEBUG(TAG, "Statistics - Reads: %lu, Errors: %lu, Success rate: %d.%d%%",
                           readCount, errorCount,
                           (int)successRate, (int)(successRate * 10) % 10);
             }
             
             // Report device health
             if (errorCount > readCount / 10) {  // More than 10% errors
-                LOG_WARN(LOG_TAG_MB8ART, "High error rate detected");
+                LOG_WARN(TAG, "High error rate detected");
                 xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);
             }
             
@@ -259,7 +261,7 @@ bool requestImmediateSensorRead() {
 bool changeSensorReadInterval(uint32_t newIntervalMs) {
     // In async mode, MB8ART controls its own timing
     // This function is kept for API compatibility
-    LOG_WARN(LOG_TAG_MB8ART, "Cannot change interval - MB8ART is in async mode");
+    LOG_WARN(TAG, "Cannot change interval - MB8ART is in async mode");
     return false;
 }
 
@@ -478,11 +480,11 @@ void updateSensorData(const std::vector<float>& temperatureData) {
         static std::atomic<bool> firstReadLogged{false};
         if (!firstReadLogged.load() && !firstRead.load()) {  // Only log once on first read completion
             if (firstReadLogged.exchange(true) == false) {
-                LOG_INFO(LOG_TAG_MB8ART, "First sensor read completed successfully - sensors initialized");
+                LOG_INFO(TAG, "First sensor read completed successfully - sensors initialized");
             }
         }
     } else {
-        LOG_ERROR(LOG_TAG_MB8ART, "Failed to lock sensor readings mutex");
+        LOG_ERROR(TAG, "Failed to lock sensor readings mutex");
         anySensorError = true;
     }
     

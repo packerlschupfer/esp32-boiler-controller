@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <cstring>
 
+static const char* TAG = "Monitoring";
+
 // Timer handles for different monitoring intervals
 static TimerHandle_t healthCheckTimer = nullptr;
 static TimerHandle_t detailedMonitorTimer = nullptr;
@@ -89,7 +91,7 @@ static void detailedMonitorTimerCallback(TimerHandle_t xTimer) {
  * @brief Event-driven monitoring task main function
  */
 void MonitoringTaskEventDriven(void* pvParameters) {
-    LOG_INFO(LOG_TAG_MONITORING, "Task started @ %lu ms", millis());
+    LOG_INFO(TAG, "Task started @ %lu ms", millis());
     
     // Register with watchdog with simple approach
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::enabled(
@@ -99,55 +101,55 @@ void MonitoringTaskEventDriven(void* pvParameters) {
 
     bool registered = SRP::getTaskManager().registerCurrentTaskWithWatchdog("Monitoring", wdtConfig);
     if (registered) {
-        LOG_INFO(LOG_TAG_MONITORING, "WDT registered %lums", SystemConstants::System::WDT_MONITORING_MS);
+        LOG_INFO(TAG, "WDT registered %lums", SystemConstants::System::WDT_MONITORING_MS);
         (void)SRP::getTaskManager().feedWatchdog();
     } else {
-        LOG_WARN(LOG_TAG_MONITORING, "WDT registration failed - continuing anyway");
+        LOG_WARN(TAG, "WDT registration failed - continuing anyway");
     }
     
     // Initialize event aggregator - clean up any existing one first (handles task restart)
     monitoringEventsReady = false;  // Mark as not ready during initialization
     if (monitoringEvents != nullptr) {
-        LOG_WARN(LOG_TAG_MONITORING, "Cleaning up existing EventAggregator (task restart?)");
+        LOG_WARN(TAG, "Cleaning up existing EventAggregator (task restart?)");
         delete monitoringEvents;
         monitoringEvents = nullptr;
     }
 
-    LOG_DEBUG(LOG_TAG_MONITORING, "Creating new EventAggregator...");
+    LOG_DEBUG(TAG, "Creating new EventAggregator...");
     monitoringEvents = new EventAggregator();
     if (monitoringEvents == nullptr) {
-        LOG_ERROR(LOG_TAG_MONITORING, "Failed to allocate memory for EventAggregator");
+        LOG_ERROR(TAG, "Failed to allocate memory for EventAggregator");
         vTaskDelete(NULL);
         return;
     }
     if (monitoringEvents->getHandle() == nullptr) {
-        LOG_ERROR(LOG_TAG_MONITORING, "EventAggregator created but handle is NULL");
+        LOG_ERROR(TAG, "EventAggregator created but handle is NULL");
         delete monitoringEvents;
         monitoringEvents = nullptr;
         vTaskDelete(NULL);
         return;
     }
-    LOG_DEBUG(LOG_TAG_MONITORING, "Event aggregator created successfully with handle: %p",
+    LOG_DEBUG(TAG, "Event aggregator created successfully with handle: %p",
               monitoringEvents->getHandle());
     
     // Feed watchdog before waiting for sensors (even if registration failed)
     (void)SRP::getTaskManager().feedWatchdog();
     
     // Skip waiting for sensors - monitoring can work without them initially
-    LOG_INFO(LOG_TAG_MONITORING, "Skipping sensor wait to avoid blocking at %lu ms", millis());
+    LOG_INFO(TAG, "Skipping sensor wait to avoid blocking at %lu ms", millis());
     
     // Just check if sensors are already ready without waiting
     EventBits_t sensorBits = xEventGroupGetBits(SRP::getSensorEventGroup());
     if (sensorBits & SystemEvents::SensorUpdate::FIRST_READ_COMPLETE) {
-        LOG_INFO(LOG_TAG_MONITORING, "Sensors already ready at %lu ms", millis());
+        LOG_INFO(TAG, "Sensors already ready at %lu ms", millis());
     } else {
-        LOG_INFO(LOG_TAG_MONITORING, "Sensors not ready yet at %lu ms - will monitor anyway", millis());
+        LOG_INFO(TAG, "Sensors not ready yet at %lu ms - will monitor anyway", millis());
     }
     
     // Feed watchdog
     (void)SRP::getTaskManager().feedWatchdog();
 
-    LOG_INFO(LOG_TAG_MONITORING, "Starting event-driven monitoring at %lu ms", millis());
+    LOG_INFO(TAG, "Starting event-driven monitoring at %lu ms", millis());
 
     // Create timers for periodic monitoring
     healthCheckTimer = xTimerCreate(
@@ -167,7 +169,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
     );
 
     if (!healthCheckTimer || !detailedMonitorTimer) {
-        LOG_ERROR(LOG_TAG_MONITORING, "Failed to create timers");
+        LOG_ERROR(TAG, "Failed to create timers");
         // Cleanup any timer that was created
         if (healthCheckTimer) {
             xTimerDelete(healthCheckTimer, 0);
@@ -189,7 +191,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
     // Start timers
     if (xTimerStart(healthCheckTimer, pdMS_TO_TICKS(100)) != pdPASS ||
         xTimerStart(detailedMonitorTimer, pdMS_TO_TICKS(100)) != pdPASS) {
-        LOG_ERROR(LOG_TAG_MONITORING, "Failed to start timers");
+        LOG_ERROR(TAG, "Failed to start timers");
         // Cleanup timers
         xTimerDelete(healthCheckTimer, 0);
         xTimerDelete(detailedMonitorTimer, 0);
@@ -204,7 +206,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
         return;
     }
 
-    LOG_INFO(LOG_TAG_MONITORING, "Timers started - Health: %ums, Detailed: %ums",
+    LOG_INFO(TAG, "Timers started - Health: %ums, Detailed: %ums",
              HEALTH_CHECK_INTERVAL_MS, DETAILED_MONITOR_INTERVAL_MS);
 
     // Mark event aggregator as ready - timer callbacks can now safely access it
@@ -213,24 +215,24 @@ void MonitoringTaskEventDriven(void* pvParameters) {
     // Feed watchdog before entering main loop
     (void)SRP::getTaskManager().feedWatchdog();
 
-    LOG_DEBUG(LOG_TAG_MONITORING, "Initialization complete, entering main loop...");
+    LOG_DEBUG(TAG, "Initialization complete, entering main loop...");
 
     // Main event loop
     EventGroupHandle_t eventGroup = monitoringEvents->getHandle();
     if (!eventGroup) {
-        LOG_ERROR(LOG_TAG_MONITORING, "Failed to get event group handle!");
+        LOG_ERROR(TAG, "Failed to get event group handle!");
         vTaskDelete(NULL);
         return;
     }
     
-    LOG_DEBUG(LOG_TAG_MONITORING, "Got event group handle: %p", eventGroup);
+    LOG_DEBUG(TAG, "Got event group handle: %p", eventGroup);
     
     const EventBits_t ALL_EVENTS = MONITOR_EVENT_HEALTH_CHECK | MONITOR_EVENT_DETAILED | 
                                    MONITOR_EVENT_ON_DEMAND | MONITOR_EVENT_CRITICAL;
 
     uint32_t loopCount = 0;
     
-    LOG_DEBUG(LOG_TAG_MONITORING, "About to enter main loop...");
+    LOG_DEBUG(TAG, "About to enter main loop...");
     
     // Feed watchdog once more before entering loop
     (void)SRP::getTaskManager().feedWatchdog();
@@ -241,7 +243,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
         
         // Use ESP_LOG directly for critical messages to bypass custom logger
         if (loopCount < 10) {
-            LOG_DEBUG(LOG_TAG_MONITORING, "Loop %u @ %lu ms", loopCount, millis());
+            LOG_DEBUG(TAG, "Loop %u @ %lu ms", loopCount, millis());
         }
         
         // Wait for any monitoring event with shorter timeout
@@ -258,12 +260,12 @@ void MonitoringTaskEventDriven(void* pvParameters) {
         
         // Only log watchdog feed occasionally to reduce log pressure
         if (loopCount % 20 == 0) {
-            LOG_VERBOSE(LOG_TAG_MONITORING, "WDT fed @ %lu ms", millis());
+            LOG_VERBOSE(TAG, "WDT fed @ %lu ms", millis());
         }
 
         // Debug logging after wait
         if (events != 0 && loopCount < 10) {
-            LOG_VERBOSE(LOG_TAG_MONITORING, "Events: 0x%08X", events);
+            LOG_VERBOSE(TAG, "Events: 0x%08X", events);
         }
         
         // Increment loop counter
@@ -282,14 +284,14 @@ void MonitoringTaskEventDriven(void* pvParameters) {
             
             // Only log if heap is getting low
             if (freeHeap < 50000 || minFreeHeap < 30000) {
-                LOG_WARN(LOG_TAG_MONITORING, "Low heap! Free: %u, Min: %u", 
+                LOG_WARN(TAG, "Low heap! Free: %u, Min: %u", 
                          freeHeap, minFreeHeap);
             }
             
             // Log health check completion every 10th time (50 seconds)
             static uint32_t healthCheckCount = 0;
             if (++healthCheckCount % 10 == 0) {
-                LOG_VERBOSE(LOG_TAG_MONITORING, "Health check #%u - heap: %u", 
+                LOG_VERBOSE(TAG, "Health check #%u - heap: %u", 
                          healthCheckCount, freeHeap);
             }
             
@@ -299,7 +301,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
 
         // Handle detailed monitoring event
         if (events & MONITOR_EVENT_DETAILED) {
-            LOG_INFO(LOG_TAG_MONITORING, "=== DETAILED MONITOR REPORT ===");
+            LOG_INFO(TAG, "=== DETAILED MONITOR REPORT ===");
 
             // Compact status report with yields between sections to prevent starving other tasks
             // This is important because logAllTasks() iterates through all 32 tasks
@@ -320,7 +322,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
 
         // Handle on-demand report
         if (events & MONITOR_EVENT_ON_DEMAND) {
-            LOG_INFO(LOG_TAG_MONITORING, "On-demand report requested");
+            LOG_INFO(TAG, "On-demand report requested");
             // Trigger both health check and detailed monitoring
             if (monitoringEvents != nullptr) {
                 monitoringEvents->setEvent(MONITOR_EVENT_HEALTH_CHECK | MONITOR_EVENT_DETAILED);
@@ -329,7 +331,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
 
         // Handle critical alerts
         if (events & MONITOR_EVENT_CRITICAL) {
-            LOG_ERROR(LOG_TAG_MONITORING, "!!! CRITICAL ALERT !!!");
+            LOG_ERROR(TAG, "!!! CRITICAL ALERT !!!");
             // Dump error log for diagnostics
             dumpErrorLog(10);
             // Force immediate detailed monitoring
@@ -455,7 +457,7 @@ void MonitoringTask::taskFunction(void* pvParameters) {
 static void logNetworkStatus() {
     // Compact network status
     bool isConnected = EthernetManager::isConnected();
-    LOG_DEBUG(LOG_TAG_MONITORING, "ETH: %s", isConnected ? "UP" : "DOWN");
+    LOG_DEBUG(TAG, "ETH: %s", isConnected ? "UP" : "DOWN");
 }
 
 static void logSensorStatus() {
@@ -472,7 +474,7 @@ static void logSensorStatus() {
 
         // Batch all sensor data into fewer log lines for efficiency
         // Temperature_t is already in tenths of degrees
-        LOG_DEBUG(LOG_TAG_MONITORING, "Sens BO:%d.%d BR:%d.%d WT:%d.%d WO:%d.%d",
+        LOG_DEBUG(TAG, "Sens BO:%d.%d BR:%d.%d WT:%d.%d WO:%d.%d",
                  readings.isBoilerTempOutputValid ? readings.boilerTempOutput / 10 : -99,
                  readings.isBoilerTempOutputValid ? abs(readings.boilerTempOutput % 10) : 9,
                  readings.isBoilerTempReturnValid ? readings.boilerTempReturn / 10 : -99,
@@ -482,7 +484,7 @@ static void logSensorStatus() {
                  readings.isWaterHeaterTempOutputValid ? readings.waterHeaterTempOutput / 10 : -99,
                  readings.isWaterHeaterTempOutputValid ? abs(readings.waterHeaterTempOutput % 10) : 9);
 
-        LOG_DEBUG(LOG_TAG_MONITORING, "Env O:%d.%d I:%d.%d HR:%d.%d WR:%d.%d",
+        LOG_DEBUG(TAG, "Env O:%d.%d I:%d.%d HR:%d.%d WR:%d.%d",
                  readings.isOutsideTempValid ? readings.outsideTemp / 10 : -99,
                  readings.isOutsideTempValid ? abs(readings.outsideTemp % 10) : 9,
                  readings.isInsideTempValid ? readings.insideTemp / 10 : -99,
@@ -509,7 +511,7 @@ static void logRelayStatus() {
         SharedRelayReadings relays = SRP::getRelayReadings();
 
         // Compact relay status - single line with all states
-        LOG_DEBUG(LOG_TAG_MONITORING, "Rly HP:%d WP:%d B:%d HP:%d WM:%d V:%d S:%d",
+        LOG_DEBUG(TAG, "Rly HP:%d WP:%d B:%d HP:%d WM:%d V:%d S:%d",
                  relays.relayHeatingPump,
                  relays.relayWaterPump,
                  relays.relayBurnerEnable,
@@ -523,11 +525,11 @@ static void logRelayStatus() {
 }
 
 static void dumpErrorLog(size_t maxErrors) {
-    LOG_INFO(LOG_TAG_MONITORING, "=== ERROR LOG DUMP ===");
+    LOG_INFO(TAG, "=== ERROR LOG DUMP ===");
     
     // Get error statistics first
     ErrorLogFRAM::ErrorStats stats = ErrorLogFRAM::getStats();
-    LOG_INFO(LOG_TAG_MONITORING, "Error Stats: Total=%lu, Critical=%lu, Unique=%u", 
+    LOG_INFO(TAG, "Error Stats: Total=%lu, Critical=%lu, Unique=%u", 
              stats.totalErrors, stats.criticalErrors, stats.uniqueErrors);
     
     if (stats.lastErrorTime > 0) {
@@ -536,7 +538,7 @@ static void dumpErrorLog(size_t maxErrors) {
         uint32_t hours = timeSinceLast / 3600;
         uint32_t minutes = (timeSinceLast % 3600) / 60;
         uint32_t seconds = timeSinceLast % 60;
-        LOG_INFO(LOG_TAG_MONITORING, "Last error: %02lu:%02lu:%02lu ago", hours, minutes, seconds);
+        LOG_INFO(TAG, "Last error: %02lu:%02lu:%02lu ago", hours, minutes, seconds);
     }
     
     // Get recent errors
@@ -544,7 +546,7 @@ static void dumpErrorLog(size_t maxErrors) {
     size_t errorCount = ErrorLogFRAM::getErrorCount();
     size_t displayCount = std::min(errorCount, maxErrors);
     
-    LOG_INFO(LOG_TAG_MONITORING, "Recent Errors (showing %zu of %zu):", displayCount, errorCount);
+    LOG_INFO(TAG, "Recent Errors (showing %zu of %zu):", displayCount, errorCount);
     
     for (size_t i = 0; i < displayCount; i++) {
         if (ErrorLogFRAM::getError(i, entry)) {
@@ -558,36 +560,36 @@ static void dumpErrorLog(size_t maxErrors) {
             
             // Log the error entry
             if (entry.count > 1) {
-                LOG_INFO(LOG_TAG_MONITORING, "[%zu] %s (code: %lu) x%u - %02lu:%02lu ago",
+                LOG_INFO(TAG, "[%zu] %s (code: %lu) x%u - %02lu:%02lu ago",
                          i, errorStr, entry.errorCode, entry.count, minutesAgo, secondsAgo);
             } else {
-                LOG_INFO(LOG_TAG_MONITORING, "[%zu] %s (code: %lu) - %02lu:%02lu ago",
+                LOG_INFO(TAG, "[%zu] %s (code: %lu) - %02lu:%02lu ago",
                          i, errorStr, entry.errorCode, minutesAgo, secondsAgo);
             }
             
             // Log message and context if available
             if (strlen(entry.message) > 0) {
-                LOG_INFO(LOG_TAG_MONITORING, "    Msg: %s", entry.message);
+                LOG_INFO(TAG, "    Msg: %s", entry.message);
             }
             if (strlen(entry.context) > 0) {
-                LOG_INFO(LOG_TAG_MONITORING, "    Ctx: %s", entry.context);
+                LOG_INFO(TAG, "    Ctx: %s", entry.context);
             }
         }
     }
     
     // Get critical errors specifically
-    LOG_INFO(LOG_TAG_MONITORING, "Critical Errors:");
+    LOG_INFO(TAG, "Critical Errors:");
     ErrorLogFRAM::ErrorEntry criticalErrors[5];
     size_t criticalCount = ErrorLogFRAM::getCriticalErrors(criticalErrors, 5);
     
     for (size_t i = 0; i < criticalCount; i++) {
         const char* errorStr = ErrorHandler::errorToString(static_cast<SystemError>(criticalErrors[i].errorCode));
-        LOG_INFO(LOG_TAG_MONITORING, "  [CRIT] %s (code: %lu) - %s",
+        LOG_INFO(TAG, "  [CRIT] %s (code: %lu) - %s",
                  errorStr, criticalErrors[i].errorCode, 
                  criticalErrors[i].context[0] ? criticalErrors[i].context : "No context");
     }
     
-    LOG_INFO(LOG_TAG_MONITORING, "=== END ERROR LOG ===");
+    LOG_INFO(TAG, "=== END ERROR LOG ===");
 }
 
 static void logCompactStatus() {
@@ -598,22 +600,22 @@ static void logCompactStatus() {
     uint32_t minutes = (uptimeMs % 3600000) / 60000;
     uint32_t seconds = (uptimeMs % 60000) / 1000;
     
-    LOG_DEBUG(LOG_TAG_MONITORING, "Up %dd %02d:%02d:%02d", days, hours, minutes, seconds);
+    LOG_DEBUG(TAG, "Up %dd %02d:%02d:%02d", days, hours, minutes, seconds);
     
     // Get task count
     UBaseType_t taskCount = uxTaskGetNumberOfTasks();
-    LOG_DEBUG(LOG_TAG_MONITORING, "Tasks: %d", taskCount);
+    LOG_DEBUG(TAG, "Tasks: %d", taskCount);
 }
 
 static void logAllTasks() {
     // Get number of tasks
     UBaseType_t taskCount = uxTaskGetNumberOfTasks();
-    LOG_DEBUG(LOG_TAG_MONITORING, "=== TASKS (%u) ===", taskCount);
+    LOG_DEBUG(TAG, "=== TASKS (%u) ===", taskCount);
     
     // Allocate array for task status
     TaskStatus_t* taskStatusArray = (TaskStatus_t*)pvPortMalloc(taskCount * sizeof(TaskStatus_t));
     if (taskStatusArray == nullptr) {
-        LOG_ERROR(LOG_TAG_MONITORING, "Alloc fail");
+        LOG_ERROR(TAG, "Alloc fail");
         return;
     }
     
@@ -627,7 +629,7 @@ static void logAllTasks() {
     int suspendedCount = 0;
     
     // Log header
-    LOG_DEBUG(LOG_TAG_MONITORING, "Name          St Pri Stack Core");
+    LOG_DEBUG(TAG, "Name          St Pri Stack Core");
     
     // Display each task (no sorting - keep creation order)
     // Yield periodically to prevent starving other tasks during this long iteration
@@ -674,7 +676,7 @@ static void logAllTasks() {
         strncpy(shortName, taskStatusArray[i].pcTaskName, 12);
         shortName[12] = '\0';
 
-        LOG_DEBUG(LOG_TAG_MONITORING, "%-12s %3s %2d %5u %3s%s",
+        LOG_DEBUG(TAG, "%-12s %3s %2d %5u %3s%s",
                  shortName,
                  stateStr,
                  taskStatusArray[i].uxCurrentPriority,
@@ -688,10 +690,10 @@ static void logAllTasks() {
         }
     }
     
-    LOG_DEBUG(LOG_TAG_MONITORING, "=== END ===");
+    LOG_DEBUG(TAG, "=== END ===");
     
     // Log issues summary
-    LOG_DEBUG(LOG_TAG_MONITORING, "Issues: L%d B%d S%d", 
+    LOG_DEBUG(TAG, "Issues: L%d B%d S%d", 
              lowStackCount, blockedCount, suspendedCount);
     
     // Free memory

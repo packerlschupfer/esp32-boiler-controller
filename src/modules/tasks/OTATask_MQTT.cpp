@@ -4,6 +4,8 @@
 #include "core/SystemResourceProvider.h"
 #include <ArduinoJson.h>
 
+static const char* TAG = "OTA";
+
 // Static storage for progress tracking
 static unsigned int lastProgress = 0;
 static unsigned int lastTotal = 0;
@@ -172,6 +174,6 @@ bool OTATask::initWithMQTT() {
     // Publish initial status
     publishOTAStatus("ready");
     
-    LOG_INFO(LOG_TAG_OTA, "OTA initialized with MQTT status reporting");
+    LOG_INFO(TAG, "OTA initialized with MQTT status reporting");
     return true;
 }

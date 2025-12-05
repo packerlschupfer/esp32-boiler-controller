@@ -8,8 +8,10 @@
 #include "core/SystemResourceProvider.h"
 #include "events/SystemEventsGenerated.h"
 
+
+static const char* TAG = "NetworkInitializer";
 Result<void> NetworkInitializer::initializeAsync() {
-    LOG_INFO(LOG_TAG_MAIN, "Starting network initialization (async)...");
+    LOG_INFO(TAG, "Starting network initialization (async)...");
 
     unsigned long ethStartTime = millis();
 
@@ -30,17 +32,17 @@ Result<void> NetworkInitializer::initializeAsync() {
         IPAddress(ETH_DNS1),
         IPAddress(ETH_DNS2)
     );
-    LOG_INFO(LOG_TAG_MAIN, "Using static IP: %d.%d.%d.%d", ETH_STATIC_IP);
+    LOG_INFO(TAG, "Using static IP: %d.%d.%d.%d", ETH_STATIC_IP);
 #else
-    LOG_INFO(LOG_TAG_MAIN, "Using DHCP");
+    LOG_INFO(TAG, "Using DHCP");
 #endif
 
     if (!EthernetManager::initializeAsync(ethConfig)) {
         return Result<void>(SystemError::NETWORK_INIT_FAILED, "Failed to start Ethernet");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Ethernet PHY initialization started (async) in %lu ms", millis() - ethStartTime);
-    LOG_INFO(LOG_TAG_MAIN, "Network will connect in background...");
+    LOG_INFO(TAG, "Ethernet PHY initialization started (async) in %lu ms", millis() - ethStartTime);
+    LOG_INFO(TAG, "Network will connect in background...");
 
     // Create a task to monitor network connection
     xTaskCreate(
@@ -56,17 +58,17 @@ Result<void> NetworkInitializer::initializeAsync() {
 }
 
 Result<void> NetworkInitializer::initializeBlocking() {
-    LOG_INFO(LOG_TAG_MAIN, "Initializing network (blocking)...");
+    LOG_INFO(TAG, "Initializing network (blocking)...");
 
 #ifdef ETH_MAC_ADDRESS
     uint8_t mac[] = ETH_MAC_ADDRESS;
     EthernetManager::setMacAddress(mac);
-    LOG_INFO(LOG_TAG_MAIN, "Using custom MAC address");
+    LOG_INFO(TAG, "Using custom MAC address");
 #endif
 
     unsigned long ethStartTime = millis();
 
-    LOG_INFO(LOG_TAG_MAIN, "Starting Ethernet PHY early initialization");
+    LOG_INFO(TAG, "Starting Ethernet PHY early initialization");
     EthernetManager::earlyInit();
 
     delay(10);
@@ -76,14 +78,14 @@ Result<void> NetworkInitializer::initializeBlocking() {
         return Result<void>(SystemError::NETWORK_INIT_FAILED, "Failed to start Ethernet");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Ethernet initialization started in %lu ms", millis() - ethStartTime);
+    LOG_INFO(TAG, "Ethernet initialization started in %lu ms", millis() - ethStartTime);
 
     // Wait for connection
     if (!EthernetManager::waitForConnection(ETH_CONNECTION_TIMEOUT_MS)) {
         return Result<void>(SystemError::NETWORK_TIMEOUT, "Ethernet connection timeout");
     }
 
-    LOG_INFO(LOG_TAG_MAIN, "Network initialized successfully");
+    LOG_INFO(TAG, "Network initialized successfully");
     EthernetManager::logEthernetStatus();
 
     // Set network ready bit for other tasks
