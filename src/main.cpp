@@ -5,7 +5,6 @@
 #include "init/SystemInitializer.h"
 #include "utils/ErrorHandler.h"
 // #include "utils/EarlyLogCapture.h"  // Not needed - monitor connects early
-#include "shared/GlobalComponents.h"
 #include <TaskManager.h>
 #include <Watchdog.h>
 #include "LoggingMacros.h"
@@ -286,11 +285,7 @@ void setup() {
     // Re-apply task_wdt suppression after system init (in case it was overridden)
     // These errors come from NimBLE and are harmless
     esp_log_level_set("task_wdt", ESP_LOG_NONE);
-    
-    // Update legacy global pointers
-    getMB8ART();  // Updates MB8ART1
-    getRYN4();    // Updates RYN41
-    
+
     // Control modules are initialized in SystemInitializer
     // Access them using SRP::getXXX() methods (ServiceContainer removed)
 
@@ -422,29 +417,6 @@ void updateSystemHealth() {
         }
     }
     // Fast blink handled in error conditions above
-}
-
-// Accessor functions for global components
-MB8ART* getMB8ART() {
-    MB8ART* device = gSystemInitializer ? gSystemInitializer->getMB8ART() : nullptr;
-    // Update legacy global pointer
-    MB8ART1 = device;
-    return device;
-}
-
-RYN4* getRYN4() {
-    RYN4* device = gSystemInitializer ? gSystemInitializer->getRYN4() : nullptr;
-    // Update legacy global pointer
-    RYN41 = device;
-    return device;
-}
-
-MQTTManager* getMQTTManager() {
-    return gSystemInitializer ? gSystemInitializer->getMQTTManager() : nullptr;
-}
-
-PIDControlModule* getPIDControl() {
-    return gSystemInitializer ? gSystemInitializer->getPIDControl() : nullptr;
 }
 
 // Logging configuration functions
