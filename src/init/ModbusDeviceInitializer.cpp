@@ -22,6 +22,12 @@
 // Core services
 #include "core/SystemResourceProvider.h"
 
+// Unified hardware mapping
+#include "config/RelayHardwareConfig.h"
+#include "config/SensorHardwareConfig.h"
+#include "shared/RelayBindings.h"
+#include "shared/SensorBindings.h"
+
 // Tasks
 #include "modules/tasks/MB8ARTTasks.h"
 #include "modules/tasks/MB8ARTProcessingTask.h"
@@ -49,6 +55,13 @@ namespace HAL {
 
 Result<void> ModbusDeviceInitializer::initializeDevices(SystemInitializer* initializer) {
     LOG_INFO(LOG_TAG_MAIN, "Initializing Modbus devices...");
+
+    // ========== Initialize Hardware Mapping Bindings ==========
+    LOG_INFO(LOG_TAG_MAIN, "Initializing unified hardware mapping bindings...");
+    RelayBindings::initialize();
+    SensorBindings::initialize();
+    ANDRTF3Bindings::initialize();
+    LOG_INFO(LOG_TAG_MAIN, "Hardware mapping bindings initialized");
 
     // ModbusRTU now supports proper watchdog control - disable during device initialization
     LOG_INFO(LOG_TAG_MAIN, "Disabling ModbusRTU watchdog for device initialization...");
@@ -121,6 +134,11 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
     if (!initializer->mb8art_) {
         return Result<void>(SystemError::MEMORY_ALLOCATION_FAILED, "Failed to create MB8ART device");
     }
+
+    // Bind hardware config and sensor pointers (unified mapping)
+    LOG_INFO(LOG_TAG_MAIN, "Binding MB8ART sensor pointers...");
+    initializer->mb8art_->setHardwareConfig(SensorHardware::CONFIGS.data());
+    initializer->mb8art_->bindSensorPointers(SensorBindings::getBindingArray());
 
     // Configure MB8ART with event group
     LOG_INFO(LOG_TAG_MAIN, "Configuring MB8ART with device ready event group...");
@@ -228,6 +246,11 @@ void ModbusDeviceInitializer::initializeANDRTF3(SystemInitializer* initializer) 
 
     LOG_INFO(LOG_TAG_MAIN, "ANDRTF3 instance created successfully");
 
+    // Bind temperature pointers (unified mapping)
+    LOG_INFO(LOG_TAG_MAIN, "Binding ANDRTF3 temperature pointers...");
+    initializer->andrtf3_->bindTemperaturePointers(ANDRTF3Bindings::insideTempPtr,
+                                                    ANDRTF3Bindings::insideTempValidPtr);
+
     // Configure after creation
     andrtf3::ANDRTF3::Config config = initializer->andrtf3_->getConfig();
     config.timeout = 1000;
@@ -262,6 +285,11 @@ Result<void> ModbusDeviceInitializer::initializeRYN4(SystemInitializer* initiali
         return Result<void>(SystemError::MEMORY_ALLOCATION_FAILED, "Failed to create RYN4 device");
     }
     LOG_INFO(LOG_TAG_MAIN, "RYN4 instance created successfully");
+
+    // Bind hardware config and relay pointers (unified mapping)
+    LOG_INFO(LOG_TAG_MAIN, "Binding RYN4 relay pointers...");
+    initializer->ryn4_->setHardwareConfig(RelayHardware::CONFIGS.data());
+    initializer->ryn4_->bindRelayPointers(RelayBindings::getPointerArray());
 
     // Configure with event group
     LOG_INFO(LOG_TAG_MAIN, "Configuring RYN4 with device ready event group...");

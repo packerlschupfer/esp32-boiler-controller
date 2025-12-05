@@ -5,6 +5,7 @@
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/tasks/RelayControlTask.h"
 #include "config/SystemConstants.h"
+#include "config/RelayIndices.h"
 #include "events/SystemEventsGenerated.h"
 #include "shared/SharedRelayReadings.h"
 #include "shared/SharedSensorReadings.h"
@@ -374,8 +375,8 @@ Temperature_t BurnerSystemController::getCurrentTargetTemp() const {
 // Private Methods
 // ============================================================================
 
-std::vector<bool> BurnerSystemController::buildRelayStates(BurnerMode mode, PowerLevel power,
-                                                           bool heatingPump, bool waterPump) {
+std::array<bool, 8> BurnerSystemController::buildRelayStates(BurnerMode mode, PowerLevel power,
+                                                             bool heatingPump, bool waterPump) {
     // RYN4 relay mapping (8 relays):
     // Relay 1: HEATING_PUMP
     // Relay 2: WATER_PUMP
@@ -384,32 +385,32 @@ std::vector<bool> BurnerSystemController::buildRelayStates(BurnerMode mode, Powe
     // Relay 5: WATER_MODE
     // Relay 6-8: Unused
 
-    std::vector<bool> states(8, false);
+    std::array<bool, 8> states = {};  // Initialize all to false
 
     // Pumps
-    states[0] = heatingPump;  // Relay 1
-    states[1] = waterPump;    // Relay 2
+    states[RelayIndex::HEATING_PUMP] = heatingPump;
+    states[RelayIndex::WATER_PUMP]   = waterPump;
 
     // Burner control relays (mutually exclusive)
     if (mode == BurnerMode::HEATING) {
-        states[2] = true;   // BURNER_ENABLE ON
-        states[4] = false;  // WATER_MODE OFF
+        states[RelayIndex::BURNER_ENABLE] = true;   // BURNER_ENABLE ON
+        states[RelayIndex::WATER_MODE]    = false;  // WATER_MODE OFF
     } else if (mode == BurnerMode::WATER) {
-        states[2] = false;  // BURNER_ENABLE OFF
-        states[4] = true;   // WATER_MODE ON
+        states[RelayIndex::BURNER_ENABLE] = false;  // BURNER_ENABLE OFF
+        states[RelayIndex::WATER_MODE]    = true;   // WATER_MODE ON
     } else {
         // OFF mode
-        states[2] = false;  // BURNER_ENABLE OFF
-        states[4] = false;  // WATER_MODE OFF
+        states[RelayIndex::BURNER_ENABLE] = false;  // BURNER_ENABLE OFF
+        states[RelayIndex::WATER_MODE]    = false;  // WATER_MODE OFF
     }
 
-    // Power select (relay 4)
-    states[3] = (power == PowerLevel::HALF);  // 1=half power, 0=full power
+    // Power select
+    states[RelayIndex::HALF_POWER] = (power == PowerLevel::HALF);
 
     return states;
 }
 
-Result<void> BurnerSystemController::executeRelayBatch(const std::vector<bool>& states) {
+Result<void> BurnerSystemController::executeRelayBatch(const std::array<bool, 8>& states) {
     // Use RelayControlTask batch command (single Modbus transaction)
     bool success = RelayControlTask::setMultipleRelays(states);
 
@@ -419,8 +420,9 @@ Result<void> BurnerSystemController::executeRelayBatch(const std::vector<bool>& 
                            "Batch relay command failed");
     }
 
-    LOG_DEBUG(TAG, "Batch relay command succeeded (R1:%d R2:%d R3:%d R4:%d R5:%d)",
-              states[0], states[1], states[2], states[3], states[4]);
+    LOG_DEBUG(TAG, "Batch relay command succeeded (HeatingPump:%d WaterPump:%d BurnerEnable:%d HalfPower:%d WaterMode:%d)",
+              states[RelayIndex::HEATING_PUMP], states[RelayIndex::WATER_PUMP],
+              states[RelayIndex::BURNER_ENABLE], states[RelayIndex::HALF_POWER], states[RelayIndex::WATER_MODE]);
 
     return Result<void>();
 }

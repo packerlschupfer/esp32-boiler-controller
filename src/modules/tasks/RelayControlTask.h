@@ -6,7 +6,7 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <freertos/event_groups.h>
-#include <vector>
+#include <array>   // For std::array
 #include <atomic>  // Round 20 Issue #6: For atomic relayStatesKnown
 #include <RYN4.h>
 #include "config/ProjectConfig.h"
@@ -28,7 +28,7 @@ public:
     // Relay control methods
     static bool setRelayState(uint8_t relayIndex, bool state);
     static bool setAllRelays(bool state);
-    static bool setMultipleRelays(const std::vector<bool>& states);
+    static bool setMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety
     static bool toggleRelay(uint8_t relayIndex);
     static bool toggleAllRelays();
     
@@ -43,7 +43,7 @@ private:
     static bool processSingleRelay(uint8_t relayIndex, bool state);
     static bool processToggleRelay(uint8_t relayIndex);
     static bool processSetAllRelays(bool state);
-    static bool processSetMultipleRelays(const std::vector<bool>& states);
+    static bool processSetMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety
     static bool processToggleAllRelays();
     
     // Rate limiting methods (from version 2)

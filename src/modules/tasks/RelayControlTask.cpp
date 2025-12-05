@@ -7,6 +7,7 @@
 #include "shared/RelayConfigurations.h"
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
+#include "config/RelayIndices.h"  // For RelayIndex constants
 #include "ryn4/RelayDefs.h"
 #include <SemaphoreGuard.h>
 #include <esp_task_wdt.h>
@@ -249,10 +250,10 @@ void RelayControlTask::taskFunction(void* pvParameters) {
     stackHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
     LOG_INFO(LOG_TAG_RYN4, "Stack high water mark after getData: %d words", stackHighWaterMark);
     
-    if (stateResult.isOk() && stateResult.value().size() >= RYN4_NUM_RELAYS) {
+    if (stateResult.isOk() && stateResult.value().size() >= 8) {
         // Round 20 Issue #6: Protect state array access with mutex
         if (xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
-            for (int i = 0; i < RYN4_NUM_RELAYS; i++) {
+            for (int i = 0; i < 8; i++) {
                 currentRelayStates[i] = stateResult.value()[i] > 0.5f;
                 LOG_INFO(LOG_TAG_RYN4, "Initial state - Relay %d: %s",
                          i + 1, currentRelayStates[i] ? "ON" : "OFF");
@@ -447,50 +448,48 @@ bool RelayControlTask::processToggleRelay(uint8_t relayIndex) {
 bool RelayControlTask::processSetAllRelays(bool state) {
     LOG_INFO(LOG_TAG_RYN4, "Setting all relays to %s", state ? "ON" : "OFF");
 
-    bool states[RYN4_NUM_RELAYS];
-    for (int i = 0; i < RYN4_NUM_RELAYS; i++) {
+    std::array<bool, 8> states;
+    for (int i = 0; i < 8; i++) {
         states[i] = state;
     }
-    
-    // Create vector on stack
-    std::vector<bool> stateVector(states, states + RYN4_NUM_RELAYS);
-    return processSetMultipleRelays(stateVector);
+
+    return processSetMultipleRelays(states);
 }
 
 // NEW METHOD: Process set multiple relays with smart update detection (from v2)
-bool RelayControlTask::processSetMultipleRelays(const std::vector<bool>& states) {
+bool RelayControlTask::processSetMultipleRelays(const std::array<bool, 8>& states) {
     LOG_INFO(LOG_TAG_RYN4, "Setting multiple relays");
-    
+
     // Get the update event group
     EventGroupHandle_t updateEventGroup = ryn4Device->getUpdateEventGroup();
     if (!updateEventGroup) {
         LOG_ERROR(LOG_TAG_RYN4, "Failed to get update event group");
         return false;
     }
-    
+
     // Use the global constant for all relay update bits
-    
+
     // Clear all relay update bits before sending command
     xEventGroupClearBits(updateEventGroup, SRP::getRelayAllUpdateBits());
-    
+
     // Get current states to determine which relays will actually change
     EventBits_t expectedChangeBits = 0;
     auto currentStates = ryn4Device->getData(
         IDeviceInstance::DeviceDataType::RELAY_STATE);
-    
-    if (currentStates.isOk() && currentStates.value().size() == RYN4_NUM_RELAYS) {
+
+    if (currentStates.isOk() && currentStates.value().size() == 8) {
         // Build mask of only relays that will change
-        for (size_t i = 0; i < states.size() && i < RYN4_NUM_RELAYS; i++) {
+        for (size_t i = 0; i < 8; i++) {
             bool currentState = currentStates.value()[i] > 0.5f;
             if (currentState != states[i]) {
                 expectedChangeBits |= ryn4::RELAY_UPDATE_BITS[i];
                 #if defined(LOG_MODE_DEBUG_FULL)
-                LOG_DEBUG(LOG_TAG_RYN4, "Relay %zu will change: %s -> %s", 
+                LOG_DEBUG(LOG_TAG_RYN4, "Relay %zu will change: %s -> %s",
                          i + 1, currentState ? "ON" : "OFF", states[i] ? "ON" : "OFF");
                 #endif
             }
         }
-        
+
         // If no changes expected, we're done
         if (expectedChangeBits == 0) {
             LOG_INFO(LOG_TAG_RYN4, "No relay state changes needed");
@@ -556,26 +555,25 @@ bool RelayControlTask::processToggleAllRelays() {
     // Get current states
     auto result = ryn4Device->getData(
         IDeviceInstance::DeviceDataType::RELAY_STATE);
-    
-    if (!result.isOk() || result.value().size() != RYN4_NUM_RELAYS) {
+
+    if (!result.isOk() || result.value().size() != 8) {
         LOG_ERROR(LOG_TAG_RYN4, "Failed to get current states for toggle all");
         return false;
     }
-    
-    // Create inverted states vector
-    std::vector<bool> newStates;
-    newStates.reserve(RYN4_NUM_RELAYS);
-    
-    for (const auto& value : result.value()) {
-        newStates.push_back(!(value > 0.5f));
+
+    // Create inverted states array
+    std::array<bool, 8> newStates;
+
+    for (size_t i = 0; i < 8; i++) {
+        newStates[i] = !(result.value()[i] > 0.5f);
     }
-    
+
     return processSetMultipleRelays(newStates);
 }
 
 // NEW METHOD: Check rate limit (from v2)
 bool RelayControlTask::checkRateLimit(uint8_t relayIndex) {
-    if (relayIndex < 1 || relayIndex > RYN4_NUM_RELAYS) {
+    if (relayIndex < 1 || relayIndex > 8) {
         return false;
     }
     
@@ -886,14 +884,14 @@ void RelayControlTask::processRelayRequests() {
 
 bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
     LOG_DEBUG(LOG_TAG_RYN4, "setRelayState called: relay=%d, state=%s", relayIndex, state ? "ON" : "OFF");
-    
+
     if (!initialized || !ryn4Device) {
-        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized: init=%d, device=%p", 
+        LOG_ERROR(LOG_TAG_RYN4, "Task not initialized: init=%d, device=%p",
                   initialized, (void*)ryn4Device);
         return false;
     }
-    
-    if (relayIndex < 1 || relayIndex > RYN4_NUM_RELAYS) {
+
+    if (relayIndex < 1 || relayIndex > 8) {
         LOG_ERROR(LOG_TAG_RYN4, "Invalid relay index: %d", relayIndex);
         return false;
     }
@@ -933,17 +931,12 @@ bool RelayControlTask::setAllRelays(bool state) {
     return processSetAllRelays(state);
 }
 
-bool RelayControlTask::setMultipleRelays(const std::vector<bool>& states) {
+bool RelayControlTask::setMultipleRelays(const std::array<bool, 8>& states) {
     if (!initialized || !ryn4Device) {
         LOG_ERROR(LOG_TAG_RYN4, "Task not initialized");
         return false;
     }
-    
-    if (states.size() > RYN4_NUM_RELAYS) {
-        LOG_ERROR(LOG_TAG_RYN4, "Too many relay states: %d", states.size());
-        return false;
-    }
-    
+
     // Directly process the command without queue
     LOG_INFO(LOG_TAG_RYN4, "Setting multiple relays (direct call)");
     return processSetMultipleRelays(states);
@@ -954,8 +947,8 @@ bool RelayControlTask::toggleRelay(uint8_t relayIndex) {
         LOG_ERROR(LOG_TAG_RYN4, "Task not initialized");
         return false;
     }
-    
-    if (relayIndex < 1 || relayIndex > RYN4_NUM_RELAYS) {
+
+    if (relayIndex < 1 || relayIndex > 8) {
         LOG_ERROR(LOG_TAG_RYN4, "Invalid relay index: %d", relayIndex);
         return false;
     }
@@ -1033,7 +1026,7 @@ void RelayControlTask::updateSharedRelayReadings(uint8_t relayIndex, bool state)
 }
 
 void RelayControlTask::checkRelayHealthAndEscalate(uint8_t relayIndex, bool success) {
-    if (relayIndex < 1 || relayIndex > RYN4_NUM_RELAYS) {
+    if (relayIndex < 1 || relayIndex > 8) {
         return;
     }
 

@@ -6,7 +6,7 @@
 #include "utils/ErrorHandler.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include <vector>
+#include <array>
 
 // Forward declarations (avoid circular dependencies)
 class BurnerStateMachine;
@@ -269,8 +269,8 @@ private:
      * @param waterPump Water pump state
      * @return Vector of 8 relay states
      */
-    std::vector<bool> buildRelayStates(BurnerMode mode, PowerLevel power,
-                                       bool heatingPump, bool waterPump);
+    std::array<bool, 8> buildRelayStates(BurnerMode mode, PowerLevel power,
+                                         bool heatingPump, bool waterPump);
 
     /**
      * @brief Execute atomic relay batch command
@@ -280,5 +280,5 @@ private:
      * @param states 8 relay states
      * @return Success if batch command succeeded
      */
-    Result<void> executeRelayBatch(const std::vector<bool>& states);
+    Result<void> executeRelayBatch(const std::array<bool, 8>& states);
 };
