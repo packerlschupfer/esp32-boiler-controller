@@ -1,0 +1,228 @@
+// src/utils/ErrorLogFRAM.cpp
+// FRAM-based error logging implementation
+#include "ErrorLogFRAM.h"
+#include "LoggingMacros.h"
+#include "core/SystemResourceProvider.h"
+#include "utils/ErrorHandler.h"
+#include <ArduinoJson.h>
+#include <cstring>
+
+// Static members
+RuntimeStorage::RuntimeStorage* ErrorLogFRAM::storage_ = nullptr;
+bool ErrorLogFRAM::initialized_ = false;
+ErrorLogFRAM::ErrorStats ErrorLogFRAM::cachedStats_;
+
+// Constants
+static const char* TAG = "ErrorLogFRAM";
+
+bool ErrorLogFRAM::begin(RuntimeStorage::RuntimeStorage* storage) {
+    if (!storage) {
+        LOG_ERROR(TAG, "No storage provided");
+        return false;
+    }
+    
+    storage_ = storage;
+    
+    // Load initial stats
+    ::RuntimeStorage::ErrorStats rtStats;
+    storage_->getErrorStats(rtStats);
+    cachedStats_.totalErrors = rtStats.totalErrors;
+    cachedStats_.criticalErrors = rtStats.criticalErrors;
+    cachedStats_.lastErrorTime = rtStats.lastErrorTime;
+    cachedStats_.oldestErrorTime = rtStats.oldestErrorTime;
+    cachedStats_.uniqueErrors = rtStats.uniqueErrors;
+    
+    initialized_ = true;
+    LOG_INFO(TAG, "Initialized - Total: %lu, Critical: %lu", 
+             cachedStats_.totalErrors, cachedStats_.criticalErrors);
+    
+    return true;
+}
+
+void ErrorLogFRAM::logError(SystemError error, const char* message, const char* context) {
+    if (!initialized_ || !storage_) {
+        return;
+    }
+    
+    // Convert SystemError to uint32_t
+    uint32_t errorCode = static_cast<uint32_t>(error);
+    
+    // Log to FRAM
+    if (!storage_->logError(errorCode, message, context)) {
+        LOG_ERROR(TAG, "Failed to log error %lu", errorCode);
+    }
+    
+    // Update cached stats
+    updateCachedStats();
+    
+    // Log locally for debugging
+    LOG_ERROR(TAG, "Error %lu: %s (%s)", 
+              errorCode, 
+              message ? message : "No message",
+              context ? context : "No context");
+}
+
+void ErrorLogFRAM::logCriticalError(SystemError error, const char* message, const char* context) {
+    if (!initialized_ || !storage_) {
+        return;
+    }
+    
+    // Convert SystemError to uint32_t
+    uint32_t errorCode = static_cast<uint32_t>(error);
+    
+    // Log to FRAM as critical
+    if (!storage_->logCriticalError(errorCode, message, context)) {
+        LOG_ERROR(TAG, "Failed to log critical error %lu", errorCode);
+    }
+    
+    // Update cached stats
+    updateCachedStats();
+    
+    // Log locally with high priority
+    LOG_ERROR(TAG, "CRITICAL Error %lu: %s (%s)", 
+              errorCode,
+              message ? message : "No message", 
+              context ? context : "No context");
+}
+
+bool ErrorLogFRAM::getError(size_t index, ErrorEntry& entry) {
+    if (!initialized_ || !storage_) {
+        return false;
+    }
+    
+    ::RuntimeStorage::ErrorEntry rtEntry;
+    if (!storage_->getError(index, rtEntry)) {
+        return false;
+    }
+    
+    // Convert from RuntimeStorage::ErrorEntry to our ErrorEntry
+    entry.timestamp = rtEntry.timestamp;
+    entry.errorCode = rtEntry.errorCode;
+    entry.count = rtEntry.count;
+    strncpy(entry.message, rtEntry.message, sizeof(entry.message) - 1);
+    entry.message[sizeof(entry.message) - 1] = '\0';
+    strncpy(entry.context, rtEntry.context, sizeof(entry.context) - 1);
+    entry.context[sizeof(entry.context) - 1] = '\0';
+    
+    return true;
+}
+
+ErrorLogFRAM::ErrorStats ErrorLogFRAM::getStats() {
+    if (!initialized_ || !storage_) {
+        return ErrorStats();
+    }
+    
+    // Return cached stats for performance
+    return cachedStats_;
+}
+
+void ErrorLogFRAM::clear() {
+    if (!initialized_ || !storage_) {
+        return;
+    }
+    
+    storage_->clearErrors();
+    
+    // Reset cached stats
+    memset(&cachedStats_, 0, sizeof(cachedStats_));
+    
+    LOG_INFO(TAG, "All errors cleared");
+}
+
+void ErrorLogFRAM::clearOldErrors(uint32_t daysOld) {
+    if (!initialized_ || !storage_) {
+        return;
+    }
+    
+    // This functionality is not yet implemented in RuntimeStorage
+    LOG_WARN(TAG, "clearOldErrors not yet implemented");
+}
+
+size_t ErrorLogFRAM::getErrorCount() {
+    if (!initialized_ || !storage_) {
+        return 0;
+    }
+    
+    return storage_->getErrorCount();
+}
+
+size_t ErrorLogFRAM::getCriticalErrors(ErrorEntry* buffer, size_t maxCount) {
+    if (!initialized_ || !storage_ || !buffer) {
+        return 0;
+    }
+    
+    // Allocate temporary buffer for RuntimeStorage entries
+    ::RuntimeStorage::ErrorEntry* rtBuffer = new ::RuntimeStorage::ErrorEntry[maxCount];
+    if (!rtBuffer) {
+        return 0;
+    }
+    
+    size_t count = storage_->getCriticalErrors(rtBuffer, maxCount);
+    
+    // Convert each entry
+    for (size_t i = 0; i < count; i++) {
+        buffer[i].timestamp = rtBuffer[i].timestamp;
+        buffer[i].errorCode = rtBuffer[i].errorCode;
+        buffer[i].count = rtBuffer[i].count;
+        strncpy(buffer[i].message, rtBuffer[i].message, sizeof(buffer[i].message) - 1);
+        buffer[i].message[sizeof(buffer[i].message) - 1] = '\0';
+        strncpy(buffer[i].context, rtBuffer[i].context, sizeof(buffer[i].context) - 1);
+        buffer[i].context[sizeof(buffer[i].context) - 1] = '\0';
+    }
+    
+    delete[] rtBuffer;
+    return count;
+}
+
+bool ErrorLogFRAM::exportToJson(char* buffer, size_t bufferSize, size_t maxErrors) {
+    if (!initialized_ || !storage_ || !buffer || bufferSize == 0) {
+        return false;
+    }
+    
+    // Create JSON document
+    StaticJsonDocument<2048> doc;
+    JsonArray errors = doc.createNestedArray("errors");
+    
+    // Get error count
+    size_t errorCount = getErrorCount();
+    size_t exportCount = min(errorCount, maxErrors);
+    
+    // Add stats
+    JsonObject stats = doc.createNestedObject("stats");
+    stats["total"] = cachedStats_.totalErrors;
+    stats["critical"] = cachedStats_.criticalErrors;
+    stats["oldest"] = cachedStats_.oldestErrorTime;
+    stats["latest"] = cachedStats_.lastErrorTime;
+    
+    // Add errors
+    for (size_t i = 0; i < exportCount; i++) {
+        ErrorEntry entry;
+        if (getError(i, entry)) {
+            JsonObject errorObj = errors.createNestedObject();
+            errorObj["time"] = entry.timestamp;
+            errorObj["code"] = entry.errorCode;
+            errorObj["count"] = entry.count;
+            errorObj["msg"] = entry.message;
+            if (strlen(entry.context) > 0) {
+                errorObj["ctx"] = entry.context;
+            }
+        }
+    }
+    
+    // Serialize to buffer
+    size_t written = serializeJson(doc, buffer, bufferSize);
+    
+    return (written > 0 && written < bufferSize);
+}
+
+void ErrorLogFRAM::updateCachedStats() {
+    if (storage_) {
+        ::RuntimeStorage::ErrorStats rtStats;
+        storage_->getErrorStats(rtStats);
+        cachedStats_.totalErrors = rtStats.totalErrors;
+        cachedStats_.criticalErrors = rtStats.criticalErrors;
+        cachedStats_.lastErrorTime = rtStats.lastErrorTime;
+        cachedStats_.oldestErrorTime = rtStats.oldestErrorTime;
+        cachedStats_.uniqueErrors = rtStats.uniqueErrors;
+    }
+}
