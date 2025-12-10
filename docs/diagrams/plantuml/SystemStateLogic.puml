@@ -1,0 +1,169 @@
+@startuml SystemStateLogic
+!include theme.puml
+
+title System State Logic - Main Operating Modes\nWith Initialization and Error Handling
+
+[*] --> PowerOn : System Start
+
+state PowerOn {
+    PowerOn : Entry: Boot ESP32
+    PowerOn : Do: Hardware init
+}
+
+PowerOn --> Initialization : Boot complete
+
+state Initialization {
+    [*] --> InitLogging
+    InitLogging --> InitSharedResources : Logger ready
+    InitSharedResources --> InitHardware : Event groups/mutexes
+    InitHardware --> InitNetwork : I2C, FRAM, RTC
+    InitNetwork --> InitStorage : Ethernet async
+    InitStorage --> InitModbus : Load NVS parameters
+    InitModbus --> InitControlModules : MB8ART, RYN4, ANDRTF3
+    InitControlModules --> InitMQTT : Burner, Heating, PID
+    InitMQTT --> InitTasks : Connect broker
+    InitTasks --> [*] : Start 16 tasks
+}
+
+Initialization --> SystemIdle : STARTUP_COMPLETE
+Initialization --> SystemError : Init failed
+
+state SystemIdle {
+    SystemIdle : Entry: All systems ready
+    SystemIdle : Do: Monitor demands
+    SystemIdle : Exit: Check conditions
+}
+
+SystemIdle --> HeatingMode : Heating demand\n& enabled
+SystemIdle --> WaterMode : Water demand\n& enabled
+SystemIdle --> MixedMode : Both demands
+
+state HeatingMode {
+    [*] --> CheckHeatingDemand
+    CheckHeatingDemand --> HeatingActive : Temp < Target - 2°C
+    CheckHeatingDemand --> HeatingStandby : Temp OK
+
+    state HeatingActive {
+        HeatingActive : Entry: Start burner & pump
+        HeatingActive : Do: PID control
+        HeatingActive : Power: 50% or 100%
+    }
+
+    state HeatingStandby {
+        HeatingStandby : Entry: Stop burner
+        HeatingStandby : Do: Pump overrun (5 min)
+    }
+
+    HeatingActive --> HeatingStandby : Temp > Target + 2°C
+    HeatingStandby --> [*] : Overrun complete
+}
+
+state WaterMode {
+    [*] --> CheckWaterDemand
+    CheckWaterDemand --> WaterActive : Temp < Target - 4°C
+    CheckWaterDemand --> WaterStandby : Temp OK
+
+    state WaterActive {
+        WaterActive : Entry: Start burner & water pump
+        WaterActive : Do: Heat to 60°C
+        WaterActive : Mode: Full power
+    }
+
+    state WaterStandby {
+        WaterStandby : Entry: Stop burner
+        WaterStandby : Do: Pump overrun (2 min)
+    }
+
+    WaterActive --> WaterStandby : Temp > Target + 4°C
+    WaterStandby --> [*] : Overrun complete
+}
+
+state MixedMode {
+    [*] --> CheckPriority
+    CheckPriority --> WaterPriority : WATER_PRIORITY_BIT
+    CheckPriority --> HeatingPriority : Default
+
+    state WaterPriority {
+        WaterPriority : Entry: Pause heating
+        WaterPriority : Do: Service water first
+    }
+
+    state HeatingPriority {
+        HeatingPriority : Entry: Continue heating
+        HeatingPriority : Do: Water waits
+    }
+
+    WaterPriority --> WaterMode : Switch to water
+    HeatingPriority --> HeatingMode : Continue heating
+}
+
+HeatingMode --> SystemIdle : No demand
+WaterMode --> SystemIdle : No demand
+MixedMode --> SystemIdle : No demand
+
+' Emergency paths
+HeatingMode --> EmergencyStop : EMERGENCY_STOP\nevent
+WaterMode --> EmergencyStop : EMERGENCY_STOP\nevent
+MixedMode --> EmergencyStop : EMERGENCY_STOP\nevent
+SystemIdle --> EmergencyStop : Safety fault
+
+state EmergencyStop {
+    [*] --> LogFault
+    LogFault --> ShutdownBurner : To FRAM
+    ShutdownBurner --> StopAll : < 100ms
+    StopAll --> SafeRelays : Burner OFF
+    SafeRelays --> NotifyMQTT : Pumps ON
+    NotifyMQTT --> WaitReset : Send alert
+    WaitReset --> [*] : Manual reset
+}
+
+EmergencyStop --> SystemError : Cannot recover
+EmergencyStop --> SystemIdle : Reset successful
+
+state SystemError {
+    SystemError : Entry: Log critical error
+    SystemError : Do: Disable all outputs
+    SystemError : Exit: Requires service
+}
+
+SystemError --> [*] : Power cycle
+
+note right of Initialization
+  **8-Stage Initialization:**
+  1. Logging
+  2. Shared Resources
+  3. Hardware (I2C, FRAM, RTC)
+  4. Network (Ethernet async)
+  5. Modbus Devices (background)
+  6. Control Modules
+  7. MQTT (connect)
+  8. Tasks (start all 16)
+
+  **Duration:** ~5-10 seconds
+end note
+
+note right of MixedMode
+  **Priority Logic:**
+  Water always has priority
+  when WATER_PRIORITY_BIT set
+
+  **Make-Before-Break:**
+  Smooth pump transitions
+  No heating interruption
+end note
+
+note bottom of EmergencyStop
+  **Safety Triggers:**
+  - Over-temperature > 95°C
+  - Rate of change > 5°C/min
+  - Sensor failure
+  - Watchdog timeout
+  - Manual E-STOP button
+  - MQTT emergency command
+
+  **Recovery:**
+  Manual reset required
+  5 minute lockout minimum
+end note
+
+@enduml
