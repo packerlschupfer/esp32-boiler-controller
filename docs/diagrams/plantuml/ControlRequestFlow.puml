@@ -1,0 +1,103 @@
+@startuml ControlRequestFlow
+!include theme.puml
+
+title Control Request Flow - Event-Driven Architecture\nHeating vs Water Priority with PID Control
+
+participant "HeatingControlTask\n(1s interval)" as HCT
+participant "WheaterControlTask\n(1s interval)" as WCT
+participant "BURNER_REQUEST\nEvent Group" as BRE
+participant "BurnerControlTask\n(200ms interval)" as BCT
+participant "SpaceHeatingPID\n(5s interval)" as PID
+participant "RelayControlTask\n(continuous)" as RCT
+participant "Hardware\n(RYN4 Relays)" as HW
+
+autonumber
+
+== Heating Request Scenario ==
+
+HCT -> HCT : Read room temp: 18°C\nTarget: 20°C
+note right: Below (target - 2°C)?\nYes, start heating
+
+HCT -> HCT : Calculate boiler target\nusing heating curve: 70°C
+HCT -> BRE : **SetBits**\nHEATING_REQUEST\nTemp: 70°C (bits 16-23)
+note over BRE: Encoded: 0x00004601\nBit 0 = HEATING_REQUEST\nBits 16-23 = 70 (0x46)
+
+== Water Request Scenario (with priority) ==
+
+WCT -> WCT : Read tank temp: 45°C\nTarget: 50°C
+note right: Below (target - 4°C)?\nYes, start water heating
+
+WCT -> WCT : Calculate target:\ntank + 15°C = 60°C
+WCT -> BRE : **SetBits**\nWATER_REQUEST\nTemp: 60°C (bits 16-23)
+note over BRE: Encoded: 0x00003C02\nBit 1 = WATER_REQUEST\nBits 16-23 = 60 (0x3C)
+
+== Burner Processing (every 200ms) ==
+
+BCT -> BRE : **GetBits** (check requests)
+BRE --> BCT : Both HEATING and WATER set
+BCT -> BCT : **Apply priority logic:**\nWater has priority
+BCT -> BRE : **ClearBits** WATER_REQUEST
+BCT -> BCT : Decode target: 60°C
+BCT -> RCT : Enable burner\nSet water mode\nStart water pump
+RCT -> HW : R3 (BURNER): ON\nR5 (WATER_MODE): ON\nR2 (WATER_PUMP): ON
+BCT -> PID : Notify target: 60°C
+
+== PID Power Control (every 5s) ==
+
+PID -> BRE : **GetBits** (check active)
+BRE --> PID : Burner active\n(water request cleared)
+PID -> PID : Read boiler temp: 55°C\nTarget: 60°C\nError: 5°C
+PID -> PID : **Calculate PID:**\nP = Kp * error\nI = Ki * integral\nD = Kd * derivative\nOutput: 75%
+PID -> BRE : **SetBits** POWER_FULL
+BCT -> BRE : **GetBits** (check power)
+BRE --> BCT : FULL_POWER set
+BCT -> RCT : Set full power mode
+RCT -> HW : R4 (POWER_SELECT): OFF\n(OFF = full power)
+
+== Relay Updates ==
+
+RCT -> HW : **Batch Update:**\nR3 (burner): ON\nR4 (power): OFF\nR5 (water): ON\nR2 (pump): ON
+RCT -> RCT : Update\nSharedRelayReadings
+note right: Immediate state tracking\nNo separate status task
+
+== Water Complete, Return to Heating ==
+
+WCT -> WCT : Tank temp: 54°C\nAbove (target + 4°C)?\nYes, stop water
+WCT -> BRE : **ClearBits** WATER_REQUEST
+BCT -> BRE : **GetBits** (check requests)
+BRE --> BCT : Only HEATING_REQUEST active
+BCT -> BCT : **Switch to heating mode**\nDecode target: 70°C
+BCT -> RCT : Clear water mode\nStart heating pump\n(make-before-break)
+RCT -> HW : R1 (HEAT_PUMP): ON\nR2 (WATER_PUMP): OFF\nR5 (WATER_MODE): OFF
+BCT -> PID : New target: 70°C
+
+note over HCT, WCT
+  **Hysteresis Prevents Flapping:**
+  Heating: ±2°C band with state memory
+  Water: ±4°C band with state memory
+
+  Static bool wasHeating/wasWaterHeating
+  remembers last state
+end note
+
+note over BRE
+  **32-bit BURNER_REQUEST Format:**
+  Bit 0: HEATING_REQUEST
+  Bit 1: WATER_REQUEST
+  Bit 2: POWER_OFF
+  Bit 3: POWER_HALF
+  Bit 4: POWER_FULL
+  Bit 5: EMERGENCY_STOP
+  Bits 8-15: <unused>
+  **Bits 16-23: Target Temperature (0-255°C)**
+
+  **Helper Functions:**
+  encode_temperature(temp)
+  decode_temperature(bits)
+
+  **Atomic Operation:**
+  Set request + temperature
+  in single xEventGroupSetBits() call
+end note
+
+@enduml

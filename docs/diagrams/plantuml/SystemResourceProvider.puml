@@ -1,0 +1,168 @@
+@startuml SystemResourceProvider
+!include theme.puml
+
+title SystemResourceProvider (SRP) - Service Locator Pattern\nReplaced ServiceContainer for O(1) Static Access
+
+class SystemResourceProvider <<Static Service Locator>> {
+    {static} - s_taskManager: TaskManager*
+    {static} - s_sharedResourceMgr: SharedResourceManager*
+    {static} - s_queueManager: QueueManager*
+    {static} - s_modbusCoordinator: ModbusCoordinator*
+    {static} - s_mb8art: MB8ART*
+    {static} - s_ryn4: RYN4*
+    {static} - s_andrtf3: ANDRTF3*
+    {static} - s_ds3231: DS3231Controller*
+    {static} - s_burnerSystemController: BurnerSystemController*
+    {static} - s_heatingControl: HeatingControlModule*
+    {static} - s_pidControl: PIDControlModule*
+    {static} - s_waterControl: WaterControlModule*
+    {static} - s_mqttManager: MQTTManager*
+    {static} - s_persistentStorage: PersistentStorage*
+    {static} - s_runtimeStorage: RuntimeStorage*
+    {static} - s_healthMonitor: HealthMonitor*
+    {static} - s_sensorReadings: SharedSensorReadings*
+    {static} - s_relayReadings: SharedRelayReadings*
+    {static} - s_systemSettings: SystemSettings*
+    ====
+    {static} + **Infrastructure**
+    {static} + getTaskManager(): TaskManager*
+    {static} + getSharedResourceManager(): SharedResourceManager*
+    {static} + getQueueManager(): QueueManager*
+    {static} + getModbusCoordinator(): ModbusCoordinator*
+    ====
+    {static} + **Hardware Devices**
+    {static} + getMB8ART(): MB8ART*
+    {static} + getRYN4(): RYN4*
+    {static} + getANDRTF3(): ANDRTF3*
+    {static} + getDS3231(): DS3231Controller*
+    ====
+    {static} + **Control Modules**
+    {static} + getBurnerSystemController(): BurnerSystemController*
+    {static} + getHeatingControl(): HeatingControlModule*
+    {static} + getPIDControl(): PIDControlModule*
+    {static} + getWaterControl(): WaterControlModule*
+    ====
+    {static} + **Services**
+    {static} + getMQTTManager(): MQTTManager*
+    {static} + getPersistentStorage(): PersistentStorage*
+    {static} + getRuntimeStorage(): RuntimeStorage*
+    {static} + getHealthMonitor(): HealthMonitor*
+    ====
+    {static} + **Shared Data**
+    {static} + getSensorReadings(): SharedSensorReadings*
+    {static} + getRelayReadings(): SharedRelayReadings*
+    {static} + getSystemSettings(): SystemSettings*
+}
+
+class SystemInitializer {
+    + initializeStage1_Logging(): void
+    + initializeStage2_SharedResources(): void
+    + initializeStage3_Hardware(): void
+    + initializeStage4_Network(): void
+    + initializeStage5_ModbusDevices(): void
+    + initializeStage6_ControlModules(): void
+    + initializeStage7_MQTT(): void
+    + initializeStage8_Tasks(): void
+}
+
+' Example service classes
+class TaskManager <<Singleton>>
+class BurnerSystemController <<Singleton>>
+class MQTTManager <<Singleton>>
+class SharedSensorReadings <<Global>>
+
+' Example task using SRP
+class BurnerControlTask {
+    - burnerCtrl: BurnerSystemController*
+    --
+    + task(): void
+}
+
+class HeatingControlTask {
+    - heatingCtrl: HeatingControlModule*
+    - sensorData: SharedSensorReadings*
+    --
+    + task(): void
+}
+
+' Relationships
+SystemInitializer ..> SystemResourceProvider : registers\nservices
+
+SystemResourceProvider --> TaskManager : stores
+SystemResourceProvider --> BurnerSystemController : stores
+SystemResourceProvider --> MQTTManager : stores
+SystemResourceProvider --> SharedSensorReadings : stores
+
+BurnerControlTask ..> SystemResourceProvider : auto* ctrl =\nSRP::getBurnerSystemController()
+HeatingControlTask ..> SystemResourceProvider : auto* data =\nSRP::getSensorReadings()
+
+note left of SystemResourceProvider
+  **Why SRP Replaced ServiceContainer:**
+
+  **ServiceContainer Problems:**
+  ✗ Runtime HashMap lookup O(log n)
+  ✗ String key management
+  ✗ Complex registration API
+  ✗ No compile-time safety
+  ✗ Unnecessary abstraction
+
+  **SRP Benefits:**
+  ✓ Zero overhead static access O(1)
+  ✓ Compile-time type safety
+  ✓ Simple API: SRP::getXXX()
+  ✓ IDE autocomplete friendly
+  ✓ No string keys needed
+  ✓ Faster, cleaner code
+end note
+
+note right of SystemInitializer
+  **8-Stage Initialization:**
+  1. Logging (serial, logger)
+  2. Shared Resources (events, mutexes)
+  3. Hardware (I2C, FRAM, RTC)
+  4. Network (Ethernet async)
+  5. Modbus Devices (background init)
+  6. Control Modules (create instances)
+  7. MQTT (connect)
+  8. Tasks (start all 16 tasks)
+
+  All services registered in SRP
+  during initialization stages
+end note
+
+note bottom of BurnerControlTask
+  **Usage Pattern:**
+  ```cpp
+  void BurnerControlTask::task() {
+      auto* burnerCtrl = SRP::getBurnerSystemController();
+      auto* sensors = SRP::getSensorReadings();
+
+      // Use services...
+      burnerCtrl->activateHeatingMode();
+  }
+  ```
+
+  **Benefits:**
+  - Clean, readable code
+  - No parameter passing needed
+  - Services available anywhere
+  - nullptr asserts after init
+end note
+
+note as N1
+  **Service Lifetime:**
+  All services are:
+  • Created during initialization
+  • Stored as static pointers
+  • Never destroyed
+  • Valid for program lifetime
+
+  **Thread Safety:**
+  SRP access is thread-safe
+  Services handle their own
+  synchronization (mutexes)
+end note
+
+SystemResourceProvider .. N1
+
+@enduml
