@@ -1,0 +1,188 @@
+@startuml ParameterManagementFlow
+!include theme.puml
+
+title Parameter Management Flow - MQTT-Accessible Configuration\n32 Parameters via PersistentStorage Service
+
+package "External Access" {
+    component [MQTT Client\nmosquitto_pub/sub] as MQTTClient
+    component [Web Interface\nFuture] as WebUI
+    component [init_parameters.py\nBulk Setup Script] as InitScript
+}
+
+package "MQTT Topics" {
+    storage "esplan/params/set/+" as SetTopic
+    storage "esplan/params/get/+" as GetTopic
+    storage "esplan/params/list" as ListTopic
+    storage "esplan/params/save" as SaveTopic
+    storage "esplan/params/status/+" as StatusTopic
+}
+
+package "PersistentStorage Service" {
+    component [PersistentStorage\nParameter Manager] as PersistSvc {
+        [handleMqttMessage\nCommand Handler] as MsgHandler
+        [validateParameter\nRange & Type Check] as Validator
+        [executeCallbacks\nNotify Modules] as Callbacks
+        [autoSaveTimer\nEvery 5 Minutes] as AutoSave
+    }
+
+    component [Parameter Registry\n32 Parameters] as ParamReg {
+        storage "Water Heater (7)" as WaterParams {
+            tempLimitLow
+            tempLimitHigh
+            hysteresis
+            priorityDelay
+            heatingRate
+            boostDuration
+            tankCapacity
+        }
+
+        storage "Heating (6)" as HeatParams {
+            targetTemp
+            hysteresis
+            nightSetback
+            outsideTempComp
+            minBoilerTemp
+            maxBoilerTemp
+        }
+
+        storage "PID Tuning (6)" as PIDParams {
+            Kp
+            Ki
+            Kd
+            outputMin
+            outputMax
+            sampleTime
+        }
+
+        storage "Sensors (1)" as SensorParams {
+            outsideTempOffset
+        }
+
+        storage "Status (12)" as StatusParams {
+            Read-only
+            Current sensor values
+            System state
+        }
+    }
+}
+
+package "System Integration" {
+    component [HeatingControlModule\nUses targetTemp] as HeatingCtrl
+    component [PIDControlModule\nUses Kp, Ki, Kd] as PIDCtrl
+    component [WaterControlModule\nUses tempLimits] as WaterCtrl
+
+    storage [SystemSettings\nRuntime Values\nMutex Protected] as SystemSettings
+
+    storage [SharedSensorReadings\nCurrent Values] as SensorData
+
+    storage [GeneralSystemEventGroup\nSETTINGS_CHANGED_BIT] as EventBits
+}
+
+package "Storage Backend" {
+    database "ESP32 NVS Flash\nNon-Volatile Storage\nKey-Value Store" as NVS
+}
+
+' External to MQTT
+MQTTClient --> SetTopic : publish\n{"value": 22.5}
+MQTTClient --> GetTopic : publish\nrequest
+MQTTClient --> ListTopic : publish\nrequest
+MQTTClient --> SaveTopic : publish\nforce save
+MQTTClient <-- StatusTopic : subscribe\nresponses
+InitScript --> SetTopic : bulk set
+
+' MQTT to Service
+SetTopic --> MsgHandler : JSON value
+GetTopic --> MsgHandler : request
+ListTopic --> MsgHandler : request
+SaveTopic --> MsgHandler : trigger
+
+' Processing Flow
+MsgHandler --> Validator : validate
+Validator --> ParamReg : check type/range
+ParamReg --> WaterParams
+ParamReg --> HeatParams
+ParamReg --> PIDParams
+ParamReg --> SensorParams
+ParamReg --> StatusParams
+
+Validator --> SystemSettings : update if valid
+MsgHandler --> Callbacks : execute
+Callbacks --> EventBits : SetBits\nSETTINGS_CHANGED
+
+' Response Flow
+MsgHandler --> StatusTopic : publish\nresponse
+
+' Module Access
+HeatingCtrl --> SystemSettings : read targetTemp
+PIDCtrl --> SystemSettings : read Kp, Ki, Kd
+WaterCtrl --> SystemSettings : read tempLimits
+
+' Event Notification
+EventBits --> HeatingCtrl : notify change
+EventBits --> PIDCtrl : notify change
+
+' Persistence
+AutoSave --> NVS : save every 5min
+PersistSvc --> NVS : load on boot
+NVS --> SystemSettings : restore
+
+' Status Updates
+SensorData --> StatusParams : read-only values
+
+note right of MsgHandler
+  **Parameter Update Flow:**
+  1. MQTT pub to esplan/params/set/heating/targetTemp
+  2. MQTTManager receives {"value": 22.5}
+  3. Calls handleMqttMessage(topic, payload)
+  4. parseParameterPath("heating/targetTemp")
+  5. validateParameter(value, info)
+     - Check type (float expected)
+     - Check range (15-30°C)
+     - Check access permissions
+  6. Update SystemSettings in RAM
+  7. Execute change callbacks
+  8. SetBits SETTINGS_CHANGED_BIT
+  9. Publish confirmation to status topic
+  10. Auto-save to NVS after 5 minutes
+end note
+
+note right of Validator
+  **Validation Rules:**
+  - Type checking (int, float, bool)
+  - Range checking (min/max values)
+  - Business rules (e.g., tempLimitLow < tempLimitHigh)
+  - Access control (read-only parameters)
+
+  **Validation Failure:**
+  Returns error via MQTT status topic
+  Does NOT update SystemSettings
+end note
+
+note bottom of EventBits
+  **Change Notification:**
+  When parameters change:
+  1. SetBits(SETTINGS_CHANGED_BIT)
+  2. Control modules WaitBits()
+  3. Modules read new values
+  4. Update control logic
+
+  **Thread-Safe:**
+  All access via mutex
+  Atomic bit operations
+end note
+
+note bottom of NVS
+  **Persistence Strategy:**
+  - Auto-save every 5 minutes
+  - Manual save via MQTT command
+  - Load on boot before tasks start
+  - Survives firmware updates
+  - ~16KB partition
+
+  **Reliability:**
+  - CRC32 integrity checks
+  - Default values on corruption
+  - Validation before apply
+end note
+
+@enduml
