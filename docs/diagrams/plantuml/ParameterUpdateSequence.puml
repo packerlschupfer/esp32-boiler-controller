@@ -1,0 +1,178 @@
+@startuml ParameterUpdateSequence
+!include theme.puml
+
+title Parameter Update Sequence - MQTT-Driven Configuration\nValidation, Persistence, and Notification Flow
+
+participant "MQTT Client" as Client
+participant "MQTT Broker" as Broker
+participant "MQTTTask" as MQTTTask
+participant "PersistentStorage" as Storage
+participant "NVS Flash" as NVS
+participant "SystemResourceProvider\nSRP" as SRP
+participant "Control Module" as Module
+
+autonumber
+
+== Parameter Update Request ==
+
+Client -> Broker : **Publish**\nesplan/params/set/heating/targetTemp\n{"value": 22.5}
+note right: User wants to change\nroom temperature setpoint
+
+Broker -> MQTTTask : **Deliver message**
+MQTTTask -> Storage : handleMqttMessage(topic, payload)
+
+== Validation Phase ==
+
+Storage -> Storage : parseParameterPath(\n"heating/targetTemp")
+note right: Extract:\n- category: "heating"\n- parameter: "targetTemp"
+
+Storage -> Storage : validateParameter(value, info)
+note right
+  **Validation Checks:**
+  1. Type check (float expected)
+  2. Range check (15-30°C)
+  3. Access permissions (read/write)
+  4. Business rules
+end note
+
+alt **Parameter Valid**
+
+    == Update in Memory ==
+
+    Storage -> SRP : getSystemSettings()
+    SRP --> Storage : SystemSettings*
+    Storage -> Storage : settings.heatingTargetTemp = 22.5
+    note right: Update in RAM\n(mutex protected)
+
+    == Persist to NVS ==
+
+    Storage -> NVS : **nvs_set_blob**(key, value)
+    NVS --> Storage : ESP_OK
+    note right: Immediate save\n(optional, usually\nwaits for auto-save)
+
+    == Notify System ==
+
+    Storage -> SRP : getSharedResourceManager()
+    SRP --> Storage : SharedResourceManager*
+    Storage -> Storage : setGeneralSystemEventBits(\nSETTINGS_CHANGED_BIT)
+    note right: Wake up waiting\ncontrol modules
+
+    == Execute Callback ==
+
+    Storage -> Module : onParameterChange(\n"heating/targetTemp", 22.5)
+    note right: Registered callback\nfor immediate action
+
+    Module -> Module : recalculateSetpoints()
+    note right: Update control logic\nwith new target
+
+    == Publish Confirmation ==
+
+    Storage -> MQTTTask : publish(\nesplan/params/status/heating/targetTemp)
+    MQTTTask -> Broker : **Publish response**
+    Broker -> Client : **Deliver confirmation**
+    note left
+      {
+        "name": "heating/targetTemp",
+        "value": 22.5,
+        "status": "ok",
+        "timestamp": "2025-01-04T12:34:56Z"
+      }
+    end note
+
+else **Parameter Invalid**
+
+    Storage -> MQTTTask : publish(\nesplan/params/status/heating/targetTemp)
+    MQTTTask -> Broker : **Publish error**
+    Broker -> Client : **Deliver error**
+    note left
+      {
+        "name": "heating/targetTemp",
+        "error": "Value out of range (15-30)",
+        "status": "error"
+      }
+    end note
+
+end
+
+== Module Reaction to Change (Async) ==
+
+Module -> SRP : **waitGeneralSystemEventBits**(\nSETTINGS_CHANGED_BIT)
+note right: Module wakes up\non event bit
+
+Module -> SRP : getSystemSettings()
+SRP --> Module : SystemSettings*
+Module -> Module : Read new targetTemp: 22.5
+Module -> Module : Update boiler target\nusing heating curve
+note right: New control parameters\napplied immediately
+
+== Auto-Save Timer (Separate Flow) ==
+
+group Every 5 minutes
+    Storage -> Storage : autoSaveTimer fires
+    Storage -> NVS : **saveAllDirtyParameters**()
+    note right: Batch save all\nchanged parameters\n(reduces NVS wear)
+end
+
+== Get Parameter Flow ==
+
+group Parameter Query
+    Client -> Broker : **Publish**\nesplan/params/get/heating/targetTemp
+    Broker -> MQTTTask : Deliver message
+    MQTTTask -> Storage : handleMqttMessage(topic, "")
+    Storage -> SRP : getSystemSettings()
+    SRP --> Storage : SystemSettings*
+    Storage -> Storage : Read current value: 22.5
+    Storage -> MQTTTask : publish current value
+    MQTTTask -> Broker : **Publish response**
+    Broker -> Client : Deliver value
+    note left
+      {
+        "name": "heating/targetTemp",
+        "value": 22.5,
+        "type": "float",
+        "range": "15-30",
+        "unit": "°C"
+      }
+    end note
+end
+
+== List All Parameters Flow ==
+
+group List Parameters
+    Client -> Broker : **Publish**\nesplan/params/list
+    Broker -> MQTTTask : Deliver message
+    MQTTTask -> Storage : handleMqttMessage(topic, "")
+    Storage -> Storage : buildParameterList()
+    note right
+      **32 Parameters:**
+      - Water Heater: 7
+      - Heating: 6
+      - PID: 6
+      - Sensors: 1
+      - Status: 12 (read-only)
+    end note
+
+    loop For each parameter
+        Storage -> MQTTTask : publish parameter info
+        note right: Sent individually\nto avoid stack overflow
+    end
+
+    MQTTTask -> Broker : **Publish responses** (32 messages)
+    Broker -> Client : Deliver list
+end
+
+note over Client, Module
+  **Thread Safety:**
+  - All SystemSettings access protected by mutex
+  - Event bits are atomic operations
+  - NVS writes are serialized
+  - Multiple MQTT clients supported
+
+  **Persistence:**
+  - Immediate: Optional for critical parameters
+  - Auto-save: Every 5 minutes (default)
+  - Manual: Via esplan/params/save command
+  - Survives: Firmware updates, power loss
+end note
+
+@enduml

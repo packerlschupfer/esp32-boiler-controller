@@ -1,0 +1,154 @@
+@startuml BurnerStateMachine
+!include theme.puml
+
+title Burner State Machine - 8 States with Safety Interlocks
+
+[*] --> IDLE : System Ready
+
+state IDLE {
+    IDLE : Entry: All relays OFF
+    IDLE : Do: Wait for demand
+    IDLE : Exit: Check safety conditions
+}
+
+IDLE --> PRE_PURGE : Heat demand\n& Safety OK
+
+state PRE_PURGE {
+    PRE_PURGE : Entry: Fan ON, Gas OFF
+    PRE_PURGE : Do: Purge combustion chamber
+    PRE_PURGE : Timer: 30 seconds
+    PRE_PURGE : Exit: Verify fan operation
+}
+
+PRE_PURGE --> IGNITION : Timer complete
+PRE_PURGE --> ERROR : Safety fault
+PRE_PURGE --> IDLE : Demand lost
+
+state IGNITION {
+    IGNITION : Entry: Gas valve ON, Igniter ON
+    IGNITION : Do: Attempt flame ignition
+    IGNITION : Timer: 5 seconds
+    IGNITION : Retries: Max 3 attempts
+    IGNITION : Exit: Verify flame sensor
+}
+
+IGNITION --> RUNNING_LOW : Flame detected
+IGNITION --> IGNITION : Retry < 3\n[close gas, wait 5s]
+IGNITION --> LOCKOUT : Max retries\nexceeded
+IGNITION --> ERROR : Safety fault
+
+state RUNNING_LOW {
+    RUNNING_LOW : Entry: Set power 50%
+    RUNNING_LOW : Do: Monitor operation
+    RUNNING_LOW : Power: POWER_SELECT = ON
+    RUNNING_LOW : Check: Temperature, pressure
+    RUNNING_LOW : Exit: Log runtime
+}
+
+state RUNNING_HIGH {
+    RUNNING_HIGH : Entry: Set power 100%
+    RUNNING_HIGH : Do: Full power operation
+    RUNNING_HIGH : Power: POWER_SELECT = OFF
+    RUNNING_HIGH : Check: Delta-T limits
+    RUNNING_HIGH : Exit: Log runtime
+}
+
+RUNNING_LOW --> RUNNING_HIGH : PID ≥ 50%
+RUNNING_HIGH --> RUNNING_LOW : PID < 50%
+RUNNING_LOW --> POST_PURGE : No demand\n| Flame lost
+RUNNING_HIGH --> POST_PURGE : No demand\n| Flame lost
+RUNNING_LOW --> ERROR : Safety fault
+RUNNING_HIGH --> ERROR : Safety fault
+
+state POST_PURGE {
+    POST_PURGE : Entry: Gas valve OFF, Fan ON
+    POST_PURGE : Do: Clear residual gases
+    POST_PURGE : Timer: 60 seconds
+    POST_PURGE : Exit: Cool down complete
+}
+
+POST_PURGE --> IDLE : Timer complete
+POST_PURGE --> LOCKOUT : Fault during\nshutdown
+
+state LOCKOUT {
+    LOCKOUT : Entry: Log fault to FRAM
+    LOCKOUT : Do: Wait for reset
+    LOCKOUT : Timer: 5 minutes minimum
+    LOCKOUT : Reason: Log error code
+    LOCKOUT : Exit: Publish MQTT alert
+}
+
+LOCKOUT --> IDLE : Manual reset\n& Timer expired
+LOCKOUT --> ERROR : Critical fault
+
+state ERROR {
+    ERROR : Entry: Emergency shutdown
+    ERROR : Do: Log to FRAM
+    ERROR : All: Relays to safe position
+    ERROR : Notify: MQTT emergency
+    ERROR : Exit: Requires service
+}
+
+ERROR --> [*] : Power cycle\nrequired
+
+' Emergency transitions from any state
+IGNITION --> EmergencyStop : EMERGENCY_STOP\nevent
+RUNNING_LOW --> EmergencyStop : EMERGENCY_STOP\nevent
+RUNNING_HIGH --> EmergencyStop : EMERGENCY_STOP\nevent
+
+state EmergencyStop <<choice>>
+EmergencyStop --> ERROR : < 100ms\nshutdown
+
+note right of PRE_PURGE
+  **Safety Checks:**
+  - Gas pressure OK
+  - Air pressure OK
+  - Temperature within limits
+  - Flame sensor ready
+  - No lockout active
+end note
+
+note right of IGNITION
+  **Flame Detection:**
+  Currently simulated
+  Real sensor planned
+
+  **Retry Logic:**
+  1. Close gas valve
+  2. Wait 5 seconds
+  3. Try again (max 3)
+end note
+
+note right of RUNNING_LOW
+  **Relay States:**
+  R3 (BURNER_ENABLE): ON
+  R4 (POWER_SELECT): ON
+  R5 (WATER_MODE): per mode
+
+  **Power: 50%**
+  Modulated gas valve
+end note
+
+note right of RUNNING_HIGH
+  **Relay States:**
+  R3 (BURNER_ENABLE): ON
+  R4 (POWER_SELECT): OFF
+  R5 (WATER_MODE): per mode
+
+  **Power: 100%**
+  Full gas valve
+end note
+
+note right of LOCKOUT
+  **Lockout Reasons:**
+  - Max ignition failures
+  - Safety violations
+  - Communication errors
+  - Over-temperature
+
+  **Recovery:**
+  Manual reset required
+  MQTT command or button
+end note
+
+@enduml

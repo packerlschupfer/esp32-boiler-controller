@@ -1,0 +1,265 @@
+@startuml CompleteSystemArchitecture2025
+!include theme.puml
+
+title Complete System Architecture - January 2025\nProduction System Post H1/M1 Refactoring
+
+!define HARDWARE #8B4513
+!define INFRASTRUCTURE #4682B4
+!define CONTROL #FFD93D
+!define SERVICE #52BE80
+!define STORAGE #8B7355
+
+node "ESP32 DevKit" {
+
+    node "Core 0" #2F4F4F {
+        [NTPTask] as NTP
+        [TimerSchedulerTask] as Scheduler
+        [Arduino Loop] as Loop
+    }
+
+    node "Core 1" #36648B {
+        package "Hardware Tasks" HARDWARE {
+            [MB8ARTTask] as MB8ARTTask
+            [MB8ARTProcessingTask] as MB8ARTProc
+            [ANDRTF3Task] as ANDRTF3Task
+            [RelayControlTask] as RelayTask
+        }
+
+        package "Control Tasks" CONTROL {
+            [BurnerControlTask] as BurnerTask
+            [HeatingControlTask] as HeatingTask
+            [WheaterControlTask] as WaterTask
+            [SpaceHeatingPIDTask] as PIDTask
+        }
+
+        package "Service Tasks" SERVICE {
+            [MQTTTask] as MQTTTask
+            [MonitoringTask] as MonitorTask
+            [OTATask] as OTATask
+            [PersistentStorageTask] as StorageTask
+        }
+    }
+
+    package "Core Services" INFRASTRUCTURE {
+        [SystemResourceProvider\nSRP] as SRP
+        [SharedResourceManager\n12 Event Groups\n5 Mutexes] as SRM
+        [TaskManager\n16 Tasks] as TaskMgr
+        [ModbusCoordinator\nBus Arbitration] as ModbusCoord
+    }
+
+    package "Control Modules" CONTROL {
+        [BurnerSystemController\nH1: Unified Burner+Pump] as BurnerCtrl
+        [HeatingControlModule\nWeather Compensation] as HeatingCtrl
+        [PIDControlModule\nFixed-Point PID] as PIDCtrl
+        [WaterControlModule\n60°C Fixed Target] as WaterCtrl
+    }
+
+    package "Shared Data\n(Mutex Protected)" STORAGE {
+        database "SharedSensorReadings\n8 Temperatures\nTemperature_t" as SensorData
+        database "SharedRelayReadings\n8 Relay States" as RelayData
+        database "SystemSettings\n32 Parameters" as Settings
+    }
+}
+
+node "RS485 Modbus RTU\n9600 baud" HARDWARE {
+    [MB8ART\n8-Ch PT1000\n0.1°C Resolution] as MB8ART
+    [RYN4\n8-Ch Relay Module\nBatch Commands] as RYN4
+    [ANDRTF3\nRoom Sensor\nWall-mount] as ANDRTF3
+}
+
+node "I2C Bus\nSDA=21, SCL=22" HARDWARE {
+    database "DS3231 RTC\nBattery-backed\n±2ppm\n236B SRAM" as DS3231
+    database "MB85RC256V FRAM\n32KB\nUnlimited writes\nCRC32" as FRAM
+}
+
+node "ESP32 Internal" HARDWARE {
+    database "NVS Flash\n~16KB\nKey-Value Store" as NVS
+}
+
+cloud "External Systems" {
+    [MQTT Broker\nmosquitto] as MQTTBroker
+    [Home Assistant\nYAML Integration] as HomeAssist
+    [Web Clients\nMQTT Control] as WebClient
+}
+
+node "Ethernet\nLAN8720A PHY" HARDWARE {
+    [EthernetManager\nStatic IP] as EthMgr
+}
+
+' Hardware connections
+MB8ARTTask --> ModbusCoord : coordinated
+ANDRTF3Task --> ModbusCoord : coordinated
+ModbusCoord --> MB8ART : sequential\naccess
+ModbusCoord --> RYN4 : sequential\naccess
+ModbusCoord --> ANDRTF3 : sequential\naccess
+
+MB8ARTTask --> SensorData : update
+MB8ARTProc --> SensorData : process
+ANDRTF3Task --> SensorData : update
+
+RelayTask --> RYN4 : execute\nbatch
+RYN4 --> RelayData : states
+
+' Control flow
+HeatingTask --> HeatingCtrl : use
+WaterTask --> WaterCtrl : use
+PIDTask --> PIDCtrl : use
+BurnerTask --> BurnerCtrl : use
+
+BurnerCtrl --> RYN4 : atomic\nbatch
+
+HeatingTask --> SensorData : read
+WaterTask --> SensorData : read
+PIDTask --> SensorData : read
+
+HeatingTask --> Settings : read
+WaterTask --> Settings : read
+PIDTask --> Settings : read
+
+' Storage connections
+StorageTask --> NVS : save\n5 min
+StorageTask --> Settings : manage
+
+DS3231 <-- Scheduler : schedules
+FRAM <-- MonitorTask : error log
+
+' Service flow
+MQTTTask --> EthMgr : network
+EthMgr --> MQTTBroker : TCP/IP
+MQTTBroker <--> HomeAssist
+MQTTBroker <--> WebClient
+
+MQTTTask --> SensorData : publish
+MQTTTask --> RelayData : publish
+MQTTTask --> Settings : update
+
+NTP --> DS3231 : sync
+NTP --> EthMgr : network
+
+OTATask --> EthMgr : updates
+
+' SRP access
+BurnerTask ..> SRP : getBurnerSystemController()
+HeatingTask ..> SRP : getHeatingControl()
+MB8ARTTask ..> SRP : getMB8ART()
+MQTTTask ..> SRP : getMQTTManager()
+
+SRP --> SRM
+SRP --> TaskMgr
+SRP --> BurnerCtrl
+SRP --> HeatingCtrl
+SRP --> PIDCtrl
+
+note right of BurnerCtrl
+  **H1 Refactoring:**
+  ✓ Unified burner + pump control
+  ✓ Atomic relay operations
+  ✓ 30s pump motor protection
+  ✓ Heat recovery mode
+  ✓ Automatic cooldown
+
+  **Eliminated:**
+  ✗ Separate pump tasks
+  ✗ Coordination complexity
+  ✗ Race conditions
+end note
+
+note right of SRM
+  **M1 Refactoring:**
+  12 Event Groups (was ~15)
+  ✓ GeneralSystem
+  ✓ SystemState
+  ✓ ControlRequests
+  ✓ BurnerRequest
+  ✓ Sensor
+  ✓ Relay/Request/Status
+  ✓ Heating
+  ✓ Burner
+  ✓ ErrorNotification
+  ✓ DeviceReady
+
+  5 Core Mutexes:
+  ✓ sensorReadingsMutex
+  ✓ relayReadingsMutex
+  ✓ systemSettingsMutex
+  ✓ mqttMutex
+  ✓ modbusMutex
+end note
+
+note bottom of SRP
+  **ServiceContainer → SRP:**
+  Replaced HashMap with
+  static service locator
+
+  ✓ O(1) access vs O(log n)
+  ✓ Compile-time type safety
+  ✓ Zero overhead
+  ✓ Simple API: SRP::getXXX()
+end note
+
+note right of NVS
+  **Storage Strategy:**
+
+  **NVS:** Configuration params
+  - Infrequent writes
+  - Survives firmware update
+
+  **FRAM:** Runtime data
+  - Frequent writes (ns)
+  - Error logging (256 entries)
+  - Runtime counters
+  - PID state
+
+  **RTC SRAM:** Critical data
+  - Battery-backed
+  - 10 hot water schedules
+  - Vacation flag
+end note
+
+note right of MQTTBroker
+  **MQTT Topics:**
+
+  **Status (Published):**
+  - boiler/status/sensors
+  - boiler/status/health
+  - boiler/status/system
+
+  **Control (Subscribed):**
+  - boiler/cmd/system
+  - boiler/cmd/heating
+  - boiler/cmd/water
+
+  **Parameters:**
+  - esplan/params/set/+
+  - esplan/params/get/+
+  - esplan/params/save
+end note
+
+note bottom of TaskMgr
+  **16 FreeRTOS Tasks:**
+
+  **Core 0:** (3 tasks)
+  - NTP (P2, 4KB)
+  - Scheduler (P2, 4KB)
+  - Loop
+
+  **Core 1 Hardware:** (4 tasks)
+  - MB8ART (P3, 4KB)
+  - MB8ARTProc (P3, 3KB)
+  - ANDRTF3 (P3, 3KB)
+  - Relay (P4, 3KB)
+
+  **Core 1 Control:** (4 tasks)
+  - Burner (P4, 5KB)
+  - Heating (P3, 4KB)
+  - Water (P3, 4KB)
+  - PID (P3, 3.5KB)
+
+  **Core 1 Services:** (4 tasks)
+  - MQTT (P2, 8KB)
+  - Monitor (P2, 8KB)
+  - OTA (P1, 8KB)
+  - Storage (P2, 4KB)
+end note
+
+@enduml

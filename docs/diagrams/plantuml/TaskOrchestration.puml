@@ -1,0 +1,183 @@
+@startuml TaskOrchestration
+!include theme.puml
+
+title Task Orchestration - 16 FreeRTOS Tasks\nEvent-Driven Architecture with Shared Resources
+
+left to right direction
+
+package "Core 0 Tasks" #2F4F4F {
+    component [NTPTask\nTime Sync\nP:2, Stack:4KB] as NTPTask
+    component [TimerSchedulerTask\nHot Water Scheduler\nP:2, Stack:4KB] as SchedulerTask
+    component [Arduino Loop\nSystem Monitor] as LoopTask
+}
+
+package "Core 1 - Hardware Interface" #8B4513 {
+    component [MB8ARTTask\nSensor Polling\nP:3, Stack:4KB] as MB8ARTTask
+    component [MB8ARTProcessingTask\nData Processing\nP:3, Stack:3KB] as MB8ARTProc
+    component [ANDRTF3Task\nRoom Sensor\nP:3, Stack:3KB] as ANDRTF3Task
+    component [RelayControlTask\nRelay Execution\nP:4, Stack:3KB] as RelayTask
+}
+
+package "Core 1 - Control Logic" #4682B4 {
+    component [BurnerControlTask\nState Machine\nP:4, Stack:5KB] as BurnerTask
+    component [HeatingControlTask\nSpace Heating\nP:3, Stack:4KB] as HeatingTask
+    component [WheaterControlTask\nWater Heating\nP:3, Stack:4KB] as WaterTask
+    component [SpaceHeatingPIDTask\nPID Computation\nP:3, Stack:3.5KB] as PIDTask
+}
+
+package "Core 1 - Services" #52BE80 {
+    component [MQTTTask\nCommunication\nP:2, Stack:8KB] as MQTTTask
+    component [MonitoringTask\nSystem Health\nP:2, Stack:8KB] as MonitorTask
+    component [OTATask\nFirmware Update\nP:1, Stack:8KB] as OTATask
+    component [PersistentStorageTask\nParameter Saves\nP:2, Stack:4KB] as StorageTask
+}
+
+package "Shared Data Structures\n(Mutex Protected)" #8B7355 {
+    storage [SharedSensorReadings\n8 Temperatures\nValidity Flags\nTemperature_t int16] as SensorData
+    storage [SharedRelayReadings\n8 Relay States\nError Codes] as RelayData
+    storage [SystemSettings\nAll Runtime Parameters\nUpdated via MQTT] as SystemSettings
+}
+
+package "Event Groups\n(FreeRTOS)" #708090 {
+    storage [GeneralSystem\nSTARTUP_COMPLETE\nNETWORK_READY\nMQTT_CONNECTED\nSTORAGE_READY] as GeneralSys
+    storage [SystemState\nBOILER/HEATING/WATER\nENABLED/ON bits\nEMERGENCY_STOP] as SystemState
+    storage [BurnerRequest\nHEATING/WATER_REQUEST\nPOWER_LOW/HIGH\nTemp encoding 16-23] as BurnerReq
+    storage [Sensor\n8 update bits\n8 error bits\nDATA_AVAILABLE] as SensorEvents
+    storage [Relay\nRelay + RelayRequest\n8 relay ON/OFF\nUPDATE_REQUIRED\nEMERGENCY_STOP] as RelayEvents
+}
+
+package "SystemResourceProvider (SRP)\nService Locator" #68228B {
+    interface " " as SRP {
+        getMB8ART()
+        getRYN4()
+        getANDRTF3()
+        getBurnerSystemController()
+        getHeatingControl()
+        getPIDControl()
+        getMQTTManager()
+        getPersistentStorage()
+        getSharedResourceManager()
+    }
+}
+
+package "Hardware Devices\n(via SRP)" #CD5B45 {
+    component [MB8ART\n8-Ch Temp Sensor\nModbus RTU] as MB8ART
+    component [RYN4\n8-Ch Relay Module\nModbus RTU] as RYN4
+    component [ANDRTF3\nRoom Sensor\nModbus RTU] as ANDRTF3
+}
+
+package "Control Modules\n(via SRP)" #FFD93D {
+    component [BurnerSystemController\nUnified Burner+Pump\nH1 Refactoring] as BurnerSysCtrl
+    component [HeatingControlModule\nPID + Heating Curve] as HeatingCtrl
+    component [PIDControlModule\nFixed-Point PID] as PIDCtrl
+}
+
+' Hardware Interface Flow
+MB8ARTTask --> MB8ART : poll\n5s
+MB8ART --> MB8ARTProc : raw data
+MB8ARTProc --> SensorData : update
+MB8ARTProc --> SensorEvents : SetBits
+
+ANDRTF3Task --> ANDRTF3 : poll\n5s
+ANDRTF3 --> SensorData : update
+ANDRTF3 --> SensorEvents : SetBits
+
+RelayTask --> RYN4 : execute\ncontinuous
+RYN4 --> RelayData : states
+RelayTask --> RelayEvents : SetBits
+
+' Control Logic Flow
+HeatingTask --> SensorData : read
+HeatingTask --> SystemSettings : read
+HeatingTask --> BurnerReq : SetBits\nHEATING_REQUEST
+
+WaterTask --> SensorData : read
+WaterTask --> SystemSettings : read
+WaterTask --> BurnerReq : SetBits\nWATER_REQUEST
+
+BurnerTask --> BurnerReq : WaitBits
+BurnerTask --> BurnerSysCtrl : control
+BurnerSysCtrl --> RYN4 : batch commands
+BurnerTask --> RelayEvents : SetBits
+
+PIDTask --> BurnerReq : check active
+PIDTask --> SensorData : read boiler temp
+PIDTask --> PIDCtrl : calculate
+PIDTask --> BurnerReq : SetBits\nPOWER bits
+
+' Service Flow
+MQTTTask --> SystemSettings : read
+MQTTTask --> SensorData : read
+MQTTTask --> RelayData : read
+MQTTTask --> GeneralSys : publish status
+
+MonitorTask --> SensorData : collect
+MonitorTask --> RelayData : collect
+MonitorTask --> SystemState : check
+MonitorTask --> MQTTTask : report
+
+StorageTask --> SystemSettings : auto-save\n5 min
+
+' Scheduler Flow
+SchedulerTask --> SensorData : read tank temp
+SchedulerTask --> BurnerReq : SetBits\nWATER_REQUEST
+
+' SRP Access
+HeatingTask ..> SRP : getHeatingControl()
+BurnerTask ..> SRP : getBurnerSystemController()
+MB8ARTTask ..> SRP : getMB8ART()
+RelayTask ..> SRP : getRYN4()
+
+SRP --> MB8ART
+SRP --> RYN4
+SRP --> ANDRTF3
+SRP --> BurnerSysCtrl
+SRP --> HeatingCtrl
+SRP --> PIDCtrl
+
+note right of SensorData
+  **Thread Safety:**
+  All shared data protected
+  by mutexes via RAII pattern
+
+  **Temperature Format:**
+  Temperature_t = int16_t
+  Resolution: 0.1°C
+  No float arithmetic
+end note
+
+note right of BurnerReq
+  **Temperature Encoding:**
+  Bits 0-15: Control flags
+  Bits 16-23: Target temp
+
+  Example: 70°C heating
+  = 0x00004601
+
+  **Atomic Operation:**
+  Request + temperature
+  in single SetBits call
+end note
+
+note bottom of BurnerTask
+  **Priority Arbitration:**
+  1. Read all request bits
+  2. Water has priority
+  3. Decode target temperature
+  4. Control BurnerSystemController
+  5. Update relay states
+  6. 200ms cycle time
+end note
+
+note bottom of SRP
+  **Service Locator Pattern:**
+  - O(1) static access
+  - Compile-time type safety
+  - No ServiceContainer overhead
+  - Replaced HashMap lookup
+
+  All tasks access services
+  via SRP::getXXX() calls
+end note
+
+@enduml

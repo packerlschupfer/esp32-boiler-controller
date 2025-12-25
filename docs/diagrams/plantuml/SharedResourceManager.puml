@@ -1,0 +1,214 @@
+@startuml SharedResourceManager
+!include theme.puml
+
+title SharedResourceManager - FreeRTOS Resource Management\n12 Event Groups (Post-M1) + 5 Mutexes + Managed Queues
+
+class SharedResourceManager <<Singleton>> {
+    - eventGroups: Map<string, EventGroupHandle_t>
+    - mutexes: Map<string, SemaphoreHandle_t>
+    - queues: Map<string, QueueHandle_t>
+    --
+    + getInstance(): SharedResourceManager&
+    + initializeStandardResources(): void
+    --
+    + **Event Group Methods**
+    + createEventGroup(name): EventGroupHandle_t
+    + getEventGroup(name): EventGroupHandle_t
+    + GET_EVENT_GROUP(name): EventGroupHandle_t <<macro>>
+    --
+    + **Mutex Methods**
+    + createMutex(name): SemaphoreHandle_t
+    + getMutex(name): SemaphoreHandle_t
+    + GET_MUTEX(name): SemaphoreHandle_t <<macro>>
+    --
+    + **Queue Methods**
+    + createQueue(name, size): QueueHandle_t
+    + getQueue(name): QueueHandle_t
+    + GET_QUEUE(name): QueueHandle_t <<macro>>
+}
+
+package "12 Event Groups (M1 Refactored)" {
+    class GeneralSystem <<EventGroup>> {
+        + STARTUP_COMPLETE
+        + NETWORK_READY
+        + MQTT_CONNECTED
+        + TIME_SYNCED
+        + STORAGE_READY
+        + SYSTEM_REBOOT
+        + SENSOR_DEGRADED
+        + MUTEX_CONTENTION
+    }
+
+    class SystemState <<EventGroup>> {
+        + BOILER_ENABLED/ON
+        + HEATING_ENABLED/ON
+        + WATER_ENABLED/ON
+        + WATER_PRIORITY
+        + BURNER_ON
+        + PUMPS_ON
+        + MQTT_ENABLED/OPERATIONAL
+        + EMERGENCY_STOP
+    }
+
+    class ControlRequests <<EventGroup>> {
+        + BOILER_ENABLE/DISABLE
+        + HEATING_ENABLE/DISABLE
+        + WATER_ENABLE/DISABLE
+        + MQTT_ENABLE/DISABLE
+        + OVERRIDES
+        + SAVE_PARAMETERS
+    }
+
+    class BurnerRequest <<EventGroup>> {
+        + HEATING_REQUEST
+        + WATER_REQUEST
+        + POWER_LOW/HIGH
+        + CHANGED_FLAGS
+        + **Bits 16-23: Temperature**
+    }
+
+    class Sensor <<EventGroup>> {
+        + 8 sensor update bits
+        + 8 sensor error bits
+        + DATA_AVAILABLE
+        + FIRST_READ_COMPLETE
+    }
+
+    class Relay <<EventGroup>> {
+        + 8 relay ON/OFF bits
+        + UPDATE_REQUIRED
+        + UPDATE_COMPLETE
+        + EMERGENCY_STOP
+    }
+
+    class RelayRequest <<EventGroup>>
+    class RelayStatus <<EventGroup>>
+    class Heating <<EventGroup>>
+    class Burner <<EventGroup>>
+    class ErrorNotification <<EventGroup>>
+    class DeviceReady <<EventGroup>>
+}
+
+package "5 Core Mutexes" {
+    class sensorReadingsMutex <<Mutex>> {
+        + Protects: SharedSensorReadings
+    }
+
+    class relayReadingsMutex <<Mutex>> {
+        + Protects: SharedRelayReadings
+    }
+
+    class systemSettingsMutex <<Mutex>> {
+        + Protects: SystemSettings
+    }
+
+    class mqttMutex <<Mutex>> {
+        + Protects: MQTT operations
+    }
+
+    class modbusMutex <<Mutex>> {
+        + Protects: Modbus bus access
+    }
+}
+
+class MutexGuard <<RAII>> {
+    - mutex: SemaphoreHandle_t
+    --
+    + MutexGuard(mutex)
+    + ~MutexGuard() <<auto unlock>>
+}
+
+class QueueManager {
+    + createManagedQueue(name): ManagedQueue
+    + getMetrics(): QueueMetrics
+}
+
+class ManagedQueue {
+    - queue: QueueHandle_t
+    - overflowStrategy: Strategy
+    - metrics: QueueMetrics
+    --
+    + send(item): bool
+    + receive(item, timeout): bool
+    + getMetrics(): QueueMetrics
+}
+
+' Relationships
+SharedResourceManager *-- GeneralSystem
+SharedResourceManager *-- SystemState
+SharedResourceManager *-- ControlRequests
+SharedResourceManager *-- BurnerRequest
+SharedResourceManager *-- Sensor
+SharedResourceManager *-- Relay
+SharedResourceManager *-- RelayRequest
+SharedResourceManager *-- RelayStatus
+SharedResourceManager *-- Heating
+SharedResourceManager *-- Burner
+SharedResourceManager *-- ErrorNotification
+SharedResourceManager *-- DeviceReady
+
+SharedResourceManager *-- sensorReadingsMutex
+SharedResourceManager *-- relayReadingsMutex
+SharedResourceManager *-- systemSettingsMutex
+SharedResourceManager *-- mqttMutex
+SharedResourceManager *-- modbusMutex
+
+MutexGuard ..> sensorReadingsMutex : locks/unlocks
+QueueManager --> ManagedQueue : creates
+
+note right of GeneralSystem
+  **M1 Refactoring:**
+  Consolidated from ~15 to 12
+  event groups
+
+  **Removed:**
+  - Duplicate SYSTEM groups
+  - Unused WHEATER, TIMER
+  - MQTT merged into SystemState
+end note
+
+note right of BurnerRequest
+  **Temperature Encoding:**
+  Bits 0-15: Control flags
+  Bits 16-23: Target temp (0-255°C)
+
+  **Helper Functions:**
+  encode_temperature(temp)
+  decode_temperature(bits)
+
+  **Atomic operation:**
+  Set request + temperature
+  in single bit operation
+end note
+
+note bottom of MutexGuard
+  **RAII Pattern:**
+  ```cpp
+  {
+      MutexGuard guard(mutex);
+      // Critical section
+      // Auto-unlock on scope exit
+  }
+  ```
+
+  **Benefits:**
+  - No forgotten unlocks
+  - Exception-safe
+  - Deadlock prevention
+end note
+
+note bottom of ManagedQueue
+  **Overflow Strategies:**
+  - Drop oldest
+  - Drop newest
+  - Priority drop
+  - Block
+  - Callback
+
+  **Metrics:**
+  - Peak usage
+  - Overflow count
+  - Circuit breaker
+end note
+
+@enduml
