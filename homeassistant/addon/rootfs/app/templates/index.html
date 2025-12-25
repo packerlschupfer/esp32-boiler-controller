@@ -1,0 +1,1743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boiler Controller Config</title>
+    <style>
+        :root {
+            --primary: #03a9f4;
+            --success: #4caf50;
+            --warning: #ff9800;
+            --danger: #f44336;
+            --bg: #1c1c1c;
+            --card-bg: #2d2d2d;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --border: #404040;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 16px;
+            line-height: 1.5;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        h1 { font-size: 1.5rem; font-weight: 500; }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--danger);
+        }
+        .status-dot.connected { background: var(--success); }
+        .actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.85; }
+        button:active { opacity: 0.7; }
+        button.save { background: var(--success); }
+        button.danger { background: var(--danger); }
+        button.warning { background: var(--warning); }
+        button.small { padding: 4px 8px; font-size: 12px; }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 8px;
+            overflow-x: auto;
+        }
+        .tab {
+            background: transparent;
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+        }
+        .tab.active {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+        }
+        .card {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid var(--border);
+        }
+        .card h2 {
+            font-size: 1rem;
+            font-weight: 500;
+            margin-bottom: 16px;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card h2 .icon { font-size: 1.2rem; }
+        .param-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .param-row:last-child { border-bottom: none; }
+        .param-label {
+            font-size: 14px;
+            color: #aaa;
+        }
+        .param-value {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        input[type="number"], input[type="time"], select {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input[type="number"] { width: 80px; text-align: right; }
+        input[type="time"] { width: 100px; }
+        select { min-width: 100px; }
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+        .unit { font-size: 12px; color: #888; width: 30px; }
+
+        /* Status indicators */
+        .indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .indicator.on { background: rgba(76, 175, 80, 0.2); color: var(--success); }
+        .indicator.off { background: rgba(244, 67, 54, 0.2); color: var(--danger); }
+        .indicator.idle { background: rgba(158, 158, 158, 0.2); color: #9e9e9e; }
+
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+        .sensor-item {
+            background: var(--bg);
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .sensor-value {
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: var(--primary);
+        }
+        .sensor-label {
+            font-size: 12px;
+            color: #888;
+            margin-top: 4px;
+        }
+
+        /* System status grid */
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+        .status-item {
+            text-align: center;
+            padding: 8px;
+            background: var(--bg);
+            border-radius: 4px;
+        }
+        .status-item .label { font-size: 11px; color: var(--text-dim); }
+        .status-item .value { font-size: 14px; margin-top: 4px; }
+
+        /* Schedules */
+        .schedule-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .schedule-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: var(--bg);
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }
+        .schedule-item .info { flex: 1; }
+        .schedule-item .type {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--primary);
+        }
+        .schedule-item .time { font-size: 16px; font-weight: 500; }
+        .schedule-item .days { font-size: 12px; color: var(--text-dim); }
+        .schedule-form {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }
+        .schedule-form .full-width { grid-column: 1 / -1; }
+        .day-selector {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+        .day-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .day-btn.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: white;
+        }
+
+        /* Runtime stats */
+        .runtime-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+        .runtime-item {
+            background: var(--bg);
+            padding: 12px;
+            border-radius: 6px;
+        }
+        .runtime-item .value {
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: var(--primary);
+        }
+        .runtime-item .label {
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: var(--success);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            display: none;
+            z-index: 1000;
+        }
+        .toast.error { background: var(--danger); }
+        .toast.show { display: block; }
+
+        /* Tooltips */
+        .has-tooltip {
+            position: relative;
+            cursor: help;
+        }
+        .has-tooltip::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: white;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            white-space: nowrap;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s;
+            z-index: 100;
+        }
+        .has-tooltip:hover::after {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        /* Confirmation modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+            border: 1px solid var(--border);
+        }
+        .modal h3 {
+            margin-bottom: 16px;
+            color: var(--warning);
+        }
+        .modal p { margin-bottom: 20px; color: var(--text-dim); }
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        /* Health display */
+        .health-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+        .health-item {
+            background: var(--bg);
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .health-item .value {
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: var(--primary);
+        }
+        .health-item .label {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .health-item.warning .value { color: var(--warning); }
+        .health-item.danger .value { color: var(--danger); }
+
+        /* Relay control buttons */
+        .relay-controls {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+        .relay-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px 8px;
+            border-radius: 6px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .relay-btn:hover { border-color: var(--primary); }
+        .relay-btn.active {
+            background: rgba(76, 175, 80, 0.2);
+            border-color: var(--success);
+        }
+        .relay-btn .icon { font-size: 1.5rem; margin-bottom: 4px; }
+        .relay-btn .name { font-size: 12px; color: var(--text-dim); }
+        .relay-btn .state { font-size: 11px; font-weight: 500; margin-top: 2px; }
+        .relay-btn.active .state { color: var(--success); }
+
+        @media (max-width: 600px) {
+            .sensor-grid, .status-grid { grid-template-columns: 1fr 1fr; }
+            .schedule-form { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Boiler Controller</h1>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+        <div class="actions">
+            <button onclick="refresh()">Refresh</button>
+            <button class="save" onclick="save()">Save to NVS</button>
+        </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="heating">Heating</button>
+        <button class="tab" data-tab="water">Water</button>
+        <button class="tab" data-tab="pid">PID Tuning</button>
+        <button class="tab" data-tab="schedules">Schedules</button>
+        <button class="tab" data-tab="system">System</button>
+    </div>
+
+    <!-- Overview Tab -->
+    <div class="tab-content active" id="tab-overview">
+        <div class="grid">
+            <!-- Live Sensors -->
+            <div class="card">
+                <h2><span class="icon">🌡️</span> Live Sensors</h2>
+                <div class="sensor-grid">
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="temp_boiler_out">--</div>
+                        <div class="sensor-label">Boiler Output</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="temp_boiler_ret">--</div>
+                        <div class="sensor-label">Boiler Return</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="temp_water">--</div>
+                        <div class="sensor-label">Water Tank</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="temp_inside">--</div>
+                        <div class="sensor-label">Inside Temp</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="temp_outside">--</div>
+                        <div class="sensor-label">Outside</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="pressure">--</div>
+                        <div class="sensor-label">Pressure</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="temp_target">--</div>
+                        <div class="sensor-label">Boiler Target</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-value" id="burner_state">--</div>
+                        <div class="sensor-label">Burner State</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Status -->
+            <div class="card">
+                <h2><span class="icon">⚡</span> System Status</h2>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <div class="label">System</div>
+                        <div class="value" id="sys_enabled">--</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Heating</div>
+                        <div class="value" id="sys_heating">--</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Water</div>
+                        <div class="value" id="sys_water">--</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Burner</div>
+                        <div class="value" id="sys_burner">--</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">H.Pump</div>
+                        <div class="value" id="sys_hpump">--</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">W.Pump</div>
+                        <div class="value" id="sys_wpump">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Controls -->
+            <div class="card">
+                <h2><span class="icon">🎛️</span> Quick Controls</h2>
+                <div class="param-row">
+                    <span class="param-label">System Power</span>
+                    <div class="param-value">
+                        <button onclick="sendCmd('cmd/system', 'on')">ON</button>
+                        <button class="danger" onclick="sendCmd('cmd/system', 'off')">OFF</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Space Heating</span>
+                    <div class="param-value">
+                        <button onclick="sendCmd('cmd/heating', 'on')">ON</button>
+                        <button class="danger" onclick="sendCmd('cmd/heating', 'off')">OFF</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Water Heating</span>
+                    <div class="param-value">
+                        <button onclick="sendCmd('cmd/water', 'on')">ON</button>
+                        <button class="danger" onclick="sendCmd('cmd/water', 'off')">OFF</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Runtime Stats -->
+            <div class="card">
+                <h2><span class="icon">📊</span> Runtime Statistics</h2>
+                <div class="runtime-grid">
+                    <div class="runtime-item">
+                        <div class="value" id="runtime_total">--</div>
+                        <div class="label">Total Hours</div>
+                    </div>
+                    <div class="runtime-item">
+                        <div class="value" id="runtime_burner">--</div>
+                        <div class="label">Burner Hours</div>
+                    </div>
+                    <div class="runtime-item">
+                        <div class="value" id="runtime_starts">--</div>
+                        <div class="label">Burner Starts</div>
+                    </div>
+                    <div class="runtime-item">
+                        <div class="value" id="runtime_heating">--</div>
+                        <div class="label">Heating Hours</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Manual Relay Control -->
+            <div class="card">
+                <h2><span class="icon">🔌</span> Manual Relay Control</h2>
+                <div class="relay-controls">
+                    <div class="relay-btn" id="relay_burner" onclick="toggleRelay('burner')">
+                        <span class="icon">🔥</span>
+                        <span class="name">Burner</span>
+                        <span class="state">OFF</span>
+                    </div>
+                    <div class="relay-btn" id="relay_half_power" onclick="toggleRelay('half_power')">
+                        <span class="icon">½</span>
+                        <span class="name">Half Power</span>
+                        <span class="state">OFF</span>
+                    </div>
+                    <div class="relay-btn" id="relay_heating_pump" onclick="toggleRelay('heating_pump')">
+                        <span class="icon">♨️</span>
+                        <span class="name">Heating Pump</span>
+                        <span class="state">OFF</span>
+                    </div>
+                    <div class="relay-btn" id="relay_water_pump" onclick="toggleRelay('water_pump')">
+                        <span class="icon">💧</span>
+                        <span class="name">Water Pump</span>
+                        <span class="state">OFF</span>
+                    </div>
+                </div>
+                <p style="font-size: 11px; color: var(--text-dim); margin-top: 12px; text-align: center;">
+                    ⚠️ Manual control overrides automatic operation
+                </p>
+            </div>
+
+            <!-- Device Health -->
+            <div class="card">
+                <h2><span class="icon">💻</span> Device Health</h2>
+                <div class="health-grid">
+                    <div class="health-item" id="health_heap">
+                        <div class="value">--</div>
+                        <div class="label">Free Heap</div>
+                    </div>
+                    <div class="health-item" id="health_heap_min">
+                        <div class="value">--</div>
+                        <div class="label">Min Heap</div>
+                    </div>
+                    <div class="health-item" id="health_uptime">
+                        <div class="value">--</div>
+                        <div class="label">Uptime</div>
+                    </div>
+                    <div class="health-item" id="health_stack">
+                        <div class="value">--</div>
+                        <div class="label">Min Stack</div>
+                    </div>
+                    <div class="health-item" id="health_tasks">
+                        <div class="value">--</div>
+                        <div class="label">Tasks</div>
+                    </div>
+                    <div class="health-item" id="health_errors">
+                        <div class="value">--</div>
+                        <div class="label">Errors</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Heating Tab -->
+    <div class="tab-content" id="tab-heating">
+        <div class="grid">
+            <div class="card">
+                <h2><span class="icon">🏠</span> Space Heating Settings</h2>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Room temperature setpoint">Target Temperature</span>
+                    <div class="param-value">
+                        <input type="number" step="0.5" id="heating_targetTemp" data-topic="params/heating/targetTemp" min="15" max="30">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/heating', 'heating_targetTemp')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_targetTemp')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Temperature band around setpoint">Hysteresis</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="heating_hysteresis" data-topic="params/heating/hysteresis" min="0.1" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/heating', 'heating_hysteresis')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_hysteresis')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Heating curve steepness (higher = more aggressive)">Curve Coefficient</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="heating_curveCoeff" data-topic="params/heating/curveCoeff" min="0.5" max="5">
+                        <span class="unit"></span>
+                        <button class="small" onclick="getParam('params/get/heating', 'heating_curveCoeff')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_curveCoeff')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Parallel shift of heating curve">Curve Shift</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="heating_curveShift" data-topic="params/heating/curveShift" min="-10" max="30">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/heating', 'heating_curveShift')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_curveShift')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Min boiler temp for space heating">Burner Low Limit</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="heating_burnerLowLimit" data-topic="params/heating/burnerLowLimit" min="20" max="70">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/heating', 'heating_burnerLowLimit')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_burnerLowLimit')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Max boiler temp for space heating">High Limit</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="heating_highLimit" data-topic="params/heating/highLimit" min="40" max="85">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/heating', 'heating_highLimit')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_highLimit')">S</button>
+                    </div>
+                </div>
+                <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+                    <span class="param-label">All Parameters</span>
+                    <div class="param-value">
+                        <button onclick="getHeatingParams()">Read All</button>
+                        <button class="save" onclick="setHeatingParams()">Set All</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Water Tab -->
+    <div class="tab-content" id="tab-water">
+        <div class="grid">
+            <div class="card">
+                <h2><span class="icon">🚿</span> Water Heater Settings</h2>
+                <!-- Safety Limits Display -->
+                <div style="display: flex; gap: 16px; margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: 6px;">
+                    <div style="flex: 1; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-dim);">Safe Low</div>
+                        <div style="font-size: 1.2rem; color: var(--warning);" id="wheater_safeLow">--°C</div>
+                    </div>
+                    <div style="flex: 1; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-dim);">Operating Range</div>
+                        <div style="font-size: 1.2rem; color: var(--success);" id="wheater_range">-- - --°C</div>
+                    </div>
+                    <div style="flex: 1; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-dim);">Safe High</div>
+                        <div style="font-size: 1.2rem; color: var(--danger);" id="wheater_safeHigh">--°C</div>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Target temperature to heat water to">High Limit</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="wheater_tempLimitHigh" data-topic="params/wheater/tempLimitHigh" min="40" max="75">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/wheater', 'wheater_tempLimitHigh')">R</button>
+                        <button class="small save" onclick="setParamFromInput('wheater_tempLimitHigh')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Temperature at which heating starts">Low Limit</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="wheater_tempLimitLow" data-topic="params/wheater/tempLimitLow" min="20" max="60">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/wheater', 'wheater_tempLimitLow')">R</button>
+                        <button class="small save" onclick="setParamFromInput('wheater_tempLimitLow')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Boiler temp above tank temp for charging">Charge Delta</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="wheater_tempChargeDelta" data-topic="params/wheater/tempChargeDelta" min="3" max="20">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/wheater', 'wheater_tempChargeDelta')">R</button>
+                        <button class="small save" onclick="setParamFromInput('wheater_tempChargeDelta')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Expected heating rate for time estimation">Heating Rate</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="wheater_heatingRate" data-topic="params/wheater/heatingRate" min="0.1" max="5">
+                        <span class="unit">°C/m</span>
+                        <button class="small" onclick="getParam('params/get/wheater', 'wheater_heatingRate')">R</button>
+                        <button class="small save" onclick="setParamFromInput('wheater_heatingRate')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Water heating takes priority over space heating">Priority Enabled</span>
+                    <div class="param-value">
+                        <input type="checkbox" id="wheater_priorityEnabled" data-topic="params/wheater/priorityEnabled">
+                        <button class="small" onclick="getParam('params/get/wheater', 'wheater_priorityEnabled')">R</button>
+                        <button class="small save" onclick="setCheckboxParam('wheater_priorityEnabled')">S</button>
+                    </div>
+                </div>
+                <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+                    <span class="param-label">All Parameters</span>
+                    <div class="param-value">
+                        <button onclick="getWaterParams()">Read All</button>
+                        <button class="save" onclick="setWaterParams()">Set All</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PID Tab -->
+    <div class="tab-content" id="tab-pid">
+        <div class="grid">
+            <div class="card">
+                <h2><span class="icon">📈</span> Space Heating PID</h2>
+                <div class="param-row">
+                    <span class="param-label">Kp (Proportional)</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="pid_sh_kp" data-topic="params/pid/spaceHeating/kp">
+                        <button class="small" onclick="getParam('params/get/pid/spaceHeating', 'pid_sh_kp')">R</button>
+                        <button class="small save" onclick="setParamFromInput('pid_sh_kp')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Ki (Integral)</span>
+                    <div class="param-value">
+                        <input type="number" step="0.001" id="pid_sh_ki" data-topic="params/pid/spaceHeating/ki">
+                        <button class="small" onclick="getParam('params/get/pid/spaceHeating', 'pid_sh_ki')">R</button>
+                        <button class="small save" onclick="setParamFromInput('pid_sh_ki')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Kd (Derivative)</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="pid_sh_kd" data-topic="params/pid/spaceHeating/kd">
+                        <button class="small" onclick="getParam('params/get/pid/spaceHeating', 'pid_sh_kd')">R</button>
+                        <button class="small save" onclick="setParamFromInput('pid_sh_kd')">S</button>
+                    </div>
+                </div>
+                <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+                    <span class="param-label">All Parameters</span>
+                    <div class="param-value">
+                        <button onclick="getPidParams('spaceHeating')">Read All</button>
+                        <button class="save" onclick="setPidParams('spaceHeating')">Set All</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">📈</span> Water Heater PID</h2>
+                <div class="param-row">
+                    <span class="param-label">Kp (Proportional)</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="pid_wh_kp" data-topic="params/pid/waterHeater/kp">
+                        <button class="small" onclick="getParam('params/get/pid/waterHeater', 'pid_wh_kp')">R</button>
+                        <button class="small save" onclick="setParamFromInput('pid_wh_kp')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Ki (Integral)</span>
+                    <div class="param-value">
+                        <input type="number" step="0.001" id="pid_wh_ki" data-topic="params/pid/waterHeater/ki">
+                        <button class="small" onclick="getParam('params/get/pid/waterHeater', 'pid_wh_ki')">R</button>
+                        <button class="small save" onclick="setParamFromInput('pid_wh_ki')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Kd (Derivative)</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="pid_wh_kd" data-topic="params/pid/waterHeater/kd">
+                        <button class="small" onclick="getParam('params/get/pid/waterHeater', 'pid_wh_kd')">R</button>
+                        <button class="small save" onclick="setParamFromInput('pid_wh_kd')">S</button>
+                    </div>
+                </div>
+                <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+                    <span class="param-label">All Parameters</span>
+                    <div class="param-value">
+                        <button onclick="getPidParams('waterHeater')">Read All</button>
+                        <button class="save" onclick="setPidParams('waterHeater')">Set All</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PID Auto-Tuning -->
+            <div class="card">
+                <h2><span class="icon">🎯</span> PID Auto-Tuning</h2>
+                <!-- Status Display -->
+                <div style="display: flex; gap: 16px; margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: 6px;">
+                    <div style="flex: 1; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-dim);">Status</div>
+                        <div style="font-size: 1rem; font-weight: 500;" id="autotune_status">Idle</div>
+                    </div>
+                    <div style="flex: 1; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-dim);">Progress</div>
+                        <div style="font-size: 1rem; font-weight: 500;" id="autotune_progress">--</div>
+                    </div>
+                    <div style="flex: 1; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-dim);">Cycles</div>
+                        <div style="font-size: 1rem; font-weight: 500;" id="autotune_cycles">--</div>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Relay output amplitude during tuning (10-100%)">Relay Amplitude</span>
+                    <div class="param-value">
+                        <input type="number" step="5" id="autotune_amplitude" data-topic="params/pid/autotune/amplitude" min="10" max="100">
+                        <span class="unit">%</span>
+                        <button class="small" onclick="getAutotuneParams()">R</button>
+                        <button class="small save" onclick="setParamFromInput('autotune_amplitude')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Hysteresis band around setpoint (0.5-10°C)">Hysteresis</span>
+                    <div class="param-value">
+                        <input type="number" step="0.5" id="autotune_hysteresis" data-topic="params/pid/autotune/hysteresis" min="0.5" max="10">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getAutotuneParams()">R</button>
+                        <button class="small save" onclick="setParamFromInput('autotune_hysteresis')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Tuning method for calculating PID parameters">Method</span>
+                    <div class="param-value">
+                        <select id="autotune_method" data-topic="params/pid/autotune/method">
+                            <option value="0">Ziegler-Nichols PI</option>
+                            <option value="1">Ziegler-Nichols PID</option>
+                            <option value="2">Tyreus-Luyben</option>
+                            <option value="3" selected>Cohen-Coon</option>
+                            <option value="4">Lambda Tuning</option>
+                        </select>
+                        <button class="small" onclick="getAutotuneParams()">R</button>
+                        <button class="small save" onclick="setAutotuneMethod()">S</button>
+                    </div>
+                </div>
+                <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+                    <span class="param-label">Auto-Tune Control</span>
+                    <div class="param-value">
+                        <button onclick="startAutotune()">Start</button>
+                        <button class="danger" onclick="stopAutotune()">Stop</button>
+                        <button class="small" onclick="getAutotuneStatus()">Status</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Schedules Tab -->
+    <div class="tab-content" id="tab-schedules">
+        <div class="grid">
+            <div class="card">
+                <h2><span class="icon">📅</span> Active Schedules</h2>
+                <div class="schedule-list" id="scheduleList">
+                    <p style="color: var(--text-dim); text-align: center;">No schedules configured</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">➕</span> Add Schedule</h2>
+                <div class="schedule-form">
+                    <div>
+                        <label class="param-label">Type</label>
+                        <select id="sched_type">
+                            <option value="water">Water Heating</option>
+                            <option value="heating">Space Heating</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="param-label">Start Time</label>
+                        <input type="time" id="sched_start" value="06:00">
+                    </div>
+                    <div>
+                        <label class="param-label">End Time</label>
+                        <input type="time" id="sched_end" value="07:00">
+                    </div>
+                    <div class="full-width">
+                        <label class="param-label">Days</label>
+                        <div class="day-selector" id="daySelector">
+                            <button type="button" class="day-btn active" data-day="0">Su</button>
+                            <button type="button" class="day-btn active" data-day="1">Mo</button>
+                            <button type="button" class="day-btn active" data-day="2">Tu</button>
+                            <button type="button" class="day-btn active" data-day="3">We</button>
+                            <button type="button" class="day-btn active" data-day="4">Th</button>
+                            <button type="button" class="day-btn active" data-day="5">Fr</button>
+                            <button type="button" class="day-btn active" data-day="6">Sa</button>
+                        </div>
+                    </div>
+                    <div class="full-width">
+                        <button onclick="addSchedule()">Add Schedule</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Tab -->
+    <div class="tab-content" id="tab-system">
+        <div class="grid">
+            <div class="card">
+                <h2><span class="icon">🔧</span> Device Control</h2>
+                <div class="param-row">
+                    <span class="param-label">Restart Device</span>
+                    <div class="param-value">
+                        <button class="warning" onclick="confirmAction('Restart Device', 'This will restart the boiler controller. Heating will be interrupted.', () => sendCmd('cmd/system', 'restart'))">Restart</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Emergency Stop</span>
+                    <div class="param-value">
+                        <button class="danger" onclick="confirmAction('Emergency Stop', 'This will immediately stop the burner and all pumps!', () => sendCmd('cmd/emergency', 'stop'))">STOP</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Reset Lockout</span>
+                    <div class="param-value">
+                        <button onclick="confirmAction('Reset Lockout', 'This will reset any burner lockout conditions.', () => sendCmd('cmd/burner', 'reset'))">Reset</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">💾</span> Storage</h2>
+                <div class="param-row">
+                    <span class="param-label">Save Parameters</span>
+                    <div class="param-value">
+                        <button class="save" onclick="save()">Save to NVS</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Reload Parameters</span>
+                    <div class="param-value">
+                        <button onclick="refresh()">Refresh All</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">ℹ️</span> Device Info</h2>
+                <div class="param-row">
+                    <span class="param-label">Last Update</span>
+                    <span id="lastUpdate">--</span>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">Device IP</span>
+                    <span id="deviceIP">192.168.20.40</span>
+                </div>
+                <div class="param-row">
+                    <span class="param-label">MQTT Broker</span>
+                    <span id="mqttBroker">192.168.20.27</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">🛡️</span> Safety Configuration</h2>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Minimum time between pump state changes (motor protection)">Pump Protection</span>
+                    <div class="param-value">
+                        <input type="number" id="safety_pump_prot" min="5" max="60" step="1" value="15">
+                        <span class="unit">sec</span>
+                        <button class="small" onclick="setSafetyConfig('pump_protection_ms', document.getElementById('safety_pump_prot').value * 1000)">Set</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Time before sensor data is considered stale (triggers fallback)">Sensor Timeout</span>
+                    <div class="param-value">
+                        <input type="number" id="safety_sensor_stale" min="30" max="300" step="10" value="60">
+                        <span class="unit">sec</span>
+                        <button class="small" onclick="setSafetyConfig('sensor_stale_ms', document.getElementById('safety_sensor_stale').value * 1000)">Set</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Pump run time after burner stops (heat dissipation)">Post-Purge</span>
+                    <div class="param-value">
+                        <input type="number" id="safety_post_purge" min="30" max="180" step="10" value="90">
+                        <span class="unit">sec</span>
+                        <button class="small" onclick="setSafetyConfig('post_purge_ms', document.getElementById('safety_post_purge').value * 1000)">Set</button>
+                    </div>
+                </div>
+                <div class="param-row" style="padding-top: 12px; border-top: 1px solid var(--border); margin-top: 8px;">
+                    <span class="param-label" style="font-size: 11px; color: var(--text-dim);">Changes saved to NVS automatically</span>
+                    <button class="small" onclick="refreshSafetyConfig()">Refresh</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <!-- Confirmation Modal -->
+    <div class="modal-overlay" id="confirmModal">
+        <div class="modal">
+            <h3 id="confirmTitle">Confirm Action</h3>
+            <p id="confirmMessage">Are you sure you want to proceed?</p>
+            <div class="modal-actions">
+                <button onclick="closeConfirmModal()">Cancel</button>
+                <button class="danger" id="confirmBtn" onclick="executeConfirmedAction()">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Base URL for API calls (handles HA ingress)
+        const BASE_URL = window.location.pathname.replace(/\/$/, '');
+        function apiUrl(path) {
+            return BASE_URL + path;
+        }
+
+        // Tab handling
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Day selector
+        document.querySelectorAll('.day-btn').forEach(btn => {
+            btn.addEventListener('click', () => btn.classList.toggle('active'));
+        });
+
+        // Show toast notification
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast show' + (isError ? ' error' : '');
+            setTimeout(() => toast.className = 'toast', 3000);
+        }
+
+        // Confirmation modal
+        let pendingAction = null;
+        function confirmAction(title, message, action) {
+            document.getElementById('confirmTitle').textContent = title;
+            document.getElementById('confirmMessage').textContent = message;
+            pendingAction = action;
+            document.getElementById('confirmModal').classList.add('show');
+        }
+        function closeConfirmModal() {
+            document.getElementById('confirmModal').classList.remove('show');
+            pendingAction = null;
+        }
+        function executeConfirmedAction() {
+            if (pendingAction) {
+                pendingAction();
+            }
+            closeConfirmModal();
+        }
+
+        // Relay toggle
+        const relayState = { burner: false, half_power: false, heating_pump: false, water_pump: false };
+        async function toggleRelay(relay) {
+            const newState = !relayState[relay];
+            const topic = `cmd/relay/${relay}`;
+            await sendCmd(topic, newState ? 'on' : 'off');
+        }
+        function updateRelayButtons(relays) {
+            if (!relays) return;
+            for (const [key, value] of Object.entries(relays)) {
+                relayState[key] = value;
+                const btn = document.getElementById(`relay_${key}`);
+                if (btn) {
+                    btn.classList.toggle('active', value);
+                    btn.querySelector('.state').textContent = value ? 'ON' : 'OFF';
+                }
+            }
+        }
+
+        // Format bytes to KB
+        function formatBytes(bytes) {
+            if (bytes === undefined || bytes === null) return '--';
+            return (bytes / 1024).toFixed(1) + ' KB';
+        }
+
+        // Format uptime
+        function formatUptime(seconds) {
+            if (seconds === undefined || seconds === null) return '--';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return h > 0 ? `${h}h ${m}m` : `${m}m`;
+        }
+
+        // Format temperature from fixed-point (tenths of degree)
+        function formatTemp(value) {
+            if (value === undefined || value === null) return '--';
+            return (value / 10).toFixed(1);
+        }
+
+        // Format hours
+        function formatHours(value) {
+            if (value === undefined || value === null) return '--';
+            return parseFloat(value).toFixed(1) + 'h';
+        }
+
+        // Create status indicator
+        function statusIndicator(on, label = null) {
+            const cls = on ? 'on' : 'off';
+            const text = label || (on ? 'ON' : 'OFF');
+            return `<span class="indicator ${cls}">${text}</span>`;
+        }
+
+        // Parse day bitmask to string
+        function daysToString(bits) {
+            const days = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+            return days.filter((_, i) => bits & (1 << i)).join(', ') || 'None';
+        }
+
+        // Update UI with state
+        function updateUI(state) {
+            // Update connection status
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (state.connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+
+            // Update last update time
+            if (state.last_update) {
+                document.getElementById('lastUpdate').textContent =
+                    new Date(state.last_update).toLocaleTimeString();
+            }
+
+            // Update sensors (i = inside/room temp)
+            if (state.sensors) {
+                if (state.sensors.t) {
+                    document.getElementById('temp_boiler_out').textContent = formatTemp(state.sensors.t.bo) + '°C';
+                    document.getElementById('temp_boiler_ret').textContent = formatTemp(state.sensors.t.br) + '°C';
+                    document.getElementById('temp_water').textContent = formatTemp(state.sensors.t.wt) + '°C';
+                    document.getElementById('temp_inside').textContent = formatTemp(state.sensors.t.i) + '°C';
+                    document.getElementById('temp_outside').textContent = formatTemp(state.sensors.t.o) + '°C';
+                    document.getElementById('temp_target').textContent = formatTemp(state.sensors.t.bt) + '°C';
+                }
+            }
+
+            // Update burner state (from diagnostics/burner topic)
+            if (state.burner_state) {
+                const bs = state.burner_state;
+                const stateEl = document.getElementById('burner_state');
+                if (typeof bs === 'object' && bs.state) {
+                    stateEl.textContent = bs.state;
+                    // Color based on state
+                    stateEl.style.color = bs.state.includes('RUNNING') ? 'var(--warning)' :
+                                         bs.state === 'IDLE' ? 'var(--text)' :
+                                         bs.state === 'ERROR' || bs.state === 'LOCKOUT' ? 'var(--danger)' :
+                                         'var(--primary)';
+                } else if (typeof bs === 'string') {
+                    stateEl.textContent = bs;
+                }
+            }
+
+            // Pressure is in hundredths of BAR
+            if (state.sensors && state.sensors.p !== undefined) {
+                document.getElementById('pressure').textContent = (state.sensors.p / 100).toFixed(2) + ' bar';
+            }
+
+            // Update system status
+            if (state.system_bits) {
+                const sb = state.system_bits;
+                document.getElementById('sys_enabled').innerHTML = statusIndicator(sb.system_enabled);
+                document.getElementById('sys_heating').innerHTML = statusIndicator(sb.heating_on, sb.heating_on ? 'ACTIVE' : (sb.heating_enabled ? 'Ready' : 'OFF'));
+                document.getElementById('sys_water').innerHTML = statusIndicator(sb.water_on, sb.water_on ? 'ACTIVE' : (sb.water_enabled ? 'Ready' : 'OFF'));
+            }
+
+            // Update relay status
+            if (state.relays) {
+                const r = state.relays;
+                document.getElementById('sys_burner').innerHTML = statusIndicator(r.burner, r.burner ? (r.half_power ? 'LOW' : 'HIGH') : 'OFF');
+                document.getElementById('sys_hpump').innerHTML = statusIndicator(r.heating_pump);
+                document.getElementById('sys_wpump').innerHTML = statusIndicator(r.water_pump);
+                // Update relay toggle buttons
+                updateRelayButtons(r);
+            }
+
+            // Update device health
+            if (state.status && state.status.health) {
+                const h = state.status.health;
+                const heapEl = document.getElementById('health_heap');
+                const heapMinEl = document.getElementById('health_heap_min');
+
+                if (h.heap_free !== undefined) {
+                    heapEl.querySelector('.value').textContent = formatBytes(h.heap_free);
+                    // Warn if heap low
+                    heapEl.classList.toggle('warning', h.heap_free < 50000);
+                    heapEl.classList.toggle('danger', h.heap_free < 30000);
+                }
+                if (h.heap_min !== undefined) {
+                    heapMinEl.querySelector('.value').textContent = formatBytes(h.heap_min);
+                    heapMinEl.classList.toggle('warning', h.heap_min < 40000);
+                    heapMinEl.classList.toggle('danger', h.heap_min < 20000);
+                }
+                if (h.uptime !== undefined) {
+                    document.getElementById('health_uptime').querySelector('.value').textContent = formatUptime(h.uptime);
+                }
+                if (h.health) {
+                    if (h.health.stack_hwm !== undefined) {
+                        const stackEl = document.getElementById('health_stack');
+                        stackEl.querySelector('.value').textContent = h.health.stack_hwm + ' B';
+                        stackEl.classList.toggle('warning', h.health.stack_hwm < 200);
+                        stackEl.classList.toggle('danger', h.health.stack_hwm < 100);
+                    }
+                    if (h.health.tasks !== undefined) {
+                        document.getElementById('health_tasks').querySelector('.value').textContent = h.health.tasks;
+                    }
+                }
+            }
+            // Error count from counters
+            if (state.counters && state.counters.e !== undefined) {
+                const errEl = document.getElementById('health_errors');
+                errEl.querySelector('.value').textContent = state.counters.e;
+                errEl.classList.toggle('danger', state.counters.e > 0);
+            }
+
+            // Update runtime stats (t=total, h=heating, w=water, b=burner hours)
+            if (state.runtime) {
+                const rt = state.runtime;
+                if (rt.t !== undefined) document.getElementById('runtime_total').textContent = rt.t + 'h';
+                if (rt.b !== undefined) document.getElementById('runtime_burner').textContent = rt.b + 'h';
+                if (rt.h !== undefined) document.getElementById('runtime_heating').textContent = rt.h + 'h';
+            }
+            // Counters (b=burner starts)
+            if (state.counters) {
+                const ct = state.counters;
+                if (ct.b !== undefined) document.getElementById('runtime_starts').textContent = ct.b;
+            }
+
+            // Update PID params (placeholders)
+            if (state.params.pid.spaceHeating) {
+                const sh = state.params.pid.spaceHeating;
+                if (sh.kp !== undefined) document.getElementById('pid_sh_kp').placeholder = sh.kp;
+                if (sh.ki !== undefined) document.getElementById('pid_sh_ki').placeholder = sh.ki;
+                if (sh.kd !== undefined) document.getElementById('pid_sh_kd').placeholder = sh.kd;
+            }
+            if (state.params.pid.waterHeater) {
+                const wh = state.params.pid.waterHeater;
+                if (wh.kp !== undefined) document.getElementById('pid_wh_kp').placeholder = wh.kp;
+                if (wh.ki !== undefined) document.getElementById('pid_wh_ki').placeholder = wh.ki;
+                if (wh.kd !== undefined) document.getElementById('pid_wh_kd').placeholder = wh.kd;
+            }
+            // Update auto-tuning params
+            if (state.params.pid.autotune) {
+                const at = state.params.pid.autotune;
+                if (at.amplitude !== undefined) document.getElementById('autotune_amplitude').placeholder = at.amplitude;
+                if (at.hysteresis !== undefined) document.getElementById('autotune_hysteresis').placeholder = at.hysteresis;
+                if (at.method !== undefined) document.getElementById('autotune_method').value = at.method;
+            }
+            // Update auto-tuning status
+            if (state.autotune) {
+                const at = state.autotune;
+                const statusEl = document.getElementById('autotune_status');
+                const progressEl = document.getElementById('autotune_progress');
+                const cyclesEl = document.getElementById('autotune_cycles');
+                if (at.status) {
+                    statusEl.textContent = at.status.charAt(0).toUpperCase() + at.status.slice(1);
+                    statusEl.style.color = at.status === 'running' ? 'var(--warning)' :
+                                          at.status === 'complete' ? 'var(--success)' :
+                                          at.status === 'failed' ? 'var(--danger)' : 'var(--text)';
+                }
+                if (at.progress !== undefined) {
+                    progressEl.textContent = at.progress + '%';
+                }
+                if (at.cycles !== undefined && at.minCycles !== undefined) {
+                    cyclesEl.textContent = at.cycles + '/' + at.minCycles;
+                }
+            }
+
+            // Update heating params (actual device param names)
+            if (state.params.heating) {
+                const h = state.params.heating;
+                if (h.targetTemp !== undefined) document.getElementById('heating_targetTemp').placeholder = h.targetTemp;
+                if (h.hysteresis !== undefined) document.getElementById('heating_hysteresis').placeholder = h.hysteresis;
+                if (h.curveCoeff !== undefined) document.getElementById('heating_curveCoeff').placeholder = h.curveCoeff;
+                if (h.curveShift !== undefined) document.getElementById('heating_curveShift').placeholder = h.curveShift;
+                if (h.burnerLowLimit !== undefined) document.getElementById('heating_burnerLowLimit').placeholder = h.burnerLowLimit;
+                if (h.highLimit !== undefined) document.getElementById('heating_highLimit').placeholder = h.highLimit;
+            }
+
+            // Update wheater params (actual device param names)
+            if (state.params.wheater) {
+                const w = state.params.wheater;
+                if (w.tempLimitHigh !== undefined) document.getElementById('wheater_tempLimitHigh').placeholder = w.tempLimitHigh;
+                if (w.tempLimitLow !== undefined) document.getElementById('wheater_tempLimitLow').placeholder = w.tempLimitLow;
+                if (w.tempChargeDelta !== undefined) document.getElementById('wheater_tempChargeDelta').placeholder = w.tempChargeDelta;
+                if (w.heatingRate !== undefined) document.getElementById('wheater_heatingRate').placeholder = w.heatingRate;
+                if (w.priorityEnabled !== undefined) document.getElementById('wheater_priorityEnabled').checked = w.priorityEnabled;
+                // Update safety limits display
+                if (w.tempSafeLimitLow !== undefined) {
+                    document.getElementById('wheater_safeLow').textContent = w.tempSafeLimitLow + '°C';
+                }
+                if (w.tempSafeLimitHigh !== undefined) {
+                    document.getElementById('wheater_safeHigh').textContent = w.tempSafeLimitHigh + '°C';
+                }
+                if (w.tempLimitLow !== undefined && w.tempLimitHigh !== undefined) {
+                    document.getElementById('wheater_range').textContent = w.tempLimitLow + ' - ' + w.tempLimitHigh + '°C';
+                }
+            }
+
+            // Update schedules
+            updateScheduleList(state.schedules || []);
+
+            // Update safety config
+            if (state.safety_config) {
+                updateSafetyConfigUI(state.safety_config);
+            }
+        }
+
+        // Update schedule list
+        function updateScheduleList(schedules) {
+            const list = document.getElementById('scheduleList');
+            if (!schedules || schedules.length === 0) {
+                list.innerHTML = '<p style="color: var(--text-dim); text-align: center;">No schedules configured</p>';
+                return;
+            }
+
+            list.innerHTML = schedules.map((s, i) => `
+                <div class="schedule-item">
+                    <div class="info">
+                        <div class="type">${s.type || 'water'}</div>
+                        <div class="time">${String(s.startHour).padStart(2,'0')}:${String(s.startMinute).padStart(2,'0')} - ${String(s.endHour).padStart(2,'0')}:${String(s.endMinute).padStart(2,'0')}</div>
+                        <div class="days">${daysToString(s.days)}</div>
+                    </div>
+                    <button class="small danger" onclick="removeSchedule(${i})">✕</button>
+                </div>
+            `).join('');
+        }
+
+        // Fetch state from server
+        async function fetchState() {
+            try {
+                const response = await fetch(apiUrl('/api/state'));
+                const state = await response.json();
+                updateUI(state);
+            } catch (e) {
+                console.error('Failed to fetch state:', e);
+            }
+        }
+
+        // Set parameter
+        async function setParam(topic, value) {
+            try {
+                const response = await fetch(apiUrl('/api/param'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic, value })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(`Set ${topic.split('/').pop()} = ${value}`);
+                } else {
+                    showToast(result.error, true);
+                }
+            } catch (e) {
+                showToast('Failed to set parameter', true);
+            }
+        }
+
+        // Get single parameter (request from device, updates via auto-refresh)
+        async function getParam(topic, inputId) {
+            try {
+                await fetch(apiUrl('/api/command'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic, payload: '' })
+                });
+                showToast(`Requested ${inputId.replace(/_/g, ' ')}`);
+                setTimeout(fetchState, 500);
+            } catch (e) {
+                showToast('Failed to get parameter', true);
+            }
+        }
+
+        // Set parameter from input element (uses value or placeholder)
+        async function setParamFromInput(inputId) {
+            const input = document.getElementById(inputId);
+            if (!input) {
+                showToast(`Input ${inputId} not found`, true);
+                return;
+            }
+            const topic = input.dataset.topic;
+            const value = input.value || input.placeholder;
+            if (!topic) {
+                showToast('No topic configured', true);
+                return;
+            }
+            if (!value || value === '--') {
+                showToast('No value to set', true);
+                return;
+            }
+            await setParam(topic, value);
+            input.value = '';  // Clear input after setting
+        }
+
+        // Send command
+        async function sendCmd(topic, payload) {
+            try {
+                const response = await fetch(apiUrl('/api/command'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic, payload })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(`${topic}: ${payload}`);
+                    setTimeout(fetchState, 500);
+                }
+            } catch (e) {
+                showToast('Failed to send command', true);
+            }
+        }
+
+        // Add schedule
+        async function addSchedule() {
+            const type = document.getElementById('sched_type').value;
+            const start = document.getElementById('sched_start').value.split(':');
+            const end = document.getElementById('sched_end').value.split(':');
+
+            let days = 0;
+            document.querySelectorAll('.day-btn.active').forEach(btn => {
+                days |= (1 << parseInt(btn.dataset.day));
+            });
+
+            const schedule = {
+                type,
+                startHour: parseInt(start[0]),
+                startMinute: parseInt(start[1]),
+                endHour: parseInt(end[0]),
+                endMinute: parseInt(end[1]),
+                days,
+                enabled: true
+            };
+
+            try {
+                const response = await fetch(apiUrl('/api/schedule/add'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(schedule)
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast('Schedule added');
+                    setTimeout(fetchState, 500);
+                }
+            } catch (e) {
+                showToast('Failed to add schedule', true);
+            }
+        }
+
+        // Remove schedule
+        async function removeSchedule(index) {
+            try {
+                const response = await fetch(apiUrl('/api/schedule/remove'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ index })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast('Schedule removed');
+                    setTimeout(fetchState, 500);
+                }
+            } catch (e) {
+                showToast('Failed to remove schedule', true);
+            }
+        }
+
+        // Refresh parameters
+        async function refresh() {
+            try {
+                await fetch(apiUrl('/api/refresh'), { method: 'POST' });
+                showToast('Refresh requested');
+                setTimeout(fetchState, 500);
+            } catch (e) {
+                showToast('Failed to refresh', true);
+            }
+        }
+
+        // Save to NVS
+        async function save() {
+            try {
+                await fetch(apiUrl('/api/save'), { method: 'POST' });
+                showToast('Save command sent');
+            } catch (e) {
+                showToast('Failed to save', true);
+            }
+        }
+
+        // Get heating parameters from device
+        async function getHeatingParams() {
+            try {
+                await fetch(apiUrl('/api/command'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic: 'params/get/heating', payload: '' })
+                });
+                showToast('Heating params requested');
+                setTimeout(fetchState, 500);
+            } catch (e) {
+                showToast('Failed to get heating params', true);
+            }
+        }
+
+        // Set all heating parameters
+        async function setHeatingParams() {
+            const params = [
+                { id: 'heating_targetTemp', topic: 'params/heating/targetTemp' },
+                { id: 'heating_hysteresis', topic: 'params/heating/hysteresis' },
+                { id: 'heating_curveCoeff', topic: 'params/heating/curveCoeff' },
+                { id: 'heating_curveShift', topic: 'params/heating/curveShift' },
+                { id: 'heating_burnerLowLimit', topic: 'params/heating/burnerLowLimit' },
+                { id: 'heating_highLimit', topic: 'params/heating/highLimit' }
+            ];
+            let count = 0;
+            for (const p of params) {
+                const input = document.getElementById(p.id);
+                const value = input.value || input.placeholder;
+                if (value && value !== '--') {
+                    await setParam(p.topic, value);
+                    count++;
+                }
+            }
+            showToast(`Set ${count} heating parameters`);
+        }
+
+        // Get water parameters from device
+        async function getWaterParams() {
+            try {
+                await fetch(apiUrl('/api/command'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic: 'params/get/wheater', payload: '' })
+                });
+                showToast('Water params requested');
+                setTimeout(fetchState, 500);
+            } catch (e) {
+                showToast('Failed to get water params', true);
+            }
+        }
+
+        // Set all water parameters
+        async function setWaterParams() {
+            const params = [
+                { id: 'wheater_tempLimitHigh', topic: 'params/wheater/tempLimitHigh' },
+                { id: 'wheater_tempLimitLow', topic: 'params/wheater/tempLimitLow' },
+                { id: 'wheater_tempChargeDelta', topic: 'params/wheater/tempChargeDelta' },
+                { id: 'wheater_heatingRate', topic: 'params/wheater/heatingRate' }
+            ];
+            let count = 0;
+            for (const p of params) {
+                const input = document.getElementById(p.id);
+                const value = input.value || input.placeholder;
+                if (value && value !== '--') {
+                    await setParam(p.topic, value);
+                    count++;
+                }
+            }
+            // Handle checkbox separately
+            const priority = document.getElementById('wheater_priorityEnabled');
+            await setParam('params/wheater/priorityEnabled', priority.checked ? 'true' : 'false');
+            count++;
+            showToast(`Set ${count} water parameters`);
+        }
+
+        // Set checkbox parameter
+        async function setCheckboxParam(inputId) {
+            const input = document.getElementById(inputId);
+            if (!input) {
+                showToast(`Input ${inputId} not found`, true);
+                return;
+            }
+            const topic = input.dataset.topic;
+            if (!topic) {
+                showToast('No topic configured', true);
+                return;
+            }
+            await setParam(topic, input.checked ? 'true' : 'false');
+        }
+
+        // Get PID parameters from device
+        async function getPidParams(type) {
+            try {
+                await fetch(apiUrl('/api/command'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic: `params/get/pid/${type}`, payload: '' })
+                });
+                showToast(`${type} PID params requested`);
+                setTimeout(fetchState, 500);
+            } catch (e) {
+                showToast('Failed to get PID params', true);
+            }
+        }
+
+        // Set all PID parameters for a type
+        async function setPidParams(type) {
+            const prefix = type === 'spaceHeating' ? 'pid_sh' : 'pid_wh';
+            const params = ['kp', 'ki', 'kd'];
+            let count = 0;
+            for (const p of params) {
+                const input = document.getElementById(`${prefix}_${p}`);
+                const value = input.value || input.placeholder;
+                if (value && value !== '--') {
+                    await setParam(`params/pid/${type}/${p}`, value);
+                    count++;
+                }
+            }
+            showToast(`Set ${count} ${type} PID parameters`);
+        }
+
+        // Auto-tuning functions
+        async function startAutotune() {
+            await sendCmd('cmd/pid_autotune', 'start');
+            showToast('Auto-tuning started');
+        }
+
+        async function stopAutotune() {
+            await sendCmd('cmd/pid_autotune', 'stop');
+            showToast('Auto-tuning stopped');
+        }
+
+        async function getAutotuneStatus() {
+            await sendCmd('cmd/pid_autotune', 'status');
+            setTimeout(fetchState, 500);
+        }
+
+        async function getAutotuneParams() {
+            await sendCmd('cmd/pid_autotune', 'params');
+            setTimeout(fetchState, 500);
+        }
+
+        async function setAutotuneMethod() {
+            const select = document.getElementById('autotune_method');
+            await setParam('params/pid/autotune/method', select.value);
+        }
+
+        // Setup input change handlers
+        document.querySelectorAll('input[data-topic]').forEach(input => {
+            input.addEventListener('change', () => {
+                const topic = input.dataset.topic;
+                const value = input.value;
+                if (value !== '') {
+                    setParam(topic, value);
+                    input.value = '';
+                }
+            });
+        });
+
+        // Safety config functions
+        async function setSafetyConfig(param, value) {
+            try {
+                const response = await fetch(apiUrl('/api/safety_config'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ param, value: parseInt(value) })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showToast(`Set ${param.replace(/_/g, ' ')} = ${value/1000}s`);
+                    setTimeout(fetchState, 500);
+                } else {
+                    showToast(result.error || 'Failed to set safety config', true);
+                }
+            } catch (e) {
+                showToast('Failed to set safety config', true);
+            }
+        }
+
+        async function refreshSafetyConfig() {
+            try {
+                const response = await fetch(apiUrl('/api/safety_config'));
+                const config = await response.json();
+                updateSafetyConfigUI(config);
+                showToast('Safety config refreshed');
+            } catch (e) {
+                showToast('Failed to refresh safety config', true);
+            }
+        }
+
+        function updateSafetyConfigUI(config) {
+            if (config.pump_prot !== undefined) {
+                document.getElementById('safety_pump_prot').value = config.pump_prot / 1000;
+            }
+            if (config.sensor_stale !== undefined) {
+                document.getElementById('safety_sensor_stale').value = config.sensor_stale / 1000;
+            }
+            if (config.post_purge !== undefined) {
+                document.getElementById('safety_post_purge').value = config.post_purge / 1000;
+            }
+        }
+
+        // Initial fetch and auto-refresh
+        fetchState();
+        setInterval(fetchState, 2000);
+    </script>
+</body>
+</html>
