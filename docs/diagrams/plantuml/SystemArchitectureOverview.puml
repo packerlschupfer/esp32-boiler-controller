@@ -1,0 +1,125 @@
+@startuml SystemArchitectureOverview
+!include theme.puml
+
+title System Architecture Overview - High-Level Deployment\nESP32 Boiler Controller Production System
+
+!define HARDWARE #8B4513
+!define CORE #4682B4
+!define SERVICE #52BE80
+
+cloud "External Network" {
+    [MQTT Broker] as Broker
+    [NTP Servers] as NTP
+    [Home Assistant] as HA
+}
+
+node "LAN8720A\nEthernet PHY" HARDWARE {
+    interface "10/100 Mbps" as ETH
+}
+
+node "ESP32 DevKit" {
+
+    package "Application\n16 FreeRTOS Tasks" {
+        [Burner Control] as Burner
+        [Heating Control] as Heating
+        [Water Control] as Water
+        [PID Control] as PID
+        [Sensor Tasks] as Sensors
+        [Service Tasks] as Services
+    }
+
+    package "Core Services" CORE {
+        [SystemResourceProvider\nSRP] as SRP
+        [SharedResourceManager\n12 Event Groups] as SRM
+        [ModbusCoordinator] as ModbusC
+    }
+
+    package "Storage" SERVICE {
+        database "NVS Flash\n16KB Config" as NVS
+    }
+}
+
+node "RS485 Bus\nModbus RTU 9600" HARDWARE {
+    [MB8ART\n8-Ch Temp] as MB8ART
+    [RYN4\n8-Ch Relay] as RYN4
+    [ANDRTF3\nRoom Temp] as ANDRTF3
+}
+
+node "I2C Bus\nSDA=21 SCL=22" HARDWARE {
+    [DS3231\nRTC] as RTC
+    [FRAM\n32KB] as FRAM
+}
+
+node "Physical Boiler System" {
+    [Burner] as PhyBurner
+    [Heating Pump] as HPump
+    [Water Pump] as WPump
+    [Temperature Sensors] as TempSensors
+}
+
+' Connections
+Burner --> SRP : use services
+Heating --> SRP : use services
+Water --> SRP : use services
+PID --> SRP : use services
+Sensors --> SRP : use services
+Services --> SRP : use services
+
+SRP --> SRM : manage resources
+SRP --> ModbusC : coordinate
+
+Sensors --> ModbusC : schedule
+ModbusC --> MB8ART : sequential
+ModbusC --> RYN4 : sequential
+ModbusC --> ANDRTF3 : sequential
+
+Burner --> RYN4 : control relays
+Services --> NVS : persist config
+Services --> FRAM : log errors
+Services --> RTC : schedules
+
+Services --> ETH : network
+ETH --> Broker : MQTT
+ETH --> NTP : time sync
+Broker <--> HA : integration
+
+RYN4 --> PhyBurner : enable/disable
+RYN4 --> HPump : on/off
+RYN4 --> WPump : on/off
+MB8ART <-- TempSensors : PT1000
+ANDRTF3 <-- TempSensors : room
+
+note right of SRP
+  **Service Locator Pattern:**
+  - Static O(1) access
+  - Replaced ServiceContainer
+  - All services registered
+    during initialization
+  - Thread-safe access
+end note
+
+note right of SRM
+  **Resource Management:**
+  - 12 Event Groups
+  - 5 Core Mutexes
+  - Managed Queues
+  - RAII patterns
+  - M1 refactoring
+end note
+
+note bottom of ModbusC
+  **Bus Arbitration:**
+  - Sequential access
+  - No contention
+  - 500ms timer
+  - Coordinated polling
+end note
+
+note bottom of NVS
+  **Three-Layer Storage:**
+  **NVS:** Config params
+  **FRAM:** Runtime/errors
+  **RTC:** Schedules (battery)
+end note
+
+@enduml

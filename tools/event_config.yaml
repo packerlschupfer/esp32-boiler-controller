@@ -1,0 +1,376 @@
+# Event System Configuration
+# This file defines all event groups and their bits for code generation
+
+event_groups:
+  # System State Event Group (xSystemStateEventGroup)
+  SystemState:
+    handle: xSystemStateEventGroup
+    description: "System operational state tracking"
+    events:
+      # Basic system states (0-9)
+      - { name: BOILER_ENABLED, bit: 0, desc: "Boiler system enabled" }
+      - { name: BOILER_ON, bit: 1, desc: "Boiler currently on" }
+      - { name: HEATING_ENABLED, bit: 2, desc: "Space heating enabled" }
+      - { name: HEATING_ON, bit: 3, desc: "Space heating active" }
+      - { name: WATER_ENABLED, bit: 4, desc: "Water heating enabled" }
+      - { name: WATER_ON, bit: 5, desc: "Water heating active" }
+      - { name: WATER_PRIORITY, bit: 6, desc: "Water has priority over heating" }
+      - { name: BURNER_ON, bit: 7, desc: "Burner is running" }
+      - { name: HEATING_PUMP_ON, bit: 8, desc: "Heating pump running" }
+      - { name: WATER_PUMP_ON, bit: 9, desc: "Water pump running" }
+      # MQTT states (12-15)
+      - { name: MQTT_ENABLED, bit: 12, desc: "MQTT communication enabled" }
+      - { name: MQTT_COMMAND_ENABLED, bit: 13, desc: "MQTT commands enabled" }
+      - { name: MQTT_REPORT_ENABLED, bit: 14, desc: "MQTT reporting enabled" }
+      - { name: MQTT_OPERATIONAL, bit: 15, desc: "MQTT fully operational" }
+      # Burner states (16-21)
+      - { name: BURNER_OFF, bit: 16, desc: "Burner is off" }
+      - { name: BURNER_HEATING_LOW, bit: 17, desc: "Burner on low for heating" }
+      - { name: BURNER_HEATING_HIGH, bit: 18, desc: "Burner on high for heating" }
+      - { name: BURNER_WATER_LOW, bit: 19, desc: "Burner on low for water" }
+      - { name: BURNER_WATER_HIGH, bit: 20, desc: "Burner on high for water" }
+      - { name: BURNER_ERROR, bit: 21, desc: "Burner in error state" }
+      # System status (22-23)
+      - { name: EMERGENCY_STOP, bit: 22, desc: "Emergency stop active" }
+      - { name: WARNING, bit: 23, desc: "System warning active" }
+    derived_bits:
+      - { name: DEGRADED_MODE, expr: "WARNING", desc: "System in degraded mode" }
+
+  # Burner Event Group (xBurnerEventGroup)
+  Burner:
+    handle: xBurnerEventGroup
+    description: "Burner-specific control and status"
+    events:
+      # State bits
+      - { name: IDLE, bit: 0, desc: "Burner is idle" }
+      - { name: STARTING, bit: 1, desc: "Burner is starting" }
+      - { name: RUNNING, bit: 2, desc: "Burner is running" }
+      - { name: STOPPING, bit: 3, desc: "Burner is stopping" }
+      - { name: LOCKOUT, bit: 4, desc: "Burner in lockout state" }
+      # Control bits
+      - { name: ENABLE, bit: 5, desc: "Burner enable signal" }
+      - { name: LOW_POWER, bit: 6, desc: "Low power mode" }
+      - { name: HIGH_POWER, bit: 7, desc: "High power mode" }
+      - { name: PURGE, bit: 8, desc: "Purge cycle active" }
+      # Safety bits
+      - { name: FLAME_DETECTED, bit: 9, desc: "Flame detected" }
+      - { name: TEMP_OK, bit: 10, desc: "Temperature within limits" }
+      - { name: PRESSURE_OK, bit: 11, desc: "Pressure within limits" }
+      - { name: SAFETY_OK, bit: 12, desc: "All safety checks OK" }
+      # Error bits
+      - { name: ERROR_IGNITION, bit: 13, desc: "Ignition failure" }
+      - { name: ERROR_FLAME_LOSS, bit: 14, desc: "Flame loss during operation" }
+      - { name: ERROR_OVERHEAT, bit: 15, desc: "Overheat condition" }
+      - { name: ERROR_PRESSURE, bit: 16, desc: "Pressure error" }
+      # Event bits
+      - { name: FLAME_STATE_CHANGED, bit: 17, desc: "Flame state changed" }
+      - { name: PRESSURE_CHANGED, bit: 18, desc: "Pressure sensor changed" }
+      - { name: FLOW_CHANGED, bit: 19, desc: "Flow sensor changed" }
+      - { name: SAFETY_EVENT, bit: 20, desc: "Any safety sensor changed" }
+      - { name: STATE_TIMEOUT, bit: 21, desc: "State machine timeout occurred" }
+    derived_bits:
+      - { name: ANY_ERROR, expr: "ERROR_IGNITION | ERROR_FLAME_LOSS | ERROR_OVERHEAT | ERROR_PRESSURE" }
+
+  # Burner Request Event Group (xBurnerRequestEventGroup)
+  BurnerRequest:
+    handle: xBurnerRequestEventGroup
+    description: "Burner demand coordination between heating and water"
+    events:
+      - { name: HEATING, bit: 0, desc: "Space heating requesting burner" }
+      - { name: WATER, bit: 1, desc: "Water heating requesting burner" }
+      # Note: Bit 2 was PRIORITY_WATER, now removed - use SystemState::WATER_PRIORITY instead
+      - { name: POWER_LOW, bit: 3, desc: "Request low power mode" }
+      - { name: POWER_HIGH, bit: 4, desc: "Request high power mode" }
+      - { name: CHANGED, bit: 18, desc: "Any request changed" }
+      - { name: HEATING_CHANGED, bit: 19, desc: "Heating request changed" }
+      - { name: WATER_CHANGED, bit: 20, desc: "Water request changed" }
+    special_regions:
+      - { name: TEMPERATURE, start_bit: 16, end_bit: 23, desc: "Encoded target temperature" }
+    derived_bits:
+      - { name: ANY_REQUEST, expr: "HEATING | WATER" }
+      - { name: POWER_BITS, expr: "POWER_LOW | POWER_HIGH" }
+      - { name: ALL_BITS, expr: "HEATING | WATER | POWER_LOW | POWER_HIGH | TEMPERATURE_MASK | CHANGED | HEATING_CHANGED | WATER_CHANGED" }
+      - { name: CHANGE_EVENT_BITS, expr: "HEATING_CHANGED | WATER_CHANGED | CHANGED" }
+
+  # Sensor Event Group (xSensorEventGroup)
+  SensorUpdate:
+    handle: xSensorEventGroup
+    description: "Temperature sensor update notifications"
+    events:
+      - { name: BOILER_OUTPUT, bit: 0, desc: "Boiler output temp updated" }
+      - { name: BOILER_RETURN, bit: 1, desc: "Boiler return temp updated" }
+      - { name: WATER_TANK, bit: 2, desc: "Water tank temp updated" }
+      - { name: WATER_OUTPUT, bit: 3, desc: "Water output temp updated" }
+      - { name: WATER_RETURN, bit: 4, desc: "Water return temp updated" }
+      - { name: HEATING_RETURN, bit: 5, desc: "Heating return temp updated" }
+      - { name: OUTSIDE, bit: 6, desc: "Outside temp updated" }
+      - { name: INSIDE, bit: 7, desc: "Inside temp updated" }
+      - { name: EXHAUST, bit: 8, desc: "Exhaust temp updated" }
+      # Error bits (10-18)
+      - { name: BOILER_OUTPUT_ERROR, bit: 10, desc: "Boiler output sensor error" }
+      - { name: BOILER_RETURN_ERROR, bit: 11, desc: "Boiler return sensor error" }
+      - { name: WATER_TANK_ERROR, bit: 12, desc: "Water tank sensor error" }
+      - { name: WATER_OUTPUT_ERROR, bit: 13, desc: "Water output sensor error" }
+      - { name: WATER_RETURN_ERROR, bit: 14, desc: "Water return sensor error" }
+      - { name: HEATING_RETURN_ERROR, bit: 15, desc: "Heating return sensor error" }
+      - { name: OUTSIDE_ERROR, bit: 16, desc: "Outside sensor error" }
+      - { name: INSIDE_ERROR, bit: 17, desc: "Inside sensor error" }
+      - { name: EXHAUST_ERROR, bit: 18, desc: "Exhaust sensor error" }
+      # General bits
+      - { name: DATA_ERROR, bit: 19, desc: "General sensor data error" }
+      - { name: DATA_AVAILABLE, bit: 9, desc: "Sensor data available" }
+      - { name: FIRST_READ_COMPLETE, bit: 23, desc: "First sensor read complete" }
+      # Pressure sensor bits
+      - { name: PRESSURE, bit: 20, desc: "System pressure updated" }
+      - { name: PRESSURE_ERROR, bit: 21, desc: "Pressure sensor error" }
+    derived_bits:
+      - { name: ALL_TEMPS, expr: "BOILER_OUTPUT | BOILER_RETURN | WATER_TANK | WATER_OUTPUT | WATER_RETURN | HEATING_RETURN | OUTSIDE | INSIDE" }
+      - { name: CRITICAL_TEMPS, expr: "BOILER_OUTPUT | EXHAUST" }
+
+  # Error Event Group (xErrorEventGroup)
+  Error:
+    handle: xErrorEventGroup
+    description: "System error tracking"
+    events:
+      # Component errors (0-7)
+      - { name: SENSOR_FAILURE, bit: 0, desc: "Sensor has failed" }
+      - { name: SENSOR_RESOLVED, bit: 1, desc: "Sensor error resolved" }
+      - { name: WATER_HEATER, bit: 2, desc: "Water heater error" }
+      - { name: WATER_HEATER_RESOLVED, bit: 3, desc: "Water heater error resolved" }
+      - { name: BURNER, bit: 4, desc: "Burner error" }
+      - { name: BURNER_RESOLVED, bit: 5, desc: "Burner error resolved" }
+      - { name: PUMP, bit: 6, desc: "Pump error" }
+      - { name: PUMP_RESOLVED, bit: 7, desc: "Pump error resolved" }
+      # System errors (8-15)
+      - { name: GENERAL_SYSTEM, bit: 8, desc: "General system error" }
+      - { name: GENERAL_SYSTEM_RESOLVED, bit: 9, desc: "System error resolved" }
+      - { name: COMMUNICATION, bit: 10, desc: "Communication error" }
+      - { name: COMMUNICATION_RESOLVED, bit: 11, desc: "Communication error resolved" }
+      - { name: MEMORY, bit: 12, desc: "Memory error" }
+      - { name: MEMORY_RESOLVED, bit: 13, desc: "Memory error resolved" }
+      - { name: SAFETY, bit: 14, desc: "Safety check failed" }
+      - { name: SAFETY_RESOLVED, bit: 15, desc: "Safety error resolved" }
+      # Critical errors (16-21)
+      - { name: OVERHEAT, bit: 16, desc: "Overheating detected" }
+      - { name: OVERHEAT_RESOLVED, bit: 17, desc: "Overheat resolved" }
+      - { name: MODBUS, bit: 18, desc: "Modbus error" }
+      - { name: RELAY, bit: 19, desc: "Relay control error" }
+      - { name: NETWORK, bit: 20, desc: "Network error" }
+      - { name: HEATING, bit: 20, desc: "Heating system error" }
+      - { name: HEATING_CLEARED, bit: 21, desc: "Heating error cleared" }
+      - { name: DETECTED, bit: 22, desc: "General error detected" }
+    derived_bits:
+      - { name: ANY_ACTIVE, expr: "SENSOR_FAILURE | WATER_HEATER | BURNER | PUMP | GENERAL_SYSTEM | COMMUNICATION | MEMORY | SAFETY | OVERHEAT | MODBUS | RELAY | NETWORK" }
+      - { name: CRITICAL, expr: "OVERHEAT | SAFETY | BURNER" }
+
+  # Control Request Event Group (xControlRequestEventGroup)
+  ControlRequest:
+    handle: xControlRequestEventGroup
+    description: "Remote control requests from MQTT/scheduler"
+    events:
+      # System control (0-7)
+      - { name: BOILER_ENABLE, bit: 0, desc: "Enable boiler system" }
+      - { name: BOILER_DISABLE, bit: 1, desc: "Disable boiler system" }
+      - { name: HEATING_ENABLE, bit: 2, desc: "Enable heating" }
+      - { name: HEATING_DISABLE, bit: 3, desc: "Disable heating" }
+      - { name: HEATING_ON_OVERRIDE, bit: 4, desc: "Force heating on" }
+      - { name: HEATING_OFF_OVERRIDE, bit: 5, desc: "Force heating off" }
+      - { name: WATER_ENABLE, bit: 6, desc: "Enable water heating" }
+      - { name: WATER_DISABLE, bit: 7, desc: "Disable water heating" }
+      # Water control (8-11)
+      - { name: WATER_PRIORITY_ENABLE, bit: 8, desc: "Enable water priority" }
+      - { name: WATER_PRIORITY_DISABLE, bit: 9, desc: "Disable water priority" }
+      - { name: WATER_ON_OVERRIDE, bit: 10, desc: "Force water heating on" }
+      - { name: WATER_OFF_OVERRIDE, bit: 11, desc: "Force water heating off" }
+      # MQTT control (12-17)
+      - { name: MQTT_ENABLE, bit: 12, desc: "Enable MQTT" }
+      - { name: MQTT_DISABLE, bit: 13, desc: "Disable MQTT" }
+      - { name: MQTT_COMMAND_ENABLE, bit: 14, desc: "Enable MQTT commands" }
+      - { name: MQTT_COMMAND_DISABLE, bit: 15, desc: "Disable MQTT commands" }
+      - { name: MQTT_REPORT_ENABLE, bit: 16, desc: "Enable MQTT reporting" }
+      - { name: MQTT_REPORT_DISABLE, bit: 17, desc: "Disable MQTT reporting" }
+      # Inter-task notification events (18-20)
+      - { name: WATER_PRIORITY_RELEASED, bit: 18, desc: "Water priority was released (notify heating)" }
+      - { name: PID_SAVE, bit: 19, desc: "Save PID parameters" }
+      - { name: SAVE_PARAMETERS, bit: 20, desc: "Save system parameters" }
+      # PID control (22-23) - Note: bits 24-31 reserved by FreeRTOS!
+      - { name: PID_AUTOTUNE, bit: 22, desc: "Start PID auto-tuning" }
+      - { name: PID_AUTOTUNE_STOP, bit: 23, desc: "Stop PID auto-tuning" }
+
+  # Device Ready Event Group (local to SystemInitializer)
+  DeviceReady:
+    handle: deviceReadyEventGroup
+    description: "Device initialization status tracking"
+    events:
+      - { name: MB8ART_READY, bit: 0, desc: "MB8ART device initialized and ready" }
+      - { name: MB8ART_ERROR, bit: 1, desc: "MB8ART initialization error" }
+      - { name: RYN4_READY, bit: 2, desc: "RYN4 device initialized and ready" }
+      - { name: RYN4_ERROR, bit: 3, desc: "RYN4 initialization error" }
+    derived_bits:
+      - { name: ALL_CRITICAL_READY, expr: "MB8ART_READY | RYN4_READY" }
+
+  # Heating Event Group (xHeatingEventGroup)
+  HeatingEvent:
+    handle: xHeatingEventGroup
+    description: "Heating system control events"
+    events:
+      # System events (0-8)
+      - { name: ON, bit: 0, desc: "Heating system is turned on" }
+      - { name: OFF, bit: 1, desc: "Heating system is turned off" }
+      - { name: TEMP_LOW, bit: 2, desc: "Temperature below setpoint" }
+      - { name: TEMP_HIGH, bit: 3, desc: "Temperature above setpoint" }
+      - { name: ERROR, bit: 4, desc: "Heating system error occurred" }
+      - { name: PUMP_ON, bit: 5, desc: "Heating pump turned on" }
+      - { name: PUMP_OFF, bit: 6, desc: "Heating pump turned off" }
+      - { name: DEMAND, bit: 7, desc: "Heat demand detected" }
+      - { name: NO_DEMAND, bit: 8, desc: "No heat demand" }
+      # Auto-tuning events (9-13)
+      - { name: AUTOTUNE_START, bit: 9, desc: "Start PID auto-tuning" }
+      - { name: AUTOTUNE_STOP, bit: 10, desc: "Stop PID auto-tuning" }
+      - { name: AUTOTUNE_RUNNING, bit: 11, desc: "Auto-tuning in progress" }
+      - { name: AUTOTUNE_COMPLETE, bit: 12, desc: "Auto-tuning completed" }
+      - { name: AUTOTUNE_FAILED, bit: 13, desc: "Auto-tuning failed" }
+      # Error conditions (16-19)
+      - { name: ERROR_SENSOR, bit: 16, desc: "Temperature sensor error" }
+      - { name: ERROR_PUMP, bit: 17, desc: "Heating pump error" }
+      - { name: ERROR_OVERHEAT, bit: 18, desc: "Overheating detected" }
+      - { name: ERROR_TIMEOUT, bit: 19, desc: "Heating timeout" }
+
+  # Error Notification Event Group (ERROR_NOTIFICATION)
+  Error:
+    handle: ERROR_NOTIFICATION
+    description: "Error notification and recovery events"
+    events:
+      # Sensor errors (0-1)
+      - { name: SENSOR_FAILURE, bit: 0, desc: "Sensor has failed" }
+      - { name: SENSOR_RESOLVED, bit: 1, desc: "Sensor error resolved" }
+      # Water heater errors (2-3)
+      - { name: WHEATER, bit: 2, desc: "Water heater error" }
+      - { name: WHEATER_RESOLVED, bit: 3, desc: "Water heater error resolved" }
+      # Burner errors (4-5)
+      - { name: BURNER, bit: 4, desc: "Burner error" }
+      - { name: BURNER_RESOLVED, bit: 5, desc: "Burner error resolved" }
+      # Pump errors (6-7)
+      - { name: PUMP, bit: 6, desc: "Pump error" }
+      - { name: PUMP_RESOLVED, bit: 7, desc: "Pump error resolved" }
+      # System errors (8-9)
+      - { name: GENERAL_SYSTEM, bit: 8, desc: "General system error" }
+      - { name: GENERAL_SYSTEM_RESOLVED, bit: 9, desc: "General system error resolved" }
+      # Communication errors (10-11)
+      - { name: COMMUNICATION, bit: 10, desc: "Communication error" }
+      - { name: COMMUNICATION_RESOLVED, bit: 11, desc: "Communication error resolved" }
+      # Memory errors (12-13)
+      - { name: MEMORY, bit: 12, desc: "Memory allocation error" }
+      - { name: MEMORY_RESOLVED, bit: 13, desc: "Memory error resolved" }
+      # Safety errors (14-15)
+      - { name: SAFETY, bit: 14, desc: "Safety check failed" }
+      - { name: SAFETY_RESOLVED, bit: 15, desc: "Safety error resolved" }
+      # Overheat errors (16-17)
+      - { name: OVERHEAT, bit: 16, desc: "Overheating detected" }
+      - { name: OVERHEAT_RESOLVED, bit: 17, desc: "Overheat resolved" }
+      # Additional errors (18-20)
+      - { name: MODBUS, bit: 18, desc: "Modbus communication error" }
+      - { name: RELAY, bit: 19, desc: "Relay control error" }
+      - { name: NETWORK, bit: 20, desc: "Network error" }
+    derived_bits:
+      - { name: SENSOR, expr: "SENSOR_FAILURE", desc: "Alias for sensor failure" }
+      - { name: ANY_ACTIVE, expr: "SENSOR_FAILURE | WHEATER | BURNER | PUMP | GENERAL_SYSTEM | COMMUNICATION | MEMORY | SAFETY | OVERHEAT" }
+      - { name: ALL_RESOLVED, expr: "SENSOR_RESOLVED | WHEATER_RESOLVED | BURNER_RESOLVED | PUMP_RESOLVED | GENERAL_SYSTEM_RESOLVED | COMMUNICATION_RESOLVED | MEMORY_RESOLVED | SAFETY_RESOLVED | OVERHEAT_RESOLVED" }
+
+  # General System Event Group (xGeneralSystemEventGroup)
+  GeneralSystem:
+    handle: xGeneralSystemEventGroup
+    description: "General system-wide status flags"
+    events:
+      - { name: STARTUP_COMPLETE, bit: 0, desc: "System startup completed" }
+      - { name: NETWORK_READY, bit: 1, desc: "Network interface ready" }
+      - { name: WIFI_CONNECTED, bit: 2, desc: "WiFi connected" }
+      - { name: MQTT_CONNECTED, bit: 3, desc: "MQTT broker connected" }
+      - { name: TIME_SYNCED, bit: 4, desc: "Time synchronized" }
+      - { name: STORAGE_READY, bit: 5, desc: "Storage system ready" }
+      - { name: SYSTEM_REBOOT, bit: 6, desc: "System reboot requested" }
+      - { name: SENSOR_DEGRADED, bit: 7, desc: "Sensor operating in degraded mode" }
+      - { name: MQTT_QUEUE_PRESSURE, bit: 8, desc: "MQTT queue under pressure" }
+      - { name: MUTEX_CONTENTION, bit: 9, desc: "Mutex contention detected" }
+
+  # Relay Request Event Group (xRelayRequestEventGroup)
+  RelayRequest:
+    handle: xRelayRequestEventGroup
+    description: "Relay control requests"
+    events:
+      # Pump requests (0-3)
+      - { name: HEATING_PUMP_ON, bit: 0, desc: "Request heating pump ON" }
+      - { name: WATER_PUMP_ON, bit: 1, desc: "Request water pump ON" }
+      - { name: HEATING_PUMP_OFF, bit: 2, desc: "Request heating pump OFF" }
+      - { name: WATER_PUMP_OFF, bit: 3, desc: "Request water pump OFF" }
+      # Burner requests (4-5)
+      - { name: BURNER_ENABLE, bit: 4, desc: "Request burner ON" }
+      - { name: BURNER_DISABLE, bit: 5, desc: "Request burner OFF" }
+      # Power requests (6-7)
+      - { name: POWER_HALF, bit: 6, desc: "Request half power" }
+      - { name: POWER_FULL, bit: 7, desc: "Request full power" }
+      # Mode requests (8-9)
+      - { name: WATER_MODE_ON, bit: 8, desc: "Request water mode ON" }
+      - { name: WATER_MODE_OFF, bit: 9, desc: "Request water mode OFF" }
+      # Valve requests (10-11)
+      - { name: VALVE_OPEN, bit: 10, desc: "Request valve OPEN" }
+      - { name: VALVE_CLOSE, bit: 11, desc: "Request valve CLOSE" }
+      # Alarm requests (12-13)
+      - { name: ALARM_ON, bit: 12, desc: "Request alarm ON" }
+      - { name: ALARM_OFF, bit: 13, desc: "Request alarm OFF" }
+      # Special requests (20-21)
+      - { name: EMERGENCY_STOP, bit: 20, desc: "Emergency stop all relays" }
+      - { name: UPDATE, bit: 21, desc: "Force relay state update" }
+    derived_bits:
+      - { name: PUMP_REQUESTS_MASK, expr: "HEATING_PUMP_ON | WATER_PUMP_ON | HEATING_PUMP_OFF | WATER_PUMP_OFF" }
+      - { name: BURNER_REQUESTS_MASK, expr: "BURNER_ENABLE | BURNER_DISABLE" }
+      - { name: POWER_REQUESTS_MASK, expr: "POWER_HALF | POWER_FULL" }
+      - { name: ALL_REQUESTS_MASK, expr: "(1UL << 22UL) - 1" }
+
+  # Relay Status Event Group (xRelayStatusEventGroup)
+  RelayStatus:
+    handle: xRelayStatusEventGroup
+    description: "Relay status and feedback"
+    events:
+      - { name: SYNCHRONIZED, bit: 0, desc: "Relay states synchronized" }
+      - { name: COMM_OK, bit: 1, desc: "Communication OK" }
+      - { name: COMM_ERROR, bit: 2, desc: "Communication error" }
+      - { name: UPDATE_PENDING, bit: 3, desc: "Update pending" }
+
+  # Relay Event Group (xRelayEventGroup)
+  RelayControl:
+    handle: xRelayEventGroup
+    description: "Relay control requests and status"
+    events:
+      # Pump controls (0-3)
+      - { name: HEATING_PUMP_ON, bit: 0, desc: "Turn heating pump on" }
+      - { name: HEATING_PUMP_OFF, bit: 1, desc: "Turn heating pump off" }
+      - { name: WATER_PUMP_ON, bit: 2, desc: "Turn water pump on" }
+      - { name: WATER_PUMP_OFF, bit: 3, desc: "Turn water pump off" }
+      # Burner controls (4-5)
+      - { name: BURNER_ENABLE_ON, bit: 4, desc: "Enable burner" }
+      - { name: BURNER_ENABLE_OFF, bit: 5, desc: "Disable burner" }
+      # Mode controls (6-9)
+      - { name: WATER_MODE_ON, bit: 6, desc: "Switch to water mode" }
+      - { name: WATER_MODE_OFF, bit: 7, desc: "Exit water mode" }
+      - { name: POWER_BOOST_ON, bit: 8, desc: "Activate power boost (full power)" }
+      - { name: POWER_BOOST_OFF, bit: 9, desc: "Deactivate power boost (half power)" }
+      # Valve controls (10-11)
+      - { name: VALVE_OPEN, bit: 10, desc: "Open valve" }
+      - { name: VALVE_CLOSE, bit: 11, desc: "Close valve" }
+      # Alarm controls (12-13)
+      - { name: ALARM_ON, bit: 12, desc: "Activate alarm" }
+      - { name: ALARM_OFF, bit: 13, desc: "Deactivate alarm" }
+      # Update controls (14-15)
+      - { name: UPDATE_REQUIRED, bit: 14, desc: "Relay update needed" }
+      - { name: UPDATE_COMPLETE, bit: 15, desc: "Relay update done" }
+      # Status bits (16-19)
+      - { name: DATA_AVAILABLE, bit: 16, desc: "Relay data available" }
+      # Emergency (20-21)
+      - { name: EMERGENCY_STOP, bit: 20, desc: "Emergency stop all" }
+      - { name: FORCE_UPDATE, bit: 21, desc: "Force relay update" }
+
+output:
+  header: include/events/SystemEventsGenerated.h
+  documentation: docs/generated/events.md
+  generator_script: tools/generate_events.py

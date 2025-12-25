@@ -1,0 +1,92 @@
+{
+  "Water Heater Configuration": {
+    "wheater/priorityEnabled": {
+      "value": true,
+      "description": "Water heating priority over space heating"
+    },
+    "wheater/tempLimitLow": {
+      "value": 35.0,
+      "description": "Water heater low temperature limit (°C)"
+    },
+    "wheater/tempLimitHigh": {
+      "value": 60.0,
+      "description": "Water heater high temperature limit (°C)"
+    },
+    "wheater/tempChargeDelta": {
+      "value": 5.0,
+      "description": "Water heater charging temperature delta (°C)"
+    },
+    "wheater/tempSafeLimitHigh": {
+      "value": 80.0,
+      "description": "Water heater safety high limit (°C)"
+    },
+    "wheater/tempSafeLimitLow": {
+      "value": 5.0,
+      "description": "Water heater safety low limit (°C)"
+    },
+    "wheater/hysteresis": {
+      "value": 2.0,
+      "description": "Water heater temperature hysteresis (°C)"
+    }
+  },
+  "Heating Configuration": {
+    "heating/targetTemp": {
+      "value": 21.0,
+      "description": "Target indoor temperature (°C)"
+    },
+    "heating/curveShift": {
+      "value": 20.0,
+      "description": "Heating curve shift"
+    },
+    "heating/curveCoeff": {
+      "value": 1.5,
+      "description": "Heating curve coefficient"
+    },
+    "heating/burnerLowLimit": {
+      "value": 35.0,
+      "description": "Minimum burner temperature (°C)"
+    },
+    "heating/highLimit": {
+      "value": 75.0,
+      "description": "Maximum heating temperature (°C)"
+    },
+    "heating/hysteresis": {
+      "value": 0.5,
+      "description": "Heating temperature hysteresis (°C)"
+    }
+  },
+  "PID Parameters - Space Heating": {
+    "pid/spaceHeating/kp": {
+      "value": 2.0,
+      "description": "Space heating proportional gain"
+    },
+    "pid/spaceHeating/ki": {
+      "value": 0.5,
+      "description": "Space heating integral gain"
+    },
+    "pid/spaceHeating/kd": {
+      "value": 0.1,
+      "description": "Space heating derivative gain"
+    }
+  },
+  "PID Parameters - Water Heater": {
+    "pid/waterHeater/kp": {
+      "value": 1.5,
+      "description": "Water heater proportional gain"
+    },
+    "pid/waterHeater/ki": {
+      "value": 0.3,
+      "description": "Water heater integral gain"
+    },
+    "pid/waterHeater/kd": {
+      "value": 0.05,
+      "description": "Water heater derivative gain"
+    }
+  },
+  "Sensor Configuration": {
+    "sensor/miThInterval": {
+      "value": 5000,
+      "description": "MiThermometer update interval (ms)"
+    }
+  }
+}

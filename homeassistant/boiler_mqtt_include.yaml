@@ -1,0 +1,891 @@
+# MQTT Configuration for ESPlan Boiler Controller (firmware v2.2.0+)
+# Updated: 2025-12-11
+#
+# IMPORTANT: Parameter SET topics require "set/" prefix!
+#   Read:  boiler/params/wheater/tempLimitHigh  (returns current value)
+#   Write: boiler/params/set/wheater/tempLimitHigh  (sets new value)
+#
+# Command Topics (boiler/cmd/...):
+#   system       - on/off/enable/disable/reboot
+#   heating      - on/off/enable/disable/override_on/override_off/<temp 15-30>
+#   room_target  - <temp 15-30> (set room target temperature)
+#   water        - on/off/enable/disable/override_on/override_off/priority_on/priority_off
+#   pid_autotune - start/stop/status
+#   status       - any (request status update)
+#   fram         - status/counters/runtime/reset_counters/format/save_pid
+#   fram_errors  - stats/clear
+#   config/pump_protection_ms  - 5000-60000 (pump motor protection delay)
+#   config/sensor_stale_ms     - 30000-300000 (sensor staleness timeout)
+#   config/post_purge_ms       - 30000-180000 (post-purge duration)
+#
+# Scheduler Commands (boiler/cmd/scheduler/...):
+#   add    - JSON: {"name":"...", "type":"water_heating|space_heating", "start_hour":6, ...}
+#   remove - JSON: {"id":1}
+#   list   - any
+#   status - any
+#
+# Parameter Topics (boiler/params/set/...):  <-- Note: SET requires "set/" prefix!
+#   get/all              - Request all parameter values (no set/ prefix)
+#   save                 - Save all parameters to NVS (no set/ prefix)
+#   wheater/priorityEnabled, tempLimitLow, tempLimitHigh, tempChargeDelta,
+#           tempSafeLimitHigh, tempSafeLimitLow, heatingRate
+#   heating/targetTemp, curveShift, curveCoeff, burnerLowLimit, highLimit, hysteresis
+#   pid/spaceHeating/kp, ki, kd
+#   pid/waterHeater/kp, ki, kd
+#   sensor/offset/boilerOutput, boilerReturn, waterTank, outside, room, pressure
+#
+# Status Topics (boiler/status/...):
+#   sensors       - Sensor data JSON (every 10s)
+#   online        - {"online": true/false} (retained)
+#   safety_config - {"pump_prot":15000, "sensor_stale":60000, "post_purge":90000}
+#   health        - {"heap_free":..., "uptime":...}
+#   fram/counters - {"b":123, "h":456, "w":789, "e":0}
+#   fram/runtime  - {"t":1234, "b":567}
+#
+# Diagnostics Topics (boiler/diagnostics/...):
+#   burner        - {"state":"IDLE", "active":false, "power_level":0}
+#
+# Sensor JSON format: {"t":{"bo":254,"br":253,"wt":220,"o":50,"i":233,"bt":650},"p":150,"r":21,"s":59,"sf":1}
+#   t.bo = boiler output (tenths °C)
+#   t.br = boiler return
+#   t.wt = water tank
+#   t.o  = outside
+#   t.i  = inside (room)
+#   t.bt = boiler target (tenths °C) - target temp for water/space heating
+#   p    = pressure (hundredths BAR)
+#   r    = relay bitmap (bit0:burner_enable, bit1:heating_pump, bit2:water_pump, bit3:power_boost, bit4:water_mode)
+#   s    = system state bitmap (bit0:system_en, bit1:heating_en, bit2:heating_on, bit3:water_en, bit4:water_on, bit5:water_priority)
+#   sf   = sensor fallback mode (0=startup, 1=normal, 2=shutdown)
+
+climate:
+  - name: "Heating"
+    unique_id: boiler_climate_heating
+    modes:
+      - "off"
+      - "heat"
+    mode_command_topic: "boiler/cmd/heating"
+    mode_command_template: "{{ 'on' if value == 'heat' else 'off' }}"
+    # State from sensor data 's' bitmap - bit1 = heating_enabled
+    mode_state_topic: "boiler/status/sensors"
+    mode_state_template: "{{ 'heat' if (value_json.s | default(0) | int) | bitwise_and(2) else 'off' }}"
+    current_temperature_topic: "boiler/status/sensors"
+    current_temperature_template: "{{ (value_json.t.i | default(0)) / 10 }}"
+    temperature_command_topic: "boiler/cmd/room_target"
+    temperature_command_template: "{{ value | round(1) }}"
+    temperature_state_topic: "boiler/status/heating/target"
+    min_temp: 15
+    max_temp: 25
+    temp_step: 0.2
+    optimistic: true
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+sensor:
+  # Temperature sensors (divide by 10 to get °C)
+  - name: "Boiler Output Temp"
+    unique_id: boiler_temp_output
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    value_template: "{{ (value_json.t.bo | default(0)) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Boiler Return Temp"
+    unique_id: boiler_temp_return
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    value_template: "{{ (value_json.t.br | default(0)) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Water Tank Temp"
+    unique_id: boiler_temp_water_tank
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    value_template: "{{ (value_json.t.wt | default(0)) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Outside Temp"
+    unique_id: boiler_temp_outside
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    value_template: "{{ (value_json.t.o | default(0)) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Inside Temp"
+    unique_id: boiler_temp_inside
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    value_template: "{{ (value_json.t.i | default(0)) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Boiler Target Temp"
+    unique_id: boiler_temp_target
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    value_template: "{{ (value_json.t.bt | default(0)) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  # Delta T (output - return) - indicates flow and heat transfer
+  # High ΔT (>20°C): Low flow or heavy load
+  # Normal ΔT (8-15°C): Good operation
+  # Low ΔT (<5°C): High flow or light load
+  - name: "Boiler Delta T"
+    unique_id: boiler_temp_delta
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "°C"
+    state_class: measurement
+    value_template: "{{ ((value_json.t.bo | default(0)) - (value_json.t.br | default(0))) / 10 | round(1) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  # System pressure (divide by 100 to get BAR)
+  - name: "System Pressure"
+    unique_id: boiler_pressure
+    state_topic: "boiler/status/sensors"
+    unit_of_measurement: "bar"
+    device_class: pressure
+    state_class: measurement
+    value_template: "{{ (value_json.p | default(0)) / 100 | round(2) }}"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  # System health diagnostics
+  - name: "Boiler Heap Free"
+    unique_id: boiler_diag_heap
+    state_topic: "boiler/status/health"
+    unit_of_measurement: "bytes"
+    value_template: "{{ value_json.heap_free }}"
+    entity_category: diagnostic
+
+  - name: "Boiler Uptime"
+    unique_id: boiler_diag_uptime
+    state_topic: "boiler/status/health"
+    unit_of_measurement: "s"
+    device_class: duration
+    value_template: "{{ value_json.uptime }}"
+    entity_category: diagnostic
+
+  - name: "Sensor Fallback Mode"
+    unique_id: boiler_diag_fallback
+    state_topic: "boiler/status/sensors"
+    value_template: >
+      {% set mode = value_json.sf | default(0) %}
+      {% if mode == 0 %}Startup
+      {% elif mode == 1 %}Normal
+      {% elif mode == 2 %}Shutdown
+      {% else %}Unknown{% endif %}
+    entity_category: diagnostic
+
+  # Burner state machine status (from diagnostics)
+  - name: "Burner State"
+    unique_id: boiler_burner_state
+    state_topic: "boiler/diagnostics/burner"
+    value_template: "{{ value_json.state | default('UNKNOWN') }}"
+    entity_category: diagnostic
+
+  - name: "Burner Power Level"
+    unique_id: boiler_burner_power
+    state_topic: "boiler/diagnostics/burner"
+    value_template: >
+      {% set level = value_json.power_level | default(0) %}
+      {% if level == 0 %}Off
+      {% elif level == 1 %}Low
+      {% elif level == 2 %}High
+      {% else %}Unknown{% endif %}
+    entity_category: diagnostic
+
+  # FRAM counters (from boiler/cmd/fram -> counters)
+  - name: "Burner Starts"
+    unique_id: boiler_counter_burner
+    state_topic: "boiler/status/fram/counters"
+    value_template: "{{ value_json.b | default(0) }}"
+    state_class: total_increasing
+    entity_category: diagnostic
+
+  - name: "Heating Pump Starts"
+    unique_id: boiler_counter_heating_pump
+    state_topic: "boiler/status/fram/counters"
+    value_template: "{{ value_json.h | default(0) }}"
+    state_class: total_increasing
+    entity_category: diagnostic
+
+  - name: "Water Pump Starts"
+    unique_id: boiler_counter_water_pump
+    state_topic: "boiler/status/fram/counters"
+    value_template: "{{ value_json.w | default(0) }}"
+    state_class: total_increasing
+    entity_category: diagnostic
+
+  - name: "Error Count"
+    unique_id: boiler_counter_errors
+    state_topic: "boiler/status/fram/counters"
+    value_template: "{{ value_json.e | default(0) }}"
+    state_class: total_increasing
+    entity_category: diagnostic
+
+  # FRAM runtime hours (from boiler/cmd/fram -> runtime)
+  - name: "Total Runtime"
+    unique_id: boiler_runtime_total
+    state_topic: "boiler/status/fram/runtime"
+    unit_of_measurement: "h"
+    value_template: "{{ value_json.t | default(0) }}"
+    device_class: duration
+    state_class: total_increasing
+    entity_category: diagnostic
+
+  - name: "Burner Runtime"
+    unique_id: boiler_runtime_burner
+    state_topic: "boiler/status/fram/runtime"
+    unit_of_measurement: "h"
+    value_template: "{{ value_json.b | default(0) }}"
+    device_class: duration
+    state_class: total_increasing
+    entity_category: diagnostic
+
+binary_sensor:
+  # Relay states from bitmap
+  # Note: No device_class so they show "On/Off" text instead of "Running/Not running"
+  # Relay status sensors - read-only hardware state indicators
+  # r bitmap: bit0=burner_enable(relay1), bit1=heating_pump(relay5), bit2=water_pump(relay6),
+  #            bit3=power_boost(relay2), bit4=water_mode(relay3)
+
+  - name: "Burner H"
+    unique_id: boiler_relay_burner_enable
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.r | default(0) | int) | bitwise_and(1) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Pump H"
+    unique_id: boiler_relay_heating_pump
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.r | default(0) | int) | bitwise_and(2) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Pump W"
+    unique_id: boiler_relay_water_pump
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.r | default(0) | int) | bitwise_and(4) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Power Boost"
+    unique_id: boiler_relay_power_boost
+    state_topic: "boiler/status/sensors"
+    # ON = full power (boost active), OFF = half power
+    value_template: "{{ 'ON' if (value_json.r | default(0) | int) | bitwise_and(8) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Burner W"
+    unique_id: boiler_relay_water_mode
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.r | default(0) | int) | bitwise_and(16) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  # System state indicators (software control decisions from 's' bitmap)
+  # These show what the control logic WANTS, not necessarily hardware state
+  # For actual relay positions, see relay sensors above
+
+  # State from sensor data 's' bitmap - bit2 = heating_on
+  - name: "Heating Active"
+    unique_id: boiler_state_heating_active
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.s | default(0) | int) | bitwise_and(4) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  # State from sensor data 's' bitmap - bit4 = water_on
+  - name: "Water Heating Active"
+    unique_id: boiler_state_water_active
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.s | default(0) | int) | bitwise_and(16) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Boiler Online"
+    unique_id: boiler_online
+    state_topic: "boiler/status/online"
+    value_template: "{{ 'ON' if value_json.online else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    device_class: connectivity
+
+switch:
+  # State from sensor data 's' bitmap - bit0 = system_enabled
+  - unique_id: boiler_switch_system
+    name: "Boiler System"
+    state_topic: "boiler/status/sensors"
+    command_topic: "boiler/cmd/system"
+    availability_topic: "boiler/status/online"
+    payload_on: "on"
+    payload_off: "off"
+    value_template: "{{ (value_json.s | default(0) | int) | bitwise_and(1) }}"
+    state_on: "1"
+    state_off: "0"
+    availability_template: "{{ 'Online' if value_json.online else 'Offline' }}"
+    payload_available: "Online"
+    payload_not_available: "Offline"
+    optimistic: false
+    qos: 0
+    retain: false
+
+  # State from sensor data 's' bitmap - bit1 = heating_enabled
+  - unique_id: boiler_switch_heating
+    name: "Heating Enable"
+    state_topic: "boiler/status/sensors"
+    command_topic: "boiler/cmd/heating"
+    availability_topic: "boiler/status/online"
+    payload_on: "on"
+    payload_off: "off"
+    value_template: "{{ (value_json.s | default(0) | int) | bitwise_and(2) }}"
+    state_on: "2"
+    state_off: "0"
+    availability_template: "{{ 'Online' if value_json.online else 'Offline' }}"
+    payload_available: "Online"
+    payload_not_available: "Offline"
+    optimistic: false
+    qos: 0
+    retain: false
+
+  # State from sensor data 's' bitmap - bit3 = water_enabled
+  - unique_id: boiler_switch_water
+    name: "Water Heater Enable"
+    state_topic: "boiler/status/sensors"
+    command_topic: "boiler/cmd/water"
+    availability_topic: "boiler/status/online"
+    payload_on: "on"
+    payload_off: "off"
+    value_template: "{{ (value_json.s | default(0) | int) | bitwise_and(8) }}"
+    state_on: "8"
+    state_off: "0"
+    availability_template: "{{ 'Online' if value_json.online else 'Offline' }}"
+    payload_available: "Online"
+    payload_not_available: "Offline"
+    optimistic: false
+    qos: 0
+    retain: false
+
+  # State from sensor data 's' bitmap - bit5 = water_priority
+  - unique_id: boiler_switch_water_priority
+    name: "Water Heater Priority"
+    state_topic: "boiler/status/sensors"
+    command_topic: "boiler/cmd/water"
+    availability_topic: "boiler/status/online"
+    payload_on: "priority_on"
+    payload_off: "priority_off"
+    value_template: "{{ (value_json.s | default(0) | int) | bitwise_and(32) }}"
+    state_on: "32"
+    state_off: "0"
+    availability_template: "{{ 'Online' if value_json.online else 'Offline' }}"
+    payload_available: "Online"
+    payload_not_available: "Offline"
+    optimistic: false
+    qos: 0
+    retain: false
+
+button:
+  # boiler/cmd/status
+  - name: "Request Status"
+    unique_id: boiler_btn_status
+    command_topic: "boiler/cmd/status"
+    payload_press: "1"
+    entity_category: diagnostic
+
+  # boiler/cmd/system - reboot
+  - name: "Reboot"
+    unique_id: boiler_btn_reboot
+    command_topic: "boiler/cmd/system"
+    payload_press: "reboot"
+    entity_category: config
+
+  # boiler/cmd/heating - override_on/override_off
+  - name: "Heating Override ON"
+    unique_id: boiler_btn_heating_override_on
+    command_topic: "boiler/cmd/heating"
+    payload_press: "override_on"
+    entity_category: config
+
+  - name: "Heating Override OFF"
+    unique_id: boiler_btn_heating_override_off
+    command_topic: "boiler/cmd/heating"
+    payload_press: "override_off"
+    entity_category: config
+
+  # boiler/cmd/water - override_on/override_off
+  - name: "Water Override ON"
+    unique_id: boiler_btn_water_override_on
+    command_topic: "boiler/cmd/water"
+    payload_press: "override_on"
+    entity_category: config
+
+  - name: "Water Override OFF"
+    unique_id: boiler_btn_water_override_off
+    command_topic: "boiler/cmd/water"
+    payload_press: "override_off"
+    entity_category: config
+
+  # boiler/cmd/pid_autotune - start/stop
+  - name: "PID Autotune Start"
+    unique_id: boiler_btn_pid_start
+    command_topic: "boiler/cmd/pid_autotune"
+    payload_press: "start"
+    entity_category: config
+
+  - name: "PID Autotune Stop"
+    unique_id: boiler_btn_pid_stop
+    command_topic: "boiler/cmd/pid_autotune"
+    payload_press: "stop"
+    entity_category: config
+
+  # boiler/cmd/fram - counters/runtime/save_pid
+  - name: "FRAM Get Counters"
+    unique_id: boiler_btn_fram_counters
+    command_topic: "boiler/cmd/fram"
+    payload_press: "counters"
+    entity_category: diagnostic
+
+  - name: "FRAM Get Runtime"
+    unique_id: boiler_btn_fram_runtime
+    command_topic: "boiler/cmd/fram"
+    payload_press: "runtime"
+    entity_category: diagnostic
+
+  - name: "Save PID to FRAM"
+    unique_id: boiler_btn_fram_save_pid
+    command_topic: "boiler/cmd/fram"
+    payload_press: "save_pid"
+    entity_category: config
+
+  - name: "FRAM Reset Counters"
+    unique_id: boiler_btn_fram_reset
+    command_topic: "boiler/cmd/fram"
+    payload_press: "reset_counters"
+    entity_category: config
+
+  # boiler/cmd/fram_errors - stats/clear
+  - name: "Get Error Stats"
+    unique_id: boiler_btn_errors_stats
+    command_topic: "boiler/cmd/fram_errors"
+    payload_press: "stats"
+    entity_category: diagnostic
+
+  - name: "Clear Error Log"
+    unique_id: boiler_btn_errors_clear
+    command_topic: "boiler/cmd/fram_errors"
+    payload_press: "clear"
+    entity_category: config
+
+  # boiler/cmd/scheduler/list
+  - name: "Scheduler List"
+    unique_id: boiler_btn_scheduler_list
+    command_topic: "boiler/cmd/scheduler/list"
+    payload_press: "1"
+    entity_category: diagnostic
+
+  # boiler/cmd/scheduler/status
+  - name: "Scheduler Status"
+    unique_id: boiler_btn_scheduler_status
+    command_topic: "boiler/cmd/scheduler/status"
+    payload_press: "1"
+    entity_category: diagnostic
+
+  # boiler/params - parameter management
+  - name: "Get All Parameters"
+    unique_id: boiler_btn_params_get_all
+    command_topic: "boiler/params/get/all"
+    payload_press: "1"
+    entity_category: diagnostic
+
+  - name: "Save Parameters to NVS"
+    unique_id: boiler_btn_params_save
+    command_topic: "boiler/params/save"
+    payload_press: "1"
+    entity_category: config
+
+# Note: Room target temperature is set via climate entity or boiler/cmd/room_target topic
+# Note: Scheduler add/remove are JSON commands - use developer tools or automations
+#   Add:    boiler/cmd/scheduler/add    {"name":"Morning","type":"water_heating","start_hour":6,"start_minute":0,"end_hour":7,"end_minute":0,"target_temp":55}
+#   Remove: boiler/cmd/scheduler/remove {"id":1}
+
+# =============================================================================
+# System Parameters (boiler/params/...)
+# These settings are persisted in NVS and can be configured via MQTT
+# Use boiler/params/get/all to retrieve all current values
+# Use boiler/params/save to persist changes to NVS
+# =============================================================================
+
+number:
+  # Water Heater Temperature Settings (Two-threshold control)
+  # Start heating when tank drops below Low Limit, stop when tank rises above High Limit
+  - name: "Water Tank Low Limit"
+    unique_id: boiler_param_wheater_temp_low
+    command_topic: "boiler/params/set/wheater/tempLimitLow"
+    state_topic: "boiler/params/wheater/tempLimitLow"
+    min: 30
+    max: 60
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Water Tank High Limit"
+    unique_id: boiler_param_wheater_temp_high
+    command_topic: "boiler/params/set/wheater/tempLimitHigh"
+    state_topic: "boiler/params/wheater/tempLimitHigh"
+    min: 50
+    max: 85
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Water Charge Delta"
+    unique_id: boiler_param_wheater_charge_delta
+    command_topic: "boiler/params/set/wheater/tempChargeDelta"
+    state_topic: "boiler/params/wheater/tempChargeDelta"
+    min: 1
+    max: 20
+    step: 0.5
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Water Safety High Limit"
+    unique_id: boiler_param_wheater_safe_high
+    command_topic: "boiler/params/set/wheater/tempSafeLimitHigh"
+    state_topic: "boiler/params/wheater/tempSafeLimitHigh"
+    min: 60
+    max: 95
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Water Heating Rate"
+    unique_id: boiler_param_wheater_heating_rate
+    command_topic: "boiler/params/set/wheater/heatingRate"
+    state_topic: "boiler/params/wheater/heatingRate"
+    min: 0.1
+    max: 5
+    step: 0.1
+    unit_of_measurement: "°C/min"
+    entity_category: config
+
+  # Heating Temperature Settings
+  - name: "Room Target Temperature"
+    unique_id: boiler_param_heating_target
+    command_topic: "boiler/params/set/heating/targetTemp"
+    state_topic: "boiler/params/heating/targetTemp"
+    min: 10
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Burner Low Limit"
+    unique_id: boiler_param_burner_low
+    command_topic: "boiler/params/set/heating/burnerLowLimit"
+    state_topic: "boiler/params/heating/burnerLowLimit"
+    min: 20
+    max: 70
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Heating High Limit"
+    unique_id: boiler_param_heating_high
+    command_topic: "boiler/params/set/heating/highLimit"
+    state_topic: "boiler/params/heating/highLimit"
+    min: 50
+    max: 90
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Heating Hysteresis"
+    unique_id: boiler_param_heating_hysteresis
+    command_topic: "boiler/params/set/heating/hysteresis"
+    state_topic: "boiler/params/heating/hysteresis"
+    min: 0.1
+    max: 2
+    step: 0.1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Heating Curve Shift"
+    unique_id: boiler_param_curve_shift
+    command_topic: "boiler/params/set/heating/curveShift"
+    state_topic: "boiler/params/heating/curveShift"
+    min: -20
+    max: 40
+    step: 1
+    unit_of_measurement: "°C"
+    entity_category: config
+
+  - name: "Heating Curve Coefficient"
+    unique_id: boiler_param_curve_coeff
+    command_topic: "boiler/params/set/heating/curveCoeff"
+    state_topic: "boiler/params/heating/curveCoeff"
+    min: 0.5
+    max: 4
+    step: 0.1
+    entity_category: config
+
+  # Space Heating PID Parameters
+  - name: "Space Heating PID Kp"
+    unique_id: boiler_param_pid_space_kp
+    command_topic: "boiler/params/set/pid/spaceHeating/kp"
+    state_topic: "boiler/params/pid/spaceHeating/kp"
+    min: 0
+    max: 10
+    step: 0.1
+    entity_category: config
+
+  - name: "Space Heating PID Ki"
+    unique_id: boiler_param_pid_space_ki
+    command_topic: "boiler/params/set/pid/spaceHeating/ki"
+    state_topic: "boiler/params/pid/spaceHeating/ki"
+    min: 0
+    max: 5
+    step: 0.01
+    entity_category: config
+
+  - name: "Space Heating PID Kd"
+    unique_id: boiler_param_pid_space_kd
+    command_topic: "boiler/params/set/pid/spaceHeating/kd"
+    state_topic: "boiler/params/pid/spaceHeating/kd"
+    min: 0
+    max: 5
+    step: 0.01
+    entity_category: config
+
+  # Water Heater PID Parameters
+  - name: "Water Heater PID Kp"
+    unique_id: boiler_param_pid_water_kp
+    command_topic: "boiler/params/set/pid/waterHeater/kp"
+    state_topic: "boiler/params/pid/waterHeater/kp"
+    min: 0
+    max: 10
+    step: 0.1
+    entity_category: config
+
+  - name: "Water Heater PID Ki"
+    unique_id: boiler_param_pid_water_ki
+    command_topic: "boiler/params/set/pid/waterHeater/ki"
+    state_topic: "boiler/params/pid/waterHeater/ki"
+    min: 0
+    max: 5
+    step: 0.01
+    entity_category: config
+
+  - name: "Water Heater PID Kd"
+    unique_id: boiler_param_pid_water_kd
+    command_topic: "boiler/params/set/pid/waterHeater/kd"
+    state_topic: "boiler/params/pid/waterHeater/kd"
+    min: 0
+    max: 5
+    step: 0.01
+    entity_category: config
+
+  # Safety Configuration (milliseconds)
+  # These control safety-critical timing parameters
+  - name: "Pump Protection Delay"
+    unique_id: boiler_safety_pump_protection
+    command_topic: "boiler/cmd/config/pump_protection_ms"
+    state_topic: "boiler/status/safety_config"
+    value_template: "{{ value_json.pump_prot }}"
+    min: 5000
+    max: 60000
+    step: 1000
+    unit_of_measurement: "ms"
+    entity_category: config
+
+  - name: "Sensor Stale Timeout"
+    unique_id: boiler_safety_sensor_stale
+    command_topic: "boiler/cmd/config/sensor_stale_ms"
+    state_topic: "boiler/status/safety_config"
+    value_template: "{{ value_json.sensor_stale }}"
+    min: 30000
+    max: 300000
+    step: 5000
+    unit_of_measurement: "ms"
+    entity_category: config
+
+  - name: "Post Purge Duration"
+    unique_id: boiler_safety_post_purge
+    command_topic: "boiler/cmd/config/post_purge_ms"
+    state_topic: "boiler/status/safety_config"
+    value_template: "{{ value_json.post_purge }}"
+    min: 30000
+    max: 180000
+    step: 5000
+    unit_of_measurement: "ms"
+    entity_category: config
+
+  # Sensor Calibration Offsets (in tenths of °C or hundredths of BAR)
+  # Use boiler/params/get/all to see current values, boiler/params/save to persist
+  - name: "Offset Boiler Output"
+    unique_id: boiler_offset_boiler_output
+    command_topic: "boiler/params/set/sensor/offset/boilerOutput"
+    state_topic: "boiler/params/sensor/offset/boilerOutput"
+    min: -50
+    max: 50
+    step: 1
+    unit_of_measurement: "0.1°C"
+    entity_category: config
+
+  - name: "Offset Boiler Return"
+    unique_id: boiler_offset_boiler_return
+    command_topic: "boiler/params/set/sensor/offset/boilerReturn"
+    state_topic: "boiler/params/sensor/offset/boilerReturn"
+    min: -50
+    max: 50
+    step: 1
+    unit_of_measurement: "0.1°C"
+    entity_category: config
+
+  - name: "Offset Water Tank"
+    unique_id: boiler_offset_water_tank
+    command_topic: "boiler/params/set/sensor/offset/waterTank"
+    state_topic: "boiler/params/sensor/offset/waterTank"
+    min: -50
+    max: 50
+    step: 1
+    unit_of_measurement: "0.1°C"
+    entity_category: config
+
+  - name: "Offset Outside Temp"
+    unique_id: boiler_offset_outside
+    command_topic: "boiler/params/set/sensor/offset/outside"
+    state_topic: "boiler/params/sensor/offset/outside"
+    min: -50
+    max: 50
+    step: 1
+    unit_of_measurement: "0.1°C"
+    entity_category: config
+
+  - name: "Offset Inside Temp"
+    unique_id: boiler_offset_room
+    command_topic: "boiler/params/set/sensor/offset/room"
+    state_topic: "boiler/params/sensor/offset/room"
+    min: -50
+    max: 50
+    step: 1
+    unit_of_measurement: "0.1°C"
+    entity_category: config
+
+  - name: "Offset Pressure"
+    unique_id: boiler_offset_pressure
+    command_topic: "boiler/params/set/sensor/offset/pressure"
+    state_topic: "boiler/params/sensor/offset/pressure"
+    min: -50
+    max: 50
+    step: 1
+    unit_of_measurement: "0.01bar"
+    entity_category: config
+
+# =============================================================================
+# Dashboard Card Examples
+# =============================================================================
+# Relay status - icon only (no text), icons turn colored when on, grey when off
+# type: glance
+# title: Relay Status
+# show_state: false
+# columns: 5
+# entities:
+#   - entity: binary_sensor.boiler_burner
+#     name: Burner
+#   - entity: binary_sensor.boiler_heating_pump
+#     name: H.Pump
+#   - entity: binary_sensor.boiler_water_pump
+#     name: W.Pump
+#   - entity: binary_sensor.boiler_heating_active
+#     name: Heating
+#   - entity: binary_sensor.boiler_water_heating_active
+#     name: Water

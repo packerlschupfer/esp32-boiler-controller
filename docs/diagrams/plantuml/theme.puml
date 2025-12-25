@@ -1,0 +1,70 @@
+@startuml
+' ESP32 Boiler Controller - Common PlantUML Theme
+' Dark theme matching the previous Mermaid styling
+
+skinparam backgroundColor #1e1e1e
+skinparam DefaultFontColor #ffffff
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 12
+
+' Component colors
+skinparam component {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
+' Class colors
+skinparam class {
+    BackgroundColor #36648B
+    BorderColor #ffffff
+    FontColor #ffffff
+    HeaderBackgroundColor #2F4F4F
+}
+
+' State colors
+skinparam state {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+    StartColor #2F4F2F
+    EndColor #8B2500
+}
+
+' Package/Namespace colors
+skinparam package {
+    BackgroundColor #2F4F4F
+    BorderColor #5a5a5a
+    FontColor #ffffff
+}
+
+' Note colors
+skinparam note {
+    BackgroundColor #2F4F4F
+    BorderColor #708090
+    FontColor #ffffff
+}
+
+' Arrow colors
+skinparam arrow {
+    Color #5a5a5a
+    FontColor #ffffff
+}
+
+' Sequence diagram colors
+skinparam sequence {
+    ParticipantBackgroundColor #36648B
+    ParticipantBorderColor #ffffff
+    ParticipantFontColor #ffffff
+    LifeLineBackgroundColor #4682B4
+    LifeLineBorderColor #ffffff
+    ActorBackgroundColor #2F4F4F
+    ActorBorderColor #ffffff
+}
+
+' Stereotypes
+skinparam stereotypeCBackgroundColor #8B4513
+skinparam stereotypeIBackgroundColor #52BE80
+skinparam stereotypeEBackgroundColor #CD5B45
+
+@enduml
