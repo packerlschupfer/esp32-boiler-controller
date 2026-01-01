@@ -31,6 +31,8 @@
 #include "config/ProjectConfig.h"
 #include <RuntimeStorage.h>
 #include "modules/mqtt/MQTTCommandHandlers.h"
+#include "modules/mqtt/MQTTSubscriptionManager.h"
+#include "modules/mqtt/MQTTPublisher.h"
 
 static const char* TAG = "MQTT";
 
@@ -61,54 +63,7 @@ static constexpr uint32_t MQTT_TASK_RETRY_SUBSCRIPTIONS = (1 << 6);
 // Event group for MQTT task (declared early for use in timer callback)
 static EventGroupHandle_t mqttTaskEventGroup = nullptr;
 
-// ============================================================================
-// THREAD-SAFETY NOTE (Round 14 Issue #6):
-// Variables in this anonymous namespace are SAFE because:
-// - failedSubscriptions, subscriptionRetryTimer, subscriptionRetryAttempts:
-//   Only accessed from MQTTTask::taskFunction() and timer callback
-//   (timer runs in daemon task but only sets event bits, actual access is in task)
-// - Timer callback only calls xEventGroupSetBits() which is thread-safe
-// DO NOT access these variables from other tasks.
-// ============================================================================
-// Subscription retry tracking
-namespace {
-    // Track which subscription groups failed (bitmask)
-    static uint8_t failedSubscriptions = 0;
-    static constexpr uint8_t SUB_TEST_ECHO = (1 << 0);
-    static constexpr uint8_t SUB_CMD = (1 << 1);
-    static constexpr uint8_t SUB_CONFIG = (1 << 2);
-    static constexpr uint8_t SUB_ERRORS = (1 << 3);
-    static constexpr uint8_t SUB_SCHEDULER = (1 << 4);
-    static constexpr uint32_t SUBSCRIPTION_RETRY_DELAY_MS = 5000;  // 5 seconds
-    static TimerHandle_t subscriptionRetryTimer = nullptr;
-
-    // Round 14 Issue #14: Limit subscription retry attempts
-    static uint8_t subscriptionRetryAttempts = 0;
-    static constexpr uint8_t MAX_SUBSCRIPTION_RETRIES = 10;
-
-    static void subscriptionRetryTimerCallback(TimerHandle_t xTimer) {
-        (void)xTimer;
-
-        // Round 14 Issue #14: Stop retrying after max attempts
-        if (subscriptionRetryAttempts >= MAX_SUBSCRIPTION_RETRIES) {
-            LOG_ERROR(TAG, "Max subscription retries (%d) exceeded - giving up",
-                     MAX_SUBSCRIPTION_RETRIES);
-            // Stop the timer
-            if (subscriptionRetryTimer) {
-                xTimerStop(subscriptionRetryTimer, 0);
-            }
-            return;
-        }
-
-        subscriptionRetryAttempts++;
-        LOG_DEBUG(TAG, "Subscription retry attempt %d/%d",
-                 subscriptionRetryAttempts, MAX_SUBSCRIPTION_RETRIES);
-
-        if (mqttTaskEventGroup) {
-            xEventGroupSetBits(mqttTaskEventGroup, MQTT_TASK_RETRY_SUBSCRIPTIONS);
-        }
-    }
-}
+// Subscription retry tracking moved to MQTTSubscriptionManager (Round 21 Refactoring)
 
 // Timer handles for periodic events
 static TimerHandle_t sensorPublishTimer = nullptr;
@@ -363,15 +318,9 @@ void MQTTTask::taskFunction(void* parameter) {
                                    MQTT_TASK_PUBLISH_HEALTH | MQTT_TASK_PROCESS_QUEUE |
                                    MQTT_TASK_RETRY_SUBSCRIPTIONS;
 
-    // Create subscription retry timer (one-shot, started on subscription failure)
-    subscriptionRetryTimer = xTimerCreate(
-        "SubRetry",
-        pdMS_TO_TICKS(SUBSCRIPTION_RETRY_DELAY_MS),
-        pdFALSE,  // One-shot
-        nullptr,
-        subscriptionRetryTimerCallback
-    );
-    
+    // Initialize subscription manager (handles retry timer internally)
+    MQTTSubscriptionManager::initialize(mqttTaskEventGroup, MQTT_TASK_RETRY_SUBSCRIPTIONS);
+
     bool subscriptionsSetup = false;
     
     while (true) {
@@ -428,12 +377,7 @@ void MQTTTask::taskFunction(void* parameter) {
         if (events & MQTT_TASK_DISCONNECTED) {
             LOG_WARN(TAG, "MQTT disconnected");
             subscriptionsSetup = false;
-            failedSubscriptions = 0;  // Reset failed subscriptions on disconnect
-            subscriptionRetryAttempts = 0;  // Round 14 Issue #14: Reset retry counter
-            // Stop retry timer if running
-            if (subscriptionRetryTimer) {
-                xTimerStop(subscriptionRetryTimer, 0);
-            }
+            // Subscription state reset handled by MQTTSubscriptionManager
             // Clear MQTT operational bit
             SRP::clearSystemStateEventBits(SystemEvents::SystemState::MQTT_OPERATIONAL);
 
@@ -478,8 +422,9 @@ void MQTTTask::taskFunction(void* parameter) {
 
         // Handle subscription retry
         if ((events & MQTT_TASK_RETRY_SUBSCRIPTIONS) && mqttManager_ && mqttManager_->isConnected()) {
-            if (failedSubscriptions != 0) {
-                LOG_INFO(TAG, "Retrying failed subscriptions (mask: 0x%02X)", failedSubscriptions);
+            auto stats = MQTTSubscriptionManager::getStats();
+            if (stats.failedSubscriptions != 0) {
+                LOG_INFO(TAG, "Retrying failed subscriptions (mask: 0x%02X)", stats.failedSubscriptions);
                 retryFailedSubscriptions();
             }
         }
@@ -967,414 +912,35 @@ void MQTTTask::processPublishQueue() {
     }
 }
 
+// Publishing functions moved to MQTTPublisher (Round 21 Refactoring)
+
+// Delegation methods kept for compatibility
 void MQTTTask::publishSystemStatus() {
-    if (!mqttManager_->isConnected()) {
-        return;
-    }
-    
-    SemaphoreGuard guard(mqttMutex_, pdMS_TO_TICKS(100));
-    if (!guard.hasLock()) {
-        LOG_ERROR(TAG, "Failed to acquire mutex for status publish");
-        return;
-    }
-    
-    // Create JSON status message
-    JsonDocument doc;  // ArduinoJson v7
-    doc["timestamp"] = millis();
-
-    uint32_t heapFree = ESP.getFreeHeap();
-    uint32_t heapMaxBlock = ESP.getMaxAllocHeap();
-    doc["heap_free"] = heapFree;
-    doc["heap_min"] = ESP.getMinFreeHeap();
-    doc["heap_max_blk"] = heapMaxBlock;  // Largest free block (for fragmentation analysis)
-
-    // Round 16 Issue #5: Add heap fragmentation percentage
-    // Fragmentation = 100 - (max_block * 100 / free_heap)
-    // Lower is better: 0% = no fragmentation, 100% = completely fragmented
-    // Use 64-bit arithmetic to prevent overflow on large heap values
-    uint8_t fragPct = (heapFree > 0) ?
-        (100 - static_cast<uint8_t>((static_cast<uint64_t>(heapMaxBlock) * 100ULL) / heapFree)) : 100;
-    doc["heap_frag"] = fragPct;
-
-    doc["uptime"] = millis() / 1000;
-    
-    // Add health monitor data
-    // Add basic health data - HealthMonitor not available in this version
-    doc["health"]["tasks"] = uxTaskGetNumberOfTasks();
-    doc["health"]["stack_hwm"] = uxTaskGetStackHighWaterMark(NULL);
-    
-    auto buffer = MemoryPools::getLogBuffer();
-    if (!buffer) {
-        LOG_ERROR(TAG, "Failed to allocate buffer for health data");
-        return;
-    }
-
-    size_t written = serializeJson(doc, buffer.data(), buffer.size());
-    if (written == 0 || written >= buffer.size()) {
-        LOG_ERROR(TAG, "JSON serialization failed or truncated for health data");
-        return;
-    }
-
-    // Queue for publishing with MEDIUM priority
-    MQTTTask::publish(MQTT_STATUS_HEALTH, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_MEDIUM);
-}
-
-void MQTTTask::publishSystemState() {
-    // System state is now included in sensor data as compact byte "s"
-    // s = bit0:system_enabled, bit1:heating_enabled, bit2:heating_on,
-    //     bit3:water_enabled, bit4:water_on, bit5:water_priority
-    // Individual state topics are published by handleControlCommand() when state changes
-    // This function is kept for compatibility but does nothing - state is in sensor data
-    LOG_DEBUG(TAG, "System state included in sensor data 's' field");
+    MQTTPublisher::publishSystemStatus();
 }
 
 void MQTTTask::publishSensorData() {
-    if (!mqttManager_->isConnected()) {
-        return;
-    }
-    
-    // Get sensor data with timeout to avoid blocking
-    SemaphoreGuard guard(SRP::getSensorReadingsMutex(), pdMS_TO_TICKS(100));
-    if (!guard.hasLock()) {
-        LOG_ERROR(TAG, "Failed to acquire sensor mutex for MQTT publish");
-        return;
-    }
-    
-    // Create local copy of sensor data
-    SharedSensorReadings sensors = SRP::getSensorReadings();
-    
-    // SemaphoreGuard releases automatically when it goes out of scope
-    
-    // Create JSON message
-    JsonDocument doc;  // ArduinoJson v7
-
-    // Temperature values are in tenths of degrees Celsius (int16_t)
-    // Example: 273 = 27.3°C, -50 = -5.0°C
-
-    // Compact format: Use shorter keys for smaller payload
-    JsonObject temps = doc["t"].to<JsonObject>();  // temperatures
-    temps["bo"] = sensors.boilerTempOutput;     // boiler output
-    temps["br"] = sensors.boilerTempReturn;     // boiler return
-    temps["wt"] = sensors.waterHeaterTempTank;  // water tank
-    temps["o"] = sensors.outsideTemp;           // outside
-
-    // Optional sensors (enable via ENABLE_SENSOR_* flags)
-#ifdef ENABLE_SENSOR_WATER_TANK_TOP
-    temps["wtt"] = sensors.waterTankTopTemp;    // water tank top
-#endif
-#ifdef ENABLE_SENSOR_WATER_RETURN
-    temps["wr"] = sensors.waterHeaterTempReturn; // water return
-#endif
-#ifdef ENABLE_SENSOR_HEATING_RETURN
-    temps["hr"] = sensors.heatingTempReturn;    // heating return
-#endif
-    
-    // Only include inside temp if valid
-    if (tempIsValid(sensors.insideTemp)) {
-        temps["i"] = sensors.insideTemp;        // inside
-    }
-
-    // Add burner target temperature (from BurnerStateMachine)
-    bool burnerDemand = false;
-    Temperature_t burnerTarget = 0;
-    if (BurnerStateMachine::getHeatDemandState(burnerDemand, burnerTarget)) {
-        temps["bt"] = burnerTarget;             // burner target
-    }
-
-    // Include system pressure if valid (in hundredths of BAR for precision)
-    if (sensors.isSystemPressureValid) {
-        doc["p"] = sensors.systemPressure;      // pressure in hundredths of BAR
-    }
-    
-    // Get relay status
-    if (xSemaphoreTake(SRP::getRelayReadingsMutex(), pdMS_TO_TICKS(50)) == pdTRUE) {
-        SharedRelayReadings relays = SRP::getRelayReadings();
-        xSemaphoreGive(SRP::getRelayReadingsMutex());
-        
-        // Compact format: combine relay states into a single byte
-        // Bit 0: burner, 1: heating_pump, 2: water_pump, 3: half_power, 4: water_mode
-        uint8_t relayBits = 0;
-        if (relays.relayBurnerEnable) relayBits |= 0x01;
-        if (relays.relayHeatingPump) relayBits |= 0x02;
-        if (relays.relayWaterPump) relayBits |= 0x04;
-        if (relays.relayPowerBoost) relayBits |= 0x08;
-        if (relays.relayWaterMode) relayBits |= 0x10;
-        
-        doc["r"] = relayBits;  // relays as single byte
-    }
-
-    // Add system state as compact byte (like relays)
-    // s = system state: bit0=system_enabled, bit1=heating_enabled, bit2=heating_on,
-    //                   bit3=water_enabled, bit4=water_on, bit5=water_priority
-    EventBits_t systemState = SRP::getSystemStateEventBits();
-    uint8_t stateBits = 0;
-    if (systemState & SystemEvents::SystemState::BOILER_ENABLED) stateBits |= 0x01;
-    if (systemState & SystemEvents::SystemState::HEATING_ENABLED) stateBits |= 0x02;
-    if (systemState & SystemEvents::SystemState::HEATING_ON) stateBits |= 0x04;
-    if (systemState & SystemEvents::SystemState::WATER_ENABLED) stateBits |= 0x08;
-    if (systemState & SystemEvents::SystemState::WATER_ON) stateBits |= 0x10;
-    if (systemState & SystemEvents::SystemState::WATER_PRIORITY) stateBits |= 0x20;
-    doc["s"] = stateBits;
-
-    // Add sensor fallback status for degraded mode notification
-    // sf = sensor fallback: 0=STARTUP (waiting), 1=NORMAL (OK), 2=SHUTDOWN (degraded)
-    auto fallbackMode = TemperatureSensorFallback::getCurrentMode();
-    doc["sf"] = static_cast<uint8_t>(fallbackMode);
-
-    // If in degraded mode, add which sensors are missing
-    if (fallbackMode != TemperatureSensorFallback::FallbackMode::NORMAL) {
-        const auto& status = TemperatureSensorFallback::getStatus();
-        uint8_t missingSensors = 0;
-        if (status.missingBoilerOutput) missingSensors |= 0x01;
-        if (status.missingBoilerReturn) missingSensors |= 0x02;
-        if (status.missingWaterTemp) missingSensors |= 0x04;
-        if (status.missingRoomTemp) missingSensors |= 0x08;
-        doc["sm"] = missingSensors;  // sensor missing bits
-    }
-
-    // Use the larger JSON buffer pool for sensor data
-    auto buffer = MemoryPools::jsonBufferPool.allocate();
-    if (!buffer) {
-        LOG_ERROR(TAG, "Failed to allocate buffer for sensor data");
-        return;
-    }
-
-    size_t written = serializeJson(doc, buffer->data, sizeof(buffer->data));
-    if (written == 0 || written >= sizeof(buffer->data)) {
-        LOG_ERROR(TAG, "JSON serialization failed or truncated (wrote %zu/%zu bytes)",
-                 written, sizeof(buffer->data));
-        MemoryPools::jsonBufferPool.deallocate(buffer);
-        return;
-    }
-
-    // Queue for publishing with HIGH priority
-    MQTTTask::publish(MQTT_STATUS_SENSORS, buffer->data, 0, false, MQTTPriority::PRIORITY_HIGH);
-    
-    // Return buffer to pool
-    MemoryPools::jsonBufferPool.deallocate(buffer);
+    MQTTPublisher::publishSensorData();
 }
 
-// Helper to schedule subscription retry
-static void scheduleSubscriptionRetry() {
-    if (failedSubscriptions != 0 && subscriptionRetryTimer) {
-        xTimerStart(subscriptionRetryTimer, 0);
-        LOG_INFO(TAG, "Scheduled subscription retry in %lu ms", SUBSCRIPTION_RETRY_DELAY_MS);
-    }
+void MQTTTask::publishSystemState() {
+    MQTTPublisher::publishSystemState();
 }
 
-// Retry only the failed subscriptions
+// Old publishing implementation removed (Round 21 Refactoring - 185 lines extracted to MQTTPublisher)
+
+// Subscription management moved to MQTTSubscriptionManager (Round 21 Refactoring)
+
+// Delegation methods kept for compatibility
 void MQTTTask::retryFailedSubscriptions() {
-    if (!mqttManager_ || !mqttManager_->isConnected()) {
-        return;
-    }
-
-    uint8_t previousFailures = failedSubscriptions;
-
-    // Retry test/echo if it failed
-    if (failedSubscriptions & SUB_TEST_ECHO) {
-        auto result = mqttManager_->subscribe("test/echo",
-            [](const String& topic, const String& payload) {
-                LOG_INFO(TAG, "Echo test: %s", payload.c_str());
-                MQTTTask::publish("test/response", payload.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-            }, 0);
-        if (result.isOk()) {
-            failedSubscriptions &= ~SUB_TEST_ECHO;
-            LOG_INFO(TAG, "Retry: test/echo succeeded");
-        }
-    }
-
-    // Retry command topics if failed
-    if (failedSubscriptions & SUB_CMD) {
-        char cmdTopic[64];
-        snprintf(cmdTopic, sizeof(cmdTopic), "%s/+", MQTT_CMD_PREFIX);
-        auto result = mqttManager_->subscribe(cmdTopic,
-            [](const String& topic, const String& payload) {
-                handleControlCommand(topic.c_str(), payload.c_str());
-            }, 0);
-        if (result.isOk()) {
-            failedSubscriptions &= ~SUB_CMD;
-            LOG_INFO(TAG, "Retry: %s succeeded", cmdTopic);
-        }
-    }
-
-    // Retry config topics if failed
-    if (failedSubscriptions & SUB_CONFIG) {
-        char configTopic[64];
-        snprintf(configTopic, sizeof(configTopic), "%s/+", MQTT_CONFIG_PREFIX);
-        auto result = mqttManager_->subscribe(configTopic,
-            [](const String& topic, const String& payload) {
-                LOG_INFO(TAG, "Configuration update on %s: %s", topic.c_str(), payload.c_str());
-            }, 0);
-        if (result.isOk()) {
-            failedSubscriptions &= ~SUB_CONFIG;
-            LOG_INFO(TAG, "Retry: %s succeeded", configTopic);
-        }
-    }
-
-    // Retry errors topics if failed
-    if (failedSubscriptions & SUB_ERRORS) {
-        auto result = mqttManager_->subscribe("errors/+",
-            [](const String& topic, const String& payload) {
-                handleErrorCommand(topic.c_str(), payload.c_str());
-            }, 0);
-        if (result.isOk()) {
-            failedSubscriptions &= ~SUB_ERRORS;
-            LOG_INFO(TAG, "Retry: errors/+ succeeded");
-        }
-    }
-
-    // Retry scheduler topics if failed
-    if (failedSubscriptions & SUB_SCHEDULER) {
-        char schedulerTopic[64];
-        snprintf(schedulerTopic, sizeof(schedulerTopic), "%s/+", MQTT_CMD_SCHEDULER_PREFIX);
-        auto result = mqttManager_->subscribe(schedulerTopic,
-            [](const String& topic, const String& payload) {
-                handleSchedulerCommand(topic.c_str(), payload.c_str());
-            }, 0);
-        if (result.isOk()) {
-            failedSubscriptions &= ~SUB_SCHEDULER;
-            LOG_INFO(TAG, "Retry: %s succeeded", schedulerTopic);
-        }
-    }
-
-    // Schedule another retry if still have failures
-    if (failedSubscriptions != 0) {
-        LOG_WARN(TAG, "Still have failed subscriptions (0x%02X) - scheduling retry", failedSubscriptions);
-        scheduleSubscriptionRetry();
-    } else if (previousFailures != 0) {
-        LOG_INFO(TAG, "All subscriptions recovered!");
-        // Round 14 Issue #14: Reset retry counter on full recovery
-        subscriptionRetryAttempts = 0;
-    }
+    MQTTSubscriptionManager::retryFailedSubscriptions();
 }
 
 void MQTTTask::setupSubscriptions() {
-    if (!mqttManager_ || !mqttManager_->isConnected()) {
-        LOG_ERROR(TAG, "Cannot setup subscriptions - MQTT not connected");
-        return;
-    }
-
-    // Reset failure tracking for fresh setup
-    failedSubscriptions = 0;
-
-    // SUBACK verification is now implemented in MQTTManager v1.6.0 / ESP32MQTTClient v1.1.0
-    // - MQTTManager::subscribe() returns success when request is sent
-    // - MQTT_EVENT_SUBSCRIBED callback fires when SUBACK received
-    // - Use MQTTManager::isSubscriptionConfirmed(topic) to verify broker acknowledged
-    // - Retry mechanism handles transient failures and broker rejections
-    LOG_INFO(TAG, "Setting up MQTT subscriptions...");
-
-    // Subscribe to test topic
-    LOG_INFO(TAG, "Step 1/5: Subscribing to test/echo");
-
-    auto result = mqttManager_->subscribe("test/echo",
-        [](const String& topic, const String& payload) {
-            LOG_INFO(TAG, "Echo test: %s", payload.c_str());
-            // Echo back the message
-            MQTTTask::publish("test/response", payload.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        }, 0);  // QoS 0
-
-    if (!result.isOk()) {
-        LOG_ERROR(TAG, "Failed to subscribe to test/echo, error: %d", static_cast<int>(result.error()));
-        failedSubscriptions |= SUB_TEST_ECHO;
-    } else {
-        LOG_INFO(TAG, "Successfully subscribed to test/echo");
-    }
-
-    // Subscribe to command topics
-    LOG_INFO(TAG, "Step 2/5: Subscribing to %s/+", MQTT_CMD_PREFIX);
-
-    char cmdTopic[64];
-    snprintf(cmdTopic, sizeof(cmdTopic), "%s/+", MQTT_CMD_PREFIX);
-
-    result = mqttManager_->subscribe(cmdTopic,
-        [](const String& topic, const String& payload) {
-            handleControlCommand(topic.c_str(), payload.c_str());
-        }, 0);  // QoS 0
-
-    if (!result.isOk()) {
-        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", cmdTopic, static_cast<int>(result.error()));
-        failedSubscriptions |= SUB_CMD;
-    } else {
-        LOG_INFO(TAG, "Successfully subscribed to %s", cmdTopic);
-    }
-
-    // Subscribe to command config topics (e.g., boiler/cmd/config/syslog_enabled)
-    char cmdConfigTopic[64];
-    snprintf(cmdConfigTopic, sizeof(cmdConfigTopic), "%s/config/+", MQTT_CMD_PREFIX);
-
-    result = mqttManager_->subscribe(cmdConfigTopic,
-        [](const String& topic, const String& payload) {
-            handleControlCommand(topic.c_str(), payload.c_str());
-        }, 0);  // QoS 0
-
-    if (!result.isOk()) {
-        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", cmdConfigTopic, static_cast<int>(result.error()));
-    } else {
-        LOG_INFO(TAG, "Successfully subscribed to %s", cmdConfigTopic);
-    }
-
-    // Subscribe to configuration updates
-    LOG_INFO(TAG, "Step 3/5: Subscribing to %s/+", MQTT_CONFIG_PREFIX);
-
-    char configTopic[64];
-    snprintf(configTopic, sizeof(configTopic), "%s/+", MQTT_CONFIG_PREFIX);
-
-    result = mqttManager_->subscribe(configTopic,
-        [](const String& topic, const String& payload) {
-            LOG_INFO(TAG, "Configuration update on %s: %s", topic.c_str(), payload.c_str());
-        }, 0);  // QoS 0
-
-    if (!result.isOk()) {
-        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", configTopic, static_cast<int>(result.error()));
-        failedSubscriptions |= SUB_CONFIG;
-    } else {
-        LOG_INFO(TAG, "Successfully subscribed to %s", configTopic);
-    }
-
-    // Subscribe to error management commands
-    LOG_INFO(TAG, "Step 4/5: Subscribing to errors/+");
-
-    result = mqttManager_->subscribe("errors/+",
-        [](const String& topic, const String& payload) {
-            handleErrorCommand(topic.c_str(), payload.c_str());
-        }, 0);  // QoS 0
-
-    if (!result.isOk()) {
-        LOG_ERROR(TAG, "Failed to subscribe to errors/+, error: %d", static_cast<int>(result.error()));
-        failedSubscriptions |= SUB_ERRORS;
-    } else {
-        LOG_INFO(TAG, "Successfully subscribed to errors/+");
-    }
-
-    // Subscribe to scheduler commands
-    LOG_INFO(TAG, "Step 5/5: Subscribing to %s/+", MQTT_CMD_SCHEDULER_PREFIX);
-
-    char schedulerTopic[64];
-    snprintf(schedulerTopic, sizeof(schedulerTopic), "%s/+", MQTT_CMD_SCHEDULER_PREFIX);
-
-    result = mqttManager_->subscribe(schedulerTopic,
-        [](const String& topic, const String& payload) {
-            handleSchedulerCommand(topic.c_str(), payload.c_str());
-        }, 0);  // QoS 0
-
-    if (!result.isOk()) {
-        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", schedulerTopic, static_cast<int>(result.error()));
-        failedSubscriptions |= SUB_SCHEDULER;
-    } else {
-        LOG_INFO(TAG, "Successfully subscribed to %s", schedulerTopic);
-    }
-
-    // Schedule retry if any subscriptions failed
-    if (failedSubscriptions != 0) {
-        LOG_WARN(TAG, "Some subscriptions failed (0x%02X) - scheduling retry", failedSubscriptions);
-        scheduleSubscriptionRetry();
-    } else {
-        LOG_INFO(TAG, "MQTT subscriptions setup complete - all done!");
-    }
-
-    // Persistent Storage parameter topics are handled by PersistentStorageTask
+    MQTTSubscriptionManager::setupSubscriptions();
 }
+
+// Old subscription implementation removed (Round 21 Refactoring - 220 lines extracted to MQTTSubscriptionManager)
 
 void MQTTTask::handleControlCommand(const char* topic, const char* payload) {
     // Delegate to extracted command handlers
