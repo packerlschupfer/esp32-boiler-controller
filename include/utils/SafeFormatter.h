@@ -6,6 +6,7 @@
 #include <cstdarg>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "config/SystemConstants.h"
 
 /**
  * @brief Thread-safe string formatter with reduced memory usage
@@ -39,7 +40,7 @@ public:
     static const char* format(const char* fmt, Args... args) {
         ensureInit();
         
-        if (bufferMutex && xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (bufferMutex && xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_SAFELOG_TIMEOUT_MS)) == pdTRUE) {
             vsnprintf(buffer, sizeof(buffer), fmt, args...);
             xSemaphoreGive(bufferMutex);
         }
@@ -56,7 +57,7 @@ public:
     static const char* formatSmall(const char* fmt, Args... args) {
         ensureInit();
         
-        if (bufferMutex && xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (bufferMutex && xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_SAFELOG_TIMEOUT_MS)) == pdTRUE) {
             vsnprintf(smallBuffer, sizeof(smallBuffer), fmt, args...);
             xSemaphoreGive(bufferMutex);
         }

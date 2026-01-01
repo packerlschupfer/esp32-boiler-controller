@@ -1,5 +1,6 @@
 // src/utils/MutexRetryHelper.cpp
 #include "utils/MutexRetryHelper.h"
+#include "config/SystemConstants.h"
 #include <Arduino.h>
 
 const char* MutexRetryHelper::TAG = "MutexRetry";
@@ -75,7 +76,7 @@ MutexRetryHelper::AcquireResult MutexRetryHelper::acquire(
             }
 
             // Reset consecutive failure count on success
-            if (trackerMutex && xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            if (trackerMutex && xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_TRACKER_TIMEOUT_MS)) == pdTRUE) {
                 MutexTracker* tracker = getTracker(mutex, false);
                 if (tracker) {
                     tracker->consecutiveFailures = 0;
@@ -105,7 +106,7 @@ MutexRetryHelper::AcquireResult MutexRetryHelper::acquire(
     }
 
     // Update failure tracking
-    if (trackerMutex && xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    if (trackerMutex && xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_TRACKER_TIMEOUT_MS)) == pdTRUE) {
         MutexTracker* tracker = getTracker(mutex, true);
         if (tracker) {
             tracker->consecutiveFailures++;
@@ -137,7 +138,7 @@ MutexRetryHelper::Guard MutexRetryHelper::acquireGuard(
 void MutexRetryHelper::resetFailureCount(SemaphoreHandle_t mutex) {
     if (!initialized || !trackerMutex) return;
 
-    if (xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    if (xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_TRACKER_TIMEOUT_MS)) == pdTRUE) {
         MutexTracker* tracker = getTracker(mutex, false);
         if (tracker) {
             tracker->consecutiveFailures = 0;
@@ -151,7 +152,7 @@ uint8_t MutexRetryHelper::getFailureCount(SemaphoreHandle_t mutex) {
     if (!initialized || !trackerMutex) return 0;
 
     uint8_t count = 0;
-    if (xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    if (xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_TRACKER_TIMEOUT_MS)) == pdTRUE) {
         MutexTracker* tracker = getTracker(mutex, false);
         if (tracker) {
             count = tracker->consecutiveFailures;
@@ -165,7 +166,7 @@ bool MutexRetryHelper::hasEscalatedFailures() {
     if (!initialized || !trackerMutex) return false;
 
     bool hasEscalated = false;
-    if (xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    if (xSemaphoreTake(trackerMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_TRACKER_TIMEOUT_MS)) == pdTRUE) {
         for (size_t i = 0; i < MAX_TRACKED_MUTEXES; i++) {
             if (trackers[i].mutex != nullptr && trackers[i].escalated) {
                 hasEscalated = true;

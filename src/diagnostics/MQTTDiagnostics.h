@@ -48,7 +48,6 @@ public:
         uint32_t burner = 5000;        // 5 seconds
         uint32_t maintenance = 3600000; // 1 hour
         uint32_t queues = 10000;        // 10 seconds
-        // uint32_t ble = 60000;           // 1 minute - BLE removed
     };
     
 private:
@@ -77,7 +76,6 @@ private:
         TickType_t burner = 0;
         TickType_t maintenance = 0;
         TickType_t queues = 0;
-        // TickType_t ble = 0;  // BLE removed
     } lastPublish;
     
     // Performance tracking
@@ -210,8 +208,7 @@ private:
     void publishBurnerStatus();
     void publishMaintenanceStatus();
     void publishQueueStatus();
-    // void publishBLEStatus();  // BLE removed
-    
+
     // Helper functions
     bool shouldPublish(TickType_t& lastTime, uint32_t interval);
     bool publish(const char* subtopic, const JsonDocument& doc, bool retain = true);

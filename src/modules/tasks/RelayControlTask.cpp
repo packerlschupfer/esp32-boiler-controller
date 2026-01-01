@@ -580,7 +580,7 @@ void RelayControlTask::waitForRelayRequests() {
     // Wait for ANY relay request bit with a timeout for watchdog feeding
     // This blocks the task until a relay request is made or timeout occurs
     const EventBits_t ALL_RELAY_REQUEST_BITS = 0x00FFFFFF;  // Mask for bits 0-23
-    const TickType_t WATCHDOG_TIMEOUT = pdMS_TO_TICKS(3000); // 3 second timeout for watchdog (must be less than WDT timeout)
+    const TickType_t WATCHDOG_TIMEOUT = pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS); // 3 second timeout for watchdog (must be less than WDT timeout)
     
     EventBits_t bits = xEventGroupWaitBits(
         relayRequestEventGroup,

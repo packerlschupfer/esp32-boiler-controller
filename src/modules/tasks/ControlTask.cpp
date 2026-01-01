@@ -49,9 +49,9 @@ void ControlTask(void* parameter) {
                                    SystemEvents::ControlRequest::HEATING_DISABLE |
                                    SystemEvents::ControlRequest::HEATING_ON_OVERRIDE |
                                    SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE,
-                                   pdTRUE, 
-                                   pdFALSE, 
-                                   pdMS_TO_TICKS(3000)); // Reduced to 3 second timeout
+                                   pdTRUE,
+                                   pdFALSE,
+                                   pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS)); // Reduced to 3 second timeout
 
         // Feed watchdog after waiting for events
         (void)SRP::getTaskManager().feedWatchdog();

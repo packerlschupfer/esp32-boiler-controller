@@ -212,7 +212,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_PID_CONTROL_TASK      4096  // Safety: increased from 3072 (was showing only 60 bytes free)
     #define STACK_SIZE_MQTT_TASK             3072  // After fix: MQTT with debug
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // Optimized publishGroupedCategory() reduces stack usage
-    // #define STACK_SIZE_BLE_SENSOR_TASK       4096  // BLE removed
     #define STACK_SIZE_BURNER_CONTROL_TASK   2560  // After fix: needs more for float logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Increased for float formatting in logs
     #define STACK_SIZE_RYN4_PROCESSING_TASK  1536  // After fix: relay processing
@@ -236,7 +235,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_PID_CONTROL_TASK      4096  // Safety: keep for PID calculations
     #define STACK_SIZE_MQTT_TASK             3584  // Dec 2025: was 3072, had 712 free
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // Keep - not stress tested yet
-    // #define STACK_SIZE_BLE_SENSOR_TASK       4096  // BLE removed
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // H3: Safety-critical +512 (was 3584)
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Dec 2025: was 4096, had 2568 free
     #define STACK_SIZE_RYN4_PROCESSING_TASK  2560  // Restored to original size
@@ -259,7 +257,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_PID_CONTROL_TASK      2048  // Safety: increased for PID calculations and formatting
     #define STACK_SIZE_MQTT_TASK             1536  // After fix: MQTT operations
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 1536  // After fix: JSON operations
-    // #define STACK_SIZE_BLE_SENSOR_TASK       3584  // BLE removed
     #define STACK_SIZE_BURNER_CONTROL_TASK   1536  // After fix: needs margin for logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 1536  // After fix: increased for logging
     #define STACK_SIZE_RYN4_PROCESSING_TASK  768   // After fix: relay processing
@@ -284,7 +281,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 #define PRIORITY_MQTT_TASK 2
 #define PRIORITY_PUMP_CONTROL_TASK 3
 #define PRIORITY_BURNER_CONTROL_TASK 4  // Safety-critical: higher than other control tasks
-// #define PRIORITY_BLE_SENSOR_TASK 7  // BLE removed
 #define PRIORITY_MB8ART_PROCESSING_TASK 3
 #define PRIORITY_RYN4_PROCESSING_TASK 3
 

@@ -55,7 +55,15 @@ namespace SystemConstants {
         constexpr uint32_t MUTEX_SHORT_TIMEOUT_MS = 50;
         constexpr uint32_t MUTEX_DEFAULT_TIMEOUT_MS = 100;
         constexpr uint32_t MUTEX_LONG_TIMEOUT_MS = 1000;
-        
+
+        // Specialized mutex timeouts for specific subsystems
+        constexpr uint32_t MUTEX_TRACKER_TIMEOUT_MS = 5;    // 5ms - low-latency mutex tracker (MutexRetryHelper)
+        constexpr uint32_t MUTEX_FRAM_TIMEOUT_MS = 500;     // 500ms - FRAM write operations (CriticalDataStorage)
+        constexpr uint32_t MUTEX_SAFELOG_TIMEOUT_MS = 10;   // 10ms - SafeFormatter buffer mutex (very quick)
+
+        // Task notification timeouts
+        constexpr uint32_t TASK_NOTIFICATION_TIMEOUT_MS = 3000;  // 3s - watchdog task notifications
+
         // Task monitoring intervals
         constexpr uint32_t HEALTH_CHECK_INTERVAL_MS = 5000;     // 5s - basic health monitoring
         constexpr uint32_t DETAILED_MONITOR_INTERVAL_MS = 600000; // 10 minutes - detailed diagnostics

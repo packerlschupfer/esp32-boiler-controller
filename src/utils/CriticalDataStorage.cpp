@@ -50,7 +50,7 @@ bool CriticalDataStorage::writeToFRAM(uint16_t address, const void* data, size_t
     }
 
     // Round 20 Issue #2: Acquire mutex to protect I2C bus access
-    if (!framMutex_ || xSemaphoreTake(framMutex_, pdMS_TO_TICKS(500)) != pdTRUE) {
+    if (!framMutex_ || xSemaphoreTake(framMutex_, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_FRAM_TIMEOUT_MS)) != pdTRUE) {
         LOG_ERROR("CriticalData", "Failed to acquire FRAM mutex for write");
         return false;
     }
@@ -104,7 +104,7 @@ bool CriticalDataStorage::readFromFRAM(uint16_t address, void* data, size_t size
     }
 
     // Round 20 Issue #2: Acquire mutex to protect I2C bus access
-    if (!framMutex_ || xSemaphoreTake(framMutex_, pdMS_TO_TICKS(500)) != pdTRUE) {
+    if (!framMutex_ || xSemaphoreTake(framMutex_, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_FRAM_TIMEOUT_MS)) != pdTRUE) {
         LOG_ERROR("CriticalData", "Failed to acquire FRAM mutex for read");
         return false;
     }

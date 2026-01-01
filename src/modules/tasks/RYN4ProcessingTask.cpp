@@ -335,7 +335,7 @@ void RYN4ProcessingTask(void* parameter) {
     LOG_INFO(TAG, "Entering main processing loop - waiting for coordinator notifications");
 
     // Main processing loop
-    constexpr TickType_t WAIT_TIMEOUT = pdMS_TO_TICKS(3000);  // 3s timeout for watchdog
+    constexpr TickType_t WAIT_TIMEOUT = pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS);  // 3s timeout for watchdog
 
     while (true) {
         // Wait for coordinator notification with SensorType value
