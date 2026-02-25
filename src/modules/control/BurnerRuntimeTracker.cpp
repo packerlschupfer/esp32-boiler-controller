@@ -10,13 +10,13 @@
 
 static const char* TAG = "BurnerRuntime";
 
-// Static member definition
-uint32_t BurnerRuntimeTracker::burnerStartTime = 0;
+// Static member definition (M4 fix: atomic, was plain uint32_t in Round 21 extraction)
+std::atomic<uint32_t> BurnerRuntimeTracker::burnerStartTime{0};
 
 void BurnerRuntimeTracker::recordStartTime() {
     // Record start time for runtime tracking (if transitioning from non-running state)
-    if (burnerStartTime == 0) {
-        burnerStartTime = millis();
+    if (burnerStartTime.load() == 0) {
+        burnerStartTime.store(millis());
     }
 }
 
@@ -25,8 +25,9 @@ void BurnerRuntimeTracker::updateRuntimeCounters() {
 
     // Round 15 Issue #1 fix: Calculate and update runtime hours atomically
     // Use Utils::elapsedMs() for safe elapsed time (handles millis() wraparound)
-    if (burnerStartTime > 0) {
-        uint32_t runTimeMs = Utils::elapsedMs(burnerStartTime);
+    uint32_t startTime = burnerStartTime.load();
+    if (startTime > 0) {
+        uint32_t runTimeMs = Utils::elapsedMs(startTime);
         float runTimeHours = runTimeMs / 3600000.0f;  // Convert ms to hours
 
         rtstorage::RuntimeStorage* storage = SRP::getRuntimeStorage();
@@ -64,10 +65,10 @@ void BurnerRuntimeTracker::updateRuntimeCounters() {
             }
         }
 
-        burnerStartTime = 0;  // Reset for next run
+        burnerStartTime.store(0);  // Reset for next run
     }
 }
 
 uint32_t BurnerRuntimeTracker::getStartTime() {
-    return burnerStartTime;
+    return burnerStartTime.load();
 }

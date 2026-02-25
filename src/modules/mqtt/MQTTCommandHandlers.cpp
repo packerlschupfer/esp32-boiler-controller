@@ -677,108 +677,142 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         success = SafetyConfig::setPostPurge(value);
     }
     // Return preheating (thermal shock mitigation) config
+    // H1 fix: All SystemSettings writes are now mutex-protected (same pattern as handleHeatingCommand)
     else if (strstr(topic, "preheat_enabled") != nullptr) {
-        SystemSettings& settings = SRP::getSystemSettings();
-        settings.preheatEnabled = (value != 0);
+        bool newVal = (value != 0);
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+            SRP::getSystemSettings().preheatEnabled = newVal;
+            SRP::giveSystemSettingsMutex();
+        } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
         success = true;
-        LOG_INFO(TAG_CMD, "Preheat enabled: %s", settings.preheatEnabled ? "true" : "false");
+        LOG_INFO(TAG_CMD, "Preheat enabled: %s", newVal ? "true" : "false");
     } else if (strstr(topic, "preheat_off_multiplier") != nullptr) {
         if (value >= 1 && value <= 10) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.preheatOffMultiplier = static_cast<uint8_t>(value);
+            auto newVal = static_cast<uint8_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().preheatOffMultiplier = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat OFF multiplier: %u", settings.preheatOffMultiplier);
+            LOG_INFO(TAG_CMD, "Preheat OFF multiplier: %u", newVal);
         }
     } else if (strstr(topic, "preheat_max_cycles") != nullptr) {
         if (value >= 1 && value <= 20) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.preheatMaxCycles = static_cast<uint8_t>(value);
+            auto newVal = static_cast<uint8_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().preheatMaxCycles = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat max cycles: %u", settings.preheatMaxCycles);
+            LOG_INFO(TAG_CMD, "Preheat max cycles: %u", newVal);
         }
     } else if (strstr(topic, "preheat_timeout_ms") != nullptr) {
         if (value >= SystemConstants::Safety::ConfigValidation::PREHEAT_TIMEOUT_MIN_MS &&
             value <= SystemConstants::Safety::ConfigValidation::PREHEAT_TIMEOUT_MAX_MS) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.preheatTimeoutMs = value;
+            uint32_t newVal = value;
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().preheatTimeoutMs = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat timeout: %lu ms", settings.preheatTimeoutMs);
+            LOG_INFO(TAG_CMD, "Preheat timeout: %lu ms", newVal);
         }
     } else if (strstr(topic, "preheat_pump_min_ms") != nullptr) {
         if (value >= SystemConstants::Safety::ConfigValidation::PREHEAT_PUMP_MIN_MS_MIN &&
             value <= SystemConstants::Safety::ConfigValidation::PREHEAT_PUMP_MIN_MS_MAX) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.preheatPumpMinMs = static_cast<uint16_t>(value);
+            auto newVal = static_cast<uint16_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().preheatPumpMinMs = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat pump min change: %u ms", settings.preheatPumpMinMs);
+            LOG_INFO(TAG_CMD, "Preheat pump min change: %u ms", newVal);
         }
     } else if (strstr(topic, "preheat_safe_diff") != nullptr) {
         if (value >= 100 && value <= 300) {  // 10-30°C in tenths
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.preheatSafeDiff = static_cast<Temperature_t>(value);
+            auto newVal = static_cast<Temperature_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().preheatSafeDiff = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             char tempBuf[16];
-            formatTemp(tempBuf, sizeof(tempBuf), settings.preheatSafeDiff);
+            formatTemp(tempBuf, sizeof(tempBuf), newVal);
             LOG_INFO(TAG_CMD, "Preheat safe differential: %s°C", tempBuf);
         }
     }
     // Pump overrun configuration
     else if (strstr(topic, "pump_cooldown_ms") != nullptr) {
         if (value >= 60000 && value <= 900000) {  // 1-15 minutes
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.pumpCooldownMs = value;
+            uint32_t newVal = value;
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().pumpCooldownMs = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             LOG_INFO(TAG_CMD, "Pump cooldown time: %lu ms (%.1f min)",
-                     settings.pumpCooldownMs,
-                     settings.pumpCooldownMs / 60000.0f);
+                     newVal, newVal / 60000.0f);
         }
     }
     // Weather-compensated heating control
     else if (strstr(topic, "weather_control_enabled") != nullptr) {
-        SystemSettings& settings = SRP::getSystemSettings();
-        settings.useWeatherCompensatedControl = (value != 0);
+        bool newVal = (value != 0);
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+            SRP::getSystemSettings().useWeatherCompensatedControl = newVal;
+            SRP::giveSystemSettingsMutex();
+        } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
         success = true;
-        LOG_INFO(TAG_CMD, "Weather-compensated control: %s",
-                settings.useWeatherCompensatedControl ? "ENABLED" : "DISABLED");
+        LOG_INFO(TAG_CMD, "Weather-compensated control: %s", newVal ? "ENABLED" : "DISABLED");
     } else if (strstr(topic, "outside_heating_threshold") != nullptr) {
         if (value >= 50 && value <= 200) {  // 5-20°C in tenths
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.outsideTempHeatingThreshold = static_cast<Temperature_t>(value);
+            auto newVal = static_cast<Temperature_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().outsideTempHeatingThreshold = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             char tempBuf[16];
-            formatTemp(tempBuf, sizeof(tempBuf), settings.outsideTempHeatingThreshold);
+            formatTemp(tempBuf, sizeof(tempBuf), newVal);
             LOG_INFO(TAG_CMD, "Outside heating threshold: %s°C", tempBuf);
         }
     } else if (strstr(topic, "room_overheat_margin") != nullptr) {
         if (value >= 10 && value <= 50) {  // 1-5°C in tenths
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.roomTempOverheatMargin = static_cast<Temperature_t>(value);
+            auto newVal = static_cast<Temperature_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().roomTempOverheatMargin = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             char tempBuf[16];
-            formatTemp(tempBuf, sizeof(tempBuf), settings.roomTempOverheatMargin);
+            formatTemp(tempBuf, sizeof(tempBuf), newVal);
             LOG_INFO(TAG_CMD, "Room overheat margin: %s°C", tempBuf);
         }
     } else if (strstr(topic, "room_curve_shift_factor") != nullptr) {
         // Accept value as float * 10 (e.g., 20 = 2.0)
         float factor = static_cast<float>(value) / 10.0f;
         if (factor >= 1.0f && factor <= 4.0f) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.roomTempCurveShiftFactor = factor;
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().roomTempCurveShiftFactor = factor;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
-            LOG_INFO(TAG_CMD, "Room curve shift factor: %.1f", settings.roomTempCurveShiftFactor);
+            LOG_INFO(TAG_CMD, "Room curve shift factor: %.1f", factor);
         }
     }
     // Boiler Temperature PID Control Mode
     else if (strstr(topic, "boiler_pid_enabled") != nullptr) {
-        SystemSettings& settings = SRP::getSystemSettings();
-        bool oldValue = settings.useBoilerTempPID;
-        settings.useBoilerTempPID = (value != 0);
+        bool newVal = (value != 0);
+        bool oldValue = false;
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+            SystemSettings& settings = SRP::getSystemSettings();
+            oldValue = settings.useBoilerTempPID;
+            settings.useBoilerTempPID = newVal;
+            SRP::giveSystemSettingsMutex();
+        } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
         success = true;
-
-        LOG_WARN(TAG_CMD, "Boiler PID mode: %s → %s (REQUIRES REBOOT TO TAKE EFFECT!)",
+        LOG_WARN(TAG_CMD, "Boiler PID mode: %s -> %s (REQUIRES REBOOT TO TAKE EFFECT!)",
                 oldValue ? "ENABLED" : "DISABLED",
-                settings.useBoilerTempPID ? "ENABLED" : "DISABLED");
-
+                newVal ? "ENABLED" : "DISABLED");
         // Publish warning that reboot is needed
         MQTTTask::publish("boiler/status/config/warning",
             "{\"message\":\"Boiler PID mode change requires reboot\",\"action\":\"reboot_required\"}",
@@ -787,12 +821,14 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     // Syslog Configuration (remote logging)
     // Note: Syslog settings are saved via PersistentStorage, not SafetyConfig
     else if (strstr(topic, "syslog_enabled") != nullptr) {
-        SystemSettings& settings = SRP::getSystemSettings();
-        settings.syslogEnabled = (value != 0);
+        bool newVal = (value != 0);
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+            SRP::getSystemSettings().syslogEnabled = newVal;
+            SRP::giveSystemSettingsMutex();
+        } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
         success = true;
         syslogSettingChanged = true;
-        LOG_WARN(TAG_CMD, "Syslog: %s (REQUIRES REBOOT)",
-                 settings.syslogEnabled ? "ENABLED" : "DISABLED");
+        LOG_WARN(TAG_CMD, "Syslog: %s (REQUIRES REBOOT)", newVal ? "ENABLED" : "DISABLED");
         MQTTTask::publish("boiler/status/config/warning",
             "{\"message\":\"Syslog enable change requires reboot\"}",
             0, true, MQTTPriority::PRIORITY_HIGH);
@@ -801,11 +837,14 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         // Parse IP address from payload (e.g., "192.168.20.100")
         IPAddress ip;
         if (ip.fromString(payload)) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.syslogServerIP[0] = ip[0];
-            settings.syslogServerIP[1] = ip[1];
-            settings.syslogServerIP[2] = ip[2];
-            settings.syslogServerIP[3] = ip[3];
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SystemSettings& settings = SRP::getSystemSettings();
+                settings.syslogServerIP[0] = ip[0];
+                settings.syslogServerIP[1] = ip[1];
+                settings.syslogServerIP[2] = ip[2];
+                settings.syslogServerIP[3] = ip[3];
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             syslogSettingChanged = true;
             LOG_INFO(TAG_CMD, "Syslog server IP: %s", payload);
@@ -815,30 +854,39 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     }
     else if (strstr(topic, "syslog_port") != nullptr) {
         if (value > 0 && value <= 65535) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.syslogPort = static_cast<uint16_t>(value);
+            auto newVal = static_cast<uint16_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().syslogPort = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             syslogSettingChanged = true;
-            LOG_INFO(TAG_CMD, "Syslog port: %u", settings.syslogPort);
+            LOG_INFO(TAG_CMD, "Syslog port: %u", newVal);
         }
     }
     else if (strstr(topic, "syslog_facility") != nullptr) {
         if (value <= 23) {  // Valid facility range 0-23
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.syslogFacility = static_cast<uint8_t>(value);
+            auto newVal = static_cast<uint8_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().syslogFacility = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             syslogSettingChanged = true;
-            LOG_INFO(TAG_CMD, "Syslog facility: %u", settings.syslogFacility);
+            LOG_INFO(TAG_CMD, "Syslog facility: %u", newVal);
         }
     }
     else if (strstr(topic, "syslog_min_level") != nullptr) {
         // ESP_LOG levels: 0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG, 5=VERBOSE
         if (value <= ESP_LOG_VERBOSE) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.syslogMinLevel = static_cast<uint8_t>(value);
+            auto newVal = static_cast<uint8_t>(value);
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                SRP::getSystemSettings().syslogMinLevel = newVal;
+                SRP::giveSystemSettingsMutex();
+            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
             success = true;
             syslogSettingChanged = true;
-            LOG_INFO(TAG_CMD, "Syslog min level: %u", settings.syslogMinLevel);
+            LOG_INFO(TAG_CMD, "Syslog min level: %u", newVal);
             // Also update runtime if syslog is active
             if (auto* syslog = SRP::getSyslog()) {
                 syslog->setMinLevel(static_cast<esp_log_level_t>(value));

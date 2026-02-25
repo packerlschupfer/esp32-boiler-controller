@@ -3,6 +3,7 @@
 #define BURNER_RUNTIME_TRACKER_H
 
 #include <cstdint>
+#include <atomic>
 
 /**
  * @brief Burner runtime tracking with FRAM persistence
@@ -47,8 +48,8 @@ public:
 
 private:
     // Track when burner started running (atomic for thread-safety)
-    // Managed internally - not accessible outside this class
-    static uint32_t burnerStartTime;
+    // M4 fix: restored std::atomic<uint32_t> (was regressed to plain uint32_t in Round 21 extraction)
+    static std::atomic<uint32_t> burnerStartTime;
 };
 
 #endif // BURNER_RUNTIME_TRACKER_H

@@ -154,12 +154,13 @@ void CentralizedFailsafe::executeFailsafeActions(FailsafeLevel level, SystemErro
     LOG_INFO(TAG, "Executing failsafe actions for level %d", static_cast<int>(level));
     
     // Execute callbacks for all subsystems
+    // C3 fix: DEGRADED level now also fires subsystem-specific callbacks, not just CRITICAL+
     for (const auto& callback : subsystemCallbacks) {
-        if (callback.first == Subsystem::ALL || level >= FailsafeLevel::CRITICAL) {
+        if (callback.first == Subsystem::ALL || level >= FailsafeLevel::DEGRADED) {
             callback.second(level, reason);
         }
     }
-    
+
     // Additional level-specific actions
     switch (level) {
         case FailsafeLevel::NORMAL:
@@ -167,16 +168,18 @@ void CentralizedFailsafe::executeFailsafeActions(FailsafeLevel level, SystemErro
             xEventGroupClearBits(SRP::getSystemStateEventGroup(),
                                 SystemEvents::SystemState::WARNING | SystemEvents::SystemState::BURNER_ERROR);
             break;
-            
+
         case FailsafeLevel::WARNING:
             // Log warning but continue operation
             break;
-            
+
         case FailsafeLevel::DEGRADED:
-            // Reduce system capabilities
-            LOG_WARN(TAG, "System operating in degraded mode");
+            // C3 fix: Reduce burner power on degraded condition (e.g. relay failure).
+            // Previously only logged; now calls defaultBurnerFailsafe to limit to half power.
+            LOG_WARN(TAG, "System operating in degraded mode - limiting burner power");
+            defaultBurnerFailsafe(level);
             break;
-            
+
         case FailsafeLevel::CRITICAL:
             // Immediate safety actions
             LOG_ERROR(TAG, "Critical failsafe - initiating safety protocol");
