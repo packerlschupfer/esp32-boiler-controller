@@ -306,12 +306,18 @@ static void processWaterHeatingState() {
                     return;
                 }
 
-                // Get settings and sensor readings for boiler target calculation
-                SystemSettings& settings = SRP::getSystemSettings();
+                // H2 fix: snapshot settings under mutex (wHeaterConfTempChargeDelta is float)
+                SystemSettings settingsSnap;
+                if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+                    settingsSnap = SRP::getSystemSettings();
+                    SRP::giveSystemSettingsMutex();
+                } else {
+                    settingsSnap = SystemSettings{};  // Fail-safe: use struct defaults
+                }
                 SharedSensorReadings readings = SRP::getSensorReadings();
 
                 // Calculate boiler target: returnTemp + chargeDelta
-                Temperature_t boilerTargetTemp = calculateBoilerTarget(settings, readings);
+                Temperature_t boilerTargetTemp = calculateBoilerTarget(settingsSnap, readings);
 
                 // Turn on circulation pump
                 xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_ON);
@@ -421,9 +427,16 @@ static void processWaterHeatingState() {
                 }
 
                 // Recalculate boiler target (return temp + delta) and update if changed
-                SystemSettings& settings = SRP::getSystemSettings();
+                // H2 fix: snapshot settings under mutex (same pattern as WheaterOff→WheaterOn)
+                SystemSettings settingsSnap;
+                if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+                    settingsSnap = SRP::getSystemSettings();
+                    SRP::giveSystemSettingsMutex();
+                } else {
+                    settingsSnap = SystemSettings{};
+                }
                 SharedSensorReadings readings = SRP::getSensorReadings();
-                Temperature_t newBoilerTarget = calculateBoilerTarget(settings, readings);
+                Temperature_t newBoilerTarget = calculateBoilerTarget(settingsSnap, readings);
 
                 // Update if target changed by more than 1°C OR every 5 minutes to refresh watchdog
                 Temperature_t diff = tempAbs(tempSub(newBoilerTarget, waterState.lastBoilerTarget));
@@ -464,18 +477,30 @@ static void processWaterHeatingState() {
 static bool checkIfWaterHeatingNeededEvent() {
     bool heatingNeeded = waterState.lastHeatingNeeded; // Default to current state
 
+    // H2 fix: Snapshot temperature thresholds under settings mutex BEFORE taking sensor mutex
+    // Avoids nested mutex with sensorReadings, and protects Temperature_t reads from MQTT races
+    Temperature_t snappedLimitLow = 0, snappedLimitHigh = 0;
+    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+        const SystemSettings& s = SRP::getSystemSettings();
+        snappedLimitLow  = s.wHeaterConfTempLimitLow;
+        snappedLimitHigh = s.wHeaterConfTempLimitHigh;
+        SRP::giveSystemSettingsMutex();
+    } else {
+        LOG_ERROR(TAG, "Failed to acquire settings mutex - maintaining current water state");
+        return heatingNeeded;  // Fail-safe: keep current state
+    }
+
     // Get sensor readings with mutex protection
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {
         SharedSensorReadings readings = SRP::getSensorReadings();
-        SystemSettings& settings = SRP::getSystemSettings();
 
         if (readings.isWaterHeaterTempTankValid &&
-            (settings.wHeaterConfTempLimitHigh > 0) &&
-            (settings.wHeaterConfTempLimitLow > 0)) {  // Ensure valid thresholds
+            (snappedLimitHigh > 0) &&
+            (snappedLimitLow > 0)) {  // Ensure valid thresholds
 
             Temperature_t currentTemp = readings.waterHeaterTempTank;
-            Temperature_t lowLimit = settings.wHeaterConfTempLimitLow;   // Start heating below this
-            Temperature_t highLimit = settings.wHeaterConfTempLimitHigh; // Stop heating above this
+            Temperature_t lowLimit  = snappedLimitLow;   // Start heating below this
+            Temperature_t highLimit = snappedLimitHigh;  // Stop heating above this
 
             // Simple two-threshold control (no symmetric hysteresis calculation)
             if (!waterState.lastHeatingNeeded) {

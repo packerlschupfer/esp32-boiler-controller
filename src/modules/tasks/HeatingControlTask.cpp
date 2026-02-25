@@ -241,10 +241,14 @@ static void processHeatingState() {
             // Check if we should turn on heating
             if (checkIfSpaceHeatingNeededEvent() || (controlBits & SystemEvents::ControlRequest::HEATING_ON_OVERRIDE)) {
                 // Check settings for water priority (race prevention)
-                SystemSettings& settings = SRP::getSystemSettings();
+                // H2 fix: snapshot bool setting under mutex before use
+                bool waterPriorityEnabled = false;
+                if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+                    waterPriorityEnabled = SRP::getSystemSettings().wheaterPriorityEnabled;
+                    SRP::giveSystemSettingsMutex();
+                }
                 EventBits_t systemStateBits = SRP::getSystemStateEventBits();
                 bool waterEnabled = (systemStateBits & SystemEvents::SystemState::WATER_ENABLED) != 0;
-                bool waterPriorityEnabled = settings.wheaterPriorityEnabled;
 
                 // Round 15 Issue #13 fix: Use event-based synchronization instead of timing delay
                 // If water priority enabled, check if water task has had a chance to claim priority
@@ -308,12 +312,17 @@ static void processHeatingState() {
                     );
                     if (guard) {
                         SharedSensorReadings readings = SRP::getSensorReadings();
-                        SystemSettings& settings = SRP::getSystemSettings();
-
-                        if (heatingState.heatingControl != nullptr) {
-                            boilerTargetTemp = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(readings, settings);
+                        // H2 fix: take settings mutex inside sensor guard (Level 2, alphabetical order safe)
+                        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+                            if (heatingState.heatingControl != nullptr) {
+                                boilerTargetTemp = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(
+                                    readings, SRP::getSystemSettings());
+                            } else {
+                                LOG_WARN(TAG, "HeatingControlModule unavailable - using default target");
+                            }
+                            SRP::giveSystemSettingsMutex();
                         } else {
-                            LOG_WARN(TAG, "HeatingControlModule unavailable - using default target");
+                            LOG_ERROR(TAG, "Failed to acquire settings mutex - using default target");
                         }
                     } else {
                         LOG_ERROR(TAG, "Failed to acquire sensor mutex");
@@ -333,24 +342,27 @@ static void processHeatingState() {
                 // Log activation with context based on control mode
                 if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {
                     SharedSensorReadings readings = SRP::getSensorReadings();
-                    SystemSettings& settings = SRP::getSystemSettings();
                     char boilerBuf[16];
                     formatTemp(boilerBuf, sizeof(boilerBuf), boilerTargetTemp);
-
-                    if (settings.useWeatherCompensatedControl) {
-                        // Weather-compensated mode logging
-                        char outsideBuf[16], threshBuf[16];
-                        formatTemp(outsideBuf, sizeof(outsideBuf), readings.outsideTemp);
-                        formatTemp(threshBuf, sizeof(threshBuf), settings.outsideTempHeatingThreshold);
-                        LOG_INFO(TAG, "Heating needed: outside %s°C < threshold %s°C",
-                                outsideBuf, threshBuf);
-                    } else {
-                        // Traditional room-temp mode logging
-                        char currBuf[16], targetBuf[16];
-                        formatTemp(currBuf, sizeof(currBuf), readings.insideTemp);
-                        formatTemp(targetBuf, sizeof(targetBuf), settings.targetTemperatureInside);
-                        LOG_INFO(TAG, "Heating needed: room %s°C < target %s°C",
-                                currBuf, targetBuf);
+                    // H2 fix: acquire settings mutex inside sensor mutex (Level 2, alphabetical order safe)
+                    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+                        const SystemSettings& settings = SRP::getSystemSettings();
+                        if (settings.useWeatherCompensatedControl) {
+                            // Weather-compensated mode logging
+                            char outsideBuf[16], threshBuf[16];
+                            formatTemp(outsideBuf, sizeof(outsideBuf), readings.outsideTemp);
+                            formatTemp(threshBuf, sizeof(threshBuf), settings.outsideTempHeatingThreshold);
+                            LOG_INFO(TAG, "Heating needed: outside %s°C < threshold %s°C",
+                                    outsideBuf, threshBuf);
+                        } else {
+                            // Traditional room-temp mode logging
+                            char currBuf[16], targetBuf[16];
+                            formatTemp(currBuf, sizeof(currBuf), readings.insideTemp);
+                            formatTemp(targetBuf, sizeof(targetBuf), settings.targetTemperatureInside);
+                            LOG_INFO(TAG, "Heating needed: room %s°C < target %s°C",
+                                    currBuf, targetBuf);
+                        }
+                        SRP::giveSystemSettingsMutex();
                     }
                     LOG_INFO(TAG, "Space heating activated - Boiler target: %s°C", boilerBuf);
                     SRP::giveSensorReadingsMutex();
@@ -421,15 +433,18 @@ static void processHeatingState() {
                     );
                     if (guard) {
                         SharedSensorReadings readings = SRP::getSensorReadings();
-                        SystemSettings& settings = SRP::getSystemSettings();
-
-                        if (heatingState.heatingControl != nullptr) {
-                            newBoilerTarget = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(readings, settings);
+                        // H2 fix: take settings mutex inside sensor guard (Level 2, alphabetical safe)
+                        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+                            if (heatingState.heatingControl != nullptr) {
+                                newBoilerTarget = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(
+                                    readings, SRP::getSystemSettings());
+                            }
+                            SRP::giveSystemSettingsMutex();
                         }
-                        // If heatingControl is nullptr, keep default target - already logged at init
+                        // If heatingControl is nullptr or mutex failed, keep default target
                     }
                 }
-                
+
                 // Update if changed significantly (>1°C) OR every 5 minutes to refresh watchdog
                 static uint32_t lastRefreshTime = 0;
                 uint32_t now = millis();
@@ -481,18 +496,39 @@ static bool checkIfSpaceHeatingNeededEvent() {
     bool currentlyHeating = (heatingState.state == HeatingOn);
     bool heatingNeeded = currentlyHeating; // Default to current state
 
+    // H2 fix: Snapshot all settings fields under mutex BEFORE taking sensor mutex
+    // Avoids nested Level-2 mutex acquisition and prevents races on Temperature_t/bool fields
+    struct {
+        bool useWeatherComp;
+        Temperature_t outsideThreshold;
+        Temperature_t targetInside;
+        Temperature_t overheatMargin;
+        Temperature_t hysteresis;
+    } ss;
+    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
+        const SystemSettings& s = SRP::getSystemSettings();
+        ss.useWeatherComp     = s.useWeatherCompensatedControl;
+        ss.outsideThreshold   = s.outsideTempHeatingThreshold;
+        ss.targetInside       = s.targetTemperatureInside;
+        ss.overheatMargin     = s.roomTempOverheatMargin;
+        ss.hysteresis         = s.heating_hysteresis;
+        SRP::giveSystemSettingsMutex();
+    } else {
+        LOG_ERROR(TAG, "Failed to acquire settings mutex - maintaining current heating state");
+        return heatingNeeded;  // Fail-safe: keep current state
+    }
+
     // Get sensor readings with mutex protection
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {
         SharedSensorReadings readings = SRP::getSensorReadings();
-        SystemSettings& settings = SRP::getSystemSettings();
 
-        if (settings.useWeatherCompensatedControl) {
+        if (ss.useWeatherComp) {
             // Weather-compensated mode:
             // - Outside temp determines ON/OFF (not room temp)
             // - Room temp only provides overheat protection (Begrenzung)
             if (readings.isOutsideTempValid) {
                 Temperature_t outsideTemp = readings.outsideTemp;
-                Temperature_t threshold = settings.outsideTempHeatingThreshold;
+                Temperature_t threshold = ss.outsideThreshold;  // H2: from snapshot
 
                 // Outside cold enough for heating?
                 bool outsideCold = outsideTemp < threshold;
@@ -501,16 +537,15 @@ static bool checkIfSpaceHeatingNeededEvent() {
                 // Stop at: target + margin, Restart at: target + margin - hysteresis
                 // This prevents short-cycling when room temp oscillates near limit
                 bool roomOverheated = false;
-                if (readings.isInsideTempValid && settings.targetTemperatureInside > 0) {
-                    Temperature_t overheatLimit = tempAdd(settings.targetTemperatureInside,
-                                                          settings.roomTempOverheatMargin);
+                if (readings.isInsideTempValid && ss.targetInside > 0) {
+                    Temperature_t overheatLimit = tempAdd(ss.targetInside, ss.overheatMargin);
                     if (currentlyHeating) {
                         // When heating: stop if room exceeds target + margin
                         roomOverheated = readings.insideTemp > overheatLimit;
                     } else {
                         // When not heating: restart when room drops below (limit - hysteresis)
                         // Uses heating_hysteresis setting (default 0.5°C)
-                        Temperature_t restartLimit = tempSub(overheatLimit, settings.heating_hysteresis);
+                        Temperature_t restartLimit = tempSub(overheatLimit, ss.hysteresis);
                         roomOverheated = readings.insideTemp >= restartLimit;
                     }
                 }
@@ -528,8 +563,7 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     } else if (roomOverheated && currentlyHeating) {
                         char roomBuf[16], limitBuf[16];
                         formatTemp(roomBuf, sizeof(roomBuf), readings.insideTemp);
-                        Temperature_t overheatLimit = tempAdd(settings.targetTemperatureInside,
-                                                              settings.roomTempOverheatMargin);
+                        Temperature_t overheatLimit = tempAdd(ss.targetInside, ss.overheatMargin);
                         formatTemp(limitBuf, sizeof(limitBuf), overheatLimit);
                         LOG_INFO(TAG, "Heating stopped: room %s°C > overheat limit %s°C",
                                 roomBuf, limitBuf);
@@ -542,11 +576,11 @@ static bool checkIfSpaceHeatingNeededEvent() {
         } else {
             // Traditional room-temp ON/OFF mode (original behavior)
             if (readings.isInsideTempValid &&
-                (settings.targetTemperatureInside > 0)) {  // Ensure valid setpoint
+                (ss.targetInside > 0)) {  // Ensure valid setpoint (H2: from snapshot)
 
-                Temperature_t setpoint = settings.targetTemperatureInside;
+                Temperature_t setpoint = ss.targetInside;    // H2: from snapshot
                 Temperature_t currentTemp = readings.insideTemp;
-                Temperature_t hysteresis = settings.heating_hysteresis;
+                Temperature_t hysteresis = ss.hysteresis;    // H2: from snapshot
 
                 // Determine heating state with ASYMMETRIC ABOVE hysteresis
                 // Target is the minimum - heating starts when dropping below target,
