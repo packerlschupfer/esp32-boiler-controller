@@ -5,6 +5,7 @@
 #include "config/ProjectConfig.h"
 #include "config/SystemConstants.h"
 #include "config/SystemSettingsStruct.h"
+#include "config/SensorIndices.h"
 #include <atomic>
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"
@@ -347,11 +348,11 @@ void updateSensorData(const std::vector<float>& temperatureData) {
 
         LOG_DEBUG("MB8ARTTask", "Temperature data available (%d channels)", temperatureData.size());
 
-        // Handle channel 7 as pressure sensor (if present in data)
+        // Handle channel 4 as pressure sensor (if present in data)
 #ifdef USE_REAL_PRESSURE_SENSOR
-        const size_t PRESSURE_CHANNEL = 7;
+        const size_t PRESSURE_CHANNEL = SensorIndex::PRESSURE_CHANNEL;  // Channel 4
         if (temperatureData.size() > PRESSURE_CHANNEL) {
-            // MB8ART channel 7 should return current in mA for 4-20mA sensors
+            // MB8ART library returns current directly in mA (e.g., 10.75 mA)
             float currentMA = temperatureData[PRESSURE_CHANNEL];
             
             // Convert 4-20mA current to pressure

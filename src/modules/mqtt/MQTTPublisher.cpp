@@ -1,6 +1,5 @@
 // src/modules/mqtt/MQTTPublisher.cpp
 #include "MQTTPublisher.h"
-#include "MQTTTopics.h"
 #include "modules/tasks/MQTTTask.h"
 #include "core/SystemResourceProvider.h"
 #include "shared/SharedSensorReadings.h"
@@ -13,9 +12,13 @@
 #include <SemaphoreGuard.h>
 #include <ArduinoJson.h>
 #include <esp_log.h>
-#include <ESP.h>
+#include <Esp.h>
 
 static const char* TAG = "MQTTPub";
+
+// MQTT topic constants (avoid including MQTTTopics.h due to macro conflicts)
+#define MQTT_STATUS_HEALTH   "boiler/status/health"
+#define MQTT_STATUS_SENSORS  "boiler/status/sensors"
 
 namespace MQTTPublisher {
 
@@ -57,20 +60,24 @@ void publishSystemStatus() {
     doc["health"]["tasks"] = uxTaskGetNumberOfTasks();
     doc["health"]["stack_hwm"] = uxTaskGetStackHighWaterMark(NULL);
 
-    auto buffer = MemoryPools::getLogBuffer();
+    auto buffer = MemoryPools::logBufferPool.allocate();
     if (!buffer) {
         LOG_ERROR(TAG, "Failed to allocate buffer for health data");
         return;
     }
 
-    size_t written = serializeJson(doc, buffer.data(), buffer.size());
-    if (written == 0 || written >= buffer.size()) {
+    size_t written = serializeJson(doc, buffer->data, sizeof(buffer->data));
+    if (written == 0 || written >= sizeof(buffer->data)) {
         LOG_ERROR(TAG, "JSON serialization failed or truncated for health data");
+        MemoryPools::logBufferPool.deallocate(buffer);
         return;
     }
 
     // Queue for publishing with MEDIUM priority
-    MQTTTask::publish(MQTT_STATUS_HEALTH, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_MEDIUM);
+    MQTTTask::publish(MQTT_STATUS_HEALTH, buffer->data, 0, false, MQTTPriority::PRIORITY_MEDIUM);
+
+    // Return buffer to pool
+    MemoryPools::logBufferPool.deallocate(buffer);
 }
 
 void publishSensorData() {

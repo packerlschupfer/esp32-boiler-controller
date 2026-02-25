@@ -1,12 +1,17 @@
 // src/modules/mqtt/MQTTSubscriptionManager.cpp
 #include "MQTTSubscriptionManager.h"
-#include "MQTTTopics.h"
 #include "modules/mqtt/MQTTCommandHandlers.h"
 #include "modules/tasks/MQTTTask.h"
 #include "core/SystemResourceProvider.h"
 #include <esp_log.h>
 
 static const char* TAG = "MQTTSubMgr";
+
+// MQTT topic prefix constants (avoid including MQTTTopics.h due to macro conflicts)
+#define MQTT_CMD_PREFIX            "boiler/cmd"
+#define MQTT_CMD_SCHEDULER_PREFIX  "boiler/cmd/scheduler"
+#define MQTT_PARAMS_PREFIX         "boiler/params"
+#define MQTT_CONFIG_PREFIX         "boiler/config"
 
 namespace MQTTSubscriptionManager {
 

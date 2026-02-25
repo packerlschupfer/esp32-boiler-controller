@@ -4,6 +4,7 @@
 #include <algorithm>
 #include "SemaphoreGuard.h"
 #include "config/ProjectConfig.h"
+#include "utils/SafeLog.h"  // Round 21: Safe float logging
 
 PIDControlModule::PIDControlModule() 
     : integral(0.0f)
@@ -220,8 +221,8 @@ bool PIDControlModule::applyAutoTuningResults() {
     // Reset the controller with new parameters
     integral = 0.0f;
     previousError = 0.0f;
-    
-    LOG_INFO("PIDControl", "Applied auto-tuning results: Kp=%.3f, Ki=%.3f, Kd=%.3f",
+
+    SafeLog::logFloatTriple("PIDControl", "Applied auto-tuning results: Kp=%.3f, Ki=%.3f, Kd=%.3f",
              currentKp, currentKi, currentKd);
     
     return true;
@@ -252,6 +253,6 @@ void PIDControlModule::setParameters(float Kp, float Ki, float Kd) {
     currentKp = Kp;
     currentKi = Ki;
     currentKd = Kd;
-    
-    LOG_INFO("PIDControl", "PID parameters set: Kp=%.3f, Ki=%.3f, Kd=%.3f", Kp, Ki, Kd);
+
+    SafeLog::logFloatTriple("PIDControl", "PID parameters set: Kp=%.3f, Ki=%.3f, Kd=%.3f", Kp, Ki, Kd);
 }

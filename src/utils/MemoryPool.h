@@ -224,6 +224,32 @@ namespace MemoryPools {
         char data[64];
     };
     extern MemoryPool<TempBuffer, 6> tempBufferPool;
+
+    // Round 21: New memory pools to reduce heap fragmentation
+
+    // Pool for diagnostic message buffers (256 bytes each, 4 buffers = 1KB)
+    struct DiagnosticBuffer {
+        char data[256];
+    };
+    extern MemoryPool<DiagnosticBuffer, 4> diagnosticBufferPool;
+
+    // Pool for configuration buffers (512 bytes each, 4 buffers = 2KB)
+    struct ConfigBuffer {
+        char data[512];
+    };
+    extern MemoryPool<ConfigBuffer, 4> configBufferPool;
+
+    // Pool for calculation buffers (128 bytes each, 8 buffers = 1KB)
+    struct CalcBuffer {
+        char data[128];
+    };
+    extern MemoryPool<CalcBuffer, 8> calcBufferPool;
+
+    // Pool for error message buffers (256 bytes each, 8 buffers = 2KB)
+    struct ErrorBuffer {
+        char data[256];
+    };
+    extern MemoryPool<ErrorBuffer, 8> errorBufferPool;
 }
 
 #endif // MEMORY_POOL_H
