@@ -129,13 +129,31 @@ namespace SafetyConfig {
 
     // M4: Configurable error recovery delay
     bool setErrorRecovery(uint32_t ms) {
+        // Range validation (existing)
         if (ms < Limits::ERROR_RECOVERY_MIN_MS || ms > Limits::ERROR_RECOVERY_MAX_MS) {
             LOG_WARN(TAG, "Invalid err_recov %lu ms (range: %lu-%lu ms)",
                      ms, Limits::ERROR_RECOVERY_MIN_MS, Limits::ERROR_RECOVERY_MAX_MS);
             return false;
         }
+
+        // NEW: Cross-validation with burner anti-flapping
+        constexpr uint32_t MIN_OFF_TIME_MS = 20000;  // From BurnerAntiFlapping
+        if (ms < MIN_OFF_TIME_MS) {
+            LOG_ERROR(TAG, "Error recovery %lu ms < anti-flapping minimum %lu ms - RISK: rapid cycling",
+                      ms, MIN_OFF_TIME_MS);
+            return false;
+        }
+
+        // NEW: Cross-validation with pump protection
+        if (ms < pumpProtectionMs) {
+            LOG_WARN(TAG, "Error recovery %lu ms < pump protection %lu ms - may delay pump restart",
+                     ms, pumpProtectionMs);
+            // Allow but warn - not a hard requirement
+        }
+
         errorRecoveryMs = ms;
-        LOG_INFO(TAG, "Set err_recov to %lu ms", ms);
+        LOG_INFO(TAG, "Set err_recov to %lu ms (anti-flapping: OK, pump: %s)",
+                 ms, (ms >= pumpProtectionMs) ? "OK" : "WARNING");
         return true;
     }
 

@@ -60,4 +60,12 @@ namespace SafetyConfig {
     bool setPostPurge(uint32_t ms);
     bool setErrorRecovery(uint32_t ms);  // M4: configurable error recovery delay
     bool setPIDIntegralLimits(int32_t min, int32_t max);  // M1: PID anti-windup limits
+
+    // Compile-time validation of defaults
+    static_assert(Defaults::ERROR_RECOVERY_MS >= Limits::ERROR_RECOVERY_MIN_MS,
+                  "Default error recovery must be >= minimum");
+    static_assert(Limits::ERROR_RECOVERY_MIN_MS >= 20000,
+                  "Error recovery minimum must be >= burner anti-flapping (20s)");
+    static_assert(Defaults::PUMP_PROTECTION_MS <= Defaults::ERROR_RECOVERY_MS,
+                  "Pump protection should be < error recovery for faster restart");
 }
