@@ -26,6 +26,7 @@
 #define MQTT_STATUS_PID_AUTOTUNE        MQTT_STATUS_PREFIX "/pid/autotune"
 #define MQTT_STATUS_PID_PARAMS          MQTT_STATUS_PREFIX "/pid/params"
 #define MQTT_STATUS_ERROR               MQTT_STATUS_PREFIX "/error"
+#define MQTT_STATUS_BURNER              MQTT_STATUS_PREFIX "/burner"
 
 // FRAM error status topics
 #define MQTT_STATUS_FRAM_ERRORS_PREFIX  MQTT_STATUS_PREFIX "/fram_errors"

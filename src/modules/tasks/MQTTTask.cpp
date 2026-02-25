@@ -557,7 +557,7 @@ bool MQTTTask::start() {
         "MQTTTask",
         STACK_SIZE_MQTT_TASK,
         nullptr,
-        PRIORITY_CONTROL_TASK,  // Use standard control task priority
+        PRIORITY_MQTT_TASK,  // H4 fix: MQTT is not safety-critical, use priority 2 not 3
         1,  // Pin to core 1
         wdtConfig
     );

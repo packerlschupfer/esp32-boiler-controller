@@ -921,7 +921,7 @@ void routeControlCommand(const char* topic, const char* payload) {
         if (strcmp(payload, "lockout") == 0 || strcmp(payload, "reset") == 0) {
             LOG_WARN(TAG_CMD, "Remote command: Reset burner lockout");
             BurnerStateMachine::resetLockout();
-            MQTTTask::publish("status/boiler/burner", "lockout_reset", 0, true, MQTTPriority::PRIORITY_HIGH);
+            MQTTTask::publish(MQTT_STATUS_BURNER, "lockout_reset", 0, true, MQTTPriority::PRIORITY_HIGH);
         } else {
             LOG_WARN(TAG_CMD, "Unknown burner_reset payload: %s (use 'lockout' or 'reset')", payload);
         }

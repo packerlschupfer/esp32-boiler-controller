@@ -9,6 +9,7 @@
 #include "modules/control/BurnerRuntimeTracker.h"  // Round 21: Extracted runtime tracking
 #include "modules/tasks/RelayControlTask.h"
 #include "modules/tasks/MQTTTask.h"  // H15: For error recovery notification
+#include "MQTTTopics.h"  // C1: Centralized topic macros (prevents hardcoded string drift)
 #include "shared/SharedResources.h"
 #include "config/RelayIndices.h"
 #include "shared/Temperature.h"
@@ -461,7 +462,7 @@ BurnerSMState BurnerStateMachine::handleErrorState() {
         char buffer[64];
         snprintf(buffer, sizeof(buffer),
                 "{\"state\":\"error\",\"recovery_in\":%lu}", remainingSec);
-        MQTTTask::publish("status/boiler/burner", buffer, 0, false, MQTTPriority::PRIORITY_MEDIUM);
+        MQTTTask::publish(MQTT_STATUS_BURNER, buffer, 0, false, MQTTPriority::PRIORITY_MEDIUM);
     }
 
     if (timeInError < recoveryDelayMs) {

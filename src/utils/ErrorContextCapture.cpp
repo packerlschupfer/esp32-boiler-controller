@@ -4,6 +4,7 @@
 #include "modules/tasks/MQTTTask.h"
 #include "MQTTTopics.h"
 #include "core/SystemResourceProvider.h"
+#include "events/SystemEventsGenerated.h"  // C5: SystemState bit constants
 #include "shared/SharedSensorReadings.h"
 #include "shared/RelayState.h"
 #include <ArduinoJson.h>
@@ -73,10 +74,11 @@ ErrorContextSnapshot ErrorContextCapture::captureSnapshot(
     snapshot.relayActualState = g_relayState.actual.load();
     snapshot.relayMismatchMask = snapshot.relayDesiredState ^ snapshot.relayActualState;
 
-    // Burner and system state (from event bits)
-    snapshot.burnerActive = (snapshot.systemStateBits & (1 << 0)) != 0;  // Adjust bit position as needed
-    snapshot.heatingActive = (snapshot.systemStateBits & (1 << 1)) != 0;
-    snapshot.waterActive = (snapshot.systemStateBits & (1 << 2)) != 0;
+    // Burner and system state (from event bits using SystemState constants)
+    // C5 fix: use proper constants instead of hardcoded positions (old code read wrong bits)
+    snapshot.burnerActive = (snapshot.systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) != 0;
+    snapshot.heatingActive = (snapshot.systemStateBits & SystemEvents::SystemState::HEATING_ON) != 0;
+    snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WATER_ON) != 0;
 
     return snapshot;
 }

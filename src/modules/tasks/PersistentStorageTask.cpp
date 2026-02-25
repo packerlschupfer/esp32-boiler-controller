@@ -536,6 +536,17 @@ void PersistentStorageTask(void* pvParameters) {
     settings.wHeaterConfTempSafeLimitHigh = static_cast<Temperature_t>(tankSafeHigh_i32);
     settings.wHeaterConfTempSafeLimitLow = static_cast<Temperature_t>(tankSafeLow_i32);
 
+    // BUG FIX (C2): Apply loaded room setpoint and hysteresis to SystemSettings.
+    // Same bug pattern as wHeaterConfTempLimitHigh above: setOnChange only fires on MQTT,
+    // not on initial NVS load. Without this, room target and hysteresis revert to struct
+    // defaults (18.0°C / 0.5°C) on every reboot, ignoring any saved NVS values.
+    if (targetTemp_i32 == 0) targetTemp_i32 = 180;  // 18.0°C default (struct default)
+    if (hysteresis_i32 == 0) hysteresis_i32 = 5;    // 0.5°C default (struct default)
+    settings.targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
+    settings.heating_hysteresis = static_cast<Temperature_t>(hysteresis_i32);
+    LOG_INFO(TAG, "Room control params after load: targetTemp=%d hysteresis=%d",
+             targetTemp_i32, hysteresis_i32);
+
     LOG_INFO(TAG, "Temperature limits after load: burner[%d-%d] heating[%d-%d] water[%d-%d]",
              burner_low_i32, burner_high_i32, heating_low_i32, heating_high_i32, water_low_i32, water_high_i32);
     LOG_INFO(TAG, "Wheater tank limits after load: low=%d high=%d safeHigh=%d safeLow=%d",
