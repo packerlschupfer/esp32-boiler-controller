@@ -106,4 +106,19 @@
 // Safety configuration status topic
 #define MQTT_STATUS_SAFETY_CONFIG        MQTT_STATUS_PREFIX "/safety_config"
 
+// Alert topics (IMPROVEMENT 3: Silent Failure Detection)
+#define MQTT_ALERT_PREFIX                MQTT_BASE_PREFIX "/alert"
+#define MQTT_ALERT_DEGRADED_OPERATION    MQTT_ALERT_PREFIX "/degraded_operation"
+
+// Degraded operation status (IMPROVEMENT 3)
+#define MQTT_STATUS_DEGRADED_CHECKS      MQTT_STATUS_PREFIX "/degraded_checks"
+
+// Error context topic (IMPROVEMENT 4)
+#define MQTT_ERROR_PREFIX                MQTT_BASE_PREFIX "/error"
+#define MQTT_ERROR_CONTEXT               MQTT_ERROR_PREFIX "/context"
+
+// Diagnostics topics (IMPROVEMENT 5)
+#define MQTT_DIAGNOSTICS_PREFIX          MQTT_BASE_PREFIX "/diagnostics"
+#define MQTT_DIAGNOSTICS_MODBUS_PREFIX   MQTT_DIAGNOSTICS_PREFIX "/modbus"
+
 #endif // MQTT_TOPICS_H

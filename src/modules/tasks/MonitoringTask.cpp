@@ -20,6 +20,10 @@
 #include "config/SystemSettings.h"
 #include "utils/ErrorLogFRAM.h"
 #include "utils/ErrorHandler.h"
+#include "MQTTTask.h"
+#include "MQTTTopics.h"
+#include <ModbusErrorTracker.h>
+#include <ArduinoJson.h>
 #include <algorithm>
 #include <cstring>
 
@@ -54,6 +58,7 @@ static void logSensorStatus();
 static void logRelayStatus();
 static void logCompactStatus();
 static void logAllTasks();
+static void publishModbusErrorStats();
 static void dumpErrorLog(size_t maxErrors = 10);
 
 /**
@@ -319,6 +324,10 @@ void MonitoringTaskEventDriven(void* pvParameters) {
             logNetworkStatus();
             logSensorStatus();
             logRelayStatus();
+
+            // Publish Modbus error statistics (IMPROVEMENT 5)
+            // NOTE: Will publish zeros until device libraries integrate tracking calls
+            publishModbusErrorStats();
 
             // Feed watchdog immediately after report
             (void)SRP::getTaskManager().feedWatchdog();
@@ -706,11 +715,63 @@ static void logAllTasks() {
     }
     
     LOG_DEBUG(TAG, "=== END ===");
-    
+
     // Log issues summary
-    LOG_DEBUG(TAG, "Issues: L%d B%d S%d", 
+    LOG_DEBUG(TAG, "Issues: L%d B%d S%d",
              lowStackCount, blockedCount, suspendedCount);
-    
+
     // Free memory
     vPortFree(taskStatusArray);
+}
+
+/**
+ * @brief Publish Modbus error statistics to MQTT
+ * Queries ModbusErrorTracker from ESP32-ModbusDevice library and publishes stats for all devices
+ */
+static void publishModbusErrorStats() {
+    // Device addresses (from ProjectConfig.h)
+    const uint8_t devices[] = {MB8ART_ADDRESS, RYN4_ADDRESS, ANDRTF3_ADDRESS};
+
+    for (uint8_t address : devices) {
+        // Query statistics from library (modbus namespace)
+        uint32_t crcErrors = modbus::ModbusErrorTracker::getCrcErrors(address);
+        uint32_t timeouts = modbus::ModbusErrorTracker::getTimeouts(address);
+        uint32_t invalidData = modbus::ModbusErrorTracker::getInvalidDataErrors(address);
+        uint32_t deviceErrors = modbus::ModbusErrorTracker::getDeviceErrors(address);
+        uint32_t otherErrors = modbus::ModbusErrorTracker::getOtherErrors(address);
+        uint32_t successCount = modbus::ModbusErrorTracker::getSuccessCount(address);
+        uint32_t totalErrors = modbus::ModbusErrorTracker::getTotalErrors(address);
+        float errorRate = modbus::ModbusErrorTracker::getErrorRate(address);
+        uint32_t lastErrorTime = modbus::ModbusErrorTracker::getLastErrorTime(address);
+
+        // Build JSON payload
+        JsonDocument doc;
+        doc["address"] = address;
+        doc["crc_errors"] = crcErrors;
+        doc["timeouts"] = timeouts;
+        doc["invalid_data"] = invalidData;
+        doc["device_errors"] = deviceErrors;
+        doc["other_errors"] = otherErrors;
+        doc["success_count"] = successCount;
+        doc["total_errors"] = totalErrors;
+        doc["error_rate_pct"] = errorRate;
+
+        // Time since last error (in milliseconds)
+        if (lastErrorTime > 0) {
+            uint32_t timeSinceError = millis() - lastErrorTime;
+            doc["last_error_ms_ago"] = timeSinceError;
+        }
+
+        // Build topic: boiler/diagnostics/modbus/{address}
+        char topic[64];
+        snprintf(topic, sizeof(topic), "%s/%02X", MQTT_DIAGNOSTICS_MODBUS_PREFIX, address);
+
+        // Serialize and publish
+        char payload[256];
+        serializeJson(doc, payload, sizeof(payload));
+        MQTTTask::publish(topic, payload, 0, false, MQTTPriority::PRIORITY_LOW);
+
+        LOG_DEBUG(TAG, "Modbus stats 0x%02X: err=%lu (%.1f%%), ok=%lu",
+                 address, totalErrors, errorRate, successCount);
+    }
 }
