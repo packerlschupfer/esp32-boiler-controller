@@ -121,60 +121,7 @@ private:
     static void onExitRunning();
 
     // Helper functions
-
-    /**
-     * @brief Check if flame is detected
-     * @return true if flame detected (or assumed present)
-     *
-     * HARDWARE LIMITATION: No flame sensor installed.
-     * Currently returns burner relay state as proxy.
-     * When flame sensor hardware is added, implement actual GPIO read.
-     */
-    static bool isFlameDetected();
-    static bool checkSafetyConditions();
-    static bool shouldIncreasePower();
-    static bool shouldDecreasePower();
-
-    /**
-     * @brief Check if seamless mode switch is safe
-     * @return true if mode can be switched without shutdown
-     *
-     * Validates conditions for seamless water ↔ heating transition:
-     * - Currently in RUNNING_LOW or RUNNING_HIGH
-     * - Safety conditions pass
-     * - Flame detected
-     *
-     * Note: Does NOT check heatDemand because old mode clears demand
-     * before new mode sets it. MODE_SWITCHING handler validates new demand.
-     */
-    static bool canSeamlesslySwitch();
-
-    /**
-     * @brief Check for mode switch and return appropriate transition state
-     * @param currentStateName Name of current state for logging (e.g., "RUNNING_LOW")
-     * @return MODE_SWITCHING, POST_PURGE if switch detected, or IDLE as sentinel for no transition
-     *
-     * M1: Extracted common logic from handleRunningLowState/handleRunningHighState
-     */
-    static BurnerSMState checkModeSwitchTransition(const char* currentStateName);
-
-    /**
-     * @brief Check safety shutdown conditions
-     * @param currentState Current state for sentinel return
-     * @return POST_PURGE if shutdown needed, currentState otherwise
-     *
-     * Extracted common logic from handleRunningLowState/handleRunningHighState
-     */
-    static BurnerSMState checkSafetyShutdown(BurnerSMState currentState);
-
-    /**
-     * @brief Check flame loss conditions
-     * @param currentState Current state for sentinel return
-     * @return POST_PURGE if flame lost, currentState otherwise
-     *
-     * Extracted common logic from handleRunningLowState/handleRunningHighState
-     */
-    static BurnerSMState checkFlameLoss(BurnerSMState currentState);
+    // Round 21: Most helper functions moved to BurnerSafetyChecks, BurnerPowerController, BurnerRuntimeTracker
 
     static void logStateTransition(BurnerSMState from, BurnerSMState to);
 };
