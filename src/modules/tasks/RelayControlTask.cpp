@@ -22,6 +22,8 @@
 #include "shared/SharedRelayReadings.h"
 #include "shared/RelayState.h"
 #include "modules/control/CentralizedFailsafe.h"
+#include "modules/tasks/RelayVerificationManager.h"  // Round 21: Extracted verification logic
+#include "modules/tasks/RelayCommandProcessor.h"      // Round 21: Extracted command processing
 
 
 static const char* TAG = "RelayControl";
@@ -484,86 +486,28 @@ void RelayControlTask::updateRateLimitCounters() {
 // Pump motor protection - check if configurable time has elapsed since last state change
 // Returns true if state change is allowed, false if blocked by protection
 bool RelayControlTask::checkPumpProtection(uint8_t relayIndex, bool desiredState) {
-    // Only applies to pump relays (physical 5=heating pump, physical 6=water pump)
-    const uint8_t heatingPumpPhysical = RelayIndex::toPhysical(RelayIndex::HEATING_PUMP);  // 5
-    const uint8_t waterPumpPhysical = RelayIndex::toPhysical(RelayIndex::WATER_PUMP);      // 6
-
-    uint8_t pumpIdx;
-    if (relayIndex == heatingPumpPhysical) {
-        pumpIdx = 0;  // Heating pump
-    } else if (relayIndex == waterPumpPhysical) {
-        pumpIdx = 1;  // Water pump
-    } else {
-        return true;  // Not a pump relay, no protection needed
-    }
-    TickType_t now = xTaskGetTickCount();
-
-    // If this is the first state change (timestamp is 0), allow it
-    if (pumpLastStateChangeTime[pumpIdx] == 0) {
-        return true;
+    // Round 21: Delegate to RelayVerificationManager
+    // Get current relay states with mutex protection
+    bool states[8];
+    bool statesKnown = relayStatesKnown.load();
+    if (statesKnown && xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+        memcpy(states, currentRelayStates, sizeof(states));
+        xSemaphoreGive(relayStateMutex_);
     }
 
-    // Check if relay is already in desired state - no protection needed
-    // Round 20 Issue #6: Protect state array read with mutex
-    if (relayStatesKnown.load()) {
-        bool currentState = false;
-        if (xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-            currentState = currentRelayStates[relayIndex - 1];
-            xSemaphoreGive(relayStateMutex_);
-            if (currentState == desiredState) {
-                return true;  // No actual state change, protection doesn't apply
-            }
-        }
-    }
-
-    // Calculate elapsed time since last state change
-    TickType_t elapsed = now - pumpLastStateChangeTime[pumpIdx];
-    uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
-
-    if (elapsedMs < SafetyConfig::pumpProtectionMs) {
-        // Block the state change - motor protection
-        uint32_t remainingMs = SafetyConfig::pumpProtectionMs - elapsedMs;
-
-        static TickType_t lastBlockLog[2] = {0, 0};
-        if (now - lastBlockLog[pumpIdx] > pdMS_TO_TICKS(5000)) {  // Log every 5s max
-            LOG_WARN(TAG, "Pump %d state change blocked by motor protection - %lu ms remaining",
-                     relayIndex, remainingMs);
-            lastBlockLog[pumpIdx] = now;
-        }
-        return false;
-    }
-
-    return true;  // Protection period has elapsed, allow state change
+    return RelayVerificationManager::checkPumpProtection(
+        relayIndex,
+        desiredState,
+        states,
+        statesKnown,
+        pumpLastStateChangeTime
+    );
 }
 
 // Get time remaining until pump can change state (for debugging/status)
 uint32_t RelayControlTask::getPumpProtectionTimeRemaining(uint8_t relayIndex) {
-    // Only applies to pump relays (physical 5=heating pump, physical 6=water pump)
-    const uint8_t heatingPumpPhysical = RelayIndex::toPhysical(RelayIndex::HEATING_PUMP);  // 5
-    const uint8_t waterPumpPhysical = RelayIndex::toPhysical(RelayIndex::WATER_PUMP);      // 6
-
-    uint8_t pumpIdx;
-    if (relayIndex == heatingPumpPhysical) {
-        pumpIdx = 0;  // Heating pump
-    } else if (relayIndex == waterPumpPhysical) {
-        pumpIdx = 1;  // Water pump
-    } else {
-        return 0;  // Not a pump relay
-    }
-
-    if (pumpLastStateChangeTime[pumpIdx] == 0) {
-        return 0;  // No protection active yet
-    }
-
-    TickType_t now = xTaskGetTickCount();
-    TickType_t elapsed = now - pumpLastStateChangeTime[pumpIdx];
-    uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
-
-    if (elapsedMs >= SafetyConfig::pumpProtectionMs) {
-        return 0;  // Protection period has elapsed
-    }
-
-    return SafetyConfig::pumpProtectionMs - elapsedMs;
+    // Round 21: Delegate to RelayVerificationManager
+    return RelayVerificationManager::getPumpProtectionTimeRemaining(relayIndex, pumpLastStateChangeTime);
 }
 
 void RelayControlTask::waitForRelayRequests() {
@@ -648,144 +592,12 @@ void RelayControlTask::monitorSystemState() {
 }
 
 void RelayControlTask::processRelayRequests() {
-    // Get relay request event group
+    // Round 21: Delegate to RelayCommandProcessor
     auto& resourceManager = SharedResourceManager::getInstance();
     EventGroupHandle_t relayRequestEventGroup = resourceManager.getEventGroup(SharedResourceManager::EventGroups::RELAY_REQUEST);
-    
-    if (!relayRequestEventGroup) {
-        LOG_ERROR(TAG, "Failed to get relay request event group!");
-        return;
-    }
-    
-    // Get current state of all request bits without waiting
-    // We already waited in waitForRelayRequests(), so just get current state
-    EventBits_t requestBits = xEventGroupGetBits(relayRequestEventGroup);
-    
-    // Mask to only process valid bits (FreeRTOS event groups only support 24 bits)
-    const EventBits_t ALL_RELAY_REQUEST_BITS = 0x00FFFFFF;  // Mask for bits 0-23
-    requestBits &= ALL_RELAY_REQUEST_BITS;
-    
-    if (requestBits == 0) {
-        return;  // No requests pending
-    }
-    
-    LOG_DEBUG(TAG, "processRelayRequests: Got request bits: 0x%08X", requestBits);
 
-    // Process heating pump requests
-    if (requestBits & SystemEvents::RelayRequest::HEATING_PUMP_ON) {
-        LOG_DEBUG(TAG, "Processing heating pump ON request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::HEATING_PUMP), true);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::HEATING_PUMP_ON);
-        if (!success) {
-            LOG_DEBUG(TAG, "Heating pump ON blocked by protection (will retry on next request)");
-        }
-    }
-
-    if (requestBits & SystemEvents::RelayRequest::HEATING_PUMP_OFF) {
-        LOG_DEBUG(TAG, "Processing heating pump OFF request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::HEATING_PUMP), false);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::HEATING_PUMP_OFF);
-        if (!success) {
-            LOG_DEBUG(TAG, "Heating pump OFF blocked by protection (will retry on next request)");
-        }
-    }
-
-    // Process water pump requests
-    if (requestBits & SystemEvents::RelayRequest::WATER_PUMP_ON) {
-        LOG_INFO(TAG, "Processing water pump ON request for relay %d", RelayIndex::toPhysical(RelayIndex::WATER_PUMP));
-
-        // Log current state before attempting change
-        // Round 20 Issue #6: Protect state array read with mutex
-        if (relayStatesKnown.load() && xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-            LOG_INFO(TAG, "Current water pump state before command: %s",
-                     currentRelayStates[RelayIndex::WATER_PUMP] ? "ON" : "OFF");
-            xSemaphoreGive(relayStateMutex_);
-        }
-
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_PUMP), true);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_PUMP_ON);
-        if (success) {
-            LOG_INFO(TAG, "Water pump ON request completed");
-        } else {
-            LOG_DEBUG(TAG, "Water pump ON blocked by protection (will retry on next request)");
-        }
-    }
-
-    if (requestBits & SystemEvents::RelayRequest::WATER_PUMP_OFF) {
-        LOG_DEBUG(TAG, "Processing water pump OFF request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_PUMP), false);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_PUMP_OFF);
-        if (!success) {
-            LOG_DEBUG(TAG, "Water pump OFF blocked by protection (will retry on next request)");
-        }
-    }
-
-    // Process burner requests
-    if (requestBits & SystemEvents::RelayRequest::BURNER_ENABLE) {
-        LOG_DEBUG(TAG, "Processing burner ON request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::BURNER_ENABLE), true);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::BURNER_ENABLE);
-        if (!success) {
-            LOG_DEBUG(TAG, "Burner ON blocked by protection (will retry on next request)");
-        }
-    }
-
-    if (requestBits & SystemEvents::RelayRequest::BURNER_DISABLE) {
-        LOG_DEBUG(TAG, "Processing burner OFF request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::BURNER_ENABLE), false);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::BURNER_DISABLE);
-        if (!success) {
-            LOG_DEBUG(TAG, "Burner OFF blocked by protection (will retry on next request)");
-        }
-    }
-
-    // Process power boost requests
-    if (requestBits & SystemEvents::RelayRequest::POWER_HALF) {
-        LOG_DEBUG(TAG, "Processing half power request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::POWER_BOOST), false);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::POWER_HALF);
-        if (!success) {
-            LOG_DEBUG(TAG, "Power HALF blocked by protection (will retry on next request)");
-        }
-    }
-
-    if (requestBits & SystemEvents::RelayRequest::POWER_FULL) {
-        LOG_DEBUG(TAG, "Processing full power request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::POWER_BOOST), true);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::POWER_FULL);
-        if (!success) {
-            LOG_DEBUG(TAG, "Power FULL blocked by protection (will retry on next request)");
-        }
-    }
-
-    // Process water mode requests
-    if (requestBits & SystemEvents::RelayRequest::WATER_MODE_ON) {
-        LOG_DEBUG(TAG, "Processing water mode ON request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_MODE), true);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_MODE_ON);
-        if (!success) {
-            LOG_DEBUG(TAG, "Water mode ON blocked by protection (will retry on next request)");
-        }
-    }
-
-    if (requestBits & SystemEvents::RelayRequest::WATER_MODE_OFF) {
-        LOG_DEBUG(TAG, "Processing water mode OFF request");
-        bool success = setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_MODE), false);
-        // Clear bit unconditionally - event bits are edge-triggered, not level
-        xEventGroupClearBits(relayRequestEventGroup, SystemEvents::RelayRequest::WATER_MODE_OFF);
-        if (!success) {
-            LOG_DEBUG(TAG, "Water mode OFF blocked by protection (will retry on next request)");
-        }
-    }
+    // Use static method pointer for setRelayState
+    RelayCommandProcessor::processRelayRequests(relayRequestEventGroup, &RelayControlTask::setRelayState);
 }
 
 // Keep all the existing public methods below...
@@ -938,52 +750,6 @@ void RelayControlTask::updateSharedRelayReadings(uint8_t relayIndex, bool state)
 }
 
 void RelayControlTask::checkRelayHealthAndEscalate(uint8_t relayIndex, bool success) {
-    if (relayIndex < 1 || relayIndex > 8) {
-        return;
-    }
-
-    uint8_t idx = relayIndex - 1;
-
-    if (success) {
-        // Reset consecutive failure counter on success
-        if (consecutiveFailures[idx] > 0) {
-            LOG_INFO(TAG, "Relay %d recovered after %d failures", relayIndex, consecutiveFailures[idx]);
-            consecutiveFailures[idx] = 0;
-        }
-    } else {
-        // Increment failure counter
-        consecutiveFailures[idx]++;
-
-        LOG_WARN(TAG, "Relay %d consecutive failures: %d/%d",
-                 relayIndex, consecutiveFailures[idx], MAX_CONSECUTIVE_FAILURES);
-
-        // Check if escalation threshold reached
-        if (consecutiveFailures[idx] >= MAX_CONSECUTIVE_FAILURES) {
-            LOG_ERROR(TAG, "CRITICAL: Relay %d failed %d consecutive times - escalating to failsafe",
-                     relayIndex, consecutiveFailures[idx]);
-
-            // Set relay error bit
-            xEventGroupSetBits(SRP::getErrorNotificationEventGroup(), SystemEvents::Error::RELAY);
-
-            // FMEA Round 6: Use CRITICAL level for burner relay (triggers emergency shutdown)
-            // Other relays use WARNING level (triggers monitoring only)
-            // idx is array index (0-7), RelayIndex::BURNER_ENABLE is array index 0
-            CentralizedFailsafe::FailsafeLevel level =
-                (idx == RelayIndex::BURNER_ENABLE)
-                    ? CentralizedFailsafe::FailsafeLevel::CRITICAL
-                    : CentralizedFailsafe::FailsafeLevel::WARNING;
-
-            CentralizedFailsafe::triggerFailsafe(
-                level,
-                SystemError::RELAY_OPERATION_FAILED,
-                (idx == RelayIndex::BURNER_ENABLE)
-                    ? "BURNER relay verification failed - emergency shutdown"
-                    : "Relay verification failed repeatedly"
-            );
-
-            // Reset counter to avoid repeated escalations
-            // Next failure will start counting again
-            consecutiveFailures[idx] = 0;
-        }
-    }
+    // Round 21: Delegate to RelayVerificationManager
+    RelayVerificationManager::checkRelayHealthAndEscalate(relayIndex, success, consecutiveFailures);
 }

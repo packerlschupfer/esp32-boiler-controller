@@ -79,8 +79,8 @@ private:
 
     // Consecutive failure tracking for escalation to failsafe
     // FMEA Round 6: Reduced from 5 to 3 for faster failsafe response
+    // Round 21: MAX_CONSECUTIVE_FAILURES moved to RelayVerificationManager
     static uint8_t consecutiveFailures[8];
-    static constexpr uint8_t MAX_CONSECUTIVE_FAILURES = 3;
 
     // Pump motor protection - 30s minimum between state changes for relays 1 and 2
     // This prevents rapid on/off cycling that can damage pump motors
