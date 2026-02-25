@@ -527,8 +527,19 @@ void PersistentStorageTask(void* pvParameters) {
     settings.outsideTempHeatingThreshold = static_cast<Temperature_t>(outsideHeatingThreshold_i32);
     settings.roomTempOverheatMargin = static_cast<Temperature_t>(roomOverheatMargin_i32);
 
+    // BUG FIX: Apply loaded wheater tank limits to SystemSettings.
+    // setOnChange callbacks fire only on MQTT-triggered changes, NOT on initial NVS load.
+    // Without this explicit sync, settings.wHeaterConfTempLimitHigh stays at the struct
+    // default (65°C) even though NVS holds a different value - causing heating to ignore NVS.
+    settings.wHeaterConfTempLimitLow = static_cast<Temperature_t>(tankLow_i32);
+    settings.wHeaterConfTempLimitHigh = static_cast<Temperature_t>(tankHigh_i32);
+    settings.wHeaterConfTempSafeLimitHigh = static_cast<Temperature_t>(tankSafeHigh_i32);
+    settings.wHeaterConfTempSafeLimitLow = static_cast<Temperature_t>(tankSafeLow_i32);
+
     LOG_INFO(TAG, "Temperature limits after load: burner[%d-%d] heating[%d-%d] water[%d-%d]",
              burner_low_i32, burner_high_i32, heating_low_i32, heating_high_i32, water_low_i32, water_high_i32);
+    LOG_INFO(TAG, "Wheater tank limits after load: low=%d high=%d safeHigh=%d safeLow=%d",
+             tankLow_i32, tankHigh_i32, tankSafeHigh_i32, tankSafeLow_i32);
 
     // Load safety configuration from NVS (separate namespace)
     SafetyConfig::loadFromNVS();
