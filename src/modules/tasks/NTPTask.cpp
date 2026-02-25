@@ -156,10 +156,17 @@ static bool performNTPSync() {
     }
 
     LOG_DEBUG(TAG, "Performing NTP sync...");
-    
-    auto result = ntpClient.syncTime(5000);  // 5 second timeout
-    
-    // Note: result.syncTime field appears to have issues on ESP32, 
+
+    // Feed watchdog before sync - syncTime() can block up to timeout × num_servers.
+    // All servers now use IPs (no DNS), so 4 × 3s = 12s worst case, well within 60s WDT.
+    (void)SRP::getTaskManager().feedWatchdog();
+
+    auto result = ntpClient.syncTime(3000);  // 3s timeout per server (4 servers = 12s max)
+
+    // Feed again immediately after - covers the blocking period
+    (void)SRP::getTaskManager().feedWatchdog();
+
+    // Note: result.syncTime field appears to have issues on ESP32,
     // but the actual time sync is working correctly as we use time(nullptr) instead
     
     if (result.success) {
@@ -314,7 +321,8 @@ void NTPTaskEventDriven(void* parameter) {
     LOG_INFO(TAG, "Starting event-driven NTP task on core %d", xPortGetCoreID());
 
     // Enable TaskManager watchdog with generous timeout
-    // Event loop has 5s timeout, NTP sync 5s max, so 60s provides ample margin
+    // Event loop runs every 500ms; NTP sync worst case = 4 servers × 3s = 12s.
+    // WDT is also fed inside performNTPSync() before/after the blocking call.
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::enabled(60000);
 
     if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("NTPTask", wdtConfig)) {
@@ -336,12 +344,14 @@ void NTPTaskEventDriven(void* parameter) {
     LOG_DEBUG(TAG, "Initializing NTP client...");
     
     // Configure NTP servers
+    // NOTE: Domain-based servers require DNS resolution which is NOT covered by syncTime()'s
+    // timeout argument. When internet is unreachable, DNS can block indefinitely causing
+    // watchdog reboot. Use IP addresses for fallback servers to bypass DNS entirely.
     ntpClient.clearServers();
-    // Re-enable local server with enhanced debugging
-    (void)ntpClient.addServer("192.168.20.1", 123);       // Local NTP server (gateway)
-    (void)ntpClient.addServer("pool.ntp.org", 123);      // Primary public NTP
-    (void)ntpClient.addServer("time.google.com", 123);   // Secondary
-    (void)ntpClient.addServer("time.cloudflare.com", 123); // Tertiary
+    (void)ntpClient.addServer("192.168.20.1", 123);       // Local NTP server (gateway) - IP, no DNS
+    (void)ntpClient.addServer("216.239.35.0", 123);       // time.google.com IP - no DNS needed
+    (void)ntpClient.addServer("162.159.200.1", 123);      // time.cloudflare.com IP - no DNS needed
+    (void)ntpClient.addServer("129.6.15.28", 123);        // time.nist.gov IP - no DNS needed
     
     // Use UTC in NTPClient - system TZ environment handles timezone
     // This prevents double timezone offset application
