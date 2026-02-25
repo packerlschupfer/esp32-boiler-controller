@@ -66,9 +66,9 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // ==========================
 // Sensor Configuration
 // ==========================
-// Pressure sensor on MB8ART channel 7 (4-20mA)
-// Uncomment to enable real pressure sensor
-// #define USE_REAL_PRESSURE_SENSOR
+// Pressure sensor on MB8ART channel 4 (4-20mA, 0-5 BAR / 0-0.5 MPa)
+// Enabled - real pressure sensor connected
+#define USE_REAL_PRESSURE_SENSOR
 
 // NOTE: When USE_REAL_PRESSURE_SENSOR is undefined, system will use
 // simulated pressure data for testing/development.
@@ -92,7 +92,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // Only channels 0 to (MB8ART_ACTIVE_CHANNELS-1) will be enabled
 // Channels >= MB8ART_ACTIVE_CHANNELS will be deactivated at hardware level
 // This prevents error warnings for physically disconnected sensor channels
-#define MB8ART_ACTIVE_CHANNELS 4  // CH0-3: Boiler Out, Boiler Return, Water Tank, Outside
+#define MB8ART_ACTIVE_CHANNELS 5  // CH0-4: Boiler Out, Boiler Return, Water Tank, Outside, Pressure
 
 // ==========================
 // Ethernet Configuration

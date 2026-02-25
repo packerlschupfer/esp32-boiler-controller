@@ -216,6 +216,9 @@ Result<void> ModbusDeviceInitializer::initializeMB8ART(SystemInitializer* initia
         LOG_WARN(TAG, "MB8ART not available after initial attempts - will retry in background");
     }
 
+    // NOTE: MB8ART channel 4 configured manually via RS485 for 4-20mA pressure sensor
+    // Configuration: Register 132 (0x84) = 0x0401 (CURRENT mode, 4-20mA range)
+
     // Deactivate unused MB8ART channels to prevent error log flood
     // Only configure if not already deactivated (config persists in hardware EEPROM)
 #ifdef MB8ART_ACTIVE_CHANNELS

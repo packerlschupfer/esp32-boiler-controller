@@ -65,9 +65,9 @@ namespace SystemConstants {
         constexpr uint32_t TASK_NOTIFICATION_TIMEOUT_MS = 3000;  // 3s - watchdog task notifications
 
         // Task monitoring intervals
-        constexpr uint32_t HEALTH_CHECK_INTERVAL_MS = 5000;     // 5s - basic health monitoring
-        constexpr uint32_t DETAILED_MONITOR_INTERVAL_MS = 600000; // 10 minutes - detailed diagnostics
-        constexpr uint32_t STATUS_LOG_INTERVAL_MS = 600000;      // 10 minutes - status logging
+        constexpr uint32_t HEALTH_CHECK_INTERVAL_MS = 5000;       // 5s - basic health monitoring
+        constexpr uint32_t DETAILED_MONITOR_INTERVAL_MS = 1800000; // 30 minutes - detailed diagnostics (includes Modbus error stats)
+        constexpr uint32_t STATUS_LOG_INTERVAL_MS = 1800000;      // 30 minutes - status logging
         
         // Retry and recovery intervals
         constexpr uint32_t RETRY_INTERVAL_MS = 30000;           // 30s - general retry interval
@@ -723,7 +723,7 @@ namespace SystemConstants {
         // Modbus protocol
         constexpr size_t MAX_MODBUS_DATA = 252;      // Maximum Modbus data size
 
-        // Pressure sensor (4-20mA current loop on MB8ART channel 7)
+        // Pressure sensor (4-20mA current loop on MB8ART channel 4)
         namespace PressureSensor {
             constexpr float CURRENT_MIN_MA = 4.0f;              // 4mA = 0 BAR
             constexpr float CURRENT_MAX_MA = 20.0f;             // 20mA = max pressure
