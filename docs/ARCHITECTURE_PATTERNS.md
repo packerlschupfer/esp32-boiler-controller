@@ -4,6 +4,7 @@ This document describes the architectural patterns and best practices used in th
 
 ## Table of Contents
 - [System Resource Provider (SRP) Pattern](#system-resource-provider-srp-pattern)
+- [Module Extraction Pattern](#module-extraction-pattern)
 - [Thread Safety Guidelines](#thread-safety-guidelines)
 - [Event-Driven Communication](#event-driven-communication)
 - [Error Handling with Result<T>](#error-handling-with-resultt)
@@ -38,6 +39,224 @@ auto mb8art = SRP::getMB8ART();
 - Easier to mock for testing
 - Reduced coupling between components
 - Consistent error handling
+
+## Module Extraction Pattern
+
+When files grow too large (>800 lines), extract focused helper classes to improve maintainability and testability.
+
+### When to Extract
+
+Extract helper logic when:
+1. File exceeds 800-1000 lines
+2. Multiple distinct responsibilities in one file
+3. Helper functions can be logically grouped
+4. Testing individual components would benefit from isolation
+
+### Extraction Patterns
+
+#### Pattern 1: Namespace with Static Functions
+
+Best for stateless utility functions that don't need shared state:
+
+```cpp
+// BurnerSafetyChecks.h
+#pragma once
+
+class BurnerSafetyChecks {
+public:
+    // Flame detection (proxy via relay state)
+    static bool isFlameDetected();
+
+    // Run safety validation
+    static bool checkSafetyConditions();
+
+    // Check if seamless mode switch is safe
+    static bool canSeamlesslySwitch(BurnerSMState currentState);
+};
+```
+
+**Usage:**
+```cpp
+// In BurnerStateMachine.cpp
+#include "BurnerSafetyChecks.h"
+
+if (!BurnerSafetyChecks::checkSafetyConditions()) {
+    // Handle safety failure
+}
+```
+
+**Benefits:**
+- No instantiation needed (static functions)
+- Clear separation of concerns
+- Easy to test in isolation
+- No shared state to manage
+
+#### Pattern 2: Static Functions with Internal State
+
+For helpers that need minimal state tracking:
+
+```cpp
+// BurnerRuntimeTracker.h
+#pragma once
+#include <atomic>
+
+class BurnerRuntimeTracker {
+public:
+    // Record burner start time
+    static void recordStartTime();
+
+    // Update runtime counters (called on burner stop)
+    static void updateRuntimeCounters();
+
+    // Get start time for diagnostics
+    static uint32_t getStartTime();
+
+private:
+    static std::atomic<uint32_t> burnerStartTime;
+};
+```
+
+**Implementation:**
+```cpp
+// BurnerRuntimeTracker.cpp
+std::atomic<uint32_t> BurnerRuntimeTracker::burnerStartTime{0};
+
+void BurnerRuntimeTracker::recordStartTime() {
+    burnerStartTime = millis();
+}
+
+void BurnerRuntimeTracker::updateRuntimeCounters() {
+    uint32_t startTime = burnerStartTime.load();
+    uint32_t elapsedMs = millis() - startTime;
+    // Update FRAM counters...
+}
+```
+
+**Benefits:**
+- Encapsulated state management
+- Thread-safe with atomics
+- Simple interface
+- No complex lifecycle management
+
+#### Pattern 3: Delegation with Callback
+
+For helpers that need to call back into the parent class:
+
+```cpp
+// RelayCommandProcessor.h
+#pragma once
+#include <freertos/event_groups.h>
+
+class RelayCommandProcessor {
+public:
+    // Process relay requests with callback for actual relay control
+    static void processRelayRequests(
+        EventGroupHandle_t relayRequestEventGroup,
+        bool (*setRelayStateFunc)(uint8_t relayIndex, bool state)
+    );
+};
+```
+
+**Usage:**
+```cpp
+// In RelayControlTask.cpp
+void RelayControlTask::processRelayRequests() {
+    auto& resourceManager = SharedResourceManager::getInstance();
+    EventGroupHandle_t relayRequestEventGroup =
+        resourceManager.getEventGroup(SharedResourceManager::EventGroups::RELAY_REQUEST);
+
+    // Delegate with callback
+    RelayCommandProcessor::processRelayRequests(
+        relayRequestEventGroup,
+        &RelayControlTask::setRelayState  // Callback function pointer
+    );
+}
+```
+
+**Benefits:**
+- Separates event processing from control logic
+- Parent retains control over actual operations
+- Helper can be tested with mock callbacks
+- Clean separation of concerns
+
+### Extraction Guidelines
+
+**What to Extract:**
+- ✅ Safety check functions (validation logic)
+- ✅ Power control decision logic
+- ✅ Runtime tracking and counters
+- ✅ Event processing loops
+- ✅ Pump protection timing
+- ✅ Health monitoring and escalation
+
+**What NOT to Extract:**
+- ❌ Core state machine logic (FSM should stay together)
+- ❌ Task lifecycle functions (init, start, stop)
+- ❌ Single-use helper functions (<20 lines)
+- ❌ Functions tightly coupled to parent state
+
+### Real-World Examples from Round 21 Refactoring
+
+#### Example 1: BurnerStateMachine.cpp (1040 → 800 lines)
+
+**Extracted:**
+- `BurnerSafetyChecks` - 160 lines of safety validation
+- `BurnerPowerController` - 32 lines of power decision logic
+- `BurnerRuntimeTracker` - 48 lines of FRAM counter management
+
+**Result:**
+- 23% reduction in file size
+- Each component testable in isolation
+- Clearer separation of concerns
+- Easier to locate and modify specific logic
+
+#### Example 2: RelayControlTask.cpp (989 → 790 lines)
+
+**Extracted:**
+- `RelayVerificationManager` - Pump protection and health monitoring
+- `RelayCommandProcessor` - Event processing with callback pattern
+
+**Result:**
+- 20% reduction in file size
+- Pump protection logic isolated for testing
+- Event processing separated from control logic
+
+### Testing Extracted Modules
+
+Each extracted module should have corresponding unit tests:
+
+```cpp
+// test/test_native/test_burner_safety_checks.cpp
+#include <unity.h>
+#include "modules/control/BurnerSafetyChecks.h"
+
+void test_safety_conditions_pass() {
+    // Mock sensor data
+    // ...
+
+    bool result = BurnerSafetyChecks::checkSafetyConditions();
+    TEST_ASSERT_TRUE(result);
+}
+
+void test_80c_safety_limit() {
+    // Set temperature to 81°C
+    // ...
+
+    bool canIncrease = BurnerSafetyChecks::shouldIncreasePower();
+    TEST_ASSERT_FALSE(canIncrease);  // Should block high power
+}
+```
+
+### Naming Conventions
+
+Follow these naming patterns for extracted modules:
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| Safety logic | `*SafetyChecks` | `BurnerSafetyChecks` |
+| Control logic | `*Controller` | `BurnerPowerController` |
+| Tracking/monitoring | `*Tracker`, `*Monitor` | `BurnerRuntimeTracker`, `RelayHealthMonitor` |
+| Processing | `*Processor`, `*Manager` | `RelayCommandProcessor`, `RelayVerificationManager` |
 
 ## Thread Safety Guidelines
 

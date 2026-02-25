@@ -527,12 +527,48 @@ Custom development workflows in `.claude/commands/`:
 8. **Documentation**: Update relevant docs in `docs/` when changing architecture
 9. **RelayState initialization**: `initRelayState()` must be called during system startup (creates delay tracking mutex)
 
+## Recent Refactoring (Round 21)
+
+To improve code quality and maintainability, several large files were refactored by extracting helper logic into focused utility classes:
+
+### BurnerStateMachine.cpp Refactoring
+Extracted 3 helper classes (240-line reduction, 23%):
+- **BurnerSafetyChecks.h/cpp** - Safety validation and flame detection logic
+- **BurnerPowerController.h/cpp** - Power level decision logic (80°C safety limit)
+- **BurnerRuntimeTracker.h/cpp** - FRAM runtime counter tracking
+
+### RelayControlTask.cpp Refactoring
+Extracted 2 helper classes (199-line reduction, 20%):
+- **RelayVerificationManager.h/cpp** - Pump protection and health monitoring
+- **RelayCommandProcessor.h/cpp** - Relay request event processing
+
+### Memory Pool Expansion
+Added 4 new memory pools (+6KB total):
+- **DiagnosticBuffer** - 4 × 256B = 1KB
+- **ConfigBuffer** - 4 × 512B = 2KB
+- **CalcBuffer** - 8 × 128B = 1KB
+- **ErrorBuffer** - 8 × 256B = 2KB
+
+### SafeLog Utility
+Created **SafeLog.h** for safe float logging (prevents stack overflow):
+```cpp
+#include "utils/SafeLog.h"
+
+SafeLog::logFloatPair(TAG, "Temp: %.1f, Pressure: %.2f", temp, pressure);
+SafeLog::logFloatTriple(TAG, "P=%.2f I=%.2f D=%.2f", p, i, d);
+```
+
+Pattern: Uses stack-allocated buffer before passing to ESP_LOG to avoid variadic float stack issues.
+
+See `docs/ARCHITECTURE_PATTERNS.md` for the module extraction pattern details.
+
 ## Additional Resources
 
 - **Full documentation**: `docs/` directory (~180KB technical documentation)
 - **Initialization sequence**: `docs/INITIALIZATION_ORDER.md` - System startup order and dependencies
-- **Memory strategy**: `docs/MEMORY_OPTIMIZATION.md` - ESP32 static buffer rationale
+- **Memory strategy**: `docs/MEMORY_OPTIMIZATION.md` - ESP32 static buffer rationale and memory pool documentation
 - **Task architecture**: `docs/TASK_ARCHITECTURE.md` - All 18 FreeRTOS tasks
+- **Architecture patterns**: `docs/ARCHITECTURE_PATTERNS.md` - SRP pattern, module extraction, thread safety
 - **Algorithms**: `docs/ALGORITHMS.md` - 13 control algorithms including Modbus scheduling
 - **Library repositories**: https://github.com/packerlschupfer
 - **Issue tracker**: GitHub Issues

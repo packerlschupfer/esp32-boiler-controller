@@ -255,6 +255,78 @@ These tests can be integrated into CI/CD pipelines:
 
 2. **Flow Sensor Simulation**: Flow sensor functionality is simulated using temperature differential as documented in the tests.
 
+## Testing Extracted Helper Modules (Round 21)
+
+The Round 21 refactoring extracted helper classes from large files to improve maintainability. Each extracted module should ideally have unit tests:
+
+### Recommended Unit Tests
+
+#### BurnerStateMachine Helper Classes
+```cpp
+// test/test_native/test_burner_safety_checks.cpp
+- test_isFlameDetected_relay_on()
+- test_isFlameDetected_relay_off()
+- test_checkSafetyConditions_all_pass()
+- test_checkSafetyConditions_temp_limit_violated()
+- test_canSeamlesslySwitch_from_running_low()
+
+// test/test_native/test_burner_power_controller.cpp
+- test_shouldIncreasePower_below_80c()
+- test_shouldIncreasePower_blocks_at_80c()
+- test_shouldDecreasePower_logic()
+
+// test/test_native/test_burner_runtime_tracker.cpp
+- test_recordStartTime()
+- test_updateRuntimeCounters_calculates_correctly()
+- test_millis_wraparound_handling()
+```
+
+#### RelayControlTask Helper Classes
+```cpp
+// test/test_native/test_relay_verification_manager.cpp
+- test_checkPumpProtection_minimum_off_time()
+- test_getPumpProtectionTimeRemaining()
+- test_checkRelayHealthAndEscalate_consecutive_failures()
+
+// test/test_native/test_relay_command_processor.cpp
+- test_processRelayRequests_heating_pump_on()
+- test_processRelayRequests_water_pump_on()
+- test_processRelayRequests_burner_enable()
+```
+
+### Testing Strategy for Helper Classes
+
+**Advantages of Testing Extracted Modules:**
+1. Faster test execution (no full system setup required)
+2. Better isolation (test one responsibility at a time)
+3. Easier to mock dependencies
+4. More comprehensive edge case coverage
+
+**Example Test Structure:**
+```cpp
+#include <unity.h>
+#include "modules/control/BurnerSafetyChecks.h"
+#include "mocks/MockSystemResourceProvider.h"
+
+void setUp() {
+    MockSystemResourceProvider::reset();
+}
+
+void test_80c_safety_limit_blocks_high_power() {
+    // Arrange: Set boiler temp to 81°C
+    MockSystemResourceProvider::setSensorReading(
+        SensorType::BOILER_OUTPUT,
+        Temperature_t(810)  // 81.0°C
+    );
+
+    // Act
+    bool canIncrease = BurnerPowerController::shouldIncreasePower(false);
+
+    // Assert
+    TEST_ASSERT_FALSE(canIncrease);
+}
+```
+
 ## Future Improvements
 
 1. Add more embedded tests for:
@@ -271,7 +343,15 @@ These tests can be integrated into CI/CD pipelines:
    - Full system startup sequence
    - Fault recovery scenarios
 
-3. Add performance benchmarks for:
+3. **Add unit tests for Round 21 extracted modules:**
+   - ⏳ BurnerSafetyChecks (safety validation logic)
+   - ⏳ BurnerPowerController (80°C safety limit)
+   - ⏳ BurnerRuntimeTracker (FRAM counter management)
+   - ⏳ RelayVerificationManager (pump protection)
+   - ⏳ RelayCommandProcessor (event processing)
+   - ⏳ SafeLog utility (float logging safety)
+
+4. Add performance benchmarks for:
    - Task execution times
    - Memory usage patterns
    - Communication latencies

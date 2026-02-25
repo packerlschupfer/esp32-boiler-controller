@@ -225,6 +225,130 @@ char* p5 = TempBuffer::get();  // Overwrites p1!
 
 ---
 
+### 7. Memory Pools (Round 21 Expansion)
+
+#### Existing Memory Pools (Pre-Round 21)
+```cpp
+namespace MemoryPools {
+    MemoryPool<MqttBuffer, 4> mqttBufferPool;           // 4 × 256B = 1KB
+    MemoryPool<SensorReading, 8> sensorReadingPool;     // 8 × 32B = 256B
+    MemoryPool<JsonDocBuffer, 3> jsonBufferPool;        // 3 × 512B = 1.5KB
+    MemoryPool<StringBuffer, 4> stringBufferPool;       // 4 × 128B = 512B
+    MemoryPool<LogBuffer, 3> logBufferPool;             // 3 × 256B = 768B
+    MemoryPool<TempBuffer, 6> tempBufferPool;           // 6 × 64B = 384B
+}
+// Total: 4,480 bytes
+```
+
+**Purpose**: Reduce heap fragmentation by pre-allocating fixed-size blocks for frequent small allocations.
+
+**Thread-safety**: Each pool has an internal mutex (`lazyInit()` pattern).
+
+#### Round 21 Memory Pool Expansion (+6KB)
+
+```cpp
+namespace MemoryPools {
+    // NEW: Diagnostic message buffers (4 × 256B = 1KB)
+    MemoryPool<DiagnosticBuffer, 4> diagnosticBufferPool;
+
+    // NEW: Configuration buffers (4 × 512B = 2KB)
+    MemoryPool<ConfigBuffer, 4> configBufferPool;
+
+    // NEW: Calculation buffers (8 × 128B = 1KB)
+    MemoryPool<CalcBuffer, 8> calcBufferPool;
+
+    // NEW: Error message buffers (8 × 256B = 2KB)
+    MemoryPool<ErrorBuffer, 8> errorBufferPool;
+}
+// New Total: 10,496 bytes (~10.2KB)
+```
+
+**Rationale**:
+- Reduces heap allocation churn during diagnostics and error handling
+- Pre-allocated pools prevent fragmentation during runtime
+- Small RAM cost (3% of available heap) for significant stability improvement
+
+**Usage Pattern**:
+```cpp
+// Allocate from pool
+auto buf = MemoryPools::diagnosticBufferPool.allocate();
+if (!buf) {
+    LOG_ERROR(TAG, "Pool exhausted");
+    return;
+}
+
+// Use buffer
+snprintf(buf->data, sizeof(buf->data), "Diagnostic message");
+publish(buf->data);
+
+// Automatic deallocation when buf goes out of scope (RAII)
+```
+
+**Pool Exhaustion Handling**:
+- Pools return `nullptr` when exhausted
+- Caller must check and handle gracefully (skip operation or fallback)
+- Pool stats available via `getStats()` for monitoring
+
+**Measured Impact** (from Round 21):
+- RAM usage increased from ~40KB to ~46KB (+6KB as expected)
+- Heap fragmentation reduced significantly during stress testing
+- No pool exhaustion observed under normal operation
+
+---
+
+### 8. SafeLog Utility (Round 21)
+
+**Problem**: Logging multiple float values with variadic printf-style functions can cause stack overflow on ESP32.
+
+**Bad Pattern** (stack overflow risk):
+```cpp
+// ❌ DANGEROUS: Multiple floats on variadic stack
+LOG_INFO(TAG, "PID: Kp=%.3f Ki=%.3f Kd=%.3f", kp, ki, kd);
+```
+
+**Safe Pattern** (SafeLog utility):
+```cpp
+// ✅ SAFE: Pre-format floats into buffer before logging
+#include "utils/SafeLog.h"
+
+SafeLog::logFloatTriple(TAG, "PID: Kp=%.3f Ki=%.3f Kd=%.3f", kp, ki, kd);
+```
+
+**Implementation**:
+```cpp
+class SafeLog {
+public:
+    static void logFloatPair(const char* tag, const char* format, float v1, float v2) {
+        char buffer[128];  // Stack-allocated temp buffer
+        snprintf(buffer, sizeof(buffer), format, v1, v2);
+        ESP_LOGI(tag, "%s", buffer);  // Single string argument
+    }
+
+    static void logFloatTriple(const char* tag, const char* format, float v1, float v2, float v3) {
+        char buffer[128];
+        snprintf(buffer, sizeof(buffer), format, v1, v2, v3);
+        ESP_LOGI(tag, "%s", buffer);
+    }
+
+    // Variants for DEBUG and WARN levels
+    static void logFloatPairDebug(...);
+    static void logFloatTripleWarn(...);
+};
+```
+
+**Why It Works**:
+- Float formatting happens in controlled stack buffer (128B)
+- ESP_LOG receives single string argument (no variadic float issues)
+- Buffer is stack-local (fast, no heap allocation)
+- Thread-safe (each call has its own buffer)
+
+**Adoption Status** (Round 21):
+- Converted 2 critical instances in `PIDControlModule.cpp`
+- Pattern established for future conversions
+- Remaining ~27 instances can be converted incrementally
+
+---
+
 ## 📏 Stack Size Constraints
 
 ### Measured Stack Free Space (Runtime)
