@@ -9,9 +9,10 @@ namespace SafetyConfig {
     uint32_t pumpProtectionMs = Defaults::PUMP_PROTECTION_MS;
     uint32_t sensorStaleMs = Defaults::SENSOR_STALE_MS;
     uint32_t postPurgeMs = Defaults::POST_PURGE_MS;
-    uint32_t errorRecoveryMs = Defaults::ERROR_RECOVERY_MS;  // M4: configurable error recovery delay
-    int32_t pidIntegralMin = Defaults::PID_INTEGRAL_MIN;     // M1: PID anti-windup lower limit
-    int32_t pidIntegralMax = Defaults::PID_INTEGRAL_MAX;     // M1: PID anti-windup upper limit
+    uint32_t errorRecoveryMs = Defaults::ERROR_RECOVERY_MS;                // M4: configurable error recovery delay
+    int32_t pidIntegralMin = Defaults::PID_INTEGRAL_MIN;                   // M1: PID anti-windup lower limit
+    int32_t pidIntegralMax = Defaults::PID_INTEGRAL_MAX;                   // M1: PID anti-windup upper limit
+    uint32_t thermalShockDifferentialC = Defaults::THERMAL_SHOCK_DIFFERENTIAL_C; // tenths of °C
 
     static Preferences prefs;
     static const char* NVS_NAMESPACE = "safety";
@@ -26,6 +27,7 @@ namespace SafetyConfig {
         errorRecoveryMs = prefs.getUInt("err_recov", Defaults::ERROR_RECOVERY_MS);  // M4
         pidIntegralMin = prefs.getInt("pid_int_min", Defaults::PID_INTEGRAL_MIN);   // M1
         pidIntegralMax = prefs.getInt("pid_int_max", Defaults::PID_INTEGRAL_MAX);   // M1
+        thermalShockDifferentialC = prefs.getUInt("therm_shock", Defaults::THERMAL_SHOCK_DIFFERENTIAL_C);
         prefs.end();
 
         // Validate loaded values
@@ -72,9 +74,17 @@ namespace SafetyConfig {
             pidIntegralMax = Defaults::PID_INTEGRAL_MAX;
         }
 
+        if (thermalShockDifferentialC < Limits::THERMAL_SHOCK_MIN_C ||
+            thermalShockDifferentialC > Limits::THERMAL_SHOCK_MAX_C) {
+            LOG_WARN(TAG, "Invalid therm_shock %lu in NVS, using default %lu (tenths °C)",
+                     thermalShockDifferentialC, Defaults::THERMAL_SHOCK_DIFFERENTIAL_C);
+            thermalShockDifferentialC = Defaults::THERMAL_SHOCK_DIFFERENTIAL_C;
+        }
+
         LOG_INFO(TAG, "Loaded safety config: pump_prot=%lu, sensor_stale=%lu, post_purge=%lu, err_recov=%lu ms",
                  pumpProtectionMs, sensorStaleMs, postPurgeMs, errorRecoveryMs);
-        LOG_INFO(TAG, "PID integral limits: min=%ld, max=%ld (scaled x1000)",
+        LOG_INFO(TAG, "Thermal shock limit: %lu.%lu°C, PID integral limits: min=%ld, max=%ld (scaled x1000)",
+                 thermalShockDifferentialC / 10, thermalShockDifferentialC % 10,
                  (long)pidIntegralMin, (long)pidIntegralMax);
     }
 
@@ -86,6 +96,7 @@ namespace SafetyConfig {
         prefs.putUInt("err_recov", errorRecoveryMs);  // M4
         prefs.putInt("pid_int_min", pidIntegralMin);  // M1
         prefs.putInt("pid_int_max", pidIntegralMax);  // M1
+        prefs.putUInt("therm_shock", thermalShockDifferentialC);
         prefs.end();
 
         LOG_INFO(TAG, "Saved safety config to NVS: pump_prot=%lu, sensor_stale=%lu, post_purge=%lu, err_recov=%lu ms",
@@ -181,6 +192,18 @@ namespace SafetyConfig {
         pidIntegralMax = max;
         LOG_INFO(TAG, "Set PID integral limits: min=%ld, max=%ld (%.1f to %.1f °C)",
                  (long)min, (long)max, min / 1000.0f, max / 1000.0f);
+        return true;
+    }
+
+    bool setThermalShock(uint32_t tenthsC) {
+        if (tenthsC < Limits::THERMAL_SHOCK_MIN_C || tenthsC > Limits::THERMAL_SHOCK_MAX_C) {
+            LOG_WARN(TAG, "Invalid thermal_shock %lu tenths-°C (range: %lu-%lu, i.e. %.1f-%.1f°C)",
+                     tenthsC, Limits::THERMAL_SHOCK_MIN_C, Limits::THERMAL_SHOCK_MAX_C,
+                     Limits::THERMAL_SHOCK_MIN_C / 10.0f, Limits::THERMAL_SHOCK_MAX_C / 10.0f);
+            return false;
+        }
+        thermalShockDifferentialC = tenthsC;
+        LOG_INFO(TAG, "Set thermal_shock to %lu.%lu°C", tenthsC / 10, tenthsC % 10);
         return true;
     }
 }

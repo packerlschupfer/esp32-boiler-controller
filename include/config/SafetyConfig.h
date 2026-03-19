@@ -14,6 +14,7 @@ namespace SafetyConfig {
         constexpr uint32_t SENSOR_STALE_MS = 60000;         // 60s
         constexpr uint32_t POST_PURGE_MS = 90000;           // 90s
         constexpr uint32_t ERROR_RECOVERY_MS = 300000;      // 5min (M4: configurable error recovery delay)
+        constexpr uint32_t THERMAL_SHOCK_DIFFERENTIAL_C = 450; // 45.0°C (tenths of °C) - cast iron boiler, raised from 30°C
 
         // M1: PID anti-windup limits (fixed-point scaled by 1000)
         // Values represent temperature adjustment limits in °C
@@ -35,6 +36,9 @@ namespace SafetyConfig {
         constexpr uint32_t ERROR_RECOVERY_MIN_MS = 60000;   // 1min minimum
         constexpr uint32_t ERROR_RECOVERY_MAX_MS = 1800000; // 30min maximum
 
+        constexpr uint32_t THERMAL_SHOCK_MIN_C = 100;       // 10.0°C minimum (tenths of °C)
+        constexpr uint32_t THERMAL_SHOCK_MAX_C = 600;       // 60.0°C maximum (tenths of °C)
+
         // M1: PID anti-windup limit ranges (fixed-point scaled by 1000)
         constexpr int32_t PID_INTEGRAL_MIN_LIMIT = -500000; // -500.0°C (absolute minimum)
         constexpr int32_t PID_INTEGRAL_MAX_LIMIT = 500000;  // +500.0°C (absolute maximum)
@@ -44,9 +48,10 @@ namespace SafetyConfig {
     extern uint32_t pumpProtectionMs;
     extern uint32_t sensorStaleMs;
     extern uint32_t postPurgeMs;
-    extern uint32_t errorRecoveryMs;  // M4: configurable error recovery delay
-    extern int32_t pidIntegralMin;    // M1: PID anti-windup lower limit
-    extern int32_t pidIntegralMax;    // M1: PID anti-windup upper limit
+    extern uint32_t errorRecoveryMs;          // M4: configurable error recovery delay
+    extern int32_t pidIntegralMin;            // M1: PID anti-windup lower limit
+    extern int32_t pidIntegralMax;            // M1: PID anti-windup upper limit
+    extern uint32_t thermalShockDifferentialC; // tenths of °C, e.g. 450 = 45.0°C
 
     // Initialize from NVS (call at startup)
     void loadFromNVS();
@@ -58,8 +63,9 @@ namespace SafetyConfig {
     bool setPumpProtection(uint32_t ms);
     bool setSensorStale(uint32_t ms);
     bool setPostPurge(uint32_t ms);
-    bool setErrorRecovery(uint32_t ms);  // M4: configurable error recovery delay
+    bool setErrorRecovery(uint32_t ms);        // M4: configurable error recovery delay
     bool setPIDIntegralLimits(int32_t min, int32_t max);  // M1: PID anti-windup limits
+    bool setThermalShock(uint32_t tenthsC);    // tenths of °C, e.g. 450 = 45.0°C
 
     // Compile-time validation of defaults
     static_assert(Defaults::ERROR_RECOVERY_MS >= Limits::ERROR_RECOVERY_MIN_MS,

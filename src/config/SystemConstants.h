@@ -226,7 +226,7 @@ namespace SystemConstants {
         constexpr Temperature_t TEMP_DIFF_THRESHOLD_MEDIUM_C = 50; // 5.0°C
 
         // Thermal shock protection (output vs return temp difference)
-        constexpr Temperature_t MAX_TEMP_DIFFERENTIAL_C = 300;     // 30.0°C max output-return differential
+        constexpr Temperature_t MAX_TEMP_DIFFERENTIAL_C = 450;     // 45.0°C max output-return differential (cast iron boiler default)
 
         // Water heater limits
         constexpr Temperature_t WATER_MAX_SAFE_TEMP_C = 650;       // 65.0°C max water heater temp

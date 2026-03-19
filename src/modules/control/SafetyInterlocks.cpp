@@ -411,7 +411,7 @@ SafetyInterlocks::InterlockStatus SafetyInterlocks::performFullSafetyCheck(bool 
     
     // 4. Check temperature limits
     status.temperatureInRange = checkTemperatureLimits(SystemConstants::Temperature::MAX_BOILER_TEMP_C) &&
-                                checkThermalShock(tempFromWhole(30));  // 30.0°C
+                                checkThermalShock(static_cast<Temperature_t>(SafetyConfig::thermalShockDifferentialC));
     
     // 5. Check communication status
     status.communicationOk = checkCommunicationStatus();

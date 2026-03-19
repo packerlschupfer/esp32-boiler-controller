@@ -627,12 +627,13 @@ void handleSchedulerCommand(const char* topic, const char* payload) {
  * @brief Publish current safety configuration
  */
 void publishSafetyConfig() {
-    char json[128];
+    char json[160];
     int written = snprintf(json, sizeof(json),
-        "{\"pump_prot\":%lu,\"sensor_stale\":%lu,\"post_purge\":%lu}",
+        "{\"pump_prot\":%lu,\"sensor_stale\":%lu,\"post_purge\":%lu,\"thermal_shock_c\":%lu}",
         SafetyConfig::pumpProtectionMs,
         SafetyConfig::sensorStaleMs,
-        SafetyConfig::postPurgeMs);
+        SafetyConfig::postPurgeMs,
+        SafetyConfig::thermalShockDifferentialC);
 
     // M1: Check for buffer overflow
     if (written < 0 || static_cast<size_t>(written) >= sizeof(json)) {
@@ -675,6 +676,8 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         success = SafetyConfig::setSensorStale(value);
     } else if (strstr(topic, "post_purge_ms") != nullptr) {
         success = SafetyConfig::setPostPurge(value);
+    } else if (strstr(topic, "thermal_shock_c") != nullptr) {
+        success = SafetyConfig::setThermalShock(value);
     }
     // Return preheating (thermal shock mitigation) config
     // H1 fix: All SystemSettings writes are now mutex-protected (same pattern as handleHeatingCommand)
