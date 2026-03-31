@@ -147,6 +147,7 @@ Runtime-configurable safety parameters via MQTT:
 - Sensor staleness timeout: 30-300s (default 60s)
 - Pump protection delay: 5-60s (default 15s)
 - Post-purge duration: 30-180s (default 90s)
+- Thermal shock differential: 10-60°C (default 45°C)
 
 See `docs/SAFETY_SYSTEM.md` for complete architecture.
 
@@ -362,6 +363,7 @@ boiler/cmd/water                     - on/off/override_on/override_off
 boiler/cmd/config/sensor_stale_ms    - 30000-300000 (safety config)
 boiler/cmd/config/pump_protection_ms - 5000-60000 (equipment protection)
 boiler/cmd/config/post_purge_ms      - 30000-180000 (post-purge duration)
+boiler/cmd/config/thermal_shock_c    - 100-600 tenths of °C (thermal shock limit, default 450)
 boiler/cmd/scheduler/add             - Add schedule (JSON)
 boiler/cmd/scheduler/remove          - Remove schedule by ID
 ```

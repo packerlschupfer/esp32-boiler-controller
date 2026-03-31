@@ -318,7 +318,8 @@ Runtime-configurable safety parameters with validation and NVS persistence.
 {
   "pump_prot": 15000,
   "sensor_stale": 60000,
-  "post_purge": 90000
+  "post_purge": 90000,
+  "thermal_shock_c": 450
 }
 ```
 
@@ -361,6 +362,19 @@ mosquitto_pub -h $BROKER -u $USER -P $PASS \
   -t "boiler/cmd/config/post_purge_ms" -m "60000"
 ```
 
+#### Set Thermal Shock Differential Limit
+Maximum allowed temperature differential between boiler output and return before triggering thermal shock protection.
+
+**Topic**: `boiler/cmd/config/thermal_shock_c`
+**Range**: 100-600 (tenths of °C, i.e. 10.0-60.0°C)
+**Default**: 450 (45.0°C)
+
+```bash
+# Set to 45°C (default, suitable for cast iron boilers like Vaillant VK 42/4-2)
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/thermal_shock_c" -m "450"
+```
+
 **Notes**:
 - Changes are saved immediately to NVS (persist across reboots)
 - Updated config is published to `boiler/status/safety_config`
@@ -369,7 +383,7 @@ mosquitto_pub -h $BROKER -u $USER -P $PASS \
 
 ### Return Preheat Configuration (Thermal Shock Mitigation)
 
-When transitioning from water heating to space heating, the heating return line may be cold while the boiler is hot. Starting with a large temperature differential (>30°C) risks thermal shock damage to the boiler.
+When transitioning from water heating to space heating, the heating return line may be cold while the boiler is hot. Starting with a large temperature differential (exceeding the thermal shock limit, default 45°C) risks thermal shock damage to the boiler. The limit is runtime-configurable via `boiler/cmd/config/thermal_shock_c`.
 
 The preheat system cycles the heating pump to gradually warm the return line before allowing the burner to start. Progressive pump cycling pattern:
 - ON durations increase: 3s → 5s → 8s → 12s → 15s (more circulation as system warms)
@@ -710,6 +724,7 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/cmd/config/pump_protection_ms` | Pump protection delay | Integer (5000-60000) |
 | `boiler/cmd/config/sensor_stale_ms` | Sensor staleness timeout | Integer (30000-300000) |
 | `boiler/cmd/config/post_purge_ms` | Post-purge duration | Integer (30000-180000) |
+| `boiler/cmd/config/thermal_shock_c` | Thermal shock differential limit | Integer (100-600) |
 | `boiler/cmd/config/preheat_enabled` | Enable/disable preheating | Integer (0-1) |
 | `boiler/cmd/config/preheat_off_multiplier` | OFF duration multiplier | Integer (1-10) |
 | `boiler/cmd/config/preheat_max_cycles` | Max preheat cycles | Integer (1-20) |
