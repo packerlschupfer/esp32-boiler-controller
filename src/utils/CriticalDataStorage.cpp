@@ -55,6 +55,21 @@ bool CriticalDataStorage::writeToFRAM(uint16_t address, const void* data, size_t
         return false;
     }
 
+    // F41: also serialize against RuntimeStorage, which drives the SAME physical
+    // FRAM chip on the shared I2C bus with its own separate mutex. Without this,
+    // a RuntimeStorage transaction could land between our set-address and data
+    // phases (or vice versa), moving the FRAM address latch mid-operation.
+    SemaphoreHandle_t busMutex = storage_->getBusMutex();
+    bool busLocked = false;
+    if (busMutex) {
+        if (xSemaphoreTake(busMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_FRAM_TIMEOUT_MS)) != pdTRUE) {
+            LOG_ERROR("CriticalData", "Failed to acquire shared FRAM bus mutex for write");
+            xSemaphoreGive(framMutex_);
+            return false;
+        }
+        busLocked = true;
+    }
+
     const uint8_t* bytes = (const uint8_t*)data;
     uint8_t i2cAddr = 0x50;  // Default FRAM address
     bool success = true;
@@ -86,6 +101,7 @@ bool CriticalDataStorage::writeToFRAM(uint16_t address, const void* data, size_t
         }
     }
 
+    if (busLocked) xSemaphoreGive(busMutex);
     xSemaphoreGive(framMutex_);
     return success;
 }
@@ -109,6 +125,19 @@ bool CriticalDataStorage::readFromFRAM(uint16_t address, void* data, size_t size
         return false;
     }
 
+    // F41: serialize the two-phase (set-address then requestFrom) read against
+    // RuntimeStorage on the shared FRAM bus - see writeToFRAM for rationale.
+    SemaphoreHandle_t busMutex = storage_->getBusMutex();
+    bool busLocked = false;
+    if (busMutex) {
+        if (xSemaphoreTake(busMutex, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_FRAM_TIMEOUT_MS)) != pdTRUE) {
+            LOG_ERROR("CriticalData", "Failed to acquire shared FRAM bus mutex for read");
+            xSemaphoreGive(framMutex_);
+            return false;
+        }
+        busLocked = true;
+    }
+
     uint8_t* bytes = (uint8_t*)data;
     uint8_t i2cAddr = 0x50;  // Default FRAM address
     bool success = true;
@@ -120,6 +149,7 @@ bool CriticalDataStorage::readFromFRAM(uint16_t address, void* data, size_t size
 
     if (Wire.endTransmission() != 0) {
         LOG_ERROR("CriticalData", "FRAM read setup failed at address 0x%04X", address);
+        if (busLocked) xSemaphoreGive(busMutex);
         xSemaphoreGive(framMutex_);
         return false;
     }
@@ -147,6 +177,7 @@ bool CriticalDataStorage::readFromFRAM(uint16_t address, void* data, size_t size
         }
     }
 
+    if (busLocked) xSemaphoreGive(busMutex);
     xSemaphoreGive(framMutex_);
     return success;
 }

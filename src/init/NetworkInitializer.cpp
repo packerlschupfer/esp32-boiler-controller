@@ -98,23 +98,32 @@ Result<void> NetworkInitializer::initializeBlocking() {
 void NetworkInitializer::networkMonitorTask(void* param) {
     (void)param;
 
-    // Wait for network connection in background
-    const uint32_t QUICK_CHECK_MS = 5000;  // Quick check first
+    // F39: keep checking until the Ethernet link comes up, rather than giving up
+    // after ETH_CONNECTION_TIMEOUT_MS and self-deleting. After a power outage the
+    // ESP32 boots in ~5s while the switch can take 1-2 min to bring the port up;
+    // the old one-shot 15s window meant GeneralSystem::NETWORK_READY was never
+    // set, so NTP, Syslog and OTA (all gated on that bit) stayed dead for the
+    // entire uptime even though MQTT (which polls isConnected directly) recovered.
+    // waitForConnection() blocks up to CHECK_INTERVAL_MS, so the loop self-paces.
+    const uint32_t CHECK_INTERVAL_MS = 5000;
+    const uint32_t start = millis();
+    bool loggedStillDown = false;
 
-    if (EthernetManager::waitForConnection(QUICK_CHECK_MS)) {
-        LOG_INFO("NetworkMonitor", "Network connected successfully");
-        EthernetManager::logEthernetStatus();
-        SRP::setGeneralSystemEventBits(SystemEvents::GeneralSystem::NETWORK_READY);
-    } else {
-        // Continue waiting for full timeout
-        if (EthernetManager::waitForConnection(ETH_CONNECTION_TIMEOUT_MS - QUICK_CHECK_MS)) {
-            LOG_INFO("NetworkMonitor", "Network connected after extended wait");
+    while (true) {
+        if (EthernetManager::waitForConnection(CHECK_INTERVAL_MS)) {
+            LOG_INFO("NetworkMonitor", "Network connected (after %lu ms)",
+                     (unsigned long)(millis() - start));
             EthernetManager::logEthernetStatus();
             SRP::setGeneralSystemEventBits(SystemEvents::GeneralSystem::NETWORK_READY);
-        } else {
-            LOG_WARN("NetworkMonitor", "Network connection timeout - system will operate offline");
+            break;
+        }
+        if (!loggedStillDown && (millis() - start) >= ETH_CONNECTION_TIMEOUT_MS) {
+            LOG_WARN("NetworkMonitor",
+                     "Network still down after %lu ms - continuing to wait for link-up",
+                     (unsigned long)ETH_CONNECTION_TIMEOUT_MS);
+            loggedStillDown = true;
         }
     }
 
-    vTaskDelete(NULL);  // Delete this task
+    vTaskDelete(NULL);  // Delete this task once the link is up
 }

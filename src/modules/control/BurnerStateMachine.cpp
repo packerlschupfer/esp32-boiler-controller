@@ -743,15 +743,29 @@ BurnerSMState BurnerStateMachine::handleModeSwitchingState() {
         // HeatingControlTask runs on 5s intervals, may not have set request yet
         // during seamless water→heating transition
         if (!newModeIsWater) {
-            // Check if room temperature is below target (heating needed)
-            SystemSettings& settings = SRP::getSystemSettings();
-            SharedSensorReadings readings = SRP::getSensorReadings();
-            if (readings.isInsideTempValid &&
-                readings.insideTemp < settings.targetTemperatureInside) {
+            // Check if room temperature is below target (heating needed).
+            // F33: snapshot settings and sensor readings UNDER their mutexes
+            // (missed spot of the Round-22 H2 fix). The prior unlocked reads
+            // could pair a stale isInsideTempValid with an in-flight insideTemp
+            // (or a half-updated target), mis-deciding the water->heating handoff.
+            Temperature_t targetInside = 0;
+            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
+                targetInside = SRP::getSystemSettings().targetTemperatureInside;
+                SRP::giveSystemSettingsMutex();
+            }
+            SharedSensorReadings readings{};
+            bool haveReadings = false;
+            if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
+                readings = SRP::getSensorReadings();
+                SRP::giveSensorReadingsMutex();
+                haveReadings = true;
+            }
+            if (haveReadings && readings.isInsideTempValid &&
+                readings.insideTemp < targetInside) {
                 // Room is cold - heating IS needed, don't shut down
                 char roomBuf[16], targetBuf[16];
                 formatTemp(roomBuf, sizeof(roomBuf), readings.insideTemp);
-                formatTemp(targetBuf, sizeof(targetBuf), settings.targetTemperatureInside);
+                formatTemp(targetBuf, sizeof(targetBuf), targetInside);
                 LOG_INFO(TAG, "Heating needed (room %s°C < target %s°C) - waiting for HeatingControlTask",
                         roomBuf, targetBuf);
                 // Stay in MODE_SWITCHING, HeatingControlTask will set request soon

@@ -70,19 +70,24 @@ static void updateRTCFromNTP(time_t utcTime) {
     localtime_r(&utcTime, &localTm);
     gmtime_r(&utcTime, &utcTm);
     
-    // Calculate hour difference
-    int hourDiff = localTm.tm_hour - utcTm.tm_hour;
-    
-    // Handle day boundary
-    if (localTm.tm_mday != utcTm.tm_mday) {
-        if (localTm.tm_mday > utcTm.tm_mday) {
-            hourDiff += 24;  // Local time is next day
-        } else {
-            hourDiff -= 24;  // Local time is previous day
-        }
+    // F37: compute the timezone offset from the full calendar-field difference
+    // between the two representations of the SAME instant, NOT a tm_mday compare.
+    // The old handling inverted at month/year boundaries (local mday 1 is not
+    // > utc mday 31), so at e.g. UTC Jan 31 23:30 -> local Feb 1 00:30 it
+    // subtracted 24h instead of adding it, setting the RTC ~47h off. A timezone
+    // offset is always < 24h, so the instant straddles at most one day boundary:
+    // use tm_yday within a year and +/-1 day across a year boundary. (timegm()
+    // would be cleaner but is not declared in this toolchain.)
+    int dayDiff;
+    if (localTm.tm_year != utcTm.tm_year) {
+        dayDiff = (localTm.tm_year > utcTm.tm_year) ? 1 : -1;
+    } else {
+        dayDiff = localTm.tm_yday - utcTm.tm_yday;
     }
-    
-    int32_t tzOffset = hourDiff * 3600;  // Convert to seconds
+    int32_t tzOffset = static_cast<int32_t>(dayDiff) * 86400
+                     + (localTm.tm_hour - utcTm.tm_hour) * 3600
+                     + (localTm.tm_min  - utcTm.tm_min)  * 60
+                     + (localTm.tm_sec  - utcTm.tm_sec);
     
     // Use explicit casting to avoid format string issues
     LOG_INFO(TAG, "Updating RTC from NTP: UTC epoch=%ld, offset=%d (%+d hours)", 

@@ -151,6 +151,12 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         // Check if system is enabled first - if not, pump must be off (no overrun)
         bool systemEnabled = (systemBits & SystemEvents::SystemState::BOILER_ENABLED) != 0;
 
+        // F13: an emergency stop clears BOILER_ENABLED but leaves residual heat in
+        // the exchanger. The failsafe explicitly turns pumps ON for dissipation;
+        // without this override PumpControlModule would compute Off (systemEnabled
+        // false) and stop the pump within one 500ms cycle, defeating the failsafe.
+        bool emergencyDissipation = (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+
         // Pump should be on if system is enabled AND in the appropriate mode
         bool modeActive = (systemBits & config->modeActiveBit) != 0;
 
@@ -189,6 +195,14 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         // Override: During preheating, ReturnPreheater controls pump cycling
         if (preheatingActive) {
             desiredState = ReturnPreheater::shouldPumpBeOn() ? PumpState::On : PumpState::Off;
+        }
+
+        // F13: emergency heat-dissipation has final say - keep the pump running
+        // for as long as the emergency-stop latch is set, regardless of enabled
+        // state, overrun, or preheating.
+        if (emergencyDissipation) {
+            desiredState = PumpState::On;
+            inOverrun = false;
         }
 
         // Read current state with mutex protection

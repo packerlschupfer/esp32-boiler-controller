@@ -111,15 +111,21 @@ bool BurnerRequestManager::atomicUpdateBits(EventBits_t setBits, EventBits_t cle
             LOG_DEBUG(TAG, "Setting change event bits: 0x%06X", changeEvents);
         }
 
-        // Atomic clear-and-set using critical section to prevent TOCTOU race
-        // Without this, readers could see empty state between clear and set
-        portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
-        portENTER_CRITICAL(&spinlock);
+        // F9: this whole function already runs under requestMutex (see caller),
+        // which serializes writers. The previous function-local portMUX_TYPE
+        // provided NO additional exclusion - a stack-local spinlock excludes no
+        // other task/core - and, worse, wrapped xEventGroupSetBits (which calls
+        // vTaskSuspendAll internally) inside portENTER_CRITICAL, an ESP-IDF
+        // violation that can trip configASSERT. It is removed. The clear-then-set
+        // window is only observable to the raw-bit readers, and every reachable
+        // outcome of a torn read is fail-safe (transient demand-drop -> burner
+        // coasts OFF, self-corrects next cycle); the CHANGED edge notification
+        // (handled robustly by BurnerControlTask, see F10) is the authoritative
+        // change signal.
         xEventGroupClearBits(eventGroup, STATE_BITS);
         if (newBits != 0 || changeEvents != 0) {
             xEventGroupSetBits(eventGroup, newBits | changeEvents);
         }
-        portEXIT_CRITICAL(&spinlock);
     }
 
     if (changed) {
@@ -315,46 +321,10 @@ bool BurnerRequestManager::isHighPowerRequested() {
     return (getCurrentRequests() & SystemEvents::BurnerRequest::POWER_HIGH) != 0;
 }
 
-bool BurnerRequestManager::updateTargetTemp(Temperature_t newTemp) {
-    if (!initialized || !requestMutex) {
-        LOG_ERROR(TAG, "Not initialized");
-        return false;
-    }
-
-    // Validate temperature (20°C to 90°C)
-    Temperature_t minTemp = tempFromWhole(20);
-    Temperature_t maxTemp = tempFromWhole(90);
-    if (newTemp < minTemp) newTemp = minTemp;
-    if (newTemp > maxTemp) newTemp = maxTemp;
-
-    auto guard = MutexRetryHelper::acquireGuard(
-        requestMutex,
-        "BurnerRequest-UpdateTemp",
-        pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)
-    );
-    if (!guard) {
-        LOG_ERROR(TAG, "Failed to acquire mutex");
-        return false;
-    }
-
-    EventGroupHandle_t eventGroup = getBurnerRequestEventGroup();
-    if (!eventGroup) {
-        return false;
-    }
-
-    // Read current bits, clear temperature, set new temperature
-    EventBits_t currentBits = xEventGroupGetBits(eventGroup);
-    EventBits_t newBits = (currentBits & ~SystemEvents::BurnerRequest::TEMPERATURE_MASK) |
-                         SystemEvents::BurnerRequest::encode_temperature(newTemp);
-
-    xEventGroupClearBits(eventGroup, SystemEvents::BurnerRequest::ALL_BITS);
-    xEventGroupSetBits(eventGroup, newBits);
-
-    char tempStr[16];
-    formatTemp(tempStr, sizeof(tempStr), newTemp);
-    LOG_DEBUG(TAG, "Updated target temp to %s°C", tempStr);
-    return true;
-}
+// F9: updateTargetTemp() removed - it was dead code (zero callers) and did an
+// UNPROTECTED xEventGroupClearBits(ALL_BITS) followed by set, a worse instance
+// of the same clear-then-set race. Target temperature is updated only through
+// setHeatingRequest/setWaterRequest, which run under requestMutex.
 
 void BurnerRequestManager::emergencyClearAll() {
     LOG_ERROR(TAG, "EMERGENCY: Clearing all burner requests");

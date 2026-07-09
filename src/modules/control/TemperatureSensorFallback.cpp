@@ -111,9 +111,14 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
 
             // Check if sensor data is fresh
             // M3: Use configurable SafetyConfig::sensorStaleMs instead of hardcoded SENSOR_TIMEOUT_MS
-            bool dataFresh = isSensorDataFresh(readings.lastUpdateTimestamp, SafetyConfig::sensorStaleMs);
+            // F5: freshness is per-source. Boiler/water sensors come from the
+            // MB8ART (lastBoilerTempUpdateTimestamp); the room sensor comes from
+            // the ANDRTF3 (lastUpdateTimestamp). Gating boiler validity on the
+            // shared timestamp let a live room sensor mask a dead MB8ART.
+            bool boilerDataFresh = isSensorDataFresh(readings.lastBoilerTempUpdateTimestamp, SafetyConfig::sensorStaleMs);
+            bool roomDataFresh   = isSensorDataFresh(readings.lastUpdateTimestamp, SafetyConfig::sensorStaleMs);
 
-            if (dataFresh) {
+            if (boilerDataFresh) {
                 // Update sensor validity - pass Temperature_t directly, no conversion needed
                 currentStatus.boilerOutputValid = readings.isBoilerTempOutputValid &&
                                                  validateSensorReading(readings.boilerTempOutput);
@@ -121,19 +126,23 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
                                                  validateSensorReading(readings.boilerTempReturn);
                 currentStatus.waterTempValid = readings.isWaterHeaterTempTankValid &&
                                               validateSensorReading(readings.waterHeaterTempTank);
-                currentStatus.roomTempValid = readings.isInsideTempValid &&
-                                             validateSensorReading(readings.insideTemp);
                 currentStatus.outsideTempValid = readings.isOutsideTempValid &&
                                                 validateSensorReading(readings.outsideTemp);
             } else {
-                // Data is stale - mark all sensors as invalid
-                LOG_WARN(TAG, "Sensor data is stale (age: %ld ms) - marking all sensors invalid",
-                         now - readings.lastUpdateTimestamp);
+                // Boiler/water data stale - mark those sensors invalid
+                LOG_WARN(TAG, "Boiler sensor data is stale (age: %ld ms) - marking boiler/water sensors invalid",
+                         now - readings.lastBoilerTempUpdateTimestamp);
                 currentStatus.boilerOutputValid = false;
                 currentStatus.boilerReturnValid = false;
                 currentStatus.waterTempValid = false;
-                currentStatus.roomTempValid = false;
                 currentStatus.outsideTempValid = false;
+            }
+
+            if (roomDataFresh) {
+                currentStatus.roomTempValid = readings.isInsideTempValid &&
+                                             validateSensorReading(readings.insideTemp);
+            } else {
+                currentStatus.roomTempValid = false;
             }
         }
     }

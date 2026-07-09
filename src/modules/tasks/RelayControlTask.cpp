@@ -310,7 +310,7 @@ void RelayControlTask::taskFunction(void* pvParameters) {
     vTaskDelete(nullptr);
 }
 
-bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
+bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool bypassPumpProtection) {
     // Validate relay index
     if (relayIndex < 1 || relayIndex > 8) {
         LOG_ERROR(TAG, "Invalid relay index: %d", relayIndex);
@@ -324,8 +324,10 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state) {
     }
 
     // Check pump motor protection for relays 5 and 6 (heating and water pumps)
-    // This prevents rapid on/off cycling that can damage pump motors
-    if (!checkPumpProtection(relayIndex, state)) {
+    // This prevents rapid on/off cycling that can damage pump motors.
+    // F13: emergency/failsafe commands bypass this - protection exists to prevent
+    // rapid cycling, not to block a safety-ON for heat dissipation.
+    if (!bypassPumpProtection && !checkPumpProtection(relayIndex, state)) {
         // Pump protection blocks this state change - not an error, just too soon
         return false;
     }
@@ -488,11 +490,21 @@ void RelayControlTask::updateRateLimitCounters() {
 bool RelayControlTask::checkPumpProtection(uint8_t relayIndex, bool desiredState) {
     // Round 21: Delegate to RelayVerificationManager
     // Get current relay states with mutex protection
-    bool states[8];
+    // F29: initialize the array and only claim statesKnown when we actually
+    // read the verified states. Previously a 10ms mutex-take failure left
+    // states[] uninitialized yet passed it with statesKnown=true, so the callee
+    // read garbage (UB) and could skip pump protection if the garbage matched.
+    bool states[8] = {false};
     bool statesKnown = relayStatesKnown.load();
-    if (statesKnown && xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-        memcpy(states, currentRelayStates, sizeof(states));
-        xSemaphoreGive(relayStateMutex_);
+    if (statesKnown) {
+        if (xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+            memcpy(states, currentRelayStates, sizeof(states));
+            xSemaphoreGive(relayStateMutex_);
+        } else {
+            // Could not read verified states - take the conservative path
+            // (unknown states => protection applies) rather than pass garbage.
+            statesKnown = false;
+        }
     }
 
     return RelayVerificationManager::checkPumpProtection(
@@ -616,24 +628,18 @@ bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
         return false;
     }
     
-    // Check if we know the current state and if it's already in the desired state
-    // H2: Check relayStatesKnown INSIDE mutex to prevent race where flag changes
-    // between the check and array access
-    bool skipCommand = false;
-    if (xSemaphoreTake(relayStateMutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-        // Now atomically check flag AND read array under same mutex
-        if (relayStatesKnown.load()) {
-            bool currentState = currentRelayStates[relayIndex - 1];
-            LOG_DEBUG(TAG, "State check: known=true, current[%d]=%s, desired=%s",
-                      relayIndex - 1, currentState ? "ON" : "OFF", state ? "ON" : "OFF");
-            if (currentState == state) {
-                skipCommand = true;
-            }
-        }
-        xSemaphoreGive(relayStateMutex_);
-    }
-
-    if (skipCommand) {
+    // F26: dedup against g_relayState.desired - the single source of truth that
+    // RYN4ProcessingTask actually transmits and renews - NOT the currentRelayStates
+    // command-history cache, which is a second copy that can silently diverge from
+    // desired/hardware (lost-update race, RYN4 power cycle, DELAY-masked lost write).
+    // A redundant failsafe OFF to a safety-critical relay must NEVER be skipped, so
+    // defense-in-depth still re-asserts even if the caches diverged.
+    const bool safetyCriticalRelay =
+        (relayIndex == RelayIndex::toPhysical(RelayIndex::BURNER_ENABLE) ||
+         relayIndex == RelayIndex::toPhysical(RelayIndex::POWER_BOOST) ||
+         relayIndex == RelayIndex::toPhysical(RelayIndex::WATER_MODE));
+    bool desiredState = g_relayState.getRelay(relayIndex - 1);
+    if (desiredState == state && !(state == false && safetyCriticalRelay)) {
         LOG_DEBUG(TAG, "Relay %d already in desired state (%s), skipping command",
                   relayIndex, state ? "ON" : "OFF");
         return true;  // Already in desired state, no action needed
@@ -642,6 +648,23 @@ bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
     // Directly process the relay command using the verified method
     LOG_INFO(TAG, "Setting relay %d to %s (direct call)", relayIndex, state ? "ON" : "OFF");
     return processSingleRelay(relayIndex, state);
+}
+
+bool RelayControlTask::setRelayStateEmergency(uint8_t relayIndex, bool state) {
+    // F13: emergency path - skip the dedup shortcut and pump-motor protection so
+    // a safety-driven command (e.g. keep pumps running during an overtemp
+    // emergency) always executes even if the pump toggled within the last 15s or
+    // the desired cache already claims the target state.
+    if (!initialized || !ryn4Device) {
+        LOG_ERROR(TAG, "Task not initialized (emergency relay %d)", relayIndex);
+        return false;
+    }
+    if (relayIndex < 1 || relayIndex > 8) {
+        LOG_ERROR(TAG, "Invalid relay index (emergency): %d", relayIndex);
+        return false;
+    }
+    LOG_WARN(TAG, "EMERGENCY set relay %d to %s (protection bypassed)", relayIndex, state ? "ON" : "OFF");
+    return processSingleRelay(relayIndex, state, /*bypassPumpProtection=*/true);
 }
 
 bool RelayControlTask::setAllRelays(bool state) {

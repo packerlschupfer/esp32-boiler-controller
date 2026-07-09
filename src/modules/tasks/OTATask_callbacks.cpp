@@ -9,6 +9,8 @@
 #include "utils/CriticalDataStorage.h"
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
+#include "modules/control/BurnerStateMachine.h"    // F38: graceful burner stop before flash
+#include "modules/control/BurnerRequestManager.h"  // F38
 
 static const char* TAG = "OTA";
 
@@ -23,6 +25,22 @@ void OTATask::onOTAStart() {
         } else {
             LOG_ERROR(TAG, "Failed to acquire OTA status mutex on start");
         }
+    }
+
+    // F38: initiate a graceful burner shutdown BEFORE the flash completes and
+    // reboots. Without this, an OTA pushed while the burner is RUNNING reboots
+    // the ESP32 on completion, cutting the burner-enable relay via the 10s
+    // hardware watchdog with NO post-purge and NO pump overrun - the exact
+    // "ESP32 died" emergency path (thermal stress on the exchanger), on every
+    // field update during a burn. Clear demand now (non-blocking, so we do not
+    // stall the OTA transfer) and let the FSM run POST_PURGE during the
+    // tens-of-seconds transfer window before the reboot.
+    BurnerSMState burnerState = BurnerStateMachine::getCurrentState();
+    if (burnerState != BurnerSMState::IDLE) {
+        LOG_WARN(TAG, "OTA started while burner active (state=%d) - requesting graceful shutdown",
+                 static_cast<int>(burnerState));
+        BurnerRequestManager::emergencyClearAll();
+        BurnerStateMachine::setHeatDemand(false, 0, false);
     }
 
     // Round 21: Save critical state before OTA update

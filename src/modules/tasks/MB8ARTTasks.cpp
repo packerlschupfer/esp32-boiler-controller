@@ -354,12 +354,24 @@ void updateSensorData(const std::vector<float>& temperatureData) {
         if (temperatureData.size() > PRESSURE_CHANNEL) {
             // MB8ART library returns current directly in mA (e.g., 10.75 mA)
             float currentMA = temperatureData[PRESSURE_CHANNEL];
-            
+
+            // F19: honour the pressure channel's per-channel validity. getData()
+            // no longer compacts away faulted channels (F44), and a device
+            // sensor-fault (0x7530) now clears the channel's validity flag (F6)
+            // while leaving the raw value frozen. If CH4 is invalid (or the
+            // placeholder NAN for a deactivated channel), treat it as a sensor
+            // fault: mark pressure invalid and do NOT refresh
+            // lastPressureUpdateTimestamp, so the pressure staleness/validity
+            // failsafe fires instead of republishing a frozen value as fresh.
+            bool ch4Valid = (mb8artDevice != nullptr) &&
+                            mb8artDevice->getSensorReading(PRESSURE_CHANNEL).isTemperatureValid &&
+                            !isnan(currentMA);
+
             // Convert 4-20mA current to pressure
-            float pressure = convertCurrentToPressure(currentMA);
-            
+            float pressure = ch4Valid ? convertCurrentToPressure(currentMA) : -1.0f;
+
             // Check if sensor is connected and working
-            if (pressure >= 0.0f) {
+            if (ch4Valid && pressure >= 0.0f) {
                 // Valid pressure reading - convert to fixed-point and apply offset
                 Pressure_t rawPressure = pressureFromFloat(pressure);
                 int16_t pressureOffset = SRP::getSystemSettings().pressureOffset;
@@ -391,12 +403,18 @@ void updateSensorData(const std::vector<float>& temperatureData) {
                     xEventGroupSetBits(SRP::getBurnerEventGroup(), SystemEvents::Burner::PRESSURE_OK);
                 }
             } else {
-                // Sensor disconnected or failed (current < 4mA)
-                LOG_ERROR("MB8ARTTask", "Pressure sensor fault detected (%d.%02d mA)", 
-                          (int)currentMA, (int)(currentMA * 100) % 100);
+                // Sensor fault: either the channel reported invalid/NAN (F19)
+                // or the current is below 4 mA (broken loop). Mark invalid and
+                // leave lastPressureUpdateTimestamp untouched so staleness trips.
+                if (!ch4Valid) {
+                    LOG_ERROR("MB8ARTTask", "Pressure channel invalid (device sensor fault) - marking pressure invalid");
+                } else {
+                    LOG_ERROR("MB8ARTTask", "Pressure sensor fault detected (%d.%02d mA)",
+                              (int)currentMA, (int)(currentMA * 100) % 100);
+                }
                 SRP::getSensorReadings().isSystemPressureValid = false;
                 SRP::getSensorReadings().systemPressure = PRESSURE_INVALID;
-                
+
                 // Set pressure error event
                 xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::PRESSURE_ERROR);
                 anySensorError = true;
@@ -448,8 +466,14 @@ void updateSensorData(const std::vector<float>& temperatureData) {
         }
 #endif
         
-        // Update timestamp
-        SRP::getSensorReadings().lastUpdateTimestamp = millis();
+        // Update timestamps. lastUpdateTimestamp is the legacy "any sensor"
+        // timestamp; lastBoilerTempUpdateTimestamp is written ONLY here (the
+        // MB8ART data path) so boiler/tank staleness checks detect an
+        // MB8ART-only loss even while the ANDRTF3 room sensor keeps refreshing
+        // lastUpdateTimestamp. (Audit F5)
+        uint32_t nowMs = millis();
+        SRP::getSensorReadings().lastUpdateTimestamp = nowMs;
+        SRP::getSensorReadings().lastBoilerTempUpdateTimestamp = nowMs;
         
         // Set event bits BEFORE releasing mutex to ensure data consistency
         // This prevents other tasks from seeing the event before data is ready

@@ -27,6 +27,11 @@ public:
     
     // Relay control methods
     static bool setRelayState(uint8_t relayIndex, bool state);
+    // F13: emergency relay set that bypasses the dedup skip AND pump-motor
+    // protection, so a safety-driven pump-ON for heat dissipation cannot be
+    // silently dropped because the pump toggled within the last 15s. Use ONLY
+    // from failsafe/emergency paths.
+    static bool setRelayStateEmergency(uint8_t relayIndex, bool state);
     static bool setAllRelays(bool state);
     static bool setMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety
     static bool toggleRelay(uint8_t relayIndex);
@@ -40,7 +45,7 @@ private:
     static void taskFunction(void* pvParameters);
     
     // Direct relay processing methods (no queue)
-    static bool processSingleRelay(uint8_t relayIndex, bool state);
+    static bool processSingleRelay(uint8_t relayIndex, bool state, bool bypassPumpProtection = false);
     static bool processToggleRelay(uint8_t relayIndex);
     static bool processSetAllRelays(bool state);
     static bool processSetMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety

@@ -235,8 +235,11 @@ uint8_t BurnerSafetyValidator::validateTemperatureSensors(
     
     // Check sensor data freshness using configurable timeout
     // H1: Use Utils::elapsedMs() for safe elapsed time (handles millis() wraparound)
-    if (readings.lastUpdateTimestamp > 0) {
-        uint32_t sensorAge = Utils::elapsedMs(readings.lastUpdateTimestamp);
+    // F5: this function validates the boiler/tank sensors, so it must use the
+    // MB8ART-only lastBoilerTempUpdateTimestamp; the shared lastUpdateTimestamp
+    // is kept fresh by the ANDRTF3 room sensor and would mask an MB8ART loss.
+    if (readings.lastBoilerTempUpdateTimestamp > 0) {
+        uint32_t sensorAge = Utils::elapsedMs(readings.lastBoilerTempUpdateTimestamp);
         if (sensorAge > ::SafetyConfig::sensorStaleMs) {
             LOG_ERROR(TAG, "Sensor data is stale: %lu ms old (threshold: %lu ms)",
                      sensorAge, ::SafetyConfig::sensorStaleMs);

@@ -32,6 +32,11 @@ public:
     static constexpr uint16_t ADDR_LOG_INDICES = ADDR_CRITICAL_BASE + 0xF0;    // 16 bytes - log position indices
     static constexpr uint16_t ADDR_ERROR_CIRCULAR = ADDR_CRITICAL_BASE + 0x100; // 4KB circular buffer
     static constexpr uint16_t ADDR_SAFETY_LOG = ADDR_CRITICAL_BASE + 0x1100;    // 1KB safety events
+    static constexpr uint16_t SIZE_SAFETY_LOG  = 0x400;                          // 1KB
+    // F7: first FRAM byte AFTER this driver's critical region. Any other driver
+    // (e.g. ScheduleStorage) MUST start at or after this address. A compile-time
+    // static_assert in RuntimeStorageSchedules.h enforces non-overlap.
+    static constexpr uint16_t ADDR_CRITICAL_END = ADDR_SAFETY_LOG + SIZE_SAFETY_LOG;  // 0x6120
     
     // Data structures
     struct EmergencyState {

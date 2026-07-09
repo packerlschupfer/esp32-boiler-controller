@@ -269,10 +269,16 @@ void BurnerControlTask(void* parameter) {
         
         // Wait for burner request changes with a timeout
         // This is the primary event we care about
+        // F10: clear CHANGE_EVENT_BITS ATOMICALLY with the read (clear-on-exit).
+        // Previously the bits were cleared AFTER processBurnerRequest(), so a
+        // request change arriving during the (tens-of-ms) handler was wiped
+        // unprocessed - the burner kept firing on stale demand with the pump off
+        // until the overheat interlock caught it. Clearing here means any change
+        // that lands during processing re-sets the bit and is handled next loop.
         EventBits_t requestEvents = xEventGroupWaitBits(
             cachedHandles.burnerRequestEventGroup,
             SystemEvents::BurnerRequest::CHANGE_EVENT_BITS,
-            pdFALSE,  // Don't clear yet - we'll clear after processing
+            pdTRUE,   // Clear on exit (atomic read-and-clear)
             pdFALSE,  // Wait for any bit
             pdMS_TO_TICKS(timeoutMs)  // Dynamic timeout based on state
         );
@@ -345,13 +351,13 @@ void BurnerControlTask(void* parameter) {
         }
         (void)SRP::getTaskManager().feedWatchdog();
 
-        // 4. Burner requests - process if we got a change event
+        // 4. Burner requests - process if we got a change event.
+        // F10: CHANGE_EVENT_BITS were already cleared atomically at the wait
+        // above, so a change arriving during processBurnerRequest() is preserved
+        // for the next iteration rather than being wiped by a late clear here.
         if (requestEvents & SystemEvents::BurnerRequest::CHANGE_EVENT_BITS) {
             LOG_DEBUG(TAG, "Processing burner request change event (events: 0x%06X)", requestEvents);
             processBurnerRequest();
-            // Clear the change event bits after processing
-            xEventGroupClearBits(cachedHandles.burnerRequestEventGroup,
-                                SystemEvents::BurnerRequest::CHANGE_EVENT_BITS);
         }
         (void)SRP::getTaskManager().feedWatchdog();
 

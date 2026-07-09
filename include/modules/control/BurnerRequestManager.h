@@ -47,7 +47,7 @@ public:
     static bool isHighPowerRequested();
     
     // Update temperature without changing other bits
-    static bool updateTargetTemp(Temperature_t newTemp);
+    // F9: updateTargetTemp() removed - dead code with an unprotected ALL_BITS clear.
 
     // Emergency operations
     static void emergencyClearAll();

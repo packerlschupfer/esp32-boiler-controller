@@ -50,8 +50,16 @@ struct SharedSensorReadings {
     bool isSystemPressureValid = false;
 
     // Timestamps initialized to 0 - checked before use for freshness validation
+    //
+    // lastUpdateTimestamp is refreshed by ANY temperature source (including the
+    // ANDRTF3 room sensor every ~5s), so it CANNOT detect a boiler-channel
+    // sensor/bus loss while another sensor is alive. Boiler/tank staleness
+    // checks must therefore use lastBoilerTempUpdateTimestamp, which is written
+    // ONLY by the MB8ART data path (the source of the boiler output/return/tank
+    // channels), mirroring the dedicated lastPressureUpdateTimestamp. (Audit F5)
     uint32_t lastUpdateTimestamp = 0;
     uint32_t lastPressureUpdateTimestamp = 0;
+    uint32_t lastBoilerTempUpdateTimestamp = 0;
 
     // Add more fields as required...
 };

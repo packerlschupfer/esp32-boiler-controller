@@ -43,18 +43,20 @@ static const char* TAG_CMD = "MQTTCmd";
 // External function declarations (defined in other compilation units)
 extern void triggerCriticalAlert();  // Defined in MonitoringTask.cpp
 
-// Command deduplication to prevent double-execution on QoS retries
+// Command deduplication to prevent double-execution
 namespace {
-    struct RecentCommand {
-        uint32_t hash;
-        uint32_t timestamp;
-    };
-    // Increased from 8 to 16 to handle rapid command bursts better
-    static constexpr size_t DEDUP_CACHE_SIZE = 16;
-    static constexpr uint32_t DEDUP_WINDOW_MS = 5000;  // 5 second dedup window
-    static RecentCommand recentCommands[DEDUP_CACHE_SIZE] = {};
-    static size_t recentCommandIndex = 0;
-    // M5: Mutex for thread-safe dedup cache access (MQTT callbacks may come from different contexts)
+    // F23: dedup ONLY the immediately-previous command. All boiler/cmd/# topics
+    // are QoS 0, so the broker never redelivers - the multi-entry 5s cache could
+    // therefore only ever drop DISTINCT operator actions. The classic failure was
+    // off -> on -> off within 5s: the second 'off' hashed identically to the
+    // first and was silently dropped, leaving the boiler enabled while the
+    // operator-facing (retained) state showed off. Tracking only the last hash
+    // still collapses a genuine immediate double-publish but always executes any
+    // A -> B -> A sequence.
+    static constexpr uint32_t DEDUP_WINDOW_MS = 2000;  // 2s - a QoS0 double-publish arrives within ms
+    static uint32_t lastCommandHash = 0;
+    static uint32_t lastCommandTimestamp = 0;
+    // M5: Spinlock for thread-safe access (MQTT callbacks may come from different contexts)
     static portMUX_TYPE dedupSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
     // Simple hash function for command deduplication
@@ -74,60 +76,25 @@ namespace {
         return hash;
     }
 
-    // Clean up stale entries from dedup cache (caller must hold spinlock)
-    void cleanupStaleEntriesLocked() {
-        uint32_t now = millis();
-        for (size_t i = 0; i < DEDUP_CACHE_SIZE; i++) {
-            if (recentCommands[i].hash != 0) {
-                uint32_t elapsed = now - recentCommands[i].timestamp;
-                if (elapsed >= DEDUP_WINDOW_MS) {
-                    recentCommands[i].hash = 0;  // Mark as free
-                    recentCommands[i].timestamp = 0;
-                }
-            }
-        }
-    }
-
-    // Check if command is duplicate (seen within dedup window)
-    // M5: Thread-safe with spinlock
+    // True only if this command is IDENTICAL to the immediately-previous one and
+    // arrived within the (short) window.
     bool isDuplicateCommand(uint32_t hash) {
         uint32_t now = millis();
         bool isDuplicate = false;
-
         portENTER_CRITICAL(&dedupSpinlock);
-        // Clean up stale entries first to free space
-        cleanupStaleEntriesLocked();
-
-        for (size_t i = 0; i < DEDUP_CACHE_SIZE; i++) {
-            if (recentCommands[i].hash == hash) {
-                uint32_t elapsed = now - recentCommands[i].timestamp;
-                if (elapsed < DEDUP_WINDOW_MS) {
-                    isDuplicate = true;
-                    break;
-                }
-            }
+        if (lastCommandHash != 0 && lastCommandHash == hash &&
+            (now - lastCommandTimestamp) < DEDUP_WINDOW_MS) {
+            isDuplicate = true;
         }
         portEXIT_CRITICAL(&dedupSpinlock);
         return isDuplicate;
     }
 
-    // Record command for deduplication
-    // M5: Thread-safe with spinlock
+    // Record the most-recently-executed command.
     void recordCommand(uint32_t hash) {
         portENTER_CRITICAL(&dedupSpinlock);
-        // Try to find a free slot first
-        for (size_t i = 0; i < DEDUP_CACHE_SIZE; i++) {
-            if (recentCommands[i].hash == 0) {
-                recentCommands[i].hash = hash;
-                recentCommands[i].timestamp = millis();
-                portEXIT_CRITICAL(&dedupSpinlock);
-                return;
-            }
-        }
-        // No free slot, use circular index
-        recentCommands[recentCommandIndex].hash = hash;
-        recentCommands[recentCommandIndex].timestamp = millis();
-        recentCommandIndex = (recentCommandIndex + 1) % DEDUP_CACHE_SIZE;
+        lastCommandHash = hash;
+        lastCommandTimestamp = millis();
         portEXIT_CRITICAL(&dedupSpinlock);
     }
 }

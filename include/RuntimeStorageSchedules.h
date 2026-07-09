@@ -5,12 +5,22 @@
 #include <Arduino.h>
 #include "TimerSchedule.h"
 #include <RuntimeStorage.h>
+#include "utils/CriticalDataStorage.h"  // F7: for ADDR_CRITICAL_END region guard
 
 // Use separate namespace to avoid conflict with rtstorage::RuntimeStorage class
 namespace schedules {
 
 // Schedule storage configuration
-const uint16_t ADDR_SCHEDULES = 0x4C20;  // Start of reserved area
+// F7 (CRITICAL): ScheduleStorage previously started at 0x4C20 - the SAME address
+// as CriticalDataStorage's critical region (0x4C20..0x6120). The two drivers
+// mutually corrupted each other: any emergency save wiped the schedule header
+// (erasing all schedules and the emergency forensic record), and counter/log
+// saves clobbered individual schedules. Relocated to 0x6200, immediately after
+// the critical region, with a compile-time overlap guard below. NOTE: this is a
+// one-time layout change - existing schedules in the old (corrupted) region are
+// NOT migrated (they were already being erased after every emergency); schedules
+// must be re-added once after this update.
+const uint16_t ADDR_SCHEDULES = 0x6200;  // After CriticalDataStorage (ends 0x6120)
 const uint16_t SIZE_SCHEDULES = 4096;    // 4KB for schedules
 const uint8_t MAX_SCHEDULES = 20;        // Maximum number of schedules
 
@@ -41,6 +51,22 @@ struct StoredSchedule {
 // Constants
 const uint32_t SCHEDULE_MAGIC = 0x53434844;  // 'SCHD'
 const uint8_t SCHEDULE_VERSION = 1;
+
+// F7: compile-time FRAM region map guard. If any of these fire, two drivers
+// claim overlapping FRAM and would silently corrupt each other at runtime.
+namespace {
+    constexpr uint32_t kScheduleRegionBytes =
+        sizeof(ScheduleStorageHeader) + static_cast<uint32_t>(MAX_SCHEDULES) * sizeof(StoredSchedule);
+    // Must start at/after the end of CriticalDataStorage's critical region.
+    static_assert(ADDR_SCHEDULES >= CriticalDataStorage::ADDR_CRITICAL_END,
+                  "FRAM schedule region overlaps CriticalDataStorage critical region");
+    // Must fit within the actual usage window we advertise...
+    static_assert(kScheduleRegionBytes <= SIZE_SCHEDULES,
+                  "Schedule header + MAX_SCHEDULES exceeds SIZE_SCHEDULES");
+    // ...and within the 32KB MB85RC256V address space.
+    static_assert(static_cast<uint32_t>(ADDR_SCHEDULES) + kScheduleRegionBytes <= 0x8000u,
+                  "FRAM schedule region exceeds 32KB device address space");
+}
 
 // Extension class for schedule storage
 class ScheduleStorage {

@@ -9,6 +9,7 @@
 #include "shared/RelayState.h"
 #include "shared/SharedRelayReadings.h"
 #include "shared/RelayBindings.h"
+#include "modules/tasks/RelayVerificationManager.h"  // F4: relay-health escalation
 #include "events/SystemEventsGenerated.h"
 #include <TaskManager.h>
 #include <IDeviceInstance.h>
@@ -58,13 +59,17 @@ static void sendDelayCommands(RYN4* ryn4, uint8_t desired) {
 }
 
 // Helper: Renew DELAY for contiguous ON relays (minimal Modbus traffic)
-static void sendCompactDelayRenewal(RYN4* ryn4, uint8_t desired) {
+// Returns true only if EVERY block was renewed successfully. The caller (F14)
+// uses this to retry on the next SET tick rather than waiting a full parity
+// cycle, so a single lost renewal does not race the 10s hardware auto-OFF.
+static bool sendCompactDelayRenewal(RYN4* ryn4, uint8_t desired) {
     // Find contiguous blocks of ON relays and renew them efficiently
     // E.g., if R1,R2,R5 are ON: send R1-R2 (4 bytes), then R5 (2 bytes)
     // Much more efficient than sending all 8 relays (16 bytes)
 
     uint8_t start = 0xFF;
     uint8_t count = 0;
+    bool allOk = true;
 
     for (int i = 0; i <= 8; i++) {  // Loop to 8 to flush last block
         bool isOn = (i < 8) && ((desired >> i) & 0x01);
@@ -92,46 +97,80 @@ static void sendCompactDelayRenewal(RYN4* ryn4, uint8_t desired) {
                 LOG_DEBUG(TAG, "DELAY renewed: R%d-%d (%d bytes)", start + 1, start + count, count * 2);
             } else {
                 LOG_ERROR(TAG, "Failed DELAY renewal: R%d-%d", start + 1, start + count);
+                allOk = false;
             }
 
             start = 0xFF;
             count = 0;
         }
     }
+
+    return allOk;
 }
 
 // Handle SET tick - DELAY watchdog with staggered renewal
 static void handleSetTick(RYN4* ryn4) {
     g_setTickCounter++;
 
+    // F34: test-and-clear pendingWrite BEFORE snapshotting desired. If a writer
+    // (RelayControlTask, other core) updates desired and sets pendingWrite AFTER
+    // our exchange, the flag stays set and the change is handled next tick,
+    // instead of being cleared while we transmit a stale bitmask.
+    bool hasPendingWrite = g_relayState.pendingWrite.exchange(false, std::memory_order_acq_rel);
     uint8_t desired = g_relayState.desired.load(std::memory_order_acquire);
-    bool hasPendingWrite = g_relayState.pendingWrite.load(std::memory_order_acquire);
+
+    // F14: renew on an elapsed-time schedule (not tick parity) so a single lost
+    // renewal is retried on the very next SET tick instead of waiting a full 5s
+    // parity cycle and racing the 10s hardware auto-OFF. renewalIntervalMs is
+    // half the watchdog so there is always a >=5s margin to hardware expiry.
+    static uint32_t s_lastRenewalMs = 0;
+    static bool     s_renewalRetryPending = false;
+    static uint8_t  s_renewalMissCount = 0;
+    const uint32_t renewalIntervalMs =
+        (static_cast<uint32_t>(SystemConstants::Relay::DELAY_WATCHDOG_SECONDS) * 1000u) / 2u;
 
     // Prioritize state changes over renewal
     if (hasPendingWrite) {
-        // Clear pending flag atomically
-        g_relayState.pendingWrite.store(false, std::memory_order_release);
-
         LOG_INFO(TAG, "SET tick - state change: 0x%02X", desired);
         sendDelayCommands(ryn4, desired);
+        // A state change also (re)issues DELAY commands, so it counts as a renewal.
+        s_lastRenewalMs = millis();
+        s_renewalRetryPending = false;
+        s_renewalMissCount = 0;
 
     } else if (desired != 0) {
         // Compact renewal: Send only contiguous ON relay blocks
         // Example: R1,R2,R5 ON → 2 transactions (R1-R2: 4 bytes, R5: 2 bytes)
-        // Much more efficient than full 8-relay batch (16 bytes)
-        // Renewal every other SET tick (5s interval per batch)
-
-        bool isRenewalTick = (g_setTickCounter % 2) == 0;
-        if (isRenewalTick) {
-            LOG_DEBUG(TAG, "SET tick - compact DELAY renewal");
-            sendCompactDelayRenewal(ryn4, desired);
+        uint32_t sinceRenewal = static_cast<uint32_t>(millis() - s_lastRenewalMs);
+        bool due = s_renewalRetryPending || (sinceRenewal >= renewalIntervalMs);
+        if (due) {
+            LOG_DEBUG(TAG, "SET tick - compact DELAY renewal%s", s_renewalRetryPending ? " (retry)" : "");
+            if (sendCompactDelayRenewal(ryn4, desired)) {
+                s_lastRenewalMs = millis();
+                s_renewalRetryPending = false;
+                s_renewalMissCount = 0;
+            } else {
+                // Retry on the NEXT SET tick (2.5s) rather than the next parity
+                // cycle. Alarm after 2 consecutive misses (~7.5s) - still before
+                // the 10s hardware expiry but close enough to warrant attention.
+                s_renewalRetryPending = true;
+                if (++s_renewalMissCount >= 2) {
+                    LOG_ERROR(TAG, "DELAY renewal failed %d consecutive times - relay auto-OFF risk", s_renewalMissCount);
+                    EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
+                    if (relayStatusEventGroup) {
+                        xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::COMM_ERROR);
+                    }
+                }
+            }
         } else {
-            LOG_DEBUG(TAG, "SET tick - no renewal (odd tick)");
+            LOG_DEBUG(TAG, "SET tick - no renewal (%lu ms since last)", (unsigned long)sinceRenewal);
         }
 
     } else {
         // All relays OFF - no renewal needed
         LOG_DEBUG(TAG, "SET tick - all relays OFF");
+        s_renewalRetryPending = false;
+        s_renewalMissCount = 0;
     }
 
     // Clean up expired DELAY timers
@@ -186,24 +225,32 @@ static void handleReadTick(RYN4* ryn4) {
             SystemEvents::RelayStatus::SYNCHRONIZED | SystemEvents::RelayStatus::COMM_OK);
     }
 
-    // Check for mismatch - but skip DELAY relays (countdown in progress)
-    // Compare against 'sent' (what we commanded), not 'desired' (what app wants)
-    if (actual != sent) {
-        // Check if mismatch is due to active DELAY timers
-        uint8_t mismatchMask = actual ^ sent;  // XOR to find differing bits
-        uint8_t delayMask = g_relayState.delayMask.load(std::memory_order_acquire);
-        uint8_t realMismatch = mismatchMask & ~delayMask;  // Exclude DELAY relays
+    // Check for mismatch - compare against 'sent' (what we commanded).
+    // F15: the DELAY-skip must be DIRECTION-aware. A relay is only given an
+    // active DELAY when commanded ON, so a DELAY relay reading OFF (sent=ON,
+    // actual=OFF) is a genuine failure and must be caught, not masked. Mask ONLY
+    // DELAY relays commanded OFF (benign coast-down of a prior DELAY). The old
+    // `mismatchMask & ~delayMask` masked EVERY energized relay, leaving ON-relay
+    // verification permanently inert (a stuck-OFF pump/burner relay went unseen).
+    uint8_t mismatchMask = static_cast<uint8_t>(actual ^ sent);
+    uint8_t delayMask = g_relayState.delayMask.load(std::memory_order_acquire);
+    uint8_t maskableDelay = static_cast<uint8_t>(delayMask & ~sent);  // DELAY + commanded OFF
+    uint8_t realMismatch = static_cast<uint8_t>(mismatchMask & ~maskableDelay);
 
-        if (realMismatch == 0) {
-            // All mismatches are from active DELAY commands - expected!
-            LOG_DEBUG(TAG, "Relay verification deferred (DELAY active): Sent: 0x%02X, Actual: 0x%02X, Delay mask: 0x%02X",
-                      sent, actual, delayMask);
+    // F4: feed the per-relay health escalation (previously dead code). A
+    // persistent real mismatch on BURNER_ENABLE escalates to a CRITICAL failsafe
+    // (emergency shutdown); other relays escalate to WARNING. success == no real
+    // mismatch on that relay, which also resets its failure counter.
+    static uint8_t s_relayHealthFailures[8] = {0};
+    for (int i = 0; i < 8; i++) {
+        bool relayMismatch = (realMismatch >> i) & 0x01;
+        RelayVerificationManager::checkRelayHealthAndEscalate(
+            static_cast<uint8_t>(i + 1), !relayMismatch, s_relayHealthFailures);
+    }
 
-            // Don't increment mismatch counter or retry for DELAY relays
-            return;
-        }
-
-        // We have real mismatches (non-DELAY relays)
+    if (realMismatch != 0) {
+        // We have real mismatches (energized relays that failed to actuate, or
+        // OFF relays that failed to release)
         uint8_t mismatches = g_relayState.consecutiveMismatches.fetch_add(1, std::memory_order_acq_rel) + 1;
 
         if (mismatches == 1) {
@@ -215,7 +262,7 @@ static void handleReadTick(RYN4* ryn4) {
             LOG_ERROR(TAG, "Relay verification FAILED after %d attempts! Sent: 0x%02X, Actual: 0x%02X",
                       mismatches, sent, actual);
 
-            // Log individual mismatches (excluding DELAY relays)
+            // Log individual real mismatches
             for (int i = 0; i < 8; i++) {
                 if (realMismatch & (1 << i)) {
                     bool sentBit = (sent >> i) & 0x01;
@@ -236,12 +283,16 @@ static void handleReadTick(RYN4* ryn4) {
         g_relayState.pendingWrite.store(true, std::memory_order_release);
 
     } else {
-        // States match - reset counter
+        // No real mismatch - reset counter. Covers exact match AND the benign
+        // masked-DELAY case (a commanded-OFF relay still coasting on a prior DELAY).
         uint8_t previousMismatches = g_relayState.consecutiveMismatches.exchange(0, std::memory_order_acq_rel);
 
         if (previousMismatches > 0) {
             LOG_INFO(TAG, "Relay verification SUCCESS after %d attempts: 0x%02X",
                      previousMismatches + 1, actual);
+        } else if (actual != sent) {
+            LOG_DEBUG(TAG, "Relay verification deferred (DELAY coast-down): Sent: 0x%02X, Actual: 0x%02X, Delay mask: 0x%02X",
+                      sent, actual, delayMask);
         } else {
             LOG_DEBUG(TAG, "Relay states verified: 0x%02X", actual);
         }
@@ -338,17 +389,24 @@ void RYN4ProcessingTask(void* parameter) {
     constexpr TickType_t WAIT_TIMEOUT = pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS);  // 3s timeout for watchdog
 
     while (true) {
-        // Wait for coordinator notification with SensorType value
-        uint32_t notificationValue = 0;
-        if (xTaskNotifyWait(0, ULONG_MAX, &notificationValue, WAIT_TIMEOUT) == pdTRUE) {
-            auto sensorType = static_cast<ModbusCoordinator::SensorType>(notificationValue);
+        // Wait for coordinator notification. F35: the coordinator now notifies
+        // with eSetBits (a distinct bit per SensorType) so a SET and a READ tick
+        // that both land while a slow transaction was in flight are coalesced
+        // rather than one overwriting the other. Clear all bits on read and
+        // service every pending tick, SET before READ.
+        uint32_t notificationBits = 0;
+        if (xTaskNotifyWait(0, ULONG_MAX, &notificationBits, WAIT_TIMEOUT) == pdTRUE) {
+            const uint32_t setBit  = 1UL << static_cast<uint32_t>(ModbusCoordinator::SensorType::RYN4_SET);
+            const uint32_t readBit = 1UL << static_cast<uint32_t>(ModbusCoordinator::SensorType::RYN4_READ);
 
-            if (sensorType == ModbusCoordinator::SensorType::RYN4_SET) {
+            if (notificationBits & setBit) {
                 handleSetTick(ryn4);
-            } else if (sensorType == ModbusCoordinator::SensorType::RYN4_READ) {
+            }
+            if (notificationBits & readBit) {
                 handleReadTick(ryn4);
-            } else {
-                LOG_WARN(TAG, "Unexpected notification value: %lu", notificationValue);
+            }
+            if ((notificationBits & (setBit | readBit)) == 0) {
+                LOG_WARN(TAG, "Unexpected notification bits: 0x%lX", notificationBits);
             }
         }
 

@@ -32,6 +32,7 @@ namespace {
     static constexpr uint8_t SUB_CONFIG = (1 << 2);
     static constexpr uint8_t SUB_ERRORS = (1 << 3);
     static constexpr uint8_t SUB_SCHEDULER = (1 << 4);
+    static constexpr uint8_t SUB_CMD_CONFIG = (1 << 5);  // F36: boiler/cmd/config/+ (safety config)
     static constexpr uint32_t SUBSCRIPTION_RETRY_DELAY_MS = 5000;  // 5 seconds
     static TimerHandle_t subscriptionRetryTimer = nullptr;
 
@@ -164,7 +165,13 @@ void setupSubscriptions() {
         }, 0);  // QoS 0
 
     if (!result.isOk()) {
+        // F36: record the failure so it is retried. boiler/cmd/+ only matches a
+        // single level, so boiler/cmd/config/x is NOT covered by it - this is the
+        // SOLE route for all runtime safety-config commands (sensor_stale_ms,
+        // pump_protection_ms, post_purge_ms, thermal_shock_c, ...). Previously a
+        // failure here was invisible and never retried until the next reconnect.
         LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", cmdConfigTopic, static_cast<int>(result.error()));
+        failedSubscriptions |= SUB_CMD_CONFIG;
     } else {
         LOG_INFO(TAG, "Successfully subscribed to %s", cmdConfigTopic);
     }
@@ -263,6 +270,20 @@ void retryFailedSubscriptions() {
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_CMD;
             LOG_INFO(TAG, "Retry: %s succeeded", cmdTopic);
+        }
+    }
+
+    // F36: retry the boiler/cmd/config/+ subscription if it failed
+    if (failedSubscriptions & SUB_CMD_CONFIG) {
+        char cmdConfigTopic[64];
+        snprintf(cmdConfigTopic, sizeof(cmdConfigTopic), "%s/config/+", MQTT_CMD_PREFIX);
+        auto result = mqttManager->subscribe(cmdConfigTopic,
+            [](const String& topic, const String& payload) {
+                MQTTCommandHandlers::routeControlCommand(topic.c_str(), payload.c_str());
+            }, 0);
+        if (result.isOk()) {
+            failedSubscriptions &= ~SUB_CMD_CONFIG;
+            LOG_INFO(TAG, "Retry: %s succeeded", cmdConfigTopic);
         }
     }
 

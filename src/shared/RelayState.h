@@ -32,13 +32,19 @@ struct RelayState {
 
     // Helper methods for relay manipulation
     void setRelay(uint8_t relay, bool on) {
-        uint8_t current = desired.load(std::memory_order_relaxed);
+        // F1 (CRITICAL): atomic read-modify-write of the shared bitmask.
+        // The previous load()/modify/store() was a lost-update race: setRelay()
+        // is called concurrently from multiple tasks on both cores (burner FSM,
+        // pump commands, and CentralizedFailsafe's per-bit burner-OFF), so a
+        // concurrent writer could resurrect a bit the failsafe had just cleared
+        // (burner enable staying energized after an emergency stop) or drop a
+        // burner-OFF. fetch_or/fetch_and make the single-bit update atomic.
+        const uint8_t mask = static_cast<uint8_t>(1u << relay);
         if (on) {
-            current |= (1 << relay);
+            desired.fetch_or(mask, std::memory_order_acq_rel);
         } else {
-            current &= ~(1 << relay);
+            desired.fetch_and(static_cast<uint8_t>(~mask), std::memory_order_acq_rel);
         }
-        desired.store(current, std::memory_order_release);
         pendingWrite.store(true, std::memory_order_release);
         consecutiveMismatches.store(0, std::memory_order_release);
         clearDelay(relay);  // Clear DELAY when manually controlling relay

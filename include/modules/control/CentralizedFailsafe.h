@@ -2,6 +2,7 @@
 #define CENTRALIZED_FAILSAFE_H
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <vector>
 #include <freertos/FreeRTOS.h>
@@ -64,10 +65,10 @@ public:
     static void triggerFailsafe(FailsafeLevel level, SystemError reason, const char* details = nullptr);
     
     // Check if system is in failsafe mode
-    static bool isInFailsafe() { return currentLevel > FailsafeLevel::WARNING; }
-    
+    static bool isInFailsafe() { return currentLevel.load() > FailsafeLevel::WARNING; }
+
     // Get current failsafe level
-    static FailsafeLevel getCurrentLevel() { return currentLevel; }
+    static FailsafeLevel getCurrentLevel() { return currentLevel.load(); }
     
     // Attempt system recovery
     static bool attemptRecovery();
@@ -91,7 +92,10 @@ private:
     // Round 20 Issue #10: Mutex to protect static state from concurrent access
     static SemaphoreHandle_t stateMutex_;
 
-    static FailsafeLevel currentLevel;
+    // F28: atomic so the unguarded writes from emergencyStop/orderlyShutdown/
+    // attemptRecovery/monitorSystemHealth (which run outside stateMutex_) cannot
+    // tear against triggerFailsafe's guarded read-modify-write of the level.
+    static std::atomic<FailsafeLevel> currentLevel;
     static SystemError lastError;
     static uint32_t failsafeStartTime;
     static uint32_t recoveryAttempts;

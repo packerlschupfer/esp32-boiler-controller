@@ -19,7 +19,7 @@ static const char* TAG = "CentralizedFailsafe";
 
 // Static member definitions
 SemaphoreHandle_t CentralizedFailsafe::stateMutex_ = nullptr;  // Round 20 Issue #10
-CentralizedFailsafe::FailsafeLevel CentralizedFailsafe::currentLevel = FailsafeLevel::NORMAL;
+std::atomic<CentralizedFailsafe::FailsafeLevel> CentralizedFailsafe::currentLevel{FailsafeLevel::NORMAL};
 SystemError CentralizedFailsafe::lastError = SystemError::SUCCESS;
 uint32_t CentralizedFailsafe::failsafeStartTime = 0;
 uint32_t CentralizedFailsafe::recoveryAttempts = 0;
@@ -45,7 +45,7 @@ void CentralizedFailsafe::initialize() {
         }
     }
 
-    currentLevel = FailsafeLevel::NORMAL;
+    currentLevel.store(FailsafeLevel::NORMAL);
     lastError = SystemError::SUCCESS;
     failsafeStartTime = 0;
     recoveryAttempts = 0;
@@ -71,7 +71,7 @@ void CentralizedFailsafe::initialize() {
 
 void CentralizedFailsafe::cleanup() {
     subsystemCallbacks.clear();
-    currentLevel = FailsafeLevel::NORMAL;
+    currentLevel.store(FailsafeLevel::NORMAL);
     lastError = SystemError::SUCCESS;
     failsafeStartTime = 0;
     recoveryAttempts = 0;
@@ -86,16 +86,28 @@ void CentralizedFailsafe::registerSubsystem(Subsystem subsystem, FailsafeCallbac
 }
 
 void CentralizedFailsafe::triggerFailsafe(FailsafeLevel level, SystemError reason, const char* details) {
-    // Round 20 Issue #10: Protect state access with mutex
-    if (stateMutex_ && xSemaphoreTake(stateMutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
-        LOG_ERROR(TAG, "Failed to acquire state mutex in triggerFailsafe");
-        // Continue anyway - failsafe is safety-critical
+    // Round 20 Issue #10: Protect state access with mutex.
+    // F11: track whether the take actually succeeded; a timed-out task must NOT
+    // give the mutex (give-by-non-holder hits configASSERT and reboots the
+    // controller mid-failsafe, or corrupts mutex ownership with asserts off).
+    bool stateLocked = false;
+    if (stateMutex_) {
+        if (xSemaphoreTake(stateMutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+            stateLocked = true;
+        } else {
+            LOG_ERROR(TAG, "Failed to acquire state mutex in triggerFailsafe");
+            // Continue anyway - failsafe is safety-critical - but do not give a
+            // mutex we do not hold.
+        }
     }
 
-    // Don't downgrade failsafe level
-    if (level <= currentLevel && currentLevel >= FailsafeLevel::CRITICAL) {
-        LOG_WARN(TAG, "Ignoring failsafe trigger - already at level %d", static_cast<int>(currentLevel));
-        if (stateMutex_) xSemaphoreGive(stateMutex_);
+    // F32: never downgrade the level via triggerFailsafe. The old guard only
+    // blocked downgrades once already at CRITICAL+, so a one-shot WARNING (e.g.
+    // routine low-memory) could overwrite a sticky DEGRADED and erase the record
+    // of an unresolved fault. Downgrades happen only via recovery/health paths.
+    if (level <= currentLevel.load()) {
+        LOG_WARN(TAG, "Ignoring failsafe trigger - already at level %d", static_cast<int>(currentLevel.load()));
+        if (stateLocked) xSemaphoreGive(stateMutex_);
         return;
     }
 
@@ -105,15 +117,15 @@ void CentralizedFailsafe::triggerFailsafe(FailsafeLevel level, SystemError reaso
              details ? details : "None");
 
     // Update state
-    FailsafeLevel previousLevel = currentLevel;
-    currentLevel = level;
+    FailsafeLevel previousLevel = currentLevel.load();
+    currentLevel.store(level);
     lastError = reason;
 
     if (failsafeStartTime == 0) {
         failsafeStartTime = millis();
     }
 
-    if (stateMutex_) xSemaphoreGive(stateMutex_);
+    if (stateLocked) xSemaphoreGive(stateMutex_);
     
     // Save system state if entering critical level
     if (previousLevel < FailsafeLevel::CRITICAL && level >= FailsafeLevel::CRITICAL) {
@@ -246,7 +258,7 @@ void CentralizedFailsafe::defaultPumpFailsafe(FailsafeLevel level) {
 void CentralizedFailsafe::emergencyStop(const char* reason) {
     LOG_ERROR(TAG, "EMERGENCY STOP: %s", reason);
 
-    currentLevel = FailsafeLevel::EMERGENCY;
+    currentLevel.store(FailsafeLevel::EMERGENCY);
 
     // 1. Immediately shut down burner via BurnerSystemController
     BurnerSystemController* controller = SRP::getBurnerSystemController();
@@ -261,9 +273,10 @@ void CentralizedFailsafe::emergencyStop(const char* reason) {
     RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::POWER_BOOST), false);
     RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_MODE), false);
 
-    // 3. Keep pumps running for safety
-    RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::HEATING_PUMP), true);
-    RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_PUMP), true);
+    // 3. Keep pumps running for safety (F13: emergency setter bypasses pump
+    // protection so a recent pump toggle cannot silently block dissipation flow)
+    RelayControlTask::setRelayStateEmergency(RelayIndex::toPhysical(RelayIndex::HEATING_PUMP), true);
+    RelayControlTask::setRelayStateEmergency(RelayIndex::toPhysical(RelayIndex::WATER_PUMP), true);
     
     // 4. Set emergency stop event
     xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
@@ -280,8 +293,8 @@ void CentralizedFailsafe::emergencyStop(const char* reason) {
 
 void CentralizedFailsafe::orderlyShutdown(const char* reason) {
     LOG_INFO(TAG, "Orderly shutdown initiated: %s", reason);
-    
-    currentLevel = FailsafeLevel::SHUTDOWN;
+
+    currentLevel.store(FailsafeLevel::SHUTDOWN);
     
     // 1. Save current state
     saveEmergencyState();
@@ -343,7 +356,7 @@ void CentralizedFailsafe::saveEmergencyState() {
 }
 
 bool CentralizedFailsafe::attemptRecovery() {
-    if (currentLevel < FailsafeLevel::CRITICAL) {
+    if (currentLevel.load() < FailsafeLevel::CRITICAL) {
         LOG_INFO(TAG, "No recovery needed - system not in critical state");
         return true;
     }
@@ -408,7 +421,7 @@ bool CentralizedFailsafe::attemptRecovery() {
                         SystemEvents::SystemState::EMERGENCY_STOP);
 
     // Reset to warning level (not NORMAL) to allow monitoring
-    currentLevel = FailsafeLevel::WARNING;
+    currentLevel.store(FailsafeLevel::WARNING);
 
     // Re-enable system
     xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
@@ -448,16 +461,16 @@ void CentralizedFailsafe::monitorSystemHealth() {
     }
 
     // If everything is OK and we're in warning state, try to clear it
-    if (currentLevel == FailsafeLevel::WARNING && errorBits == 0 &&
+    if (currentLevel.load() == FailsafeLevel::WARNING && errorBits == 0 &&
         freeHeap > SystemConstants::System::MIN_HEAP_FOR_MQTT) {
         LOG_INFO(TAG, "System health restored - clearing warning state");
-        currentLevel = FailsafeLevel::NORMAL;
+        currentLevel.store(FailsafeLevel::NORMAL);
         executeFailsafeActions(FailsafeLevel::NORMAL, SystemError::SUCCESS);
     }
 }
 
 const char* CentralizedFailsafe::getFailsafeStatusString() {
-    switch (currentLevel) {
+    switch (currentLevel.load()) {
         case FailsafeLevel::NORMAL: return "Normal";
         case FailsafeLevel::WARNING: return "Warning";
         case FailsafeLevel::DEGRADED: return "Degraded";

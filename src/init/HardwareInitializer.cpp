@@ -83,11 +83,25 @@ Result<void> HardwareInitializer::initializeModbus() {
         mainHandleData(serverAddress, fc, address, data, length);
     });
 
-    SRP::getModbusMaster().onError([](esp32Modbus::Error error) {
-        LOG_ERROR(TAG, "Modbus communication error: %d", static_cast<int>(error));
+    SRP::getModbusMaster().onError([](uint16_t serverAddress, esp32Modbus::Error error) {
+        LOG_ERROR(TAG, "Modbus communication error from 0x%02X: %d",
+                  serverAddress, static_cast<int>(error));
+        // F18: route the error to the OWNING device so ModbusDevice::handleError
+        // actually runs (flags syncContext->errorOccurred, feeds per-device error
+        // trackers) instead of only logging. Previously the RTU onError callback
+        // omitted the slave address, so this could not be done and an entire
+        // device-level error-reaction layer was dead code.
+        handleError(static_cast<uint8_t>(serverAddress), error);
     });
 
     LOG_INFO(TAG, "Modbus callbacks registered successfully");
+
+    // F17: align the RTU per-transaction timeout with the ModbusDevice sync-wait
+    // timeout (~1s). The library default is 5000ms, so a dead/slow slave held the
+    // shared bus for 5s while device callers gave up at 1s - the source of the
+    // late-response desync. Matching them (and shrinking the worst-case bus hold)
+    // keeps the TDM schedule responsive.
+    SRP::getModbusMaster().setTimeOutValue(1000);
 
     // Start the Modbus RTU task on core 1 to avoid interference with BLE on core 0
     SRP::getModbusMaster().begin(1);  // Pin to core 1

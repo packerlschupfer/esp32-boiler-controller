@@ -198,12 +198,15 @@ bool SafetyInterlocks::verifyTemperatureSensors(uint8_t minRequiredSensors) {
         // Check sensor update timestamps
         // Check if sensor data has ever been received
         // M3: Use configurable SafetyConfig::sensorStaleMs instead of hardcoded SENSOR_TIMEOUT_MS
-        if (readings.lastUpdateTimestamp == 0) {
-            LOG_WARN(TAG, "No sensor data received yet");
+        // F5: key off lastBoilerTempUpdateTimestamp (MB8ART-only) rather than the
+        // shared lastUpdateTimestamp, which the ANDRTF3 room sensor keeps fresh
+        // even after the boiler sensors' bus/module has died.
+        if (readings.lastBoilerTempUpdateTimestamp == 0) {
+            LOG_WARN(TAG, "No boiler sensor data received yet");
             validSensors = 0; // No data received
-        } else if (Utils::elapsedMs(readings.lastUpdateTimestamp) > SafetyConfig::sensorStaleMs) {
-            LOG_WARN(TAG, "Sensor data is stale - last update %lu ms ago (threshold: %lu ms)",
-                     Utils::elapsedMs(readings.lastUpdateTimestamp), SafetyConfig::sensorStaleMs);
+        } else if (Utils::elapsedMs(readings.lastBoilerTempUpdateTimestamp) > SafetyConfig::sensorStaleMs) {
+            LOG_WARN(TAG, "Boiler sensor data is stale - last update %lu ms ago (threshold: %lu ms)",
+                     Utils::elapsedMs(readings.lastBoilerTempUpdateTimestamp), SafetyConfig::sensorStaleMs);
             validSensors = 0; // Consider all invalid if data is too old
         }
     }

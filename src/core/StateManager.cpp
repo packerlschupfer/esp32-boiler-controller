@@ -232,10 +232,30 @@ uint32_t StateManager::getSensorAge(SensorChannel channel) {
     if (guard.hasLock()) {
         const SharedSensorReadings& readings = SRP::getSensorReadings();
 
-        if (channel == SensorChannel::PRESSURE) {
-            timestamp = readings.lastPressureUpdateTimestamp;
-        } else {
-            timestamp = readings.lastUpdateTimestamp;
+        // Route each channel to the timestamp written by ITS source, so a
+        // sensor/bus loss on one source is not masked by another source
+        // refreshing a shared timestamp. The ANDRTF3 room sensor refreshes
+        // lastUpdateTimestamp every ~5s; the boiler/tank channels come from the
+        // MB8ART and must key off lastBoilerTempUpdateTimestamp (written only by
+        // the MB8ART data path) or their staleness failsafe never trips when
+        // MB8ART alone dies. (Audit F5)
+        switch (channel) {
+            case SensorChannel::PRESSURE:
+                timestamp = readings.lastPressureUpdateTimestamp;
+                break;
+            case SensorChannel::BOILER_OUTPUT:
+            case SensorChannel::BOILER_RETURN:
+            case SensorChannel::WATER_TANK:
+            case SensorChannel::WATER_TANK_TOP:
+            case SensorChannel::WATER_RETURN:
+            case SensorChannel::HEATING_RETURN:
+                timestamp = readings.lastBoilerTempUpdateTimestamp;
+                break;
+            case SensorChannel::OUTSIDE_TEMP:
+            case SensorChannel::INSIDE_TEMP:
+            default:
+                timestamp = readings.lastUpdateTimestamp;
+                break;
         }
     }
 
@@ -383,7 +403,10 @@ SensorReadingsWithAge StateManager::getSensorReadingsAtomic(uint32_t maxAgeMs) {
 
     // Calculate age from the same mutex acquisition
     // Round 16 Issue #1: Use Utils::elapsedMs() for safe wraparound handling
-    uint32_t timestamp = result.readings.lastUpdateTimestamp;
+    // F5: the only callers are the burner/boiler control path, so age/staleness
+    // must reflect the MB8ART boiler channels (lastBoilerTempUpdateTimestamp),
+    // not the shared timestamp the ANDRTF3 room sensor keeps fresh.
+    uint32_t timestamp = result.readings.lastBoilerTempUpdateTimestamp;
     if (timestamp == 0) {
         result.ageMs = UINT32_MAX;
     } else {

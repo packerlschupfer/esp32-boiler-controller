@@ -154,9 +154,14 @@ void ModbusCoordinator::processTick() {
                         getSensorName(nextSensor), (int)taskState);
                 registeredSensors.erase(nextSensor);
             } else {
-                // Send notification to the task with SensorType as value
-                // This allows RYN4ProcessingTask to distinguish between SET and READ operations
-                xTaskNotify(it->second, static_cast<uint32_t>(nextSensor), eSetValueWithOverwrite);
+                // F35: notify with a distinct BIT per SensorType (eSetBits)
+                // instead of an overwriting value. RYN4 registers both RYN4_SET
+                // and RYN4_READ on ONE handle; with eSetValueWithOverwrite a
+                // second tick arriving while a slow (up to ~3s) transaction was
+                // in flight ERASED the first, dropping SET/READ ticks and DELAY
+                // renewals exactly under bus stress. eSetBits coalesces so both
+                // pending ticks survive and are processed. nextSensor is 0..3 here.
+                xTaskNotify(it->second, (1UL << static_cast<uint32_t>(nextSensor)), eSetBits);
                 LOG_DEBUG(TAG, "Tick %lu: %s", currentTick, getSensorName(nextSensor));
             }
         }

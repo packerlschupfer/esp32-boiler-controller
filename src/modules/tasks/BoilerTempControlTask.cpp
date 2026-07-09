@@ -6,6 +6,8 @@
 #include "modules/control/BoilerTempController.h"
 #include "modules/control/BurnerStateMachine.h"
 #include "modules/control/BurnerRequestManager.h"
+#include "modules/control/BurnerSafetyValidator.h"  // F2: validate before arming demand
+#include "modules/control/ReturnPreheater.h"        // F2: thermal-shock mitigation
 #include "shared/SharedResources.h"
 #include "events/SystemEventsGenerated.h"
 #include "core/SystemResourceProvider.h"
@@ -174,9 +176,21 @@ void BoilerTempControlTask(void* parameter) {
                         BurnerStateMachine::setHeatDemand(false, tuneTarget, false);
                         LOG_INFO(TAG, "Autotune: Burner OFF");
                     } else {
-                        // Auto-tuner wants burner ON at FULL power
-                        BurnerStateMachine::setHeatDemand(true, tuneTarget, true);
-                        LOG_INFO(TAG, "Autotune: Burner FULL");
+                        // Auto-tuner wants burner ON at FULL power - still gate on
+                        // Layer-1 safety validation (F2): autotune oscillations can
+                        // drive the same thermal-shock/pressure conditions.
+                        BurnerSafetyValidator::SafetyConfig safetyConfig;
+                        safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
+                        auto vr = BurnerSafetyValidator::validateBurnerOperation(
+                            readings, safetyConfig, controller.isWaterMode());
+                        if (vr == BurnerSafetyValidator::ValidationResult::SAFE_TO_OPERATE) {
+                            BurnerStateMachine::setHeatDemand(true, tuneTarget, true);
+                            LOG_INFO(TAG, "Autotune: Burner FULL");
+                        } else {
+                            BurnerStateMachine::setHeatDemand(false, tuneTarget, false);
+                            LOG_WARN(TAG, "Autotune power-on blocked by safety validation: %s",
+                                     BurnerSafetyValidator::getValidationErrorMessage(vr));
+                        }
                     }
                 }
 
@@ -294,14 +308,39 @@ void BoilerTempControlTask(void* parameter) {
                          tempToFloat(targetTemp),
                          tempToFloat(currentTemp));
             } else {
-                // HALF or FULL - update BurnerStateMachine with power level
-                // Pump control is independent (PumpControlModule watches HEATING_ON bit)
-                BurnerStateMachine::setHeatDemand(true, targetTemp, highPower);
+                // HALF or FULL - arm demand, but ONLY after the same Layer-1
+                // safety validation BurnerControlTask runs. F2 (CRITICAL): this
+                // task is a second heat-demand writer; without this gate a PID
+                // coast OFF->HALF/FULL re-armed demand that BurnerSafetyValidator
+                // had just blocked (thermal shock, system pressure, runtime
+                // limits), igniting into the exact condition Layer-1 rejected.
+                BurnerSafetyValidator::SafetyConfig safetyConfig;
+                safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
+                auto vr = BurnerSafetyValidator::validateBurnerOperation(
+                    readings, safetyConfig, controller.isWaterMode());
 
-                LOG_INFO(TAG, "Power: %s (target:%.1f curr:%.1f)",
-                         BoilerTempController::powerLevelToString(output.powerLevel),
-                         tempToFloat(targetTemp),
-                         tempToFloat(currentTemp));
+                if (vr != BurnerSafetyValidator::ValidationResult::SAFE_TO_OPERATE) {
+                    // Fail safe: do not arm demand. Mirror BurnerControlTask's
+                    // thermal-shock handling (start return preheating); leave any
+                    // emergency-stop escalation to BurnerControlTask's own path so
+                    // we do not double-trigger it.
+                    LOG_WARN(TAG, "PID power-on blocked by safety validation: %s",
+                             BurnerSafetyValidator::getValidationErrorMessage(vr));
+                    BurnerStateMachine::setHeatDemand(false, targetTemp, false);
+                    if (vr == BurnerSafetyValidator::ValidationResult::THERMAL_SHOCK_RISK &&
+                        ReturnPreheater::getState() == ReturnPreheater::State::IDLE) {
+                        LOG_INFO(TAG, "Starting return preheating to mitigate thermal shock");
+                        ReturnPreheater::start();
+                    }
+                } else {
+                    // Pump control is independent (PumpControlModule watches HEATING_ON bit)
+                    BurnerStateMachine::setHeatDemand(true, targetTemp, highPower);
+
+                    LOG_INFO(TAG, "Power: %s (target:%.1f curr:%.1f)",
+                             BoilerTempController::powerLevelToString(output.powerLevel),
+                             tempToFloat(targetTemp),
+                             tempToFloat(currentTemp));
+                }
             }
 
             stats.powerChanges++;
