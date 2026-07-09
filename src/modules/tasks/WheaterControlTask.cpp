@@ -480,14 +480,25 @@ static bool checkIfWaterHeatingNeededEvent() {
     // H2 fix: Snapshot temperature thresholds under settings mutex BEFORE taking sensor mutex
     // Avoids nested mutex with sensorReadings, and protects Temperature_t reads from MQTT races
     Temperature_t snappedLimitLow = 0, snappedLimitHigh = 0;
+    bool snappedOverrideOff = false;
     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
         const SystemSettings& s = SRP::getSystemSettings();
         snappedLimitLow  = s.wHeaterConfTempLimitLow;
         snappedLimitHigh = s.wHeaterConfTempLimitHigh;
+        snappedOverrideOff = s.waterOverrideOff;
         SRP::giveSystemSettingsMutex();
     } else {
         LOG_ERROR(TAG, "Failed to acquire settings mutex - maintaining current water state");
         return heatingNeeded;  // Fail-safe: keep current state
+    }
+
+    // F27: honour the DURABLE water-OFF override (see HeatingControlTask for the
+    // full rationale). Previously the override lived only in the transient
+    // WATER_OFF_OVERRIDE bit that ControlTask consumed before this task polled it,
+    // so a remote "water off" was usually lost and never survived a reboot. The
+    // persisted waterOverrideOff flag is now the single durable block point.
+    if (snappedOverrideOff) {
+        return false;  // water heating blocked by override - not needed
     }
 
     // Get sensor readings with mutex protection

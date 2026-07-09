@@ -504,6 +504,7 @@ static bool checkIfSpaceHeatingNeededEvent() {
         Temperature_t targetInside;
         Temperature_t overheatMargin;
         Temperature_t hysteresis;
+        bool overrideOff;
     } ss;
     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
         const SystemSettings& s = SRP::getSystemSettings();
@@ -512,10 +513,22 @@ static bool checkIfSpaceHeatingNeededEvent() {
         ss.targetInside       = s.targetTemperatureInside;
         ss.overheatMargin     = s.roomTempOverheatMargin;
         ss.hysteresis         = s.heating_hysteresis;
+        ss.overrideOff        = s.heatingOverrideOff;
         SRP::giveSystemSettingsMutex();
     } else {
         LOG_ERROR(TAG, "Failed to acquire settings mutex - maintaining current heating state");
         return heatingNeeded;  // Fail-safe: keep current state
+    }
+
+    // F27: honour the DURABLE summer-mode / heating-OFF override. Previously the
+    // override was only carried by the transient HEATING_OFF_OVERRIDE ControlRequest
+    // bit, which ControlTask consumed (clearOnExit) before this task ever polled it -
+    // so a remote "heating off" override was usually lost and never survived a reboot.
+    // The persisted heatingOverrideOff flag is now consulted here, the single decision
+    // point for both turn-on (HeatingOff state) and keep-running (HeatingOn state), so
+    // the block is reliable regardless of the race and across reboots.
+    if (ss.overrideOff) {
+        return false;  // heating blocked by override - not needed
     }
 
     // Get sensor readings with mutex protection
