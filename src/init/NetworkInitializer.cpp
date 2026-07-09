@@ -123,6 +123,14 @@ void NetworkInitializer::networkMonitorTask(void* param) {
                      (unsigned long)ETH_CONNECTION_TIMEOUT_MS);
             loggedStillDown = true;
         }
+
+        // review-fix: guaranteed yield floor. This loop relies on
+        // waitForConnection() blocking for the interval, but its early-return
+        // paths (phy not started, null event group) could return immediately -
+        // without this delay the prio-1 loop would spin tightly, starve the IDLE
+        // task and trip the task watchdog. A short unconditional delay lets IDLE
+        // run (which feeds the TWDT) and barely affects the ~5s poll cadence.
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
 
     vTaskDelete(NULL);  // Delete this task once the link is up

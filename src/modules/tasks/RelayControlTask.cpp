@@ -310,15 +310,18 @@ void RelayControlTask::taskFunction(void* pvParameters) {
     vTaskDelete(nullptr);
 }
 
-bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool bypassPumpProtection) {
+bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool emergencyBypass) {
     // Validate relay index
     if (relayIndex < 1 || relayIndex > 8) {
         LOG_ERROR(TAG, "Invalid relay index: %d", relayIndex);
         return false;
     }
 
-    // Always check rate limit for relay protection
-    if (!checkRateLimit(relayIndex)) {
+    // Rate limit for relay protection. An emergency/failsafe command bypasses it:
+    // review-fix - the rate limiter (MAX_RELAY_TOGGLE_RATE_PER_MIN /
+    // MIN_RELAY_SWITCH_INTERVAL_MS) would otherwise silently drop a safety pump-ON
+    // that follows rapid cycling, defeating F13's emergency heat-dissipation hold.
+    if (!emergencyBypass && !checkRateLimit(relayIndex)) {
         LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
         return false;
     }
@@ -327,7 +330,7 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool b
     // This prevents rapid on/off cycling that can damage pump motors.
     // F13: emergency/failsafe commands bypass this - protection exists to prevent
     // rapid cycling, not to block a safety-ON for heat dissipation.
-    if (!bypassPumpProtection && !checkPumpProtection(relayIndex, state)) {
+    if (!emergencyBypass && !checkPumpProtection(relayIndex, state)) {
         // Pump protection blocks this state change - not an error, just too soon
         return false;
     }
@@ -664,7 +667,7 @@ bool RelayControlTask::setRelayStateEmergency(uint8_t relayIndex, bool state) {
         return false;
     }
     LOG_WARN(TAG, "EMERGENCY set relay %d to %s (protection bypassed)", relayIndex, state ? "ON" : "OFF");
-    return processSingleRelay(relayIndex, state, /*bypassPumpProtection=*/true);
+    return processSingleRelay(relayIndex, state, /*emergencyBypass=*/true);
 }
 
 bool RelayControlTask::setAllRelays(bool state) {

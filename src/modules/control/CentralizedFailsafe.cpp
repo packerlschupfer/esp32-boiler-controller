@@ -101,12 +101,18 @@ void CentralizedFailsafe::triggerFailsafe(FailsafeLevel level, SystemError reaso
         }
     }
 
-    // F32: never downgrade the level via triggerFailsafe. The old guard only
-    // blocked downgrades once already at CRITICAL+, so a one-shot WARNING (e.g.
-    // routine low-memory) could overwrite a sticky DEGRADED and erase the record
-    // of an unresolved fault. Downgrades happen only via recovery/health paths.
-    if (level <= currentLevel.load()) {
-        LOG_WARN(TAG, "Ignoring failsafe trigger - already at level %d", static_cast<int>(currentLevel.load()));
+    // F32 (+ review-fix): never DOWNGRADE the level via triggerFailsafe - a
+    // one-shot WARNING (routine low-memory) must not overwrite a sticky DEGRADED
+    // and erase the record of an unresolved fault; downgrades happen only via the
+    // recovery/health paths. BUT a NEW distinct fault at the SAME sub-CRITICAL
+    // level must still be processed so lastError and the failsafe actions reflect
+    // it (F32's first cut used a strict `level<=current` guard that silently
+    // dropped it). Only skip same-level re-entry at CRITICAL+ so the heavy
+    // emergency actions are not re-run every trigger. Matches the pre-fix
+    // behavior for sub-CRITICAL levels.
+    const FailsafeLevel cur = currentLevel.load();
+    if (level < cur || (level == cur && cur >= FailsafeLevel::CRITICAL)) {
+        LOG_WARN(TAG, "Ignoring failsafe trigger - already at level %d", static_cast<int>(cur));
         if (stateLocked) xSemaphoreGive(stateMutex_);
         return;
     }

@@ -54,6 +54,7 @@ namespace {
     // still collapses a genuine immediate double-publish but always executes any
     // A -> B -> A sequence.
     static constexpr uint32_t DEDUP_WINDOW_MS = 2000;  // 2s - a QoS0 double-publish arrives within ms
+    static bool     hasLastCommand = false;  // review-fix: explicit validity flag, not a hash==0 sentinel
     static uint32_t lastCommandHash = 0;
     static uint32_t lastCommandTimestamp = 0;
     // M5: Spinlock for thread-safe access (MQTT callbacks may come from different contexts)
@@ -82,7 +83,7 @@ namespace {
         uint32_t now = millis();
         bool isDuplicate = false;
         portENTER_CRITICAL(&dedupSpinlock);
-        if (lastCommandHash != 0 && lastCommandHash == hash &&
+        if (hasLastCommand && lastCommandHash == hash &&
             (now - lastCommandTimestamp) < DEDUP_WINDOW_MS) {
             isDuplicate = true;
         }
@@ -93,6 +94,7 @@ namespace {
     // Record the most-recently-executed command.
     void recordCommand(uint32_t hash) {
         portENTER_CRITICAL(&dedupSpinlock);
+        hasLastCommand = true;
         lastCommandHash = hash;
         lastCommandTimestamp = millis();
         portEXIT_CRITICAL(&dedupSpinlock);

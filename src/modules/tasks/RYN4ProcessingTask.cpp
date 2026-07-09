@@ -393,17 +393,26 @@ void RYN4ProcessingTask(void* parameter) {
         // with eSetBits (a distinct bit per SensorType) so a SET and a READ tick
         // that both land while a slow transaction was in flight are coalesced
         // rather than one overwriting the other. Clear all bits on read and
-        // service every pending tick, SET before READ.
+        // service every pending tick.
         uint32_t notificationBits = 0;
         if (xTaskNotifyWait(0, ULONG_MAX, &notificationBits, WAIT_TIMEOUT) == pdTRUE) {
             const uint32_t setBit  = 1UL << static_cast<uint32_t>(ModbusCoordinator::SensorType::RYN4_SET);
             const uint32_t readBit = 1UL << static_cast<uint32_t>(ModbusCoordinator::SensorType::RYN4_READ);
 
-            if (notificationBits & setBit) {
-                handleSetTick(ryn4);
-            }
+            // review-fix: service READ before SET when both coalesced into one
+            // wake (the task missed ticks under bus stress). handleReadTick then
+            // verifies the PREVIOUSLY-commanded, already-settled hardware state
+            // (actual vs the old `sent`); handleSetTick re-issues afterwards and
+            // is verified on the next READ tick. Doing SET first would have
+            // read back a just-commanded relay before it physically actuated,
+            // producing a spurious mismatch that can escalate BURNER_ENABLE to a
+            // failsafe from pure timing. Order is irrelevant when only one bit is
+            // set (the normal non-coalesced case).
             if (notificationBits & readBit) {
                 handleReadTick(ryn4);
+            }
+            if (notificationBits & setBit) {
+                handleSetTick(ryn4);
             }
             if ((notificationBits & (setBit | readBit)) == 0) {
                 LOG_WARN(TAG, "Unexpected notification bits: 0x%lX", notificationBits);

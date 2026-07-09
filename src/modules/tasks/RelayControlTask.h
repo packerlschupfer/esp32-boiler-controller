@@ -45,7 +45,7 @@ private:
     static void taskFunction(void* pvParameters);
     
     // Direct relay processing methods (no queue)
-    static bool processSingleRelay(uint8_t relayIndex, bool state, bool bypassPumpProtection = false);
+    static bool processSingleRelay(uint8_t relayIndex, bool state, bool emergencyBypass = false);
     static bool processToggleRelay(uint8_t relayIndex);
     static bool processSetAllRelays(bool state);
     static bool processSetMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety
