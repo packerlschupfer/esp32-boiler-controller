@@ -235,6 +235,13 @@ bool OTATask::init() {
     }
     
     // Initialize OTA manager
+    // ArduinoOTA advertises over mDNS by default. This firmware is uploaded
+    // by IP, never by hostname, and mDNS holds heap we cannot spare:
+    // Update::begin() needs a 4KB contiguous allocation for its write buffer
+    // and was failing, which aborts the upload before the device ever opens
+    // its TCP connection. Note CONFIG_MDNS_DISABLE does not control this.
+    OTAManager::setMdnsEnabled(false);
+
     OTAManager::initialize(DEVICE_HOSTNAME,    // Use the project hostname
                           OTA_PASSWORD,       // OTA password from config
                           OTA_PORT,           // OTA port from config
