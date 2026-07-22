@@ -10,7 +10,9 @@
 #include "LoggingMacros.h"
 #ifndef LOG_NO_CUSTOM_LOGGER
 #include <Logger.h>
-#include <LogInterfaceImpl.cpp>  // Include implementation once
+// LogInterfaceImpl.cpp is compiled by the ESP32-Logger library itself when
+// USE_CUSTOM_LOGGER is defined. Including it here too defined the custom_log_*
+// symbols twice; that links on Arduino core 3.2.0 but fails on 3.3.9.
 #endif
 #include "core/SharedResourceManager.h"
 #include <MB8ART.h>
