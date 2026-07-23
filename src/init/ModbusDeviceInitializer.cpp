@@ -149,7 +149,7 @@ Result<void> ModbusDeviceInitializer::initializeDevices(SystemInitializer* initi
     }
 
     // Create background monitoring task
-    createBackgroundMonitoringTask(initializer, mb8artInitialized, ryn4Initialized);
+    createBackgroundMonitoringTask(initializer, mb8artInitialized, ryn4Initialized, andrtf3Initialized);
 
     LOG_INFO(TAG, "Modbus device initialization phase completed");
     return Result<void>();
@@ -511,7 +511,8 @@ void ModbusDeviceInitializer::initializeCriticalDataStorage(SystemInitializer* i
 
 void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* initializer,
                                                               bool mb8artInitialized,
-                                                              bool ryn4Initialized) {
+                                                              bool ryn4Initialized,
+                                                              bool andrtf3Initialized) {
     LOG_INFO(TAG, "Creating background device monitoring task...");
 
     // Create a structure to pass initialization state to the task
@@ -532,7 +533,7 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
         initializer->andrtf3_,
         mb8artInitialized,
         ryn4Initialized,
-        initializer->andrtf3_ != nullptr && initializer->andrtf3_->isConnected(),
+        andrtf3Initialized,
         initializer
     });
 
@@ -558,12 +559,19 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
             // Check device status - they should already be initialized synchronously
             bool mb8artReady = state->mb8artDone || (state->mb8art != nullptr && state->mb8art->isInitialized());
             bool ryn4Ready = state->ryn4Done || (state->ryn4 != nullptr && state->ryn4->isInitialized());
+            // ANDRTF3 has no isInitialized(); isConnected() only turns true after a
+            // successful Modbus response. Its slot is tick 0 of the coordinator's
+            // 10-tick (5s) cycle, so 100ms after init it has simply not been polled
+            // yet and reported FAIL on every boot despite working fine. Report the
+            // initialisation result, consistent with MB8ART and RYN4, and show
+            // polling state separately.
             bool andrtf3Ready = state->andrtf3Done || (state->andrtf3 != nullptr && state->andrtf3->isConnected());
+            const bool andrtf3Polled = (state->andrtf3 != nullptr && state->andrtf3->isConnected());
 
             LOG_INFO(TAG, "Device status - MB8ART:%s RYN4:%s ANDRTF3:%s",
                      mb8artReady ? "OK" : "FAIL",
                      ryn4Ready ? "OK" : "FAIL",
-                     andrtf3Ready ? "OK" : "FAIL");
+                     andrtf3Ready ? (andrtf3Polled ? "OK" : "OK(await-poll)") : "FAIL");
 
             if (mb8artReady && ryn4Ready) {
                 // Devices initialized - background verification complete

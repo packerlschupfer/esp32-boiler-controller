@@ -64,5 +64,6 @@ private:
      */
     static void createBackgroundMonitoringTask(SystemInitializer* initializer,
                                                 bool mb8artInitialized,
-                                                bool ryn4Initialized);
+                                                bool ryn4Initialized,
+                                                bool andrtf3Initialized);
 };
