@@ -153,21 +153,18 @@ struct SystemSettingsTemperatureShadows {
     }
     
     /**
-     * @brief Apply shadow values back to Temperature_t fields
+     * @brief Apply the sensor offset shadows back to Temperature_t fields
+     *
+     * Only the sensor offsets are registered with PersistentStorage through this
+     * wrapper. The temperature limit/setpoint fields are registered on separate
+     * int32_t shadows in PersistentStorageTask, which apply them via their
+     * onChange callbacks and once after loadAll(). The float fields here are
+     * filled once at boot from struct defaults and never updated, so writing them
+     * back (as this function used to on every parameter save) silently reverted
+     * live MQTT/UI changes of tank limits, burner/heating/water limits, room
+     * target and hysteresis until the next reboot.
      */
     void applyToSettings(SystemSettings& settings) {
-        settings.wHeaterConfTempLimitLow = tempFromFloat(wHeaterConfTempLimitLow);
-        settings.wHeaterConfTempLimitHigh = tempFromFloat(wHeaterConfTempLimitHigh);
-        settings.wHeaterConfTempSafeLimitHigh = tempFromFloat(wHeaterConfTempSafeLimitHigh);
-        settings.wHeaterConfTempSafeLimitLow = tempFromFloat(wHeaterConfTempSafeLimitLow);
-        settings.targetTemperatureInside = tempFromFloat(targetTemperatureInside);
-        settings.burner_low_limit = tempFromFloat(burner_low_limit);
-        settings.burner_high_limit = tempFromFloat(burner_high_limit);
-        settings.heating_low_limit = tempFromFloat(heating_low_limit);
-        settings.heating_high_limit = tempFromFloat(heating_high_limit);
-        settings.water_heating_low_limit = tempFromFloat(water_heating_low_limit);
-        settings.water_heating_high_limit = tempFromFloat(water_heating_high_limit);
-        settings.heating_hysteresis = tempFromFloat(heating_hysteresis);
         // Sensor offsets - direct int32_t to int16_t (no float conversion needed)
         settings.boilerOutputOffset = static_cast<Temperature_t>(boilerOutputOffset);
         settings.boilerReturnOffset = static_cast<Temperature_t>(boilerReturnOffset);
