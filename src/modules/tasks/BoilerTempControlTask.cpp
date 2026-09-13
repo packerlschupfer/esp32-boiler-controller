@@ -124,7 +124,22 @@ void BoilerTempControlTask(void* parameter) {
                 tuneSetpoint = tempFromFloat(55.0f);
             }
 
-            if (controller.startAutoTuning(tuneSetpoint)) {
+            // Only start from a sane, fresh boiler temperature (Autotune::MIN/MAX_BOILER_TEMP)
+            SharedSensorReadings startReadings = StateManager::getSensorReadingsCopy();
+            bool startTempOk = startReadings.isBoilerTempOutputValid &&
+                !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT) &&
+                startReadings.boilerTempOutput >= SystemConstants::PID::Autotune::MIN_BOILER_TEMP &&
+                startReadings.boilerTempOutput <= SystemConstants::PID::Autotune::MAX_BOILER_TEMP;
+
+            if (!startTempOk) {
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                LOG_WARN(TAG, "Auto-tuning not started: boiler output %.1f°C invalid, stale or outside %.1f-%.1f°C",
+                         tempToFloat(startReadings.boilerTempOutput),
+                         tempToFloat(SystemConstants::PID::Autotune::MIN_BOILER_TEMP),
+                         tempToFloat(SystemConstants::PID::Autotune::MAX_BOILER_TEMP));
+                MQTTTask::publish("boiler/status/pid/autotune/result",
+                    "{\"status\":\"rejected\",\"reason\":\"boiler temp\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
+            } else if (controller.startAutoTuning(tuneSetpoint)) {
                 SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
                 SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_COMPLETE |
                                            SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
@@ -160,6 +175,29 @@ void BoilerTempControlTask(void* parameter) {
             }
 
             SharedSensorReadings readings = StateManager::getSensorReadingsCopy();
+
+            // SAFETY: abort on lost/stale boiler temperature or excursion above
+            // Autotune::MAX_TEMP_EXCURSION. Previously an invalid reading just skipped
+            // the cycle and left the burner at the tuner's last level (possibly FULL),
+            // and the excursion limit was defined but never checked.
+            bool boilerTempUsable = readings.isBoilerTempOutputValid &&
+                !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT);
+            if (!boilerTempUsable ||
+                readings.boilerTempOutput > SystemConstants::PID::Autotune::MAX_TEMP_EXCURSION) {
+                LOG_ERROR(TAG, "Auto-tuning aborted: %s (boiler output %.1f°C, limit %.1f°C)",
+                          boilerTempUsable ? "boiler temperature excursion" : "boiler output sensor invalid or stale",
+                          tempToFloat(readings.boilerTempOutput),
+                          tempToFloat(SystemConstants::PID::Autotune::MAX_TEMP_EXCURSION));
+                controller.stopAutoTuning();
+                BurnerStateMachine::setHeatDemand(false, BurnerRequestManager::getCurrentTargetTemp(), false);
+                SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                MQTTTask::publish("boiler/status/pid/autotune/result",
+                    "{\"status\":\"aborted\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
+                stats.cycleCount++;
+                continue;
+            }
+
             if (readings.isBoilerTempOutputValid) {
                 auto output = controller.updateAutoTuning(readings.boilerTempOutput);
 
