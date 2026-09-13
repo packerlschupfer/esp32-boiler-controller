@@ -475,47 +475,57 @@ void BoilerTempController::updateMode() {
     EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
     bool isWaterMode = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
 
-    if (isWaterMode_ != isWaterMode) {
-        isWaterMode_ = isWaterMode;
+    bool modeChanged = (isWaterMode_ != isWaterMode);
+    isWaterMode_ = isWaterMode;
 
-        MutexGuard guard(mutex_, MUTEX_TIMEOUT);
-        if (!guard.hasLock()) {
-            LOG_ERROR(TAG, "updateMode: mutex timeout");
-            return;
-        }
-
-        // Mode switching behavior depends on burner type
-        if (config_.burnerType == BurnerType::MODULATING) {
-            // PID mode: Switch gains based on thermal mass characteristics
-            // Space heating: Large thermal mass (radiators) → conservative gains (avoid overshoot)
-            // Water heating: Medium thermal mass (tank) → aggressive gains (fast charging)
-            if (isWaterMode) {
-                config_.modKp = config_.waterKp;
-                config_.modKi = config_.waterKi;
-                config_.modKd = config_.waterKd;
-                LOG_INFO(TAG, "Switched to WATER heating PID: Kp=%.2f Ki=%.4f Kd=%.2f",
-                         config_.waterKp, config_.waterKi, config_.waterKd);
-            } else {
-                // Reload space heating gains from SystemSettings
-                SystemSettings& settings = SRP::getSystemSettings();
-                config_.modKp = settings.spaceHeatingKp;
-                config_.modKi = settings.spaceHeatingKi;
-                config_.modKd = settings.spaceHeatingKd;
-                LOG_INFO(TAG, "Switched to SPACE heating PID: Kp=%.2f Ki=%.4f Kd=%.2f",
-                         config_.modKp, config_.modKi, config_.modKd);
-            }
-
-            // Reset PID to prevent integral windup on mode switch
-            if (pidController_ != nullptr) {
-                pidController_->reset();
-            }
-            lastPIDOutput_ = 0;
-        } else {
-            // TWO_STAGE mode: Mode switching doesn't affect bang-bang thresholds
+    if (config_.burnerType != BurnerType::MODULATING) {
+        // TWO_STAGE mode: Mode switching doesn't affect bang-bang thresholds
+        if (modeChanged) {
             LOG_DEBUG(TAG, "Mode switched to %s - bang-bang thresholds unchanged",
                      isWaterMode ? "WATER" : "SPACE");
         }
+        return;
     }
+
+    // PID mode: use the gains of the active mode straight from SystemSettings,
+    // checked every cycle. Previously the water gains were copied once at init
+    // and only mode switches reloaded anything, so an MQTT/UI gain change had no
+    // effect until reboot.
+    // Space heating: Large thermal mass (radiators) → conservative gains (avoid overshoot)
+    // Water heating: Medium thermal mass (tank) → aggressive gains (fast charging)
+    SystemSettings& settings = SRP::getSystemSettings();
+    float kp = isWaterMode ? settings.wHeaterKp : settings.spaceHeatingKp;
+    float ki = isWaterMode ? settings.wHeaterKi : settings.spaceHeatingKi;
+    float kd = isWaterMode ? settings.wHeaterKd : settings.spaceHeatingKd;
+
+    MutexGuard guard(mutex_, MUTEX_TIMEOUT);
+    if (!guard.hasLock()) {
+        LOG_ERROR(TAG, "updateMode: mutex timeout");
+        return;
+    }
+
+    bool gainsChanged = (kp != config_.modKp) || (ki != config_.modKi) || (kd != config_.modKd);
+    if (!modeChanged && !gainsChanged) {
+        return;
+    }
+
+    config_.modKp = kp;
+    config_.modKi = ki;
+    config_.modKd = kd;
+    if (isWaterMode) {
+        config_.waterKp = kp;
+        config_.waterKi = ki;
+        config_.waterKd = kd;
+    }
+    LOG_INFO(TAG, "%s %s heating PID: Kp=%.2f Ki=%.4f Kd=%.2f",
+             modeChanged ? "Switched to" : "Gains updated for",
+             isWaterMode ? "WATER" : "SPACE", kp, ki, kd);
+
+    // Reset PID to prevent integral windup / output bumps on mode or gain change
+    if (pidController_ != nullptr) {
+        pidController_->reset();
+    }
+    lastPIDOutput_ = 0;
 }
 
 BoilerTempController::ControlOutput BoilerTempController::getLastOutput() const {

@@ -281,15 +281,16 @@ void PersistentStorageTask(void* pvParameters) {
     storage->registerFloat("pid/spaceHeating/kd", &settings.spaceHeatingKd,
                           0.0f, 50.0f, "Space heating PID derivative gain");
     
-    // PID parameters for water heating
+    // PID parameters for water heating (same ranges as space heating: the same
+    // boiler loop is controlled, and relay autotune gives e.g. Kp ~23)
     storage->registerFloat("pid/waterHeater/kp", &settings.wHeaterKp,
-                          0.0f, 10.0f, "Water heater PID proportional gain");
+                          0.0f, 100.0f, "Water heater PID proportional gain");
 
     storage->registerFloat("pid/waterHeater/ki", &settings.wHeaterKi,
-                          0.0f, 5.0f, "Water heater PID integral gain");
+                          0.0f, 10.0f, "Water heater PID integral gain");
 
     storage->registerFloat("pid/waterHeater/kd", &settings.wHeaterKd,
-                          0.0f, 5.0f, "Water heater PID derivative gain");
+                          0.0f, 50.0f, "Water heater PID derivative gain");
 
     // PID auto-tuning configuration
     storage->registerFloat("pid/autotune/amplitude", &settings.autotuneRelayAmplitude,
