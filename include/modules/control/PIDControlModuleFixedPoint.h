@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "shared/Temperature.h"
+#include "modules/control/PIDGainFixedPoint.h"
 #include <cstdint>
 
 /**

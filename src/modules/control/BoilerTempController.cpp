@@ -283,6 +283,18 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
     if (dtMs == 0) dtMs = 100;  // Minimum 100ms
     lastPIDTime_ = now;
 
+    // The PID only runs while a request is active and not during autotune, so the
+    // first call after a pause sees a dt of minutes or hours. Integrating that
+    // throws the integral straight to its clamp (2026-09-13: burner FULL above
+    // target right after an autotune stop). Restart the PID instead.
+    static constexpr uint32_t PID_MAX_DT_MS = 10000;     // control cycle is 2.5 s
+    static constexpr uint32_t PID_NOMINAL_DT_MS = 2500;
+    if (dtMs > PID_MAX_DT_MS) {
+        LOG_INFO(TAG, "PID resumed after %lu ms pause - resetting PID state", dtMs);
+        pidController_->reset();
+        dtMs = PID_NOMINAL_DT_MS;
+    }
+
     // Calculate PID adjustment
     // The PID outputs a temperature adjustment; we scale this to 0-100%
     // Gains are float (SystemSettings/autotune) but the PID takes fixed-point x1000.

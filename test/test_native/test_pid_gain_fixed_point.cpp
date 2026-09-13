@@ -57,6 +57,15 @@ void test_pid_scaled_gain_commands_off_above_target() {
     TEST_ASSERT_TRUE(truncatedFarAbove >= 35 && truncatedFarAbove <= 55);
 }
 
+void test_pid_adjustment_clamp_keeps_sign() {
+    // Regression: int32 -44055 narrowed to int16 first became +21481 (FULL).
+    TEST_ASSERT_EQUAL_INT16(-1000, PIDGainFixedPoint::clampToAdjustment(-44055, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(1000, PIDGainFixedPoint::clampToAdjustment(44055, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(-1000, PIDGainFixedPoint::clampToAdjustment(-5000000000LL, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(-123, PIDGainFixedPoint::clampToAdjustment(-123, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(0, PIDGainFixedPoint::clampToAdjustment(0, -1000, 1000));
+}
+
 void test_pid_scaled_gain_commands_full_below_target() {
     // Boiler 3°C below target: must exceed fullThreshold (75) -> FULL power.
     int32_t power = pidPowerFromP(PIDGainFixedPoint::fromFloat(34.206f), 30);

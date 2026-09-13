@@ -21,6 +21,7 @@ void test_pid_gain_conversion_scales_by_1000();
 void test_pid_gain_conversion_rejects_invalid();
 void test_pid_scaled_gain_commands_off_above_target();
 void test_pid_scaled_gain_commands_full_below_target();
+void test_pid_adjustment_clamp_keeps_sign();
 
 void test_pre_ignition_safe_conditions();
 void test_pre_ignition_high_boiler_temp();
@@ -460,6 +461,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pid_gain_conversion_rejects_invalid);
     RUN_TEST(test_pid_scaled_gain_commands_off_above_target);
     RUN_TEST(test_pid_scaled_gain_commands_full_below_target);
+    RUN_TEST(test_pid_adjustment_clamp_keeps_sign);
 
     return UNITY_END();
 }

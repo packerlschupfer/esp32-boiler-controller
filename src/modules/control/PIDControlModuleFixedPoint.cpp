@@ -87,8 +87,10 @@ Temperature_t PIDControlModuleFixedPoint::calculatePIDAdjustment(
     PIDValue_t I = static_cast<PIDValue_t>(I_raw / SCALE);
 
     // Calculate tentative output to check for saturation
+    // Clamp in the wide type first: narrowing to int16 before clamping wraps the sign.
     PIDValue_t tentativeOutput = P + I + D;
-    Temperature_t tentativeAdjustment = static_cast<Temperature_t>(tentativeOutput);
+    Temperature_t tentativeAdjustment =
+        PIDGainFixedPoint::clampToAdjustment(tentativeOutput, outputMin, outputMax);
 
     // Anti-windup: only accumulate integral if output is NOT saturated
     // This prevents integral from winding up when output is at limits
@@ -112,9 +114,9 @@ Temperature_t PIDControlModuleFixedPoint::calculatePIDAdjustment(
     // === Calculate final output ===
     PIDValue_t output = P + I + D;
 
-    // Convert back to temperature units and apply limits
-    Temperature_t tempAdjustment = static_cast<Temperature_t>(output);
-    tempAdjustment = clamp(tempAdjustment, outputMin, outputMax);
+    // Apply limits in the wide type, then convert to temperature units.
+    // (Casting to int16 first wrapped large negative outputs to positive.)
+    Temperature_t tempAdjustment = PIDGainFixedPoint::clampToAdjustment(output, outputMin, outputMax);
     
     // Debug logging (comment out in production)
     #ifdef PID_DEBUG

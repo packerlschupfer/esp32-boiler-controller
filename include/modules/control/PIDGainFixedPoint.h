@@ -33,6 +33,19 @@ namespace PIDGainFixedPoint {
         return static_cast<int32_t>(scaled);
     }
 
+    /**
+     * @brief Clamp a wide PID output to the adjustment range, THEN narrow to int16.
+     *
+     * The PID sums P+I+D in int32. Casting that to Temperature_t (int16) before
+     * clamping wraps large values: -44055 became +21481, which clamped to +100%
+     * and commanded the burner FULL while 5.5C above target (2026-09-13 23:22).
+     */
+    inline int16_t clampToAdjustment(int64_t output, int16_t minValue, int16_t maxValue) {
+        if (output < minValue) return minValue;
+        if (output > maxValue) return maxValue;
+        return static_cast<int16_t>(output);
+    }
+
 } // namespace PIDGainFixedPoint
 
 #endif // PID_GAIN_FIXED_POINT_H
