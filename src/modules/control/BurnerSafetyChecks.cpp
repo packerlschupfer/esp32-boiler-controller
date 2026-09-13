@@ -3,7 +3,10 @@
 #include "BurnerStateMachine.h"
 #include "modules/control/BurnerSystemController.h"
 #include "modules/control/BurnerAntiFlapping.h"
+#include "modules/control/BurnerRequestManager.h"
 #include "core/SystemResourceProvider.h"
+#include "utils/Utils.h"
+#include <Arduino.h>
 #include "shared/SharedSensorReadings.h"
 #include "events/SystemEventsGenerated.h"
 #include "utils/MutexRetryHelper.h"
@@ -104,7 +107,38 @@ BurnerSMState BurnerSafetyChecks::checkModeSwitchTransition(
     return BurnerSMState::IDLE;
 }
 
+bool BurnerSafetyChecks::hasActiveModeDemand() {
+    EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
+    EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
+
+    bool heatingActive = (systemBits & SystemEvents::SystemState::HEATING_ON) &&
+                         (requestBits & SystemEvents::BurnerRequest::HEATING);
+    bool waterActive = (systemBits & SystemEvents::SystemState::WATER_ON) &&
+                       (requestBits & SystemEvents::BurnerRequest::WATER);
+
+    return heatingActive || waterActive;
+}
+
 BurnerSMState BurnerSafetyChecks::checkSafetyShutdown(BurnerSMState currentState, bool heatDemand) {
+    // Stop the burner if it runs without any active heating/water mode request.
+    // Short grace period: during a water <-> heating handoff the old mode clears
+    // its bits before the new mode sets them. Bypasses anti-flapping (like flame
+    // loss) - with no mode active nothing guarantees circulation.
+    // Called only from BurnerControlTask context (state handlers) - static is safe.
+    static constexpr uint32_t MODE_DEMAND_LOSS_GRACE_MS = 10000;
+    static uint32_t noModeDemandSinceMs = 0;
+
+    if (hasActiveModeDemand()) {
+        noModeDemandSinceMs = 0;
+    } else if (noModeDemandSinceMs == 0) {
+        noModeDemandSinceMs = millis() | 1;  // 0 is the "not lost" sentinel
+    } else if (Utils::elapsedMs(noModeDemandSinceMs) >= MODE_DEMAND_LOSS_GRACE_MS) {
+        LOG_WARN(TAG, "Burner running without active heating/water mode request for %lu ms - stopping",
+                 Utils::elapsedMs(noModeDemandSinceMs));
+        noModeDemandSinceMs = 0;
+        return BurnerSMState::POST_PURGE;
+    }
+
     // Check if we should stop burner
     if (!heatDemand || !checkSafetyConditions()) {
         // Check anti-flapping before turning off

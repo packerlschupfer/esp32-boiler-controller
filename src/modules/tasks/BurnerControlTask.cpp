@@ -729,6 +729,11 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
                 if (!burnerState.lastHeatDemand) {
                     burnerState.operationStartTime = millis();
                 }
+                // Validation passed - clear the SAFETY bit set by logSafetyEvent().
+                // Nothing else clears it, so it stayed latched and every later
+                // "Critical system errors" report carried a stale 0x4000.
+                xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),
+                                     SystemEvents::Error::SAFETY);
             }
         }
     }

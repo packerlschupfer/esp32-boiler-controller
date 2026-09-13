@@ -150,17 +150,21 @@ BurnerSafetyValidator::ValidationResult BurnerSafetyValidator::validateBurnerOpe
             char outBuf[16], retBuf[16], diffBuf[16];
             formatTemp(outBuf, sizeof(outBuf), readings.boilerTempOutput);
             formatTemp(retBuf, sizeof(retBuf), readings.boilerTempReturn);
+            char limitBuf[16];
             formatTemp(diffBuf, sizeof(diffBuf), differential);
-            LOG_WARN(TAG, "Thermal shock risk: output=%s return=%s diff=%s (max 30.0°C)",
-                     outBuf, retBuf, diffBuf);
+            formatTemp(limitBuf, sizeof(limitBuf), SystemConstants::Safety::ReturnPreheat::MAX_DIFFERENTIAL);
+            LOG_WARN(TAG, "Thermal shock risk: output=%s return=%s diff=%s (max %s°C)",
+                     outBuf, retBuf, diffBuf, limitBuf);
             return ValidationResult::THERMAL_SHOCK_RISK;
         }
     }
 
-    // 8. Pump verification REMOVED (Round 18)
-    // Pumps are now started atomically with burner via BurnerSystemController batch command.
-    // Relay command verification (setMultipleRelayStatesVerified) confirms command succeeded.
-    // Physical pump failure is detected via temperature sensors (no heat transfer = no temp change).
+    // 8. Pump verification REMOVED (Round 18) - by design the burner never checks or
+    // commands pumps. BurnerSystemController switches burner relays only; pumps follow
+    // the HEATING_ON/WATER_ON mode bits via PumpControlModule (ReturnPreheater cycles
+    // the heating pump). The burner instead requires an active mode + request
+    // (BurnerSafetyChecks::hasActiveModeDemand). Physical pump failure is detected via
+    // temperature sensors (no heat transfer = no temp change).
 
     // All checks passed
     LOG_DEBUG(TAG, "All safety validations passed");

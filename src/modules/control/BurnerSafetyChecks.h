@@ -43,6 +43,23 @@ public:
     static bool checkSafetyConditions();
 
     /**
+     * @brief Check if a heating or water mode is active with a matching burner request
+     * @return true if (HEATING_ON && HEATING request) || (WATER_ON && WATER request)
+     *
+     * The state machine's heatDemand is a latched copy set by BurnerControlTask /
+     * BoilerTempControlTask. emergencyStop() does not clear it, so after an ERROR
+     * recovery a stale demand could fire the burner although the owning control
+     * task had already withdrawn its request and mode bit (incidents 2026-09-12/13:
+     * heating relay on, HEATING_ON off, boiler to 90°C). Burner start and continued
+     * operation therefore also require a live mode + request.
+     *
+     * Deliberately does NOT look at pump relays: pumps follow the mode bits via
+     * PumpControlModule (and ReturnPreheater cycles the heating pump), the burner
+     * never commands or requires them.
+     */
+    static bool hasActiveModeDemand();
+
+    /**
      * @brief Check if seamless mode switch is safe
      * @return true if mode can be switched without shutdown
      *

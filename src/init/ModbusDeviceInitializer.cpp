@@ -309,10 +309,14 @@ void ModbusDeviceInitializer::initializeANDRTF3(SystemInitializer* initializer, 
 
     LOG_INFO(TAG, "ANDRTF3 instance created successfully");
 
-    // Bind temperature pointers (unified mapping)
-    LOG_INFO(TAG, "Binding ANDRTF3 temperature pointers...");
-    initializer->andrtf3_->bindTemperaturePointers(ANDRTF3Bindings::insideTempPtr,
-                                                    ANDRTF3Bindings::insideTempValidPtr);
+    // Do NOT bind temperature pointers. ANDRTF3Task is the sole writer of
+    // insideTemp/isInsideTempValid: it applies roomTempOffset and only marks the
+    // sensor invalid after 3 consecutive failures. When bound, the library wrote
+    // the raw (uncalibrated) value and cleared validity on every single failed
+    // read (lib F46), bypassing that hysteresis. With room temp required for
+    // space heating, one normal RS485 glitch forced TempSensorFallback SHUTDOWN
+    // and an emergency stop (incidents 2026-09-12/13).
+    initializer->andrtf3_->bindTemperaturePointers(nullptr, nullptr);
 
     // Configure after creation
     andrtf3::ANDRTF3::Config config = initializer->andrtf3_->getConfig();

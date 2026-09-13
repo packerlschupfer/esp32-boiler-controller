@@ -276,6 +276,20 @@ void BurnerStateMachine::resetLockout() {
 // State Handlers Implementation
 
 BurnerSMState BurnerStateMachine::handleIdleState() {
+    // heatDemand is latched and survives emergencyStop()/ERROR recovery. Only act
+    // on it while a heating/water mode is actually requesting the burner -
+    // otherwise a stale demand fires the burner with no mode active (and so no
+    // pump), as happened on 2026-09-12/13.
+    if (heatDemand && !BurnerSafetyChecks::hasActiveModeDemand()) {
+        static uint32_t lastStaleLogMs = 0;
+        uint32_t now = millis();
+        if (lastStaleLogMs == 0 || now - lastStaleLogMs > 60000) {
+            LOG_WARN(TAG, "Ignoring stale heat demand - no active heating/water mode request");
+            lastStaleLogMs = now;
+        }
+        return BurnerSMState::IDLE;
+    }
+
     // Check for heat demand and safety conditions
     if (heatDemand && BurnerSafetyChecks::checkSafetyConditions()) {
         // Check anti-flapping before turning on
@@ -294,6 +308,12 @@ BurnerSMState BurnerStateMachine::handlePrePurgeState() {
     // Just check safety conditions
     if (!BurnerSafetyChecks::checkSafetyConditions()) {
         return BurnerSMState::ERROR;
+    }
+    // Abort the start if the mode/request went away during pre-purge - otherwise
+    // onEnterIgnition() activates the burner relays with no mode active.
+    if (!BurnerSafetyChecks::hasActiveModeDemand()) {
+        LOG_INFO(TAG, "Heating/water request withdrawn during pre-purge - aborting start");
+        return BurnerSMState::IDLE;
     }
     // Return current state to let timeout mechanism handle transition
     return stateMachine.getCurrentState();
