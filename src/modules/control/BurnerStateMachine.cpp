@@ -315,6 +315,13 @@ BurnerSMState BurnerStateMachine::handlePrePurgeState() {
         LOG_INFO(TAG, "Heating/water request withdrawn during pre-purge - aborting start");
         return BurnerSMState::IDLE;
     }
+    // Same if the heat demand itself was withdrawn (e.g. BoilerTempControlTask
+    // re-asserting OFF) - otherwise a brief re-arm ignites and then has to run
+    // for the anti-flapping minimum on-time.
+    if (!heatDemand) {
+        LOG_INFO(TAG, "Heat demand withdrawn during pre-purge - aborting start");
+        return BurnerSMState::IDLE;
+    }
     // Return current state to let timeout mechanism handle transition
     return stateMachine.getCurrentState();
 }

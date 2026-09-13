@@ -2,6 +2,7 @@
 #include "modules/control/BoilerTempController.h"
 #include "modules/control/BurnerAntiFlapping.h"
 #include "modules/control/BurnerRequestManager.h"
+#include "modules/control/PIDGainFixedPoint.h"
 #include "config/SystemConstants.h"
 #include "config/SafetyConfig.h"
 #include "config/SystemSettingsStruct.h"
@@ -10,6 +11,9 @@
 #include "LoggingMacros.h"
 #include <MutexGuard.h>
 #include <Arduino.h>
+
+static_assert(PIDGainFixedPoint::SCALE == SystemConstants::PID::PID_FIXED_POINT_SCALE,
+              "PIDGainFixedPoint::SCALE must match the fixed-point PID scale");
 
 const char* BoilerTempController::TAG = "BoilerTempCtrl";
 
@@ -281,12 +285,15 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
 
     // Calculate PID adjustment
     // The PID outputs a temperature adjustment; we scale this to 0-100%
+    // Gains are float (SystemSettings/autotune) but the PID takes fixed-point x1000.
+    // Passing them unscaled truncated Kp 34.206 -> 34 (=0.034) and Ki -> 0, which
+    // left the output pinned at ~50% so the controller never commanded OFF.
     Temperature_t pidAdjustment = pidController_->calculatePIDAdjustment(
         target,
         current,
-        config_.modKp,
-        config_.modKi,
-        config_.modKd,
+        PIDGainFixedPoint::fromFloat(config_.modKp),
+        PIDGainFixedPoint::fromFloat(config_.modKi),
+        PIDGainFixedPoint::fromFloat(config_.modKd),
         dtMs
     );
 

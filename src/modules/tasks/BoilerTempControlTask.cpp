@@ -290,6 +290,22 @@ void BoilerTempControlTask(void* parameter) {
         // Calculate control output
         auto output = controller.calculate(targetTemp, currentTemp);
 
+        // Hold OFF level-triggered, not only on the OFF edge: BurnerControlTask
+        // also writes the state machine's demand (request start, or target moved
+        // by >1°C) and can re-arm it while this controller still wants OFF. The
+        // output then no longer changes, so without this the burner would keep
+        // running above target until some failsafe tripped.
+        if (!output.changed && output.powerLevel == BoilerTempController::PowerLevel::OFF) {
+            bool smDemand = false;
+            Temperature_t smTarget = 0;
+            if (BurnerStateMachine::getHeatDemandState(smDemand, smTarget) && smDemand) {
+                BurnerStateMachine::setHeatDemand(false, targetTemp, false);
+                LOG_INFO(TAG, "Re-asserting burner OFF - demand was re-armed while coasting (target:%.1f curr:%.1f)",
+                         tempToFloat(targetTemp),
+                         tempToFloat(currentTemp));
+            }
+        }
+
         // Update BurnerStateMachine if output changed
         if (output.changed) {
             // Convert our PowerLevel to highPower flag

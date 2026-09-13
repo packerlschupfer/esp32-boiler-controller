@@ -16,6 +16,12 @@ void test_invalid_temperature();
 void test_temperature_edge_cases();
 void test_temperature_difference();
 
+// PID fixed-point gain conversion tests
+void test_pid_gain_conversion_scales_by_1000();
+void test_pid_gain_conversion_rejects_invalid();
+void test_pid_scaled_gain_commands_off_above_target();
+void test_pid_scaled_gain_commands_full_below_target();
+
 void test_pre_ignition_safe_conditions();
 void test_pre_ignition_high_boiler_temp();
 void test_pre_ignition_high_water_temp();
@@ -448,6 +454,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_complete_heating_activation_workflow);
     RUN_TEST(test_water_heating_blocked_by_tank_temp);
     RUN_TEST(test_emergency_stop_cascade);
+
+    // PID fixed-point gain conversion (regression: inert boiler PID)
+    RUN_TEST(test_pid_gain_conversion_scales_by_1000);
+    RUN_TEST(test_pid_gain_conversion_rejects_invalid);
+    RUN_TEST(test_pid_scaled_gain_commands_off_above_target);
+    RUN_TEST(test_pid_scaled_gain_commands_full_below_target);
 
     return UNITY_END();
 }
