@@ -3,6 +3,7 @@
 #define BURNER_SAFETY_CHECKS_H
 
 #include "utils/StateMachine.h"
+#include "modules/control/BurnerTransitionPolicy.h"
 
 // Forward declaration to avoid circular dependency
 enum class BurnerSMState;

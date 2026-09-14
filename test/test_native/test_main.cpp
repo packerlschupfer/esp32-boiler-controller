@@ -29,6 +29,15 @@ void test_relay_extrema_troughs_include_post_switch_undershoot();
 void test_relay_extrema_ignores_cold_start_phase();
 void test_relay_extrema_extreme_times_are_after_switch();
 
+// Burner transition policy (explicit disable, bounded mode switch)
+void test_policy_explicit_disable_stops_running_mode_only();
+void test_policy_boiler_disable_stops_any_mode();
+void test_policy_heating_wanted_respects_enable_and_override();
+void test_policy_heating_wanted_room_mode();
+void test_policy_heating_wanted_weather_mode();
+void test_policy_mode_switch_wait_is_bounded();
+void test_policy_mode_revert_requires_on_bit();
+
 void test_pre_ignition_safe_conditions();
 void test_pre_ignition_high_boiler_temp();
 void test_pre_ignition_high_water_temp();
@@ -474,6 +483,15 @@ int main(int argc, char **argv) {
     RUN_TEST(test_relay_extrema_troughs_include_post_switch_undershoot);
     RUN_TEST(test_relay_extrema_ignores_cold_start_phase);
     RUN_TEST(test_relay_extrema_extreme_times_are_after_switch);
+
+    // Burner transition policy (explicit disable, bounded mode switch)
+    RUN_TEST(test_policy_explicit_disable_stops_running_mode_only);
+    RUN_TEST(test_policy_boiler_disable_stops_any_mode);
+    RUN_TEST(test_policy_heating_wanted_respects_enable_and_override);
+    RUN_TEST(test_policy_heating_wanted_room_mode);
+    RUN_TEST(test_policy_heating_wanted_weather_mode);
+    RUN_TEST(test_policy_mode_switch_wait_is_bounded);
+    RUN_TEST(test_policy_mode_revert_requires_on_bit);
 
     return UNITY_END();
 }

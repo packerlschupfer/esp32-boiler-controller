@@ -120,6 +120,27 @@ bool BurnerSafetyChecks::hasActiveModeDemand() {
 }
 
 BurnerSMState BurnerSafetyChecks::checkSafetyShutdown(BurnerSMState currentState, bool heatDemand) {
+    // Explicit disable of the running mode (or of the whole boiler) stops the
+    // burner now instead of waiting out the anti-flapping minimum on-time
+    // (2026-09-14: heating disable during the first 2 min kept the burner running
+    // until the no-mode guard below stopped it 10 s later). Running mode comes
+    // from BurnerSystemController, i.e. the relays actually switched.
+    {
+        EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
+        BurnerSystemController* controller = SRP::getBurnerSystemController();
+        bool runningWater = controller && controller->getCurrentMode() == BurnerMode::WATER;
+        bool boilerEnabled = (systemBits & SystemEvents::SystemState::BOILER_ENABLED) != 0;
+        if (BurnerTransitionPolicy::stopForExplicitDisable(
+                runningWater,
+                boilerEnabled,
+                (systemBits & SystemEvents::SystemState::HEATING_ENABLED) != 0,
+                (systemBits & SystemEvents::SystemState::WATER_ENABLED) != 0)) {
+            LOG_INFO(TAG, "%s disabled - stopping burner now (minimum on-time bypassed)",
+                     !boilerEnabled ? "Boiler" : (runningWater ? "Water heating" : "Space heating"));
+            return BurnerSMState::POST_PURGE;
+        }
+    }
+
     // Stop the burner if it runs without any active heating/water mode request.
     // Short grace period: during a water <-> heating handoff the old mode clears
     // its bits before the new mode sets them. Bypasses anti-flapping (like flame

@@ -766,19 +766,32 @@ BurnerSMState BurnerStateMachine::handleModeSwitchingState() {
              newModeHasDemand);
 
     if (!newModeHasDemand) {
-        // No request bit set yet - but check if heating is actually needed
-        // HeatingControlTask runs on 5s intervals, may not have set request yet
-        // during seamless water→heating transition
+        // No request for the new mode yet. During a water -> heating handover
+        // HeatingControlTask (5 s cycle) may not have raised it yet, so wait - but
+        // only while heating is actually likely wanted and never longer than
+        // BurnerTransitionPolicy::MODE_SWITCH_MAX_WAIT_MS. The previous wait only
+        // checked room < targetInside (even in weather-compensated mode) and had no
+        // time limit: with heating disabled, summer override or a warm outside it
+        // kept the burner firing in water mode indefinitely, after the water pump's
+        // overrun ended with no pump at all.
+        bool heatingWanted = false;
         if (!newModeIsWater) {
-            // Check if room temperature is below target (heating needed).
             // F33: snapshot settings and sensor readings UNDER their mutexes
-            // (missed spot of the Round-22 H2 fix). The prior unlocked reads
-            // could pair a stale isInsideTempValid with an in-flight insideTemp
-            // (or a half-updated target), mis-deciding the water->heating handoff.
+            bool haveSettings = false;
+            bool useWeather = false;
+            bool overrideOff = true;
             Temperature_t targetInside = 0;
+            Temperature_t outsideThreshold = 0;
+            Temperature_t overheatMargin = 0;
             if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
-                targetInside = SRP::getSystemSettings().targetTemperatureInside;
+                const SystemSettings& s = SRP::getSystemSettings();
+                useWeather = s.useWeatherCompensatedControl;
+                overrideOff = s.heatingOverrideOff;
+                targetInside = s.targetTemperatureInside;
+                outsideThreshold = s.outsideTempHeatingThreshold;
+                overheatMargin = s.roomTempOverheatMargin;
                 SRP::giveSystemSettingsMutex();
+                haveSettings = true;
             }
             SharedSensorReadings readings{};
             bool haveReadings = false;
@@ -787,30 +800,52 @@ BurnerSMState BurnerStateMachine::handleModeSwitchingState() {
                 SRP::giveSensorReadingsMutex();
                 haveReadings = true;
             }
-            if (haveReadings && readings.isInsideTempValid &&
-                readings.insideTemp < targetInside) {
-                // Room is cold - heating IS needed, don't shut down
-                char roomBuf[16], targetBuf[16];
-                formatTemp(roomBuf, sizeof(roomBuf), readings.insideTemp);
-                formatTemp(targetBuf, sizeof(targetBuf), targetInside);
-                LOG_INFO(TAG, "Heating needed (room %s°C < target %s°C) - waiting for HeatingControlTask",
-                        roomBuf, targetBuf);
-                // Stay in MODE_SWITCHING, HeatingControlTask will set request soon
-                return BurnerSMState::MODE_SWITCHING;
+            if (haveSettings && haveReadings) {
+                heatingWanted = BurnerTransitionPolicy::heatingLikelyWanted(
+                    (systemBits & SystemEvents::SystemState::HEATING_ENABLED) != 0,
+                    overrideOff, useWeather,
+                    readings.isOutsideTempValid, readings.outsideTemp, outsideThreshold,
+                    readings.isInsideTempValid, readings.insideTemp, targetInside, overheatMargin);
             }
         }
 
-        // No demand in new mode - go to POST_PURGE
-        LOG_DEBUG(TAG, "New mode has no heat demand - transitioning to POST_PURGE");
+        uint32_t timeInState = stateMachine.getTimeInState();
+        if (BurnerTransitionPolicy::onNoDemandForNewMode(newModeIsWater, heatingWanted, timeInState) ==
+            BurnerTransitionPolicy::ModeSwitchAction::WAIT) {
+            LOG_DEBUG(TAG, "Waiting for heating request (handover, %lu ms)", timeInState);
+            return BurnerSMState::MODE_SWITCHING;
+        }
+
+        LOG_INFO(TAG, "No request for new mode %s after %lu ms (heating wanted: %s) - stopping",
+                 newModeIsWater ? "WATER" : "HEATING", timeInState, heatingWanted ? "yes" : "no");
         return BurnerSMState::POST_PURGE;
     }
 
     // Check if mode changed back to original (race condition)
     if (newModeIsWater == runningModeIsWater) {
-        // Mode reverted during switch - return to safe low power
-        // Don't use shouldIncreasePower() as it may not be updated yet
-        LOG_WARN(TAG, "Mode reverted during switch - resuming at low power");
-        return BurnerSMState::RUNNING_LOW;
+        // Resume only if the running mode's ON bit is set again. If the ON bit was
+        // withdrawn while its request is still set (WATER_OFF_OVERRIDE clears only
+        // WATER_ON, or a handover race), resuming would bounce RUNNING_LOW <->
+        // MODE_SWITCHING every tick; wait instead, bounded by MODE_SWITCH_MAX_WAIT_MS.
+        bool runningOnBit = (systemBits & (runningModeIsWater ? SystemEvents::SystemState::WATER_ON
+                                                              : SystemEvents::SystemState::HEATING_ON)) != 0;
+        uint32_t timeInState = stateMachine.getTimeInState();
+        switch (BurnerTransitionPolicy::onModeReverted(runningOnBit, timeInState)) {
+            case BurnerTransitionPolicy::RevertAction::RESUME_RUNNING:
+                // Mode reverted during switch - return to safe low power
+                // Don't use shouldIncreasePower() as it may not be updated yet
+                LOG_WARN(TAG, "Mode reverted during switch - resuming at low power");
+                return BurnerSMState::RUNNING_LOW;
+            case BurnerTransitionPolicy::RevertAction::WAIT:
+                LOG_DEBUG(TAG, "Mode reverted but %s not set - waiting (%lu ms)",
+                          runningModeIsWater ? "WATER_ON" : "HEATING_ON", timeInState);
+                return BurnerSMState::MODE_SWITCHING;
+            case BurnerTransitionPolicy::RevertAction::STOP:
+            default:
+                LOG_INFO(TAG, "Mode reverted but %s still not set after %lu ms - stopping",
+                         runningModeIsWater ? "WATER_ON" : "HEATING_ON", timeInState);
+                return BurnerSMState::POST_PURGE;
+        }
     }
 
     // Execute mode switch via BurnerSystemController
