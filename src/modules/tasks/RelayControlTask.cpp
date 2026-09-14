@@ -21,6 +21,7 @@
 #include "events/SystemEventsGenerated.h"
 #include "shared/SharedRelayReadings.h"
 #include "shared/RelayState.h"
+#include "shared/RelayCommandPolicy.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/tasks/RelayVerificationManager.h"  // Round 21: Extracted verification logic
 #include "modules/tasks/RelayCommandProcessor.h"      // Round 21: Extracted command processing
@@ -317,11 +318,20 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
         return false;
     }
 
+    // Protections apply only to real state changes. A command that re-sends the
+    // current desired state (e.g. an unchanged relay in a burner mode-switch batch)
+    // is not a toggle: counting it let the rate limiter reject the genuine
+    // POWER_BOOST change 2 ms later and escalate to an emergency stop
+    // (2026-09-14 15:41:25). relayIndex is 1-based, g_relayState 0-based.
+    const bool desiredState = g_relayState.getRelay(relayIndex - 1);
+    const bool realChange = !RelayCommandPolicy::isNoOp(desiredState, state);
+    const bool protect = RelayCommandPolicy::appliesProtection(desiredState, state, emergencyBypass);
+
     // Rate limit for relay protection. An emergency/failsafe command bypasses it:
     // review-fix - the rate limiter (MAX_RELAY_TOGGLE_RATE_PER_MIN /
     // MIN_RELAY_SWITCH_INTERVAL_MS) would otherwise silently drop a safety pump-ON
     // that follows rapid cycling, defeating F13's emergency heat-dissipation hold.
-    if (!emergencyBypass && !checkRateLimit(relayIndex)) {
+    if (protect && !checkRateLimit(relayIndex)) {
         LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
         return false;
     }
@@ -330,7 +340,7 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
     // This prevents rapid on/off cycling that can damage pump motors.
     // F13: emergency/failsafe commands bypass this - protection exists to prevent
     // rapid cycling, not to block a safety-ON for heat dissipation.
-    if (!emergencyBypass && !checkPumpProtection(relayIndex, state)) {
+    if (protect && !checkPumpProtection(relayIndex, state)) {
         // Pump protection blocks this state change - not an error, just too soon
         return false;
     }
@@ -342,10 +352,14 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
     // relayIndex is 1-based, g_relayState uses 0-based bit positions
     g_relayState.setRelay(relayIndex - 1, state);
 
-    // Update pump protection timestamp for pump relays
+    // Update pump protection timestamp for pump relays - only on a real state
+    // change, otherwise re-sent unchanged pump commands keep restarting the
+    // protection window and block the next genuine change.
     const uint8_t heatingPumpPhysical = RelayIndex::toPhysical(RelayIndex::HEATING_PUMP);
     const uint8_t waterPumpPhysical = RelayIndex::toPhysical(RelayIndex::WATER_PUMP);
-    if (relayIndex == heatingPumpPhysical) {
+    if (!realChange) {
+        // no pump protection timer update
+    } else if (relayIndex == heatingPumpPhysical) {
         pumpLastStateChangeTime[0] = xTaskGetTickCount();
         LOG_DEBUG(TAG, "Heating pump protection timer reset");
     } else if (relayIndex == waterPumpPhysical) {

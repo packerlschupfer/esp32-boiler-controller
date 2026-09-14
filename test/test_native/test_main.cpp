@@ -38,6 +38,12 @@ void test_policy_heating_wanted_weather_mode();
 void test_policy_mode_switch_wait_is_bounded();
 void test_policy_mode_revert_requires_on_bit();
 
+// Relay command policy (no-op commands vs rate limiting)
+void test_relay_policy_noop_commands_skip_protection();
+void test_relay_policy_real_changes_are_protected();
+void test_relay_policy_emergency_bypasses_protection();
+void test_relay_policy_mode_switch_then_power_change_counts_once();
+
 void test_pre_ignition_safe_conditions();
 void test_pre_ignition_high_boiler_temp();
 void test_pre_ignition_high_water_temp();
@@ -492,6 +498,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_policy_heating_wanted_weather_mode);
     RUN_TEST(test_policy_mode_switch_wait_is_bounded);
     RUN_TEST(test_policy_mode_revert_requires_on_bit);
+
+    // Relay command policy (no-op commands vs rate limiting)
+    RUN_TEST(test_relay_policy_noop_commands_skip_protection);
+    RUN_TEST(test_relay_policy_real_changes_are_protected);
+    RUN_TEST(test_relay_policy_emergency_bypasses_protection);
+    RUN_TEST(test_relay_policy_mode_switch_then_power_change_counts_once);
 
     return UNITY_END();
 }
