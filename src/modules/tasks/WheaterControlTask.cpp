@@ -44,7 +44,7 @@ static struct {
 // Forward declarations
 static void safetyCheckCallback(TimerHandle_t xTimer);
 static void processTimerCallback(TimerHandle_t xTimer);
-static void processWaterHeatingState();
+static void processWaterHeatingState(EventBits_t pendingControl = 0);
 
 // Incremented by notifyWheaterTaskSwitchedOff() (water/boiler disable, water OFF
 // override); compared on every processWaterHeatingState() run
@@ -211,9 +211,11 @@ void WheaterControlTask(void *parameter) {
                                           SystemEvents::ControlRequest::WATER_OFF_OVERRIDE;
         
         if (controlBits & CONTROL_EVENTS) {
-            // Control events trigger immediate processing
+            // Control events trigger immediate processing. The bits are cleared first,
+            // so hand them over - processWaterHeatingState() re-read the cleared bits
+            // and never acted on an override (review 2026-09-14).
             xEventGroupClearBits(SRP::getControlRequestsEventGroup(), controlBits & CONTROL_EVENTS);
-            processWaterHeatingState();
+            processWaterHeatingState(controlBits & CONTROL_EVENTS);
         }
 
         // Feed watchdog
@@ -256,7 +258,7 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
     }
 }
 
-static void processWaterHeatingState() {
+static void processWaterHeatingState(EventBits_t pendingControl) {
     // Water heating switched off since the last run: end the charge even if it is
     // already enabled again. The task runs on its timer, so an off/on within one
     // cycle was never seen - the charge latch and the burner request survived and
@@ -311,8 +313,8 @@ static void processWaterHeatingState() {
     // Operation mode is managed by BurnerControlTask - don't set it here
     
     // Get control bits
-    EventBits_t controlBits = SRP::getControlRequestsEventBits();
-    
+    EventBits_t controlBits = SRP::getControlRequestsEventBits() | pendingControl;
+
     switch (waterState.state) {
         case WheaterOff: {
             // Check if we should turn on water heating
@@ -358,6 +360,12 @@ static void processWaterHeatingState() {
 
                 waterState.state = WheaterOn;
                 waterState.lastBoilerTarget = boilerTargetTemp;
+                if (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE) {
+                    // Forced charge: charge up to tempLimitHigh instead of ending on the
+                    // next cycle because the tank is already above tempLimitLow
+                    waterState.lastHeatingNeeded = true;
+                    LOG_INFO(TAG, "Water heating started by remote override ON");
+                }
 
                 char tempStr[16];
                 formatTemp(tempStr, sizeof(tempStr), boilerTargetTemp);

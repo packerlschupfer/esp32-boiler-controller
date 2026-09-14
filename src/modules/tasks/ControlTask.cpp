@@ -43,12 +43,8 @@ void ControlTask(void* parameter) {
                                    SystemEvents::ControlRequest::WATER_DISABLE |
                                    SystemEvents::ControlRequest::WATER_PRIORITY_ENABLE |
                                    SystemEvents::ControlRequest::WATER_PRIORITY_DISABLE |
-                                   SystemEvents::ControlRequest::WATER_ON_OVERRIDE |
-                                   SystemEvents::ControlRequest::WATER_OFF_OVERRIDE |
                                    SystemEvents::ControlRequest::HEATING_ENABLE |
-                                   SystemEvents::ControlRequest::HEATING_DISABLE |
-                                   SystemEvents::ControlRequest::HEATING_ON_OVERRIDE |
-                                   SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE,
+                                   SystemEvents::ControlRequest::HEATING_DISABLE,
                                    pdTRUE,
                                    pdFALSE,
                                    pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS)); // Reduced to 3 second timeout
@@ -82,24 +78,17 @@ void ControlTask(void* parameter) {
         } else if (bits & SystemEvents::ControlRequest::WATER_DISABLE) {
             StateManager::setWaterEnabled(false);
         }
-        // Override bits are transient control (not persisted enable state)
-        if (bits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE) {
-            SRP::setSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
-        } else if (bits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) {
-            SRP::clearSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
-        }
+        // WATER_ON/OFF_OVERRIDE and HEATING_ON/OFF_OVERRIDE belong to WheaterControlTask
+        // and HeatingControlTask. This task consumed them first (clear on exit) and set
+        // SystemState::WATER_ON / HEATING_ON directly, without a burner request: the burner
+        // bounced RUNNING_LOW <-> MODE_SWITCHING and the mode tasks never saw the override
+        // (review 2026-09-14).
 
         // Handle heating requests
         if (bits & SystemEvents::ControlRequest::HEATING_ENABLE) {
             StateManager::setHeatingEnabled(true);
         } else if (bits & SystemEvents::ControlRequest::HEATING_DISABLE) {
             StateManager::setHeatingEnabled(false);
-        }
-        // Override bits are transient control (not persisted enable state)
-        if (bits & SystemEvents::ControlRequest::HEATING_ON_OVERRIDE) {
-            SRP::setSystemStateEventBits(SystemEvents::SystemState::HEATING_ON);
-        } else if (bits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) {
-            SRP::clearSystemStateEventBits(SystemEvents::SystemState::HEATING_ON);
         }
 
         // Handle water priority

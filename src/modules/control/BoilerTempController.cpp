@@ -18,6 +18,23 @@ static_assert(PIDGainFixedPoint::SCALE == SystemConstants::PID::PID_FIXED_POINT_
 
 const char* BoilerTempController::TAG = "BoilerTempCtrl";
 
+// Autotune method index (pid/autotune/method): 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben,
+// 3=Cohen-Coon, 4=Lambda
+static bool tuningMethodFromIndex(int32_t index, PIDAutoTuner::TuningMethod& method) {
+    static const PIDAutoTuner::TuningMethod kMethods[] = {
+        PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PI,
+        PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PID,
+        PIDAutoTuner::TuningMethod::TYREUS_LUYBEN,
+        PIDAutoTuner::TuningMethod::COHEN_COON,
+        PIDAutoTuner::TuningMethod::LAMBDA_TUNING
+    };
+    if (index < 0 || index > 4) {
+        return false;
+    }
+    method = kMethods[index];
+    return true;
+}
+
 bool BoilerTempController::initialize() {
     if (initialized_) {
         LOG_WARN(TAG, "Already initialized");
@@ -89,17 +106,11 @@ bool BoilerTempController::initialize() {
     config_.waterKi = settings.wHeaterKi;
     config_.waterKd = settings.wHeaterKd;
 
-    // Autotune method (0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda).
-    // Previously never read, so every reboot silently fell back to ZN_PID.
-    static const PIDAutoTuner::TuningMethod kMethods[] = {
-        PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PI,
-        PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PID,
-        PIDAutoTuner::TuningMethod::TYREUS_LUYBEN,
-        PIDAutoTuner::TuningMethod::COHEN_COON,
-        PIDAutoTuner::TuningMethod::LAMBDA_TUNING
-    };
-    if (settings.autotuneMethod >= 0 && settings.autotuneMethod <= 4) {
-        tuningMethod_ = kMethods[settings.autotuneMethod];
+    // Autotune method from settings. This runs before PersistentStorageTask has loaded
+    // NVS, so startAutoTuning() reads the setting again at every start.
+    PIDAutoTuner::TuningMethod method;
+    if (tuningMethodFromIndex(settings.autotuneMethod, method)) {
+        tuningMethod_ = method;
     }
     LOG_INFO(TAG, "Autotune method from settings: %ld", static_cast<long>(settings.autotuneMethod));
 
@@ -622,10 +633,12 @@ bool BoilerTempController::startAutoTuning(Temperature_t setpoint) {
     // read before taking mutex_ so the settings mutex is never held behind it
     float relayAmplitude = SystemConstants::PID::Autotune::DEFAULT_RELAY_AMPLITUDE;
     float hysteresis = SystemConstants::PID::Autotune::DEFAULT_RELAY_HYSTERESIS;
+    int32_t methodIndex = -1;
     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
         const SystemSettings& settings = SRP::getSystemSettings();
         relayAmplitude = AutotuneRelayConfig::amplitudeOrDefault(settings.autotuneRelayAmplitude, relayAmplitude);
         hysteresis = AutotuneRelayConfig::hysteresisOrDefault(settings.autotuneHysteresis, hysteresis);
+        methodIndex = settings.autotuneMethod;
         SRP::giveSystemSettingsMutex();
     } else {
         LOG_WARN(TAG, "startAutoTuning: settings mutex timeout - using default amplitude %.1f%% / hysteresis %.1f°C",
@@ -646,6 +659,14 @@ bool BoilerTempController::startAutoTuning(Temperature_t setpoint) {
     if (autoTuner_ == nullptr) {
         LOG_ERROR(TAG, "Auto-tuner not initialized");
         return false;
+    }
+
+    // Method from the saved setting at every start: initialize() runs before NVS is loaded
+    // (a method chosen before a reboot was lost), and pid/autotune/method set through
+    // boiler/params never reached the controller (review 2026-09-14)
+    PIDAutoTuner::TuningMethod settingsMethod;
+    if (tuningMethodFromIndex(methodIndex, settingsMethod)) {
+        tuningMethod_ = settingsMethod;
     }
 
     // The relay test below drives the burner OFF <-> FULL (updateAutoTuning), a half-swing

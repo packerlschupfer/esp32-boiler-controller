@@ -4,6 +4,8 @@
 
 #include <cstdint>
 
+#include "modules/control/BurnerSMState.h"
+
 /**
  * @brief Pure decision rules for burner state transitions (Stage A, 2026-09-14).
  *
@@ -101,6 +103,22 @@ namespace BurnerTransitionPolicy {
     // the handler, so with the same 5 s value it won almost every tick and a failed
     // start went straight to LOCKOUT without the MAX_IGNITION_RETRIES attempts.
     constexpr uint32_t IGNITION_BACKSTOP_MARGIN_MS = 2000;
+
+    // PRE_PURGE StateMachine timeout (-> IGNITION) is likewise only a backstop behind
+    // BurnerTransitions::step(), which re-checks heat demand and the mode request first.
+    constexpr uint32_t PRE_PURGE_BACKSTOP_MARGIN_MS = 2000;
+
+    /**
+     * @brief Transitions that update BurnerAntiFlapping's power level.
+     *
+     * Entering MODE_SWITCHING keeps the level and IGNITION records its start level in
+     * onEnterIgnition(). Transitions out of MODE_SWITCHING were skipped as well, so a stop
+     * from MODE_SWITCHING left anti-flapping "on" and the restart from POST_PURGE ignored
+     * the minimum off-time (review 2026-09-14). Recording an unchanged level is a no-op.
+     */
+    inline bool recordsPowerLevelOnTransition(BurnerSMState to) {
+        return to != BurnerSMState::MODE_SWITCHING && to != BurnerSMState::IGNITION;
+    }
 
     // MODE_SWITCHING hard limit (StateMachine timeout -> POST_PURGE) behind the
     // bounded waits above, in case a future path keeps returning MODE_SWITCHING.

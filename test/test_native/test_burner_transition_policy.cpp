@@ -71,3 +71,16 @@ void test_policy_mode_revert_requires_on_bit() {
     TEST_ASSERT_TRUE(onModeReverted(false, 0) == RevertAction::WAIT);
     TEST_ASSERT_TRUE(onModeReverted(false, MODE_SWITCH_MAX_WAIT_MS) == RevertAction::STOP);
 }
+
+void test_policy_mode_switch_exit_records_power_level() {
+    // Review 2026-09-14: MODE_SWITCHING -> POST_PURGE did not record OFF, so the restart
+    // from POST_PURGE skipped the minimum off-time
+    TEST_ASSERT_TRUE(recordsPowerLevelOnTransition(BurnerSMState::POST_PURGE));
+    TEST_ASSERT_TRUE(recordsPowerLevelOnTransition(BurnerSMState::ERROR));
+    TEST_ASSERT_TRUE(recordsPowerLevelOnTransition(BurnerSMState::RUNNING_LOW));
+    TEST_ASSERT_TRUE(recordsPowerLevelOnTransition(BurnerSMState::RUNNING_HIGH));
+    TEST_ASSERT_TRUE(recordsPowerLevelOnTransition(BurnerSMState::IDLE));
+    // Level kept while switching; IGNITION records its start level on entry
+    TEST_ASSERT_FALSE(recordsPowerLevelOnTransition(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_FALSE(recordsPowerLevelOnTransition(BurnerSMState::IGNITION));
+}

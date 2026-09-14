@@ -20,9 +20,9 @@
  * (BurnerSystemController::performSafetyCheck() performs an emergency shutdown on
  * over-temperature) or take mutexes, so they must not be evaluated eagerly.
  *
- * Timeout transitions (PRE_PURGE -> IGNITION, IGNITION -> LOCKOUT) stay in the
- * StateMachine configuration; entry/exit actions, the post-purge duration and the
- * LOCKOUT and ERROR handlers stay in BurnerStateMachine.
+ * PRE_PURGE -> IGNITION and IGNITION -> retry/LOCKOUT are decided here; the
+ * StateMachine timeouts of both states are only backstops. Entry/exit actions, the
+ * post-purge duration and the LOCKOUT and ERROR handlers stay in BurnerStateMachine.
  */
 namespace BurnerTransitions {
 
@@ -64,6 +64,7 @@ namespace BurnerTransitions {
         uint32_t ignitionTimeoutMs;
         uint8_t maxIgnitionRetries;
         uint32_t modeDemandLossGraceMs;
+        uint32_t prePurgeTimeMs;               // PRE_PURGE -> IGNITION once exceeded
     };
 
     // State carried between steps.
@@ -113,7 +114,8 @@ namespace BurnerTransitions {
         SWITCH_REVERT_STOP,
         SWITCH_FAILED,
         SWITCH_DONE,
-        RESTART_FROM_POST_PURGE    // heat demand returned before the post-purge ended
+        RESTART_FROM_POST_PURGE,   // heat demand returned before the post-purge ended
+        PRE_PURGE_DONE             // pre-purge time over, demand and mode request still present
     };
 
     struct Decision {
@@ -165,7 +167,7 @@ namespace BurnerTransitions {
             return make(BurnerSMState::IDLE, Reason::NONE);
         }
 
-        inline Decision prePurge(const Context& c, Environment& env) {
+        inline Decision prePurge(const Context& c, const Timing& t, Environment& env) {
             if (!env.safetyOk()) {
                 return make(BurnerSMState::ERROR, Reason::SAFETY_FAILED);
             }
@@ -180,7 +182,14 @@ namespace BurnerTransitions {
             if (!c.heatDemand) {
                 return make(BurnerSMState::IDLE, Reason::DEMAND_WITHDRAWN);
             }
-            // PRE_PURGE -> IGNITION is the StateMachine timeout
+            // PRE_PURGE -> IGNITION only after the checks above. As a StateMachine timeout
+            // (checked before this handler) the first tick after 2 s ignited without
+            // re-checking, and BurnerControlTask ticks only about once a second, so a
+            // demand withdrawn in the last second still fired the burner (review
+            // 2026-09-14). Strictly greater, like the former timeout.
+            if (c.timeInStateMs > t.prePurgeTimeMs) {
+                return make(BurnerSMState::IGNITION, Reason::PRE_PURGE_DONE);
+            }
             return make(BurnerSMState::PRE_PURGE, Reason::NONE);
         }
 
@@ -209,7 +218,25 @@ namespace BurnerTransitions {
             const bool high = (c.state == BurnerSMState::RUNNING_HIGH);
             Decision d = make(c.state, Reason::NONE);
 
-            // 1. Mode switch (water <-> heating). When both WATER_ON and HEATING_ON
+            // 1. Explicit disable of the running mode (or of the whole boiler) stops the
+            //    burner now instead of waiting out the minimum on-time. The running mode
+            //    comes from the relays actually switched. Checked before the mode switch:
+            //    disabling water clears WATER_ON at once, so the switch check came first
+            //    and the burner waited up to 15 s for a heating handover (review 2026-09-14).
+            const bool relaysWater = env.relaysInWaterMode();
+            const bool boilerEnabled = env.boilerEnabled();
+            const bool heatingEnabled = env.heatingEnabled();
+            const bool waterEnabled = env.waterEnabled();
+            if (BurnerTransitionPolicy::stopForExplicitDisable(relaysWater, boilerEnabled,
+                                                               heatingEnabled, waterEnabled)) {
+                d.next = BurnerSMState::POST_PURGE;
+                d.reason = Reason::EXPLICIT_DISABLE;
+                d.fromWater = relaysWater;
+                d.boilerDisabled = !boilerEnabled;
+                return d;
+            }
+
+            // 2. Mode switch (water <-> heating). When both WATER_ON and HEATING_ON
             //    are set, WATER_PRIORITY decides.
             const bool waterOn = env.waterOn();
             const bool heatingOn = env.heatingOn();
@@ -225,22 +252,6 @@ namespace BurnerTransitions {
                 const bool seamless = env.safetyOk() && env.flameDetected();
                 d.next = seamless ? BurnerSMState::MODE_SWITCHING : BurnerSMState::POST_PURGE;
                 d.reason = seamless ? Reason::SWITCH_SEAMLESS : Reason::SWITCH_NEEDS_STOP;
-                return d;
-            }
-
-            // 2. Explicit disable of the running mode (or of the whole boiler) stops the
-            //    burner now instead of waiting out the minimum on-time. The running mode
-            //    comes from the relays actually switched.
-            const bool relaysWater = env.relaysInWaterMode();
-            const bool boilerEnabled = env.boilerEnabled();
-            const bool heatingEnabled = env.heatingEnabled();
-            const bool waterEnabled = env.waterEnabled();
-            if (BurnerTransitionPolicy::stopForExplicitDisable(relaysWater, boilerEnabled,
-                                                               heatingEnabled, waterEnabled)) {
-                d.next = BurnerSMState::POST_PURGE;
-                d.reason = Reason::EXPLICIT_DISABLE;
-                d.fromWater = relaysWater;
-                d.boilerDisabled = !boilerEnabled;
                 return d;
             }
 
@@ -302,6 +313,20 @@ namespace BurnerTransitions {
         inline Decision modeSwitching(const Context& c, Environment& env, Memory& m) {
             if (!env.safetyOk()) {
                 return make(BurnerSMState::ERROR, Reason::SAFETY_FAILED);
+            }
+
+            // Explicit disable of the mode the relays still run in (or of the boiler)
+            // stops the burner now instead of waiting for a handover
+            {
+                const bool relaysWater = env.relaysInWaterMode();
+                const bool boilerEnabled = env.boilerEnabled();
+                if (BurnerTransitionPolicy::stopForExplicitDisable(relaysWater, boilerEnabled,
+                                                                   env.heatingEnabled(), env.waterEnabled())) {
+                    Decision stop = make(BurnerSMState::POST_PURGE, Reason::EXPLICIT_DISABLE);
+                    stop.fromWater = relaysWater;
+                    stop.boilerDisabled = !boilerEnabled;
+                    return stop;
+                }
             }
 
             // Burner request bits carry the actual demand; the SystemState ON bits may
@@ -408,7 +433,7 @@ namespace BurnerTransitions {
             case BurnerSMState::IDLE:
                 return detail::idle(c, env, m);
             case BurnerSMState::PRE_PURGE:
-                return detail::prePurge(c, env);
+                return detail::prePurge(c, t, env);
             case BurnerSMState::IGNITION:
                 return detail::ignition(c, t, env, m);
             case BurnerSMState::RUNNING_LOW:

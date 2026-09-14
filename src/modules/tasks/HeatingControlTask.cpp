@@ -41,7 +41,7 @@ static struct {
 // Forward declarations
 static void safetyCheckCallback(TimerHandle_t xTimer);
 static void processTimerCallback(TimerHandle_t xTimer);
-static void processHeatingState();
+static void processHeatingState(EventBits_t pendingControl = 0);
 static bool checkIfSpaceHeatingNeededEvent();
 
 void HeatingControlTask(void *parameter) {
@@ -166,9 +166,12 @@ void HeatingControlTask(void *parameter) {
                                           SystemEvents::ControlRequest::WATER_PRIORITY_RELEASED;
 
         if (controlBits & CONTROL_EVENTS) {
-            // Control events trigger immediate processing
+            // Control events trigger immediate processing. The bits are cleared first,
+            // so hand the override bits over - processHeatingState() re-read the cleared
+            // bits and never acted on an override (review 2026-09-14).
             xEventGroupClearBits(SRP::getControlRequestsEventGroup(), controlBits & CONTROL_EVENTS);
-            processHeatingState();
+            processHeatingState(controlBits & (SystemEvents::ControlRequest::HEATING_ON_OVERRIDE |
+                                               SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE));
         }
 
         // Feed watchdog
@@ -206,7 +209,7 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
     }
 }
 
-static void processHeatingState() {
+static void processHeatingState(EventBits_t pendingControl) {
     const char* TAG = "HeatingProcess";
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
     
@@ -233,8 +236,8 @@ static void processHeatingState() {
     // Operation mode is managed by BurnerControlTask - don't set it here
     
     // Get control bits
-    EventBits_t controlBits = SRP::getControlRequestsEventBits();
-    
+    EventBits_t controlBits = SRP::getControlRequestsEventBits() | pendingControl;
+
     switch (heatingState.state) {
         case HeatingOff: {
             // Check if we should turn on heating

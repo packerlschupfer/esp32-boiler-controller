@@ -31,4 +31,16 @@ void PersistentStorageTask_RequestSave();
  */
 void PersistentStorageTask_RequestLoad();
 
+/**
+ * @brief Set a registered parameter as if it came from boiler/params/set/<name>
+ *
+ * Queued to the storage task, which range-checks it, updates the registered value and
+ * its SystemSettings field through the change callback, and saves. Use this instead of
+ * writing SystemSettings directly for registered parameters: the next parameter save
+ * stored the stale registered value again (review 2026-09-14).
+ *
+ * @return false if the storage is not initialized or the command could not be queued
+ */
+bool PersistentStorageTask_SetParameter(const char* name, const char* payload);
+
 #endif // PERSISTENT_STORAGE_TASK_H

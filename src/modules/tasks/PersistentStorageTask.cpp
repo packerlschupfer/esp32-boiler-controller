@@ -19,6 +19,8 @@
 #include "utils/ErrorLogFRAM.h"
 #include "utils/TemperatureParameterWrapper.h"
 #include "core/StateManager.h"
+#include <atomic>
+#include <string>
 
 // Global temperature shadows for SystemSettings
 static SystemSettingsTemperatureShadows temperatureShadows;
@@ -49,6 +51,9 @@ static EventGroupHandle_t storageEventGroup = nullptr;
 static bool parametersChanged = false;
 static uint32_t lastChangeTime = 0;
 
+// Storage instance for PersistentStorageTask_SetParameter() (called from the MQTT task)
+static std::atomic<PersistentStorage*> storageInstance{nullptr};
+
 // Task function
 void PersistentStorageTask(void* pvParameters) {
     LOG_INFO(TAG, "PersistentStorageTask started");
@@ -76,6 +81,7 @@ void PersistentStorageTask(void* pvParameters) {
 
     // Track whether NVS initialized successfully
     bool nvsAvailable = storage->begin();
+    storageInstance.store(storage);
 
     if (!nvsAvailable) {
         LOG_ERROR(TAG, "NVS init failed - attempting recovery by erasing namespace");
@@ -751,4 +757,13 @@ void PersistentStorageTask_RequestLoad() {
     if (storageEventGroup) {
         xEventGroupSetBits(storageEventGroup, STORAGE_LOAD_REQUEST_BIT);
     }
+}
+
+bool PersistentStorageTask_SetParameter(const char* name, const char* payload) {
+    PersistentStorage* storage = storageInstance.load();
+    if (storage == nullptr || name == nullptr || payload == nullptr) {
+        return false;
+    }
+    // Same queued path as an MQTT boiler/params/set/<name> message
+    return storage->handleMqttCommand(std::string("boiler/params/set/") + name, payload);
 }

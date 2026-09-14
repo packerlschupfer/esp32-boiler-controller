@@ -749,24 +749,32 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         success = true;
         LOG_INFO(TAG_CMD, "Weather-compensated control: %s", newVal ? "ENABLED" : "DISABLED");
     } else if (strstr(topic, "outside_heating_threshold") != nullptr) {
-        if (value >= 50 && value <= 200) {  // 5-20°C in tenths
+        // Same range and storage path as boiler/params/set/heating/outsideThreshold. Writing
+        // SystemSettings only was reverted by the next parameter save (the registered value
+        // stayed old), and the range stopped at 20 °C (review 2026-09-14).
+        if (value >= 50 && value <= 250) {  // 5-25°C in tenths
             auto newVal = static_cast<Temperature_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().outsideTempHeatingThreshold = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            char valueBuf[12];
+            snprintf(valueBuf, sizeof(valueBuf), "%ld", static_cast<long>(value));
+            if (!PersistentStorageTask_SetParameter("heating/outsideThreshold", valueBuf)) {
+                LOG_ERROR(TAG_CMD, "Parameter storage not available");
+                return;
+            }
             success = true;
             char tempBuf[16];
             formatTemp(tempBuf, sizeof(tempBuf), newVal);
             LOG_INFO(TAG_CMD, "Outside heating threshold: %s°C", tempBuf);
         }
     } else if (strstr(topic, "room_overheat_margin") != nullptr) {
+        // Storage path like outside_heating_threshold (heating/roomOverheatMargin)
         if (value >= 10 && value <= 50) {  // 1-5°C in tenths
             auto newVal = static_cast<Temperature_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().roomTempOverheatMargin = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            char valueBuf[12];
+            snprintf(valueBuf, sizeof(valueBuf), "%ld", static_cast<long>(value));
+            if (!PersistentStorageTask_SetParameter("heating/roomOverheatMargin", valueBuf)) {
+                LOG_ERROR(TAG_CMD, "Parameter storage not available");
+                return;
+            }
             success = true;
             char tempBuf[16];
             formatTemp(tempBuf, sizeof(tempBuf), newVal);

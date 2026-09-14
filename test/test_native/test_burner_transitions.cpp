@@ -3,8 +3,8 @@
  * @brief Scenario tests for BurnerTransitions::step() (burner state machine logic)
  *
  * Replays tick sequences through the real transition function. The simulator
- * mirrors StateMachine::update(): state timeouts (PRE_PURGE 2 s -> IGNITION,
- * IGNITION backstop 7 s -> LOCKOUT) are checked before the step, and entering IGNITION
+ * mirrors StateMachine::update(): the backstop timeouts (PRE_PURGE 4 s -> IGNITION,
+ * IGNITION 7 s -> LOCKOUT) are checked before the step, and entering IGNITION
  * records the running mode like onEnterIgnition().
  */
 
@@ -25,6 +25,8 @@ constexpr uint32_t IGNITION_TIME_MS = 5000;      // SystemConstants::Burner::IGN
 constexpr uint32_t MIN_IGNITION_TIME_MS = 3000;  // SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS
 constexpr uint32_t IGNITION_STATE_TIMEOUT_MS =    // BurnerStateMachine IGNITION StateMachine timeout
     IGNITION_TIME_MS + BurnerTransitionPolicy::IGNITION_BACKSTOP_MARGIN_MS;
+constexpr uint32_t PRE_PURGE_STATE_TIMEOUT_MS =   // BurnerStateMachine PRE_PURGE StateMachine timeout
+    PRE_PURGE_TIME_MS + BurnerTransitionPolicy::PRE_PURGE_BACKSTOP_MARGIN_MS;
 
 class FakeEnvironment : public Environment {
 public:
@@ -95,6 +97,7 @@ struct Simulator {
         timing.ignitionTimeoutMs = IGNITION_TIME_MS;
         timing.maxIgnitionRetries = 3;
         timing.modeDemandLossGraceMs = MODE_DEMAND_LOSS_GRACE_MS;
+        timing.prePurgeTimeMs = PRE_PURGE_TIME_MS;
         clearVisits();
     }
 
@@ -121,7 +124,7 @@ struct Simulator {
         nowMs += tickMs;
         const uint32_t inState = nowMs - entryMs;
         // StateMachine::update(): timeout first (strictly greater), then the handler
-        if (state == BurnerSMState::PRE_PURGE && inState > PRE_PURGE_TIME_MS) {
+        if (state == BurnerSMState::PRE_PURGE && inState > PRE_PURGE_STATE_TIMEOUT_MS) {
             enter(BurnerSMState::IGNITION);
             return;
         }
@@ -613,5 +616,53 @@ void test_bsm_step_stray_other_mode_on_bit_does_not_bounce() {
     sim.run(5000);
     TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
     TEST_ASSERT_EQUAL_INT(1, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+}
+
+void test_bsm_step_demand_withdrawn_late_in_pre_purge_aborts() {
+    // BurnerControlTask ticks about once a second. With PRE_PURGE -> IGNITION as the
+    // StateMachine timeout (checked before the handler) a demand withdrawn in the last
+    // second of the pre-purge still ignited the burner
+    sim = Simulator();
+    sim.tickMs = 1100;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    sim.tick();  // 1.1 s in pre-purge
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    sim.heatDemand = false;  // BoilerTempControlTask re-asserts OFF
+    sim.tick();  // 2.2 s: past the pre-purge time
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IDLE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::DEMAND_WITHDRAWN);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::IGNITION));
+}
+
+void test_bsm_step_water_disable_during_charge_stops_now() {
+    // Disabling water clears WATER_ON and the request at once; the mode-switch check came
+    // first and the burner waited up to 15 s for a heating handover
+    startBurner(true, true);
+    sim.env.turnOffAllowed = false;
+    sim.env.heatingWanted = true;
+    sim.env.waterEn = false;
+    requestWater(false);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
+    TEST_ASSERT_TRUE(sim.last.fromWater);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+}
+
+void test_bsm_step_explicit_disable_during_mode_switch_stops() {
+    // Charge done, waiting for the heating handover; then water is disabled
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.env.waterEn = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
     TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
 }

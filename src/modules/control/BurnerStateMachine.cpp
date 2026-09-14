@@ -68,7 +68,8 @@ static const BurnerTransitions::Timing TRANSITION_TIMING = {
     SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS,
     SystemConstants::Burner::IGNITION_TIME_MS,
     SystemConstants::Burner::MAX_IGNITION_RETRIES,
-    BurnerTransitions::MODE_DEMAND_LOSS_GRACE_MS
+    BurnerTransitions::MODE_DEMAND_LOSS_GRACE_MS,
+    SystemConstants::Burner::PRE_PURGE_TIME_MS
 };
 
 void BurnerStateMachine::initialize() {
@@ -98,7 +99,9 @@ void BurnerStateMachine::initialize() {
         .handler = handlePrePurgeState,
         .onEntry = onEnterPrePurge,
         .onExit = nullptr,
-        .timeoutMs = PRE_PURGE_TIME_MS,
+        // Backstop only: the handler goes to IGNITION after PRE_PURGE_TIME_MS once demand
+        // and mode request are re-checked (as the timeout it skipped those checks)
+        .timeoutMs = PRE_PURGE_TIME_MS + BurnerTransitionPolicy::PRE_PURGE_BACKSTOP_MARGIN_MS,
         .timeoutNextState = BurnerSMState::IGNITION
     });
     
@@ -903,11 +906,11 @@ void BurnerStateMachine::logStateTransition(BurnerSMState from, BurnerSMState to
     (void)fromStr;  // Suppress unused warning when logging is disabled
     (void)toStr;    // Suppress unused warning when logging is disabled
 
-    // Record power level changes for anti-flapping
-    // Skip MODE_SWITCHING - power level doesn't change during mode switch
-    // Skip IGNITION - actual power level determined in onEnterIgnition() based on request
-    if (to != BurnerSMState::MODE_SWITCHING && from != BurnerSMState::MODE_SWITCHING &&
-        to != BurnerSMState::IGNITION) {
+    // Record power level changes for anti-flapping (entering MODE_SWITCHING keeps the
+    // level, IGNITION records its start level in onEnterIgnition()). Transitions out of
+    // MODE_SWITCHING count: a stop from there left anti-flapping "on", so the restart
+    // from POST_PURGE ignored the minimum off-time (review 2026-09-14).
+    if (BurnerTransitionPolicy::recordsPowerLevelOnTransition(to)) {
         BurnerAntiFlapping::PowerLevel newLevel = BurnerAntiFlapping::stateToPowerLevel(to);
         BurnerAntiFlapping::recordPowerLevelChange(newLevel);
     }

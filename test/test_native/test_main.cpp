@@ -38,6 +38,7 @@ void test_policy_heating_wanted_room_mode();
 void test_policy_heating_wanted_weather_mode();
 void test_policy_mode_switch_wait_is_bounded();
 void test_policy_mode_revert_requires_on_bit();
+void test_policy_mode_switch_exit_records_power_level();
 
 // Stage C policies (power level fault escalation, water limit consistency)
 void test_power_fault_escalates_on_third_fault_in_window();
@@ -92,6 +93,9 @@ void test_bsm_step_ignition_retry_success_resets_counter();
 void test_bsm_step_new_start_gets_full_ignition_attempts_after_lockout();
 void test_bsm_step_no_mode_grace_survives_steps_in_same_millisecond();
 void test_bsm_step_stray_other_mode_on_bit_does_not_bounce();
+void test_bsm_step_demand_withdrawn_late_in_pre_purge_aborts();
+void test_bsm_step_water_disable_during_charge_stops_now();
+void test_bsm_step_explicit_disable_during_mode_switch_stops();
 
 // Burner demand gate (who may arm the heat demand)
 void test_gate_hot_boiler_request_does_not_arm();
@@ -535,6 +539,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_policy_heating_wanted_weather_mode);
     RUN_TEST(test_policy_mode_switch_wait_is_bounded);
     RUN_TEST(test_policy_mode_revert_requires_on_bit);
+    RUN_TEST(test_policy_mode_switch_exit_records_power_level);
 
     // Stage C policies (power level fault escalation, water limit consistency)
     RUN_TEST(test_power_fault_escalates_on_third_fault_in_window);
@@ -589,6 +594,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bsm_step_new_start_gets_full_ignition_attempts_after_lockout);
     RUN_TEST(test_bsm_step_no_mode_grace_survives_steps_in_same_millisecond);
     RUN_TEST(test_bsm_step_stray_other_mode_on_bit_does_not_bounce);
+    RUN_TEST(test_bsm_step_demand_withdrawn_late_in_pre_purge_aborts);
+    RUN_TEST(test_bsm_step_water_disable_during_charge_stops_now);
+    RUN_TEST(test_bsm_step_explicit_disable_during_mode_switch_stops);
 
     // Burner demand gate (who may arm the heat demand)
     RUN_TEST(test_gate_hot_boiler_request_does_not_arm);
