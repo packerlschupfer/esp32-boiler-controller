@@ -56,6 +56,8 @@ The boiler controller implements a **5-layer safety architecture** designed to p
 - Layer 1: Pre-operation validation (gate-keeping)
 - Layer 2: Continuous monitoring (real-time protection)
 
+**Action on Failure**: `SafetyInterlocks::continuousSafetyMonitor()` runs on every burner state machine update during IGNITION, RUNNING_LOW and RUNNING_HIGH. A failure calls `BurnerStateMachine::emergencyStop()`: burner relays off, state ERROR.
+
 **Runtime-Configurable Parameters**:
 - **Sensor Staleness Timeout**: Same as Layer 1 (shares SafetyConfig)
 - **Pump Protection Delay**: 5-60s (default: 15s)
@@ -70,20 +72,25 @@ The boiler controller implements a **5-layer safety architecture** designed to p
 
 **Location**: `src/modules/control/CentralizedFailsafe.cpp`
 
-**Shutdown Sequence**:
-1. **Immediate burner cutoff** - Stop combustion
-2. **Maintain pump operation** - Continue circulation for heat dissipation
-3. **Post-purge execution** - Configurable duration for exhaust gas removal
-4. **State persistence** - Log failure reason to FRAM
-5. **MQTT notification** - Publish safety event
+**Shutdown Paths**:
+
+| Function | Burner relays (1-3) | Pumps | Further actions |
+|----------|---------------------|-------|-----------------|
+| `BurnerSystemController::emergencyShutdown()` | OFF via `RelayControlTask::setRelayStateEmergency()` (rate limiting bypassed) | Not commanded - PumpControlModule keeps running them while HEATING_ON/WATER_ON are set | Relay failure sets `Error::RELAY` and `Error::SAFETY` bits |
+| `BurnerStateMachine::emergencyStop()` | OFF via `emergencyShutdown()` | Not commanded | Clears `BURNER_ON`, state ERROR |
+| `CentralizedFailsafe::emergencyStop()` | OFF via `emergencyShutdown()` | Both forced ON via `setRelayStateEmergency()` for heat dissipation | Sets `EMERGENCY_STOP`, clears `BOILER_ENABLED`, logs the error |
+
+The burner never switches pumps off: the former `setAllRelays(false)` in `emergencyShutdown()` also stopped the pumps, and PumpControlModule only writes on its own state changes, so they stayed off with the heat exchanger still hot.
+
+`CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (stale sensor data during operation, critical temperature, burner request watchdog) and the EMERGENCY failsafe level. The emergency state is written to FRAM (`saveEmergencyState()`) when the failsafe level first reaches CRITICAL or higher.
 
 **Runtime-Configurable Parameters**:
 - **Post-Purge Duration**: 30-180s (default: 90s)
-  - Critical for removing combustion gases
+  - Time the burner stays in POST_PURGE with its relays off after a stop
   - Adjustable via MQTT: `boiler/cmd/config/post_purge_ms`
 
 **Post-Purge Timing**:
-- **Purpose**: Exhaust residual combustion gases after burner shutdown
+- **Purpose**: Keep the burner off after a stop; pumps are controlled independently by PumpControlModule. If heat demand returns during post-purge, the burner restarts via PRE_PURGE once the minimum off-time (20 s) has passed
 - **Default**: 90 seconds (tested and proven safe)
 - **Minimum**: 30 seconds (regulatory requirement)
 - **Maximum**: 180 seconds (prevents excessive cycling)
@@ -204,7 +211,7 @@ Range: 30000-180000ms (30-180 seconds)
 Default: 90000ms (90 seconds)
 MQTT: boiler/cmd/config/post_purge_ms
 ```
-**Purpose**: Duration to run circulation pump after burner shutdown to remove exhaust gases.
+**Purpose**: Duration of the burner POST_PURGE state (burner relays off) after a stop. The circulation pumps are not controlled by the post-purge; PumpControlModule runs them while their mode is active.
 
 **Use Cases**:
 - Adjust based on boiler volume and chimney draft
@@ -288,7 +295,7 @@ The following checks were removed as **redundant or counterproductive**:
 2. Pressure bounds (1.00-3.50 BAR)
 3. Sensor validity and staleness
 4. Pump interlock
-5. Burner anti-flapping (2 min minimum cycle)
+5. Burner anti-flapping (2 min minimum on-time, 20 s minimum off-time)
 
 **Result**: Streamlined safety system with reduced false positives while maintaining all critical protections.
 
@@ -298,46 +305,91 @@ The following checks were removed as **redundant or counterproductive**:
 
 ## Burner State Machine Integration
 
-**Location**: `src/modules/control/BurnerStateMachine.cpp`
+**Location**: `src/modules/control/BurnerStateMachine.cpp`; transition logic in `include/modules/control/BurnerTransitions.h` and `include/modules/control/BurnerTransitionPolicy.h`
+
+See [STATE_MACHINES.md](STATE_MACHINES.md) for the complete transition rules.
+
+**Active mode request**: `(HEATING_ON && BurnerRequest::HEATING) || (WATER_ON && BurnerRequest::WATER)`
 
 **Safety Integration Points**:
 
-### 1. PRE_PURGE State
+### 1. IDLE State
 ```cpp
-Duration: 30 seconds (fixed)
-Purpose: Exhaust any residual gases before ignition
+Start: Heat demand + active mode request + safety check + minimum off-time (20s)
+Safety: A latched heat demand without an active mode request is ignored
+        (heat demand survives emergencyStop() and ERROR recovery)
 ```
 
-### 2. IGNITION State
+### 2. PRE_PURGE State
 ```cpp
-Duration: 10 seconds
-Safety: If flame not detected, enter LOCKOUT
+Duration: 2 seconds (PRE_PURGE_TIME_MS, atmospheric burner)
+Purpose: Burner relays forced off before ignition
+Safety: Safety check failure -> ERROR
+        Mode request or heat demand withdrawn -> IDLE (start aborted)
 ```
 
-### 3. RUNNING States
+### 3. IGNITION State
 ```cpp
-Continuous: Layer 2 safety monitoring active
-Action: Any violation triggers POST_PURGE shutdown
+Duration: Flame proxy checked from 3s, attempt fails at 5s (IGNITION_TIME_MS)
+Safety: Failed attempt -> PRE_PURGE retry
+        3rd failed attempt (MAX_IGNITION_RETRIES) -> LOCKOUT
+Backstop: StateMachine timeout 7s (IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS) -> LOCKOUT
 ```
 
-### 4. POST_PURGE State
+### 4. RUNNING States
 ```cpp
-Duration: Configurable (SafetyConfig::postPurgeMs)
-Purpose: Exhaust combustion gases after shutdown
-Safety: Pumps continue, burner disabled
+Continuous: Layer 2 safety monitoring; failure -> emergencyStop() -> ERROR
+Stop after minimum on-time (2 min): heat demand ended or safety check failed
+Immediate stop to POST_PURGE (minimum on-time bypassed):
+  - Running mode or whole boiler explicitly disabled (stopForExplicitDisable)
+  - No active mode request for 10s (MODE_DEMAND_LOSS_GRACE_MS)
+  - Flame lost (burner relays no longer active)
+  - Mode change while not safe or not burning
+Power level change refused on entry: DEGRADED failsafe -> POST_PURGE
+  3rd fault within 10 min (POWER_FAULT_MAX_COUNT, POWER_FAULT_WINDOW_MS) -> emergencyStop()
 ```
 
-### 5. LOCKOUT State
+### 5. MODE_SWITCHING State
 ```cpp
-Trigger: Ignition failure or safety violation
-Recovery: Manual intervention required
+Entry: Water <-> heating change while safe and burning
+Safety: Safety check failure -> ERROR
+Wait for the new mode's request only while heating is likely wanted,
+  at most 15s (MODE_SWITCH_MAX_WAIT_MS), otherwise POST_PURGE
+Hard limit: 30s (MODE_SWITCH_HARD_TIMEOUT_MS) -> POST_PURGE
 ```
 
-### 6. ERROR State
+### 6. POST_PURGE State
 ```cpp
-Trigger: System-level errors
-Recovery: Clear error condition, then manual reset
+Duration: Configurable (SafetyConfig::postPurgeMs, default 90s)
+Action: Burner relays off; pumps continue under PumpControlModule
+Restart: Heat demand returns -> PRE_PURGE (same conditions as a start from IDLE,
+         not for a mode that was just disabled)
 ```
+
+### 7. LOCKOUT State
+```cpp
+Trigger: 3 failed ignition attempts
+Action: Burner relays off, ALARM relay on
+Recovery: Automatic after 5 min (LOCKOUT_TIME_MS) or resetLockout() (MQTT burner_reset)
+          Retry counter only reset by resetLockout() or a successful ignition
+```
+
+### 8. ERROR State
+```cpp
+Trigger: emergencyStop() - interlock failure, emergency stop, failed burner deactivation,
+         repeated power level fault
+Action: BurnerSystemController::emergencyShutdown() (burner relays 1-3 off)
+Recovery: Automatic after SafetyConfig::errorRecoveryMs (default 5 min) once the
+          safety check passes
+```
+
+### Heat Demand Arming
+
+`include/modules/control/BurnerDemandGate.h`: BurnerControlTask publishes a permission (request present, sensor staleness, `BurnerSafetyValidator` and return preheating checks passed, sensor fallback limits). It arms the demand for a new request only when BoilerTempControlTask would: its PID decision is fresh (6 s) and made for about the same target (1.0°C), otherwise the boiler output must be below target. BoilerTempControlTask keeps the demand equal to "permitted AND PID wants heat" on every cycle. The burner therefore does not ignite while the boiler is above target at a request start.
+
+### Relay Command Protection
+
+`include/shared/RelayCommandPolicy.h`: relay rate limiting (`MIN_RELAY_SWITCH_INTERVAL_MS`, `MAX_RELAY_TOGGLE_RATE_PER_MIN`) and pump motor protection count only real state changes. A mode switch sends all three burner relays; unchanged relays in that batch no longer consume the rate limit, so the following power level change is not rejected. `setRelayStateEmergency()` bypasses both protections.
 
 ---
 
@@ -442,7 +494,7 @@ See [MQTT_API.md](MQTT_API.md) for complete command reference.
 2. **Sensor staleness**: Disconnect Modbus � expect shutdown after timeout
 3. **Pressure loss**: Simulate low pressure � expect burner inhibit
 4. **Pump interlock**: Stop pump manually � expect burner cutoff
-5. **Post-purge**: Shutdown during heating � verify 90s pump continuation
+5. **Post-purge**: Shutdown during heating � verify burner relays stay off for `SafetyConfig::postPurgeMs` (default 90s) while pumps follow their mode
 
 ---
 
@@ -476,6 +528,11 @@ See [MQTT_API.md](MQTT_API.md) for complete command reference.
 - `src/modules/control/CentralizedFailsafe.cpp`
 - `src/config/SafetyConfig.cpp`
 - `src/modules/control/BurnerStateMachine.cpp`
+- `src/modules/control/BurnerSystemController.cpp`
+- `include/modules/control/BurnerTransitions.h`
+- `include/modules/control/BurnerTransitionPolicy.h`
+- `include/modules/control/BurnerDemandGate.h`
+- `include/shared/RelayCommandPolicy.h`
 
 ---
 
@@ -500,7 +557,9 @@ Post-purge:          90 seconds
 DELAY watchdog:      10 seconds (hardware auto-OFF, renewed every 5s)
 Max temperature:     90�C
 Pressure range:      1.00-3.50 BAR
-Burner min cycle:    120 seconds
+Burner min on-time:  120 seconds (bypassed on explicit disable, lost mode request, flame loss)
+Burner min off-time: 20 seconds
+Error recovery:      5 minutes (automatic, after safety check passes)
 ```
 
 **Safety Configuration via MQTT**:

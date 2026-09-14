@@ -27,6 +27,7 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 | RelayControlTask | 4 | 3584 | 1 | Physical relay control, motor protection |
 | HeatingControlTask | 3 | 3584 | Any | Space heating PID control |
 | WheaterControlTask | 3 | 3584 | Any | Water heating PID control |
+| BoilerTempControlTask | 4 | 3072 | 1 | Boiler temperature PID, heat demand, autotune |
 | MB8ARTProcessingTask | 3 | 3072 | Any | Temperature sensor data processing |
 | ANDRTF3Task | 3 | 3584 | Any | Room temperature sensor |
 | SensorTask | 3 | 3584 | Any | Legacy sensor coordination |
@@ -76,6 +77,9 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 - Emergency stop with immediate relay shutdown
 - Burner request expiration watchdog (10 minutes)
 - Anti-flapping protection (minimum on-time 2 min, off-time 20s)
+- BurnerDemandGate: publishes the arming permission (`getBurnerDemandPermission()`) and arms a new or changed request only when BoilerTempControlTask would (fresh PID decision wants heat, otherwise boiler below target)
+- Blocked standing requests (return preheating, stale sensors, failed validation, sensor fallback) re-evaluated every 10 s
+- Clears `Error::SAFETY` when burner safety validation passes
 
 ---
 
@@ -102,8 +106,9 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 - `RelayReadingsMutex` (shared state)
 
 **Equipment Protection**:
-- **Pump motor protection**: 30s minimum between state changes (prevents motor damage)
-- **Relay rate limiting**: Prevents rapid toggling
+- **Pump motor protection**: `SafetyConfig::pumpProtectionMs` minimum between state changes (default 15 s, prevents motor damage)
+- **Relay rate limiting**: `MIN_RELAY_SWITCH_INTERVAL_MS` (150 ms) and `MAX_RELAY_TOGGLE_RATE_PER_MIN` (30)
+- **Real changes only**: rate limiting and pump protection apply only to commands that change the desired relay state and are not emergency commands (`RelayCommandPolicy`); the pump protection timestamp is updated only on a real change
 - **Health monitoring**: Tracks relay failures and communication errors
 
 **Relay Functions**:
@@ -165,9 +170,15 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 - `SensorReadingsMutex`
 
 **Control Parameters** (configurable via MQTT):
-- `tempLimitLow`: Start threshold (default 45.0°C)
-- `tempLimitHigh`: Stop threshold (default 65.0°C)
+- `tempLimitLow`: Start threshold (default 45.0°C, range 30-60°C)
+- `tempLimitHigh`: Stop threshold (default 65.0°C, range 50-85°C)
 - PID gains for fine control
+
+**Charge Logic**:
+- Two-threshold latch in `WaterChargePolicy::nextChargeNeeded()`: start below `tempLimitLow`, stop above `tempLimitHigh`
+- Inverted limits (`low >= high`, `WaterChargePolicy::limitsValid()`) pause water heating with one WARN until the pair is consistent
+- Switching water heating off (water or boiler disable, water OFF override) clears the latch; after re-enable a new charge starts only below `tempLimitLow`. Heating preemption and sensor loss keep the latch (the charge resumes)
+- `notifyWheaterTaskSwitchedOff()` (called by `StateManager::setBoilerEnabled(false)`, `setWaterEnabled(false)`, `setWaterOverrideOff(true)` and `CentralizedFailsafe::emergencyStop()`) wakes the task, which ends a running charge on its next run even if water heating was re-enabled within the same cycle
 
 **Modes**:
 - **On-demand heating**: Activated when tank temp < tempLimitLow
@@ -362,17 +373,20 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 
 **MQTT Parameter API**:
 ```
-boiler/params/wheater/tempLimitLow       - Water start threshold (45.0°C)
-boiler/params/wheater/tempLimitHigh      - Water stop threshold (65.0°C)
+boiler/params/wheater/tempLimitLow       - Water start threshold (45.0°C, 300-600 tenths)
+boiler/params/wheater/tempLimitHigh      - Water stop threshold (65.0°C, 500-850 tenths)
 boiler/params/heating/hysteresis         - Space heating hysteresis (0.5°C)
 boiler/params/heating/setpoint           - Comfort temperature (21.0°C)
-boiler/params/pid/spaceHeating/kp        - PID proportional gain
-boiler/params/pid/spaceHeating/ki        - PID integral gain
-boiler/params/pid/spaceHeating/kd        - PID derivative gain
+boiler/params/pid/spaceHeating/kp        - PID proportional gain (0-100)
+boiler/params/pid/spaceHeating/ki        - PID integral gain (0-10)
+boiler/params/pid/spaceHeating/kd        - PID derivative gain (0-50)
+boiler/params/pid/waterHeater/kp|ki|kd   - Water PID gains (0-100 / 0-10 / 0-50)
 boiler/params/get/all                    - Request all parameters
 boiler/params/save                       - Save all to NVS
 boiler/params/save/changed               - Save only changed parameters
 ```
+
+**Live Changes**: The int32_t temperature parameters (tank limits, burner/heating/water limits, room target, hysteresis) are applied through their onChange callbacks and once after `loadAll()`. `TemperatureParameterWrapper::applyToSettings()` writes only the sensor offsets, so a save no longer reverts live changes.
 
 **NVS Recovery**: Automatic namespace erase on corruption (Round 7)
 
@@ -594,12 +608,42 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 
 ---
 
+### 18. BoilerTempControlTask
+
+**File**: `src/modules/tasks/BoilerTempControlTask.cpp`
+**Priority**: 4 (same as BurnerControlTask)
+**Stack**: 3072 bytes
+**Core**: 1 (pinned)
+**Watchdog**: 10000ms (`SystemConstants::BoilerControl::WDT_TIMEOUT_MS`, non-critical)
+
+**Purpose**: Inner boiler temperature loop. Turns the target of the active heating/water request into a burner power level (OFF/HALF/FULL) via `BoilerTempController`, keeps the burner heat demand in line with it, and runs PID autotuning.
+
+**Event Groups**:
+- **Sensor Event Group** (waits): `BOILER_OUTPUT` (timeout 2 x MB8ART read interval)
+- **Control Requests Event Group** (checks/clears): `PID_AUTOTUNE`, `PID_AUTOTUNE_STOP`
+- **Heating Event Group** (sets/clears): `AUTOTUNE_RUNNING`, `AUTOTUNE_COMPLETE`, `AUTOTUNE_FAILED`
+
+**Control Logic** (each cycle with an active request):
+- `BoilerTempController::updateMode()` reads the active mode's gains from SystemSettings every cycle; a mode or gain change is applied with a PID reset
+- Target capped by the sensor fallback limit from `getBurnerDemandPermission()`
+- Publishes its decision (`getBoilerTempDecision()`) for BurnerControlTask's arming check
+- `BurnerDemandGate::decide()` every cycle (level-triggered): arms a missing demand while permitted and the PID wants heat (after `BurnerSafetyValidator`), drops a demand that was re-armed while coasting or is no longer permitted
+
+**Autotune**:
+- Starts only with a valid, fresh boiler output within 15-75°C (`Autotune::MIN_BOILER_TEMP` / `MAX_BOILER_TEMP`), otherwise publishes `{"status":"rejected"}` and sets `AUTOTUNE_FAILED`
+- Aborts on an invalid or stale boiler output or above 80°C (`Autotune::MAX_TEMP_EXCURSION`): withdraws the heat demand, publishes `{"status":"aborted"}`
+- Stops when no heating or water request is active
+- Relay power-on requires BurnerControlTask's permission and safety validation
+
+---
+
 ## Priority Hierarchy
 
 ### Priority 4 (Safety-Critical)
 Highest priority tasks that must never be blocked:
 - **BurnerControlTask**: State machine, safety interlocks
 - **RelayControlTask**: Physical hardware control
+- **BoilerTempControlTask**: Boiler temperature PID, heat demand arming
 
 ### Priority 3 (Control Logic)
 Normal control tasks with sensor coordination:
@@ -634,6 +678,7 @@ Time-critical communication tasks:
 - **RelayControlTask**: Deterministic relay control timing
 - **MQTTTask**: Isolate network I/O
 - **OTATask**: Isolate firmware update operations
+- **BoilerTempControlTask**: Boiler temperature loop
 
 **Rationale**: Pinning communication tasks to Core 1 prevents interference with critical control loops on Core 0.
 
@@ -699,7 +744,7 @@ See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
 ### Equipment Protection
 
 **Pump Motor Protection**:
-- 30s minimum between state changes (RelayControlTask)
+- `SafetyConfig::pumpProtectionMs` minimum between real state changes (default 15 s, RelayControlTask)
 - Prevents mechanical damage from rapid cycling
 
 **Burner Anti-Flapping**:
@@ -710,6 +755,7 @@ See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
 **Relay Rate Limiting**:
 - Prevents rapid toggling
 - Tracks toggle rate per relay
+- Commands that do not change the relay state, and emergency commands, are not counted
 
 **Burner Request Expiration**:
 - 10-minute watchdog
@@ -815,7 +861,7 @@ All tasks register cleanup handlers via `TaskCleanupHandler`:
 
 **Emergency Shutdown**:
 1. BurnerSystemController emergencyShutdown()
-2. RelayControlTask kills all relays
+2. RelayControlTask switches the burner relays OFF (BURNER_ENABLE, POWER_BOOST, WATER_MODE via `setRelayStateEmergency`, rate limit bypassed); the pumps stay with PumpControlModule
 3. CriticalDataStorage saves emergency state to FRAM
 4. System reset or safe idle state
 

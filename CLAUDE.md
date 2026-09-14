@@ -393,12 +393,16 @@ See `docs/MQTT_API.md` for complete reference.
 9-state finite state machine with anti-flapping protection:
 
 ```
-IDLE → PRE_PURGE → IGNITION → RUNNING_LOW/HIGH → POST_PURGE → (IDLE | LOCKOUT | ERROR)
+IDLE → PRE_PURGE → IGNITION → RUNNING_LOW/HIGH (↔ MODE_SWITCHING) → POST_PURGE → IDLE
+IGNITION → LOCKOUT (3 failed attempts), emergencyStop() → ERROR
 ```
 
-- **Minimum on-time**: 2 minutes (equipment protection)
+- **Start condition**: heat demand plus an active mode request (HEATING_ON + HEATING request, or WATER_ON + WATER request); a latched demand without one is ignored
+- **Minimum on-time**: 2 minutes (equipment protection); bypassed on explicit disable of the running mode or boiler, no active mode request for 10 s, and flame loss
 - **Minimum off-time**: 20 seconds (anti-flapping)
 - **Request expiration**: 10 minutes (watchdog)
+- **Emergency shutdown**: `BurnerSystemController::emergencyShutdown()` switches off burner relays 1-3 only; pumps stay under PumpControlModule
+- **Transition logic**: `include/modules/control/BurnerTransitions.h` (header-only, native tests)
 
 See `docs/STATE_MACHINES.md` for complete state diagrams and transitions.
 

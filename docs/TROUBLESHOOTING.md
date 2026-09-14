@@ -15,6 +15,7 @@ This document consolidates common issues and solutions for the ESP32 Boiler Cont
 7. [Memory Issues](#memory-issues)
 8. [Safety System Issues](#safety-system-issues)
 9. [Network Issues](#network-issues)
+10. [Heating and Water Control](#heating-and-water-control)
 
 ---
 
@@ -341,7 +342,7 @@ Stack canary watchpoint triggered (TaskName)
 
 **Symptom:** Burner won't start, state shows LOCKOUT.
 
-**Cause:** Too many failed ignition attempts.
+**Cause:** Ignition failed on `MAX_IGNITION_RETRIES` (3) attempts. Each failed attempt is retried through pre-purge (`Ignition retry N/3`) before the lockout (`Max ignition retries exceeded`).
 
 **Solution:**
 1. Fix underlying issue (gas supply, ignition electrode, flame sensor)
@@ -354,13 +355,16 @@ Stack canary watchpoint triggered (TaskName)
 
 **Symptom:**
 ```
-[CentralizedFailsafe][E] EMERGENCY STOP - All relays OFF
+EMERGENCY STOP: <reason>
 ```
 
 **Causes:**
 1. Over-temperature condition
 2. Pressure fault
 3. Multiple consecutive safety check failures
+4. Third power level relay fault within 10 minutes
+
+**Note:** The emergency shutdown switches off only the burner relays (BURNER_ENABLE, POWER_BOOST, WATER_MODE). The pumps keep following their mode, see [Pumps keep running after an emergency stop](#pumps-keep-running-after-an-emergency-stop).
 
 **Recovery:**
 1. Check error logs for cause
@@ -426,6 +430,100 @@ Stack canary watchpoint triggered (TaskName)
 
 ---
 
+## Heating and Water Control
+
+### Water heating does not restart after re-enabling
+
+**Symptom:** Water heating was switched off during a charge and enabled again. No charge starts although the tank is below `tempLimitHigh`.
+
+**Cause:** Expected. Switching water heating off (water or boiler disable, water OFF override, emergency stop) ends the charge and clears the charge latch, also when water heating is enabled again within the same control cycle:
+```
+[WaterControlTask][I] Water heating switched off - ending charge
+```
+A new charge starts only when the tank drops below `wheater/tempLimitLow`. Heating preemption and a temporary sensor loss do not clear the latch; that charge resumes.
+
+---
+
+### Water heating paused: limits inconsistent
+
+**Symptom:**
+```
+[WaterControlTask][W] Water limits inconsistent: low 60.0°C >= high 50.0°C - water heating paused
+```
+
+**Cause:** `wheater/tempLimitLow` is not below `wheater/tempLimitHigh`. Each limit is range-checked on its own (low 30-60°C, high 50-85°C), so sending both in the wrong order inverts the pair.
+
+**Solution:** Set the limits so low < high. When raising both, send `tempLimitHigh` first; when lowering both, send `tempLimitLow` first. Water heating resumes by itself (`Water limits consistent again`).
+
+---
+
+### Heat demand not armed
+
+**Symptom:**
+```
+[BurnerUpdate][I] Heat demand not armed - boiler 64.4°C, target 47.0°C (BoilerTempCtrl arms when heat is needed)
+```
+
+**Cause:** Expected. A heating or water request started while the boiler was already above its target. BurnerControlTask does not ignite the burner; BoilerTempControlTask arms the demand once its PID wants heat. `[BoilerTempCtrl][I] Re-asserting burner OFF - demand was re-armed while coasting` is also normal.
+
+---
+
+### Burner stops immediately after disabling heating or water
+
+**Symptom:**
+```
+[BurnerStateMachine][I] Space heating disabled - stopping burner now (minimum on-time bypassed)
+```
+
+**Cause:** Expected. Disabling the mode the burner is running in, or the boiler, goes to post-purge without waiting for the anti-flapping minimum on-time. Disabling the other mode does not stop the burner. If heat demand returns during post-purge, the burner restarts from there once the minimum off-time is over (`Heat demand returned during post-purge - restarting after N ms`).
+
+---
+
+### Stale heat demand ignored
+
+**Symptom:**
+```
+[BurnerStateMachine][W] Ignoring stale heat demand - no active heating/water mode request
+```
+
+**Cause:** A heat demand is still latched (e.g. after an emergency stop and ERROR recovery) but no heating or water mode is requesting the burner. The burner starts only with an active mode (`HEATING_ON` + heating request, or `WATER_ON` + water request), so it cannot fire with the pumps off. Logged at most once per minute. A running burner likewise stops after 10 s without an active mode request (`Burner running without active heating/water mode request for N ms - stopping`).
+
+---
+
+### Pumps keep running after an emergency stop
+
+**Symptom:** Burner is in ERROR, but a circulation pump is still on.
+
+**Cause:** Expected. The emergency shutdown switches off only the burner relays. The pumps are controlled by PumpControlModule and follow `HEATING_ON`/`WATER_ON` (including overrun), so the heat in the exchanger is still carried away.
+
+---
+
+### Burner stops with a power level fault
+
+**Symptom:**
+```
+[BurnerStateMachine][E] RUNNING_HIGH: failed to set power level (1/3) - stopping burner via post-purge
+```
+
+**Cause:** The POWER_BOOST relay command was refused (relay rate limit, queue full, Modbus error). The burner post-purges and may restart. The third fault within 10 minutes escalates to an emergency stop.
+
+**Solution:** Check the log before the fault for relay or RYN4 communication errors.
+
+---
+
+### PID auto-tune rejected or aborted
+
+**Symptom:** `boiler/status/pid/autotune/result` shows `{"status":"rejected","reason":"boiler temp"}` or `{"status":"aborted"}`.
+
+**Cause:**
+- **rejected:** Boiler output invalid, stale or outside 15-75°C when `start` was sent
+- **aborted:** Boiler output became invalid or stale, or exceeded 80°C, during the relay test; the heat demand is withdrawn
+- The autotune also stops when no heating or water request is active, and after 90 minutes at most
+
+**Solution:** Start with the boiler between 15°C and 75°C and keep a heating or water request active for the whole test.
+
+---
+
 ## Diagnostic Commands
 
 ### MQTT Diagnostics
@@ -466,4 +564,4 @@ pio device monitor -b 921600 | grep -E '\[(MB8ART|RYN4|ANDRTF3)\]'
 
 ---
 
-*Last updated: 2025-12-22*
+*Last updated: 2026-09-14*

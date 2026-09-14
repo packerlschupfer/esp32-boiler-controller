@@ -11,174 +11,358 @@ The boiler controller uses explicit state machines for managing burner operation
 
 ## Burner State Machine
 
-**File**: `src/modules/control/BurnerStateMachine.h/cpp`
+**Files**:
+- `include/modules/control/BurnerSMState.h` - `BurnerSMState` enum (no FreeRTOS/Arduino dependencies)
+- `include/modules/control/BurnerTransitions.h` - next-state logic, `BurnerTransitions::step()` (header-only, native-testable)
+- `include/modules/control/BurnerTransitionPolicy.h` - pure decision rules and state machine limits
+- `include/modules/control/BurnerDemandGate.h` - rules for arming the heat demand
+- `src/modules/control/BurnerStateMachine.h/cpp` - state registration, entry/exit actions, POST_PURGE completion, LOCKOUT and ERROR handlers
+
 **Implementation**: `StateMachine<BurnerSMState>` template
 
 ### States
 
 | State | ID | Description | Typical Duration |
-|-------|----|-----------| -----------------|
+|-------|----|-------------|------------------|
 | IDLE | 0 | Burner off, waiting for demand | Variable |
-| PRE_PURGE | 1 | Pre-purge airflow before ignition | 10 seconds |
-| IGNITION | 2 | Ignition sequence (spark + gas) | 5 seconds |
-| RUNNING_LOW | 3 | Running at 50% power | Variable |
-| RUNNING_HIGH | 4 | Running at 100% power | Variable |
-| POST_PURGE | 5 | Post-purge airflow after shutdown | 60 seconds |
-| LOCKOUT | 6 | Safety lockout after failures | 5 minutes |
-| ERROR | 7 | Error state (manual reset required) | Until fixed |
+| PRE_PURGE | 1 | Burner relays forced off before ignition | 2 seconds |
+| IGNITION | 2 | Burner relays switched on for the requested mode, flame proxy checked | 3-5 seconds |
+| RUNNING_LOW | 3 | Running at half power (POWER_BOOST off) | Variable |
+| RUNNING_HIGH | 4 | Running at full power (POWER_BOOST on) | Variable |
+| MODE_SWITCHING | 5 | Seamless water <-> heating switch while burning | Milliseconds, wait max 15 s, hard limit 30 s |
+| POST_PURGE | 6 | Burner relays off after a stop, pumps follow their modes | `SafetyConfig::postPurgeMs` (default 90 s) |
+| LOCKOUT | 7 | Safety lockout after failed ignition attempts | 5 minutes |
+| ERROR | 8 | Emergency stop / safety failure | At least `SafetyConfig::errorRecoveryMs` (default 5 min) |
 
 ### State Transitions
 
 ```
-┌────────┐
-│  IDLE  │◄──────────────────────────────────┐
-└───┬────┘                                    │
-    │ Heat Demand + Safety OK                │
-    │ + Anti-flap OK                         │
-    ▼                                         │
-┌──────────┐                                 │
-│PRE_PURGE │  (10s timeout)                  │
-└─────┬────┘                                 │
-      │                                       │
-      │ Safety Failed                        │
-      ├──────────────────────┐               │
-      │                      ▼               │
-      │                  ┌───────┐           │
-      │                  │ ERROR │           │
-      │                  └───────┘           │
-      │                                      │
-      │ Timeout (10s)                       │
-      ▼                                      │
-┌──────────┐                                │
-│ IGNITION │  (5s max)                      │
-└─────┬────┘                                │
-      │                                      │
-      │ Flame Detected                      │
-      ├────────────┬───────────┐            │
-      │ Low Power  │ High Power│            │
-      ▼            ▼            │            │
-┌────────────┐ ┌─────────────┐│            │
-│RUNNING_LOW │ │RUNNING_HIGH ││            │
-└──┬─────────┘ └──┬──────────┘│            │
-   │ Power ▲      │ Power ▼   │            │
-   │ Increase     │ Decrease  │            │
-   └──────┬───────┴─────┬─────┘            │
-          │             │                   │
-          │ No Demand   │                   │
-          │ OR Safety   │                   │
-          │ Failed      │                   │
-          ▼             │                   │
-     ┌────────────┐    │                   │
-     │POST_PURGE  │◄───┘                   │
-     └──────┬─────┘                         │
-            │ (60s timeout)                 │
-            └───────────────────────────────┘
+        ┌────────┐
+        │  IDLE  │◄──────────────────────────────────────────────┐
+        └───┬────┘                                               │
+            │ heat demand + active mode request                  │
+            │ + safety OK + minimum off-time (20 s)              │
+            ▼                                                    │
+      ┌───────────┐  mode request or demand gone ──► IDLE        │
+      │ PRE_PURGE │  safety failed ────────────────► ERROR       │
+      └─────┬─────┘                                              │
+            │ timeout (2 s)                                      │
+            ▼                                                    │
+      ┌───────────┐  no flame at 5 s ──► PRE_PURGE (retry)       │
+      │ IGNITION  │  3rd failed attempt ──► LOCKOUT              │
+      └─────┬─────┘                                              │
+            │ flame (checked from 3 s)                           │
+            ▼                                                    │
+  ┌─────────────┐  power request  ┌──────────────┐               │
+  │ RUNNING_LOW │◄───────────────►│ RUNNING_HIGH │               │
+  └──────┬──────┘                 └──────┬───────┘               │
+         │ mode change while safe and burning                    │
+         ├──────────► MODE_SWITCHING ◄───┤                       │
+         │              │ switched ──► RUNNING_LOW/HIGH          │
+         │              │ no request, switch failed,             │
+         │              │ 30 s hard timeout ──► POST_PURGE       │
+         │              │ safety failed ──► ERROR                │
+         │                                                       │
+         │ stop (see "RUNNING → POST_PURGE")                     │
+         ▼                                                       │
+   ┌────────────┐  postPurgeMs elapsed ──────────────────────────┘
+   │ POST_PURGE │  heat demand returns ──► PRE_PURGE
+   └────────────┘
 
-     Ignition Failed (3× retries)
-              ▼
-         ┌─────────┐
-         │ LOCKOUT │  (5 min timeout)
-         └─────────┘
-              │ Timeout OR Manual Reset
-              └──────────► IDLE
+  LOCKOUT ── LOCKOUT_TIME_MS (5 min) or resetLockout() ──► IDLE
+  ERROR   ── errorRecoveryMs elapsed + safety OK ──────────► IDLE
+  IGNITION / RUNNING_LOW / RUNNING_HIGH:
+          continuousSafetyMonitor() failed ──► emergencyStop() ──► ERROR
 ```
 
-### State Transition Logic
+### State Machine Configuration
+
+`StateMachine::update()` checks the configured timeout first (`timeInState > timeoutMs`) and only then runs the state handler.
+
+| State | Handler | `timeoutMs` | On timeout |
+|-------|---------|-------------|------------|
+| IDLE | `BurnerTransitions::step()` | 0 | - |
+| PRE_PURGE | `BurnerTransitions::step()` | `PRE_PURGE_TIME_MS` (2000) | IGNITION |
+| IGNITION | `BurnerTransitions::step()` | `IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS` (7000) | LOCKOUT (backstop only) |
+| RUNNING_LOW / RUNNING_HIGH | `BurnerTransitions::step()` | 0 | - |
+| MODE_SWITCHING | `BurnerTransitions::step()` | `MODE_SWITCH_HARD_TIMEOUT_MS` (30000) | POST_PURGE |
+| POST_PURGE | `handlePostPurgeState()` (duration) + `step()` (early restart) | 0 (manual check of `SafetyConfig::postPurgeMs`) | - |
+| LOCKOUT | `handleLockoutState()` (stays) | `LOCKOUT_TIME_MS` (300000) | IDLE |
+| ERROR | `handleErrorState()` | 0 | - |
+
+### Transition Logic (`BurnerTransitions::step`)
+
+The handlers of IDLE, PRE_PURGE, IGNITION, RUNNING_LOW/HIGH and MODE_SWITCHING, and the early restart check in POST_PURGE, call `BurnerStateMachine::runTransitionStep()`, which delegates to the pure function:
+
+```cpp
+BurnerTransitions::Decision BurnerTransitions::step(
+    const Context& c,      // state, timeInStateMs, nowMs, heatDemand, requestedHighPower
+    const Timing& t,       // ignitionMinTimeMs, ignitionTimeoutMs, maxIgnitionRetries, modeDemandLossGraceMs
+    Environment& env,      // inputs and the mode switch action
+    Memory& m);            // ignitionRetries, runningModeIsWater, noModeDemandSinceMs
+```
+
+`Decision` carries the next state and a `Reason` (e.g. `STALE_DEMAND`, `EXPLICIT_DISABLE`, `NO_MODE_DEMAND`, `RESTART_FROM_POST_PURGE`) that `logTransitionDecision()` turns into log messages.
+
+In firmware the `Environment` is `FirmwareTransitionEnvironment` (in `BurnerStateMachine.cpp`). It reads the SystemState event bits and the burner request bits once per tick; safety check, flame proxy, power limit, anti-flapping and settings are probed lazily, only when the logic asks for them, because `BurnerSystemController::performSafetyCheck()` can perform an emergency shutdown and several probes take mutexes.
+
+**Active mode request** - used by IDLE, PRE_PURGE, RUNNING and POST_PURGE:
+
+```cpp
+(HEATING_ON && BurnerRequest::HEATING) || (WATER_ON && BurnerRequest::WATER)
+```
+
+**Mode selection** - when both `WATER_ON` and `HEATING_ON` are set, `WATER_PRIORITY` decides:
+
+```cpp
+bool isWater = WATER_ON && (!HEATING_ON || WATER_PRIORITY);
+```
 
 #### IDLE → PRE_PURGE
 ```cpp
 // Conditions:
-✓ Heat demand present
-✓ All safety checks passed
-✓ Anti-flapping timer expired (20s min off time)
+✓ heatDemand set
+✓ Active mode request present
+✓ BurnerSafetyChecks::checkSafetyConditions() passed
+✓ BurnerAntiFlapping::canTurnOn() (MIN_OFF_TIME_MS, 20 s)
 
-// Actions on entry:
-- Ensure burner relays OFF
-- Start exhaust fan (if present)
-- Log sequence start
+// Stale demand:
+// heatDemand is latched and survives emergencyStop()/ERROR recovery.
+// Without an active mode request IDLE ignores it (Reason::STALE_DEMAND,
+// "Ignoring stale heat demand" logged at most once per 60 s).
+
+// Actions on entry (onEnterPrePurge):
+- BurnerSystemController::deactivate() - burner relays OFF
+- Deactivate failure -> emergencyStop()
 ```
 
-#### PRE_PURGE → IGNITION
+#### PRE_PURGE → IGNITION / IDLE / ERROR
 ```cpp
-// Conditions:
-✓ 10 second timeout elapsed
-✓ Safety conditions still OK
+// Checked every tick, in this order:
+✗ Safety check failed           -> ERROR
+✗ No active mode request        -> IDLE (Reason::MODE_WITHDRAWN)
+✗ heatDemand cleared            -> IDLE (Reason::DEMAND_WITHDRAWN)
 
-// Actions on entry:
-- Enable ignition spark
-- Open gas valve (controlled power)
-- Start flame detection monitoring
-- Increment burner start counter
+// PRE_PURGE_TIME_MS (2 s) elapsed -> IGNITION (StateMachine timeout)
 ```
 
-#### IGNITION → RUNNING_HIGH/LOW
+#### IGNITION
 ```cpp
-// Conditions:
-✓ Flame detected (via sensor OR assumed if no sensor)
-✓ Within 5 second timeout
+// Actions on entry (onEnterIgnition):
+- Increment COUNTER_BURNER_STARTS (FRAM)
+- Select mode (WATER_ON / HEATING_ON / WATER_PRIORITY), remember it as running mode
+- Record start power level for anti-flapping (from requestedHighPower)
+- activateWaterMode() or activateHeatingMode() with FULL or HALF power
+- Activation failure -> set BURNER_ERROR bit, flame proxy stays false
+- vTaskDelay(BURNER_IGNITION_DELAY_MS)   // 500 ms
 
-// Power level selection:
-if (shouldIncreasePower()) → RUNNING_HIGH
-else → RUNNING_LOW
-
-// Actions on entry:
-- Disable ignition spark
-- Set power level (half/full)
-- Reset ignition retry counter
-- Start anti-flapping on-timer (2 min minimum runtime)
+// Handler:
+timeInState < BURNER_MIN_IGNITION_TIME_MS (3 s)  -> stay
+flame detected                                   -> retries = 0,
+    RUNNING_HIGH if BurnerPowerController::shouldIncreasePower(requestedHighPower)
+    else RUNNING_LOW
+timeInState >= IGNITION_TIME_MS (5 s)            -> retries++
+    retries >= MAX_IGNITION_RETRIES (3)          -> LOCKOUT
+    else                                         -> PRE_PURGE (retry)
 ```
 
-#### IGNITION → LOCKOUT
+The StateMachine timeout of IGNITION (`IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS`, 7 s) is only a backstop behind the handler. With the same 5 s value the timeout (checked before the handler) won almost every tick and a failed start went straight to LOCKOUT without the retries.
+
+**Flame detection**: no flame sensor is installed. `BurnerSafetyChecks::isFlameDetected()` returns `BurnerSystemController::isActive()` (burner relays commanded on).
+
+**Retry counter**: reset on successful ignition and by `resetLockout()`. It is not reset when LOCKOUT expires automatically and not persisted (a reboot starts at 0).
+
+#### Entering RUNNING_LOW / RUNNING_HIGH
 ```cpp
-// Conditions:
-✗ No flame after 3 ignition attempts
-✗ Each attempt includes PRE_PURGE + IGNITION cycle
+// Actions on entry (onEnterRunningLow / onEnterRunningHigh):
+- BurnerSystemController::setPowerLevel(HALF / FULL)
+- Set BURNER_ON bit (RUNNING_LOW also clears BURNER_ERROR)
+- BurnerRuntimeTracker::recordStartTime()
 
-// Actions on entry:
-- Close gas valve
-- Disable ignition
-- Log failure
-- Start 5 minute lockout timer
+// Power level change refused (relay rate limit, queue full, Modbus error):
+- CentralizedFailsafe::triggerFailsafe(DEGRADED, RELAY_OPERATION_FAILED,
+                                       "Failed to set power level to HIGH/LOW")
+- Fault 1-2 within POWER_FAULT_WINDOW_MS (10 min) -> POST_PURGE
+- Fault 3 (POWER_FAULT_MAX_COUNT) within the window -> emergencyStop() -> ERROR
+
+// Actions on exit (onExitRunning):
+- Clear BURNER_ON bit
+- BurnerRuntimeTracker::updateRuntimeCounters()
 ```
+
+#### RUNNING → MODE_SWITCHING / POST_PURGE
+```cpp
+// Checked every tick, in this order:
+1. Mode change (running mode != WATER_ON && (!HEATING_ON || WATER_PRIORITY))
+     safety OK and flame                   -> MODE_SWITCHING (Reason::SWITCH_SEAMLESS)
+     otherwise                             -> POST_PURGE     (Reason::SWITCH_NEEDS_STOP)
+   heatDemand is not checked here: the old mode clears it before the new mode sets it.
+
+2. Explicit disable                        -> POST_PURGE     (Reason::EXPLICIT_DISABLE)
+   BurnerTransitionPolicy::stopForExplicitDisable(): BOILER_ENABLED cleared, or the
+   *_ENABLED bit of the running mode cleared (running mode from the relays,
+   BurnerSystemController::getCurrentMode()). Bypasses MIN_ON_TIME_MS.
+   Disabling water while heating runs does not stop the burner.
+
+3. No active mode request for MODE_DEMAND_LOSS_GRACE_MS (10 s)
+                                           -> POST_PURGE     (Reason::NO_MODE_DEMAND)
+   Bypasses anti-flapping: with no mode active nothing guarantees circulation.
+
+4. heatDemand cleared or safety check failed
+     BurnerAntiFlapping::canTurnOff() (MIN_ON_TIME_MS, 2 min)
+                                           -> POST_PURGE     (Reason::DEMAND_ENDED)
+     otherwise keep running ("Delaying burner stop")
+
+5. Flame lost (burner relays no longer active)
+                                           -> POST_PURGE     (Reason::FLAME_LOST)
+   Bypasses anti-flapping.
+
+6. Power level (see "Power Level State Machine")
+```
+
+`performSafetyCheck()` itself calls `BurnerSystemController::emergencyShutdown()` when the `EMERGENCY_STOP` bit is set or the boiler output or return temperature reaches `MAX_BOILER_TEMP_C` (110.0°C). The burner relays are then off, so step 5 stops the burner on the same tick. A failure from `checkSystemErrors()` alone (`SENSOR_FAILURE`, `MODBUS` or `RELAY` error bits) waits for the minimum on-time.
+
+#### MODE_SWITCHING
+```cpp
+// Checked every tick:
+✗ Safety check failed -> ERROR
+
+// New mode from the burner request bits (the ON bits may not be set yet):
+toWater = BurnerRequest::WATER && (!BurnerRequest::HEATING || WATER_PRIORITY)
+
+// a) New mode has no request (water -> heating handover):
+//    BurnerTransitionPolicy::onNoDemandForNewMode()
+    heating likely wanted and timeInState < MODE_SWITCH_MAX_WAIT_MS (15 s) -> wait
+    otherwise                                                              -> POST_PURGE
+
+// b) Request points back to the running mode:
+//    BurnerTransitionPolicy::onModeReverted()
+    running mode's ON bit set                    -> RUNNING_LOW (safe low power)
+    ON bit not set, timeInState < 15 s           -> wait (no RUNNING <-> MODE_SWITCHING bounce)
+    ON bit still not set after 15 s              -> POST_PURGE
+
+// c) Otherwise switch the relays: BurnerSystemController::switchMode()
+    failure                                      -> POST_PURGE
+    success                                      -> RUNNING_HIGH / RUNNING_LOW
+                                                    (shouldIncreasePower)
+
+// MODE_SWITCH_HARD_TIMEOUT_MS (30 s) -> POST_PURGE (StateMachine timeout)
+```
+
+"Heating likely wanted" (`BurnerTransitionPolicy::heatingLikelyWanted()`) mirrors HeatingControlTask's turn-on decision: `HEATING_ENABLED` set and no heating override off; with weather compensation the outside temperature must be valid and below the heating threshold and the room not above target + overheat margin; without weather compensation the room temperature must be valid and below target.
+
+Anti-flapping power levels are not recorded for transitions into or out of MODE_SWITCHING.
 
 #### RUNNING → POST_PURGE
-```cpp
-// Conditions (any of):
-✗ Heat demand removed
-✗ Safety check failed
-✗ Flame lost
-✓ Anti-flapping minimum runtime elapsed (2 min)
+Summary of the stop rules above:
 
-// Actions on entry:
-- Close gas valve
-- Keep fan running for purge
-- Start 60 second post-purge timer
+| Trigger | Minimum on-time (2 min) |
+|---------|-------------------------|
+| Heat demand ended / safety check failed | Respected |
+| Explicit disable of the running mode or the boiler | Bypassed |
+| No active mode request for 10 s | Bypassed |
+| Flame lost | Bypassed |
+| Mode change without safe, burning state | Bypassed |
+| Power level change refused on entering RUNNING (fault 1-2) | Bypassed |
+
+```cpp
+// Actions on entry (onEnterPostPurge):
+- Record entry time
+- BurnerSystemController::deactivate() - burner relays 1-3 OFF, pumps untouched
+- Deactivate failure -> emergencyStop()
 ```
 
-#### POST_PURGE → IDLE
+#### POST_PURGE → IDLE / PRE_PURGE
 ```cpp
-// Conditions:
-✓ 60 second timeout elapsed
+// Duration (handlePostPurgeState):
+elapsed >= SafetyConfig::postPurgeMs (default 90 s, 30-180 s via MQTT) -> IDLE
 
-// Actions on entry:
-- Stop all burner activity
-- Ready for next demand cycle
+// Early restart (BurnerTransitions::step), same conditions as a start from IDLE:
+✓ heatDemand set
+✓ Active mode request present
+✓ Mode that would start not explicitly disabled (stopForExplicitDisable)
+   - its request can still be set for one control cycle after an explicit-disable stop
+✓ Safety check passed
+✓ BurnerAntiFlapping::canTurnOn() (MIN_OFF_TIME_MS, 20 s)
+-> PRE_PURGE (Reason::RESTART_FROM_POST_PURGE)
 ```
+
+POST_PURGE only keeps the burner off; the pumps are controlled independently by PumpControlModule. `SystemConstants::Burner::POST_PURGE_TIME_MS` is not used for the duration.
+
+#### LOCKOUT
+```cpp
+// Entered from IGNITION after MAX_IGNITION_RETRIES failed attempts
+// (or by the IGNITION backstop timeout)
+
+// Actions on entry (onEnterLockout):
+- BurnerSystemController::deactivate() (fallback: emergencyShutdown())
+- ALARM relay (relay 8) ON
+- HealthMonitor records IGNITION_FAILURE
+
+// Exit:
+- LOCKOUT_TIME_MS (5 min) elapsed -> IDLE (retry counter kept)
+- resetLockout() (MQTT burner_reset command, payload "lockout" or "reset")
+                                  -> IDLE (retry counter reset)
+
+// Actions on exit (onExitLockout):
+- Clear BURNER_ERROR bit, ALARM relay OFF
+```
+
+Because the retry counter is kept on automatic expiry, one more failed ignition after the lockout expires locks out again.
 
 #### ANY → ERROR
 ```cpp
-// Conditions (any of):
-✗ Critical safety failure
-✗ Emergency stop triggered
-✗ Communication lost
-✗ Sensor failure
+// BurnerStateMachine::emergencyStop() is called on:
+✗ SafetyInterlocks::continuousSafetyMonitor() failed in IGNITION / RUNNING_LOW / RUNNING_HIGH
+✗ Invalid state value
+✗ PRE_PURGE or POST_PURGE entry action could not deactivate the burner
+✗ 3rd power level fault within 10 min
+✗ BurnerControlTask: EMERGENCY_STOP system bit, failed safety event check,
+  sensor fallback cannot continue while demand is active, maximum runtime exceeded,
+  BurnerSafetyValidator failure other than thermal shock / sensor / pump failure
+// PRE_PURGE and MODE_SWITCHING also return ERROR directly on a failed safety check.
 
-// Actions on entry:
-- Immediate burner shutdown
-- Set BURNER_ERROR event bit
-- Save emergency state to FRAM
-- Require manual reset
+// emergencyStop():
+- BurnerSystemController::emergencyShutdown() - burner relays 1-3 OFF
+- Clear BURNER_ON bit
+- transitionTo(ERROR)
+
+// Actions on entry (onEnterError):
+- Record entry time
+- BurnerSystemController::emergencyShutdown()
 ```
+
+**Recovery is automatic**:
+- ERROR is held for `SafetyConfig::errorRecoveryMs` (default 5 min, range 1-30 min)
+- Every `STATUS_PUBLISH_INTERVAL_MS` (30 s) `{"state":"error","recovery_in":<seconds>}` is published to `boiler/status/burner`
+- After the delay, if `checkSafetyConditions()` passes: clear `BURNER_ERROR`, go to IDLE
+- `resetLockout()` only acts in LOCKOUT, not in ERROR
+- `heatDemand` is not cleared by ERROR; IDLE ignores it until an active mode request exists
+
+### Heat Demand Arming (`BurnerDemandGate`)
+
+Two tasks write `BurnerStateMachine::setHeatDemand(demand, target, highPower)`:
+
+**BurnerControlTask** (`updateBurnerState()`) on request changes, and every 10 s while a request is present but not permitted:
+1. Runs its blocks: sensor staleness, `BurnerSafetyValidator`, return preheating, sensor fallback limits
+2. Publishes a `Permission { permitted, highPowerAllowed, maxTargetTemp }`
+3. Not permitted -> `setHeatDemand(false)`
+4. Permitted -> arms ON only if `BurnerDemandGate::controlTaskMayArm()`:
+   - boiler output temperature invalid -> arm (sensor fallback operation)
+   - BoilerTempControlTask decision fresh (`DECISION_MAX_AGE_MS`, 6 s) and made for about the same target (`DECISION_TARGET_TOLERANCE`, 1.0°C) -> follow that decision
+   - otherwise -> arm only if boiler output < target
+
+**BoilerTempControlTask** on every boiler output update (~2.5 s) while a heating or water request exists:
+1. Caps the target with `permission.maxTargetTemp`, runs the PID, publishes its decision
+2. Applies `BurnerDemandGate::decide(permitted, pidWantsHeat, outputChanged, demandArmed)` on every cycle:
+   - `ARM` - permitted, PID wants heat, demand not armed
+   - `SET_POWER` - armed and PID output changed
+   - `DISARM` - armed but not permitted or PID wants OFF
+3. `ARM` and `SET_POWER` still require `BurnerSafetyValidator`; high power only if the PID wants FULL and `permission.highPowerAllowed`
+
+The demand therefore follows "permitted AND PID wants heat". Previously BurnerControlTask armed ON on every request start and BoilerTempControlTask only re-asserted OFF on its next cycle, after the 2 s pre-purge, so the burner could ignite while the boiler was above target.
+
+When `BOILER_ENABLED` is cleared, BurnerControlTask deactivates the burner relays, revokes the permission and clears the demand.
 
 ### Anti-Flapping Protection
 
@@ -186,42 +370,45 @@ Prevents rapid cycling that damages equipment:
 
 | Timer | Duration | Purpose |
 |-------|----------|---------|
-| Minimum ON time | 120 seconds | Prevent short cycles |
-| Minimum OFF time | 20 seconds | Allow cooling |
-| Power change delay | 30 seconds | Prevent power oscillation |
+| Minimum ON time | 120 seconds (`MIN_ON_TIME_MS`) | Prevent short cycles |
+| Minimum OFF time | 20 seconds (`MIN_OFF_TIME_MS`) | Allow cooling |
+| Power change interval | 15 seconds (`MIN_POWER_CHANGE_INTERVAL_MS`) | Prevent power oscillation |
 
 **Implementation**: `BurnerAntiFlapping.cpp`
 
-```cpp
-// Before turning on
-if (!BurnerAntiFlapping::canTurnOn()) {
-    LOG_DEBUG(TAG, "Anti-flap: Wait %lu ms",
-             BurnerAntiFlapping::getTimeUntilCanTurnOn());
-    return IDLE;  // Stay in IDLE
-}
+The minimum ON time only delays a stop for "heat demand ended" or "safety check failed". Explicit disable, loss of the mode request, flame loss, a mode change that cannot be done seamlessly and a refused power level change stop the burner immediately. Faults that call `emergencyStop()` go to ERROR regardless.
 
-// Notify anti-flapping system
-BurnerAntiFlapping::onBurnerTurnedOn();
-```
+Power levels are recorded in the transition callback (`logStateTransition()`): IDLE, PRE_PURGE, POST_PURGE, LOCKOUT and ERROR count as OFF. IGNITION records the start power in `onEnterIgnition()`.
 
 ### Safety Interlocks
 
-Before transitioning to PRE_PURGE, all checks must pass:
+**Before a start** (IDLE / POST_PURGE restart) and on every RUNNING, PRE_PURGE and MODE_SWITCHING tick, `BurnerSafetyChecks::checkSafetyConditions()` calls `BurnerSystemController::performSafetyCheck()`:
 
 ```cpp
-bool checkSafetyConditions() {
-    ✓ Pump running (circulation verified)
-    ✓ Temperature sensors valid (minimum 2 sensors)
-    ✓ Temperature in range (< 85°C typical)
-    ✓ No thermal shock (< 30°C differential)
-    ✓ Pressure in range (1.0-3.5 BAR)
-    ✓ No emergency stop
-    ✓ Communication OK (Modbus healthy)
-    ✓ No system errors
+Result<void> performSafetyCheck() {
+    ✓ No EMERGENCY_STOP bit                  // else emergencyShutdown()
+    ✓ Boiler temperatures < MAX_BOILER_TEMP_C (110.0°C)   // else emergencyShutdown()
+    ✓ No SENSOR_FAILURE / MODBUS / RELAY error bits
 }
 ```
 
-**File**: `SafetyInterlocks.cpp`
+**During IGNITION / RUNNING_LOW / RUNNING_HIGH**, `BurnerStateMachine::update()` also runs `SafetyInterlocks::continuousSafetyMonitor()` (skipped while `BOILER_ENABLED` is cleared); a failure calls `emergencyStop()`:
+
+```cpp
+bool continuousSafetyMonitor() {
+    ✓ No EMERGENCY_STOP bit
+    ✓ Boiler temperatures < CRITICAL_BOILER_TEMP_C (115.0°C)
+    ✓ Boiler output sensor not stale      // else also CentralizedFailsafe::emergencyStop()
+    // Periodic full check while HEATING_ON or WATER_ON is set:
+    ✓ Minimum 2 valid temperature sensors
+    ✓ Temperature limits and thermal shock differential
+    ✓ Communication, pressure, system errors
+}
+```
+
+Request validation before the demand is armed (`BurnerSafetyValidator`) is described in `docs/SAFETY_SYSTEM.md`.
+
+**Files**: `BurnerSafetyChecks.cpp`, `BurnerSystemController.cpp`, `SafetyInterlocks.cpp`
 
 ## Power Level State Machine
 
@@ -229,38 +416,46 @@ Nested within RUNNING states:
 
 ```
 RUNNING_LOW ←──────────────┐
-     │                      │ shouldDecreasePower()
+     │                      │ !requestedHighPower
      │ shouldIncreasePower()│ + canChangePowerLevel()
      ▼                      │
 RUNNING_HIGH ──────────────┘
 ```
 
-**Decision Logic** (`shouldIncreasePower()`, `shouldDecreasePower()`):
-- Based on PID output
-- Temperature error magnitude
-- Current vs target temperature
-- Mode (heating vs water)
+**Decision Logic**:
+- `requestedHighPower` comes from `setHeatDemand()` (BoilerTempControlTask PID output FULL, limited by the sensor fallback permission)
+- `BurnerPowerController::shouldIncreasePower()` blocks high power while the boiler output is >= 80.0°C
+- `BurnerAntiFlapping::canChangePowerLevel()` enforces `MIN_POWER_CHANGE_INTERVAL_MS` (15 s)
 
 ## Relay State Management
 
-**File**: `RYN4.cpp` (relay module)
+**Files**: `src/modules/tasks/RelayControlTask.cpp`, `include/config/RelayIndices.h`
 
 ```
 Relay State: OFF ──┐
-                   │ controlRelay(ON)
+                   │ setRelayState(ON)
                    ▼
                   ON
-                   │ controlRelay(OFF)
+                   │ setRelayState(OFF)
                    ▼
                   OFF
 ```
 
-**Relay Functions**:
-1. Burner Enable (R3)
-2. Power Select (R4) - OFF=Full, ON=Half
-3. Water Mode (R5)
-4. Heating Pump (R1)
-5. Water Pump (R2)
+**Relay Functions** (physical relay numbers):
+1. BURNER_ENABLE (1) - heating mode, half power
+2. POWER_BOOST (2) - ON = full power, OFF = half power
+3. WATER_MODE (3) - water mode, half power
+4. VALVE (4)
+5. HEATING_PUMP (5)
+6. WATER_PUMP (6)
+7. ALARM (8)
+
+The burner (`BurnerSystemController`) only commands relays 1-3. Pumps are owned by PumpControlModule.
+
+**Command protection** (`RelayControlTask::processSingleRelay()`):
+- Rate limiting (`MIN_RELAY_SWITCH_INTERVAL_MS` 150 ms, `MAX_RELAY_TOGGLE_RATE_PER_MIN` 30) and pump motor protection (`SafetyConfig::pumpProtectionMs`) apply only to real state changes (`RelayCommandPolicy::appliesProtection()`). A mode switch sends all three burner relays; unchanged relays in that batch no longer count as toggles and cannot make the following power level change fail.
+- `setRelayStateEmergency()` bypasses rate limiting and pump protection.
+- `setRelayState()` skips a command for a relay already in the desired state, except OFF commands to burner relays 1-3.
 
 **State Tracking**: `SharedRelayReadings` updated atomically with mutex protection
 
@@ -343,82 +538,83 @@ DISABLED ────────────┐
 
 ## State Machine Framework
 
-**Template**: `include/utils/StateMachine.h`
+**Template**: `src/utils/StateMachine.h`
 
 ```cpp
 template<typename StateEnum>
 class StateMachine {
 public:
-    // Current state tracking
-    StateEnum getCurrentState() const;
-    uint32_t getTimeInState() const;  // Milliseconds
+    struct StateConfig {
+        StateHandler handler;           // Returns the next state
+        ActionCallback onEntry;
+        ActionCallback onExit;
+        uint32_t timeoutMs;             // 0 = no timeout
+        StateEnum timeoutNextState;
+    };
 
-    // Transitions
+    void registerState(StateEnum state, const StateConfig& config);
+    void setTransitionCallback(TransitionCallback callback);
+    void initialize();
+    void update();                      // Timeout check, then handler
+
     void transitionTo(StateEnum newState);
-    bool isInState(StateEnum state) const;
+    void reset(StateEnum initialState);
 
-    // History
+    StateEnum getCurrentState() const;
     StateEnum getPreviousState() const;
-    uint32_t getTransitionCount() const;
+    uint32_t getTimeInState() const;    // Milliseconds
+    bool isInState(StateEnum state) const;
 };
 ```
 
 **Features**:
 - Automatic timing (time in state)
-- Transition logging
+- Per-state timeout with target state (checked before the handler, `>` comparison)
+- Transition logging and transition callback
 - Previous state tracking
-- Thread-safe state queries
+
+**Transition order** (`transitionTo()`): exit action of the old state, state update, transition callback, entry action of the new state. An entry action may itself call `transitionTo()` (e.g. `handlePowerLevelFault()` moves to POST_PURGE from `onEnterRunningLow()`).
 
 **Usage Pattern**:
 ```cpp
 // In BurnerStateMachine.cpp
-static StateMachine<BurnerSMState> stateMachine;
+StateMachine<BurnerSMState> BurnerStateMachine::stateMachine("BurnerSM", BurnerSMState::IDLE);
 
-void update() {
-    BurnerSMState currentState = stateMachine.getCurrentState();
-
-    // Handle current state
-    BurnerSMState nextState = handleCurrentState(currentState);
-
-    // Transition if needed
-    if (nextState != currentState) {
-        stateMachine.transitionTo(nextState);
-        onStateExit(currentState);
-        onStateEnter(nextState);
-    }
+BurnerSMState BurnerStateMachine::runTransitionStep() {
+    const BurnerTransitions::Context ctx = {
+        stateMachine.getCurrentState(), stateMachine.getTimeInState(),
+        millis(), heatDemand, requestedHighPower
+    };
+    FirmwareTransitionEnvironment env(TAG, targetTemperature);
+    const BurnerTransitions::Decision decision =
+        BurnerTransitions::step(ctx, TRANSITION_TIMING, env, transitionMemory);
+    logTransitionDecision(ctx, decision, env.systemBits(), env.requestBits());
+    return decision.next;   // StateMachine::update() transitions if it differs
 }
 ```
 
 ## State Persistence
 
-Critical states are persisted to FRAM for crash recovery:
+The emergency state is persisted to FRAM by `CentralizedFailsafe::saveEmergencyState()` when the failsafe level first reaches CRITICAL or higher, and on an orderly shutdown. `BurnerStateMachine::emergencyStop()` does not write it.
 
 ```cpp
 struct EmergencyState {
-    uint32_t magic = 0xDEADBEEF;
-    BurnerSMState burnerState;
-    Temperature_t lastBoilerTemp;
-    Pressure_t lastPressure;
-    bool wasHeating;
-    bool wasWaterActive;
-    uint32_t errorCode;
-    uint32_t timestamp;
-    uint32_t crc;
+    uint32_t magic;           // 0xDEADBEEF when valid
+    uint32_t timestamp;       // When emergency occurred
+    uint8_t reason;           // Emergency reason code
+    uint8_t activeRelays;     // Relay state before shutdown
+    float lastBoilerTemp;     // Last known boiler temp
+    float lastPressure;       // Last known pressure
+    bool wasHeating;          // Was heating active
+    bool wasWaterActive;      // Was water heating active
+    uint32_t errorCode;       // Associated error code
+    uint32_t crc;             // CRC32 of data
 } __attribute__((packed));
 ```
 
 **File**: `src/utils/CriticalDataStorage.h`
 
-**On Emergency Stop**:
-1. Save current state to FRAM
-2. Save sensor readings
-3. Save error code
-4. Calculate CRC32
-
-**On Startup**:
-1. Check for valid emergency state (magic + CRC)
-2. Log previous conditions
-3. Decide if safe to auto-restart or require manual intervention
+The burner ignition retry counter is intentionally not persisted.
 
 ## State Transition Rules
 
@@ -427,24 +623,37 @@ struct EmergencyState {
 States with automatic timeout transitions:
 
 ```cpp
-// PRE_PURGE: Always transitions after 10s
-if (timeInState >= PRE_PURGE_TIME_MS) {
+// PRE_PURGE: StateMachine timeout
+if (timeInState > PRE_PURGE_TIME_MS) {                                   // 2 s
     return IGNITION;
 }
 
-// IGNITION: Max 5s, retry or lockout
-if (timeInState >= IGNITION_TIME_MS) {
-    if (++retries >= MAX_RETRIES) return LOCKOUT;
+// IGNITION: handler retries or locks out, StateMachine timeout is a backstop
+if (timeInState >= IGNITION_TIME_MS) {                                   // 5 s
+    if (++retries >= MAX_IGNITION_RETRIES) return LOCKOUT;
     return PRE_PURGE;  // Retry
 }
+if (timeInState > IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS) {      // 7 s
+    return LOCKOUT;
+}
 
-// POST_PURGE: Always transitions after 60s
-if (timeInState >= POST_PURGE_TIME_MS) {
+// MODE_SWITCHING: bounded waits in the handler, StateMachine hard timeout
+if (timeInState > MODE_SWITCH_HARD_TIMEOUT_MS) {                         // 30 s
+    return POST_PURGE;
+}
+
+// POST_PURGE: manual check, runtime-configurable
+if (timeInPostPurge >= SafetyConfig::postPurgeMs) {                      // default 90 s
     return IDLE;
 }
 
-// LOCKOUT: Auto-reset after 5 minutes
-if (timeInState >= LOCKOUT_TIME_MS) {
+// LOCKOUT: automatic reset
+if (timeInState > LOCKOUT_TIME_MS) {                                     // 5 min
+    return IDLE;
+}
+
+// ERROR: recovery delay, then safety check
+if (timeInError >= SafetyConfig::errorRecoveryMs && checkSafetyConditions()) {
     return IDLE;
 }
 ```
@@ -454,20 +663,25 @@ if (timeInState >= LOCKOUT_TIME_MS) {
 States that transition based on conditions:
 
 ```cpp
-// IDLE: Transition when demand appears
-if (heatDemand && safetyOK && antiFlappingOK) {
+// IDLE: start only for an active mode request
+if (heatDemand && hasActiveModeDemand() && safetyOK && canTurnOn()) {
     return PRE_PURGE;
 }
 
-// RUNNING: Check continuously
-if (!heatDemand || !safetyOK || !flameDetected) {
-    return POST_PURGE;  // Shutdown sequence
-}
+// PRE_PURGE: abort if the request or the demand goes away
+if (!safetyOK) return ERROR;
+if (!hasActiveModeDemand() || !heatDemand) return IDLE;
 
-// ERROR: Only clear when safe
-if (safetyConditionsRestored()) {
-    clearErrorBit();
-    return IDLE;
+// RUNNING: checked continuously (order matters)
+if (modeChanged)                       return (safetyOK && flame) ? MODE_SWITCHING : POST_PURGE;
+if (stopForExplicitDisable(...))       return POST_PURGE;
+if (noModeRequestFor >= 10 s)          return POST_PURGE;
+if ((!heatDemand || !safetyOK) && canTurnOff()) return POST_PURGE;
+if (!flameDetected)                    return POST_PURGE;
+
+// POST_PURGE: restart when demand returns
+if (heatDemand && hasActiveModeDemand() && !modeDisabled && safetyOK && canTurnOn()) {
+    return PRE_PURGE;
 }
 ```
 
@@ -477,21 +691,21 @@ Within RUNNING states, power can change:
 
 ```cpp
 // RUNNING_LOW → RUNNING_HIGH
-if (shouldIncreasePower() && canChangePowerLevel()) {
+if (shouldIncreasePower(requestedHighPower) && canChangePowerLevel(POWER_HIGH)) {
     return RUNNING_HIGH;
 }
 
 // RUNNING_HIGH → RUNNING_LOW
-if (shouldDecreasePower() && canChangePowerLevel()) {
+if (!requestedHighPower && canChangePowerLevel(POWER_LOW)) {
     return RUNNING_LOW;
 }
 ```
 
 **Power Decision Factors**:
-- PID controller output
-- Temperature error (target - actual)
-- Mode (water heating typically needs more power)
-- Anti-flapping timer (30s minimum between power changes)
+- PID power level from BoilerTempControlTask (`requestedHighPower`)
+- High power blocked while boiler output >= 80.0°C
+- High power blocked while sensor fallback reduces the power factor
+- Anti-flapping timer (15 s minimum between power changes)
 
 ## Safety State Transitions
 
@@ -500,166 +714,224 @@ if (shouldDecreasePower() && canChangePowerLevel()) {
 Certain conditions trigger immediate state changes:
 
 ```cpp
-// From ANY state → ERROR
-if (criticalSafetyFailure) {
-    emergencyStop();  // Immediate shutdown
-    return ERROR;
+// IGNITION / RUNNING_LOW / RUNNING_HIGH → ERROR
+if (!SafetyInterlocks::continuousSafetyMonitor()) {
+    emergencyStop();  // Burner relays off, then ERROR
+    return;
 }
 
 // Examples of critical failures:
-- Pressure < 0.5 BAR OR > 4.0 BAR
-- Temperature > 95°C
-- Flame loss during operation
-- Communication timeout > 5 seconds
-- Emergency stop button pressed
+- EMERGENCY_STOP bit set
+- Boiler temperature >= CRITICAL_BOILER_TEMP_C (115.0°C)
+- Boiler output sensor stale during operation
+- Full interlock check failed (sensors, pressure, communication, thermal shock)
 ```
+
+### Emergency Shutdown Paths
+
+| Function | Relays switched | Pumps | Further actions |
+|----------|-----------------|-------|-----------------|
+| `BurnerSystemController::emergencyShutdown()` | BURNER_ENABLE, POWER_BOOST, WATER_MODE OFF via `setRelayStateEmergency()` | Not touched (PumpControlModule keeps following the mode bits) | On relay failure: set `Error::RELAY` and `Error::SAFETY` bits, return `RELAY_OPERATION_FAILED` |
+| `BurnerStateMachine::emergencyStop()` | Via `emergencyShutdown()` | Not touched | Clear `BURNER_ON`, go to ERROR |
+| `CentralizedFailsafe::emergencyStop()` | Via `emergencyShutdown()`, then burner relays OFF again | Both pumps forced ON via `setRelayStateEmergency()` (heat dissipation) | Set `EMERGENCY_STOP`, clear `BOILER_ENABLED`, log error |
+
+`CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (e.g. stale sensor data during operation, critical temperature, burner request watchdog after `REQUEST_EXPIRATION_MS`) and the EMERGENCY failsafe level.
 
 ### Non-Blocking Safety
 
 Some failures don't force ERROR state:
 
 ```cpp
-// Pressure sensor missing → degraded mode (not ERROR)
-if (!pressureSensorValid) {
-    LOG_WARN(TAG, "Operating without pressure sensor");
-    // Continue operation (degraded mode)
-}
+// Refused power level change: DEGRADED failsafe + POST_PURGE
+// (only the 3rd fault within 10 min escalates to ERROR)
 
-// Single temperature sensor failed → use redundant sensor
-if (!sensor1Valid && sensor2Valid) {
-    useSensor2();  // Automatic failover
-}
+// Thermal shock risk at request validation: demand blocked, return preheating started
+// Sensor or pump failure at request validation: demand blocked, no emergency stop
+
+// Pressure sensor missing -> degraded mode when ALLOW_NO_PRESSURE_SENSOR is defined
 ```
 
 ## State Entry/Exit Actions
 
 ### onEnterPrePurge()
 ```cpp
-- Ensure burner OFF
-- Start exhaust fan (if equipped)
-- Clear any stale error bits
+- BurnerSystemController::deactivate() (burner relays OFF)
+- Failure -> emergencyStop()
 ```
 
 ### onEnterIgnition()
 ```cpp
-- Enable ignition spark
-- Control gas valve to low
-- Start flame monitoring
-- Increment burner start counter (RuntimeCounters)
+- Increment burner start counter (COUNTER_BURNER_STARTS)
+- Select mode, store running mode for switch detection
+- Record start power level for anti-flapping
+- activateWaterMode() / activateHeatingMode() (FULL or HALF)
+- Failure -> set BURNER_ERROR bit (no flame -> retry path)
+- Wait BURNER_IGNITION_DELAY_MS (500 ms)
 ```
 
 ### onEnterRunningHigh()
 ```cpp
-- Set relays: Burner=ON, POWER_BOOST=ON (full power 42.2kW)
-- Notify anti-flapping system (start ON timer)
-- Update burner state event bits
-- Log transition
+- setPowerLevel(FULL): POWER_BOOST=ON
+- Failure -> handlePowerLevelFault(true)
+- Set BURNER_ON bit
+- BurnerRuntimeTracker::recordStartTime()
 ```
 
 ### onEnterRunningLow()
 ```cpp
-- Set relays: Burner=ON, POWER_BOOST=OFF (half power 23.3kW)
-- Notify anti-flapping system
-- Update burner state event bits
+- setPowerLevel(HALF): POWER_BOOST=OFF
+- Failure -> handlePowerLevelFault(false)
+- Clear BURNER_ERROR, set BURNER_ON bit
+- BurnerRuntimeTracker::recordStartTime()
+```
+
+### onExitRunning()
+```cpp
+- Clear BURNER_ON bit
+- BurnerRuntimeTracker::updateRuntimeCounters()
+```
+
+### onEnterModeSwitching()
+```cpp
+- Log only; the switch is done by the MODE_SWITCHING handler
 ```
 
 ### onEnterPostPurge()
 ```cpp
-- Close gas valve immediately
-- Keep fan running for purge
-- Notify anti-flapping (start OFF timer)
-- Log shutdown reason
+- Record entry time for SafetyConfig::postPurgeMs
+- BurnerSystemController::deactivate() (burner relays OFF, pumps untouched)
+- Failure -> emergencyStop()
 ```
 
 ### onEnterLockout()
 ```cpp
-- All relays OFF
-- Set BURNER_ERROR event bit
-- Log lockout reason and duration
-- Require manual intervention or timeout
+- BurnerSystemController::deactivate() (fallback: emergencyShutdown())
+- ALARM relay ON
+- HealthMonitor: IGNITION_FAILURE
+```
+
+### onExitLockout()
+```cpp
+- Clear BURNER_ERROR bit
+- ALARM relay OFF
 ```
 
 ### onEnterError()
 ```cpp
-- Immediate safe state (all OFF)
-- Set ERROR event bits
-- Save emergency state to FRAM
-- Trigger alarm relay (if configured)
-- Send MQTT alert
+- Record entry time for SafetyConfig::errorRecoveryMs
+- BurnerSystemController::emergencyShutdown() (burner relays OFF)
 ```
 
 ## State Monitoring
 
 ### Via MQTT
-```json
-{
-  "burner": {
-    "state": "RUNNING_HIGH",
-    "timeInState": 1234,  // milliseconds
-    "transitions": 42,     // total count
-    "previousState": "IGNITION"
-  }
-}
-```
 
 **Topic**: `boiler/status/burner`
 
+```json
+{"state":"error","recovery_in":240}
+```
+
+Published every 30 s while in ERROR. `lockout_reset` is published after a `burner_reset` command.
+
 ### Via Serial Logs
 ```
-[BurnerSM] State transition: IDLE -> PRE_PURGE
-[BurnerSM] State transition: PRE_PURGE -> IGNITION
-[BurnerSM] State 1 completed after 10015 ms, transitioning to next state
-[BurnerSM] Ignition successful - transitioning to high power
-[BurnerSM] State transition: IGNITION -> RUNNING_HIGH
+[BurnerStateMachine] State transition: IDLE -> PRE_PURGE
+[BurnerSM] State 1 completed after 2010 ms, transitioning to next state
+[BurnerStateMachine] State transition: PRE_PURGE -> IGNITION
+[BurnerStateMachine] Ignition successful after 3010 ms - transitioning to low power
+[BurnerStateMachine] State transition: IGNITION -> RUNNING_LOW
+[BurnerStateMachine] Space heating disabled - stopping burner now (minimum on-time bypassed)
+[BurnerStateMachine] Heat demand returned during post-purge - restarting after 25000 ms
 ```
 
 ## State Machine Timing Constants
 
-**From**: `SystemConstants::Burner`
-
 ```cpp
-PRE_PURGE_TIME_MS = 10000      // 10 seconds (safety requirement)
-IGNITION_TIME_MS = 5000        // 5 seconds max per attempt
-POST_PURGE_TIME_MS = 60000     // 60 seconds (safety requirement)
-LOCKOUT_TIME_MS = 300000       // 5 minutes (safety timeout)
-MAX_IGNITION_RETRIES = 3       // Maximum attempts before lockout
+// SystemConstants::Burner
+PRE_PURGE_TIME_MS = 2000               // 2 seconds (atmospheric burner)
+IGNITION_TIME_MS = 5000                // 5 seconds per attempt
+POST_PURGE_TIME_MS = 60000             // Not used for the duration (see SafetyConfig::postPurgeMs)
+LOCKOUT_TIME_MS = 300000               // 5 minutes
+MAX_IGNITION_RETRIES = 3               // Failed attempts before lockout
+MIN_ON_TIME_MS = 120000                // 2 minutes (anti-flapping)
+MIN_OFF_TIME_MS = 20000                // 20 seconds (anti-flapping)
+MIN_POWER_CHANGE_INTERVAL_MS = 15000   // 15 seconds (anti-flapping)
+REQUEST_EXPIRATION_MS = 600000         // 10 minutes (request watchdog)
 
-MIN_ON_TIME_MS = 120000        // 2 minutes (anti-flapping)
-MIN_OFF_TIME_MS = 20000        // 20 seconds (anti-flapping)
-MIN_POWER_CHANGE_INTERVAL_MS = 30000  // 30 seconds (anti-flapping)
+// SystemConstants::Timing
+BURNER_MIN_IGNITION_TIME_MS = 3000     // Flame not checked before this
+BURNER_IGNITION_DELAY_MS = 500         // Delay in onEnterIgnition()
+
+// BurnerTransitions
+MODE_DEMAND_LOSS_GRACE_MS = 10000      // RUNNING without active mode request
+
+// BurnerTransitionPolicy
+MODE_SWITCH_MAX_WAIT_MS = 15000        // MODE_SWITCHING bounded waits
+MODE_SWITCH_HARD_TIMEOUT_MS = 30000    // MODE_SWITCHING StateMachine timeout
+IGNITION_BACKSTOP_MARGIN_MS = 2000     // IGNITION StateMachine timeout = 7 s
+POWER_FAULT_MAX_COUNT = 3              // Power level faults before emergency stop
+POWER_FAULT_WINDOW_MS = 600000         // 10 minutes
+
+// BurnerDemandGate
+DECISION_MAX_AGE_MS = 6000             // BoilerTempControlTask decision freshness
+DECISION_TARGET_TOLERANCE = 10         // 1.0°C
+
+// SafetyConfig (runtime, NVS)
+postPurgeMs      default 90000   range 30000-180000
+errorRecoveryMs  default 300000  range 60000-1800000
 ```
 
 ## Failure Modes & Recovery
 
 ### Ignition Failure
 ```
-Attempt 1: IDLE → PRE_PURGE → IGNITION → (no flame) → PRE_PURGE
+Attempt 1: IDLE → PRE_PURGE → IGNITION → (no flame at 5 s) → PRE_PURGE
 Attempt 2: PRE_PURGE → IGNITION → (no flame) → PRE_PURGE
 Attempt 3: PRE_PURGE → IGNITION → (no flame) → LOCKOUT
 
 After 5 minutes in LOCKOUT:
-LOCKOUT → IDLE (auto-retry) OR manual reset
+LOCKOUT → IDLE (automatic, retry counter kept) OR resetLockout() (counter reset)
 ```
 
 ### Flame Loss During Operation
 ```
 RUNNING_HIGH → POST_PURGE → IDLE
-(No lockout - single failure)
+(No lockout, minimum on-time bypassed)
 
 Next demand → normal ignition sequence
-If flame loss repeats → lockout after 3 attempts
+```
+
+### Mode Disabled While Running
+```
+RUNNING (heating) + HEATING_ENABLED cleared → POST_PURGE immediately
+RUNNING (heating) + WATER_ENABLED cleared   → keeps running
+RUNNING + BOILER_ENABLED cleared            → POST_PURGE immediately
+```
+
+### Mode Request Lost While Running
+```
+RUNNING, no (HEATING_ON + HEATING request) or (WATER_ON + WATER request)
+  → after 10 s → POST_PURGE
+```
+
+### Power Level Relay Fault
+```
+Fault 1 and 2 within 10 min: RUNNING_x entry → DEGRADED failsafe → POST_PURGE
+                             (restart from POST_PURGE when demand remains)
+Fault 3 within 10 min:       emergencyStop() → ERROR
 ```
 
 ### Safety Interlock Failure
 ```
-RUNNING → ERROR (immediate)
-ERROR → IDLE (only after safety restored + manual clear)
+IGNITION / RUNNING → ERROR (immediate)
+ERROR → IDLE (automatic after errorRecoveryMs if safety check passes)
 ```
 
 ### Communication Loss
 ```
-If Modbus timeout > 5 seconds:
-  ANY_RUNNING_STATE → ERROR
+Boiler output sensor stale during IGNITION / RUNNING:
+  CentralizedFailsafe::emergencyStop() + BurnerStateMachine::emergencyStop() → ERROR
   (Cannot safely operate without sensor feedback)
 ```
 
@@ -668,45 +940,52 @@ If Modbus timeout > 5 seconds:
 State machine is monitored by watchdog:
 
 ```cpp
-// BurnerControlTask feeds watchdog every cycle
-void taskFunction() {
-    while (true) {
-        BurnerStateMachine::update();
-        Watchdog::feed();  // Must occur every 15 seconds
-    }
+// BurnerControlTask feeds the watchdog after each event handler
+while (true) {
+    xEventGroupWaitBits(...);                 // 100 ms active, 3 s idle, else 1 s
+    ...
+    BurnerStateMachine::update();             // on STATE_TIMEOUT (1 s timer) and sensor updates
+    (void)SRP::getTaskManager().feedWatchdog();
 }
 ```
 
-**Watchdog Timeout**: 15 seconds
-**Action on Timeout**: System reset
+**Watchdog Timeout**: 15 seconds (`WDT_BURNER_CONTROL_MS`)
+**Action on Timeout**: System reset (critical task)
 
 ## Testing State Machines
 
-### Manual State Testing
-```cpp
-// Force transition (for testing only)
-#ifdef TESTING
-    BurnerStateMachine::forceState(BurnerSMState::IGNITION);
-#endif
+### Native Tests
+
+The transition logic and policies are header-only and run without hardware:
+
+```bash
+pio test -e native_test
 ```
+
+| File | Covers |
+|------|--------|
+| `test/test_native/test_burner_transitions.cpp` | `BurnerTransitions::step()` scenarios with a fake `Environment` (stale demand, start sequence, pre-purge abort, explicit disable, grace period, flame loss, mode switch and handover, post-purge restart, ignition retries) |
+| `test/test_native/test_burner_transition_policy.cpp` | `BurnerTransitionPolicy` rules |
+| `test/test_native/test_burner_demand_gate.cpp` | `BurnerDemandGate` arming rules |
+| `test/test_native/test_relay_command_policy.cpp` | `RelayCommandPolicy` no-op handling |
+| `test/test_native/test_stage_c_policies.cpp` | Power level fault escalation, water limit consistency |
 
 ### State History Logging
 ```cpp
-// Get transition history
-uint32_t transitions = stateMachine.getTransitionCount();
+BurnerSMState current = stateMachine.getCurrentState();
 BurnerSMState previous = stateMachine.getPreviousState();
-uint32_t timeInPrevious = stateMachine.getTimeInPreviousState();
+uint32_t timeInState = stateMachine.getTimeInState();
 ```
 
-### Simulation Mode
+State changes to or from ERROR, and into LOCKOUT or IGNITION, are logged to FRAM (`EVENT_STATE_CHANGE`).
+
+### Flame Proxy
 ```cpp
-// Simulate flame sensor (when no hardware)
-#ifndef FLAME_SENSOR_INSTALLED
-    bool isFlameDetected() {
-        // Assume flame present if burner enabled
-        return burnerRelaysAreOn();
-    }
-#endif
+// No flame sensor installed: flame is assumed while the burner relays are active
+bool BurnerSafetyChecks::isFlameDetected() {
+    BurnerSystemController* controller = SRP::getBurnerSystemController();
+    return controller ? controller->isActive() : false;
+}
 ```
 
 ## State Diagram Legend

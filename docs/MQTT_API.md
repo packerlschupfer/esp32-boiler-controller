@@ -284,6 +284,10 @@ mosquitto_pub -t "boiler/cmd/water" -m "enable"
 mosquitto_pub -t "boiler/cmd/water" -m "disable"
 ```
 
+**Switch-off behaviour**:
+- Disabling the mode the burner is running in, or the boiler, stops the burner at once (post-purge) without waiting for the anti-flapping minimum on-time. Disabling the other mode does not stop the burner.
+- Disabling water heating or the boiler (and the water OFF override) ends a running charge, also when water heating is enabled again within the same control cycle. After re-enabling, a new charge starts only when the tank is below `wheater/tempLimitLow`; the interrupted charge does not resume.
+
 ### Configuration Commands
 
 **Topic Pattern**: `boiler/config/{parameter}`
@@ -543,6 +547,60 @@ mosquitto_pub -h $BROKER -u $USER -P $PASS \
 **Note**: Offsets are applied during sensor data acquisition and immediately affect
 all reported temperatures. Changes take effect on the next sensor read cycle.
 
+### Water Heating and PID Parameters
+
+**Topic Pattern**: `boiler/params/{parameter}`
+
+| Parameter | Topic | Range | Default | Description |
+|-----------|-------|-------|---------|-------------|
+| Tank start | `wheater/tempLimitLow` | 300-600 (30.0-60.0°C) | 450 | Start a charge below this |
+| Tank stop | `wheater/tempLimitHigh` | 500-850 (50.0-85.0°C) | 650 | Stop a charge above this |
+| Outside threshold | `heating/outsideThreshold` | 50-250 (5.0-25.0°C) | 150 | Weather-compensated heating runs below this |
+| Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
+| Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
+| Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |
+
+**Notes**:
+- Each tank limit is range-checked on its own. If `tempLimitLow >= tempLimitHigh`, water heating pauses (one WARN in the log) until the pair is consistent. When raising both limits send `tempLimitHigh` first; when lowering both send `tempLimitLow` first.
+- Temperature parameter changes (tank limits, burner/heating/water limits, room target, hysteresis) apply immediately and are no longer reverted by the next save.
+- PID gain changes apply on the next boiler control cycle (the PID is reset when the active gains change); no reboot needed.
+- `heating/outsideThreshold` up to 25°C allows weather-compensated heating on a mild day (e.g. for a space-heating autotune).
+
+```bash
+# Raise tank limits from 45/65°C to 60/75°C: high first, then low
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/wheater/tempLimitHigh" -m "750"
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/wheater/tempLimitLow" -m "600"
+```
+
+### PID Auto-Tuning
+
+**Command Topic**: `boiler/cmd/pid_autotune`
+**Status Topic**: `boiler/status/pid/autotune` (retained)
+**Result Topic**: `boiler/status/pid/autotune/result` (retained)
+
+| Payload | Action |
+|---------|--------|
+| `start` | Start the relay autotune of the boiler PID (status `starting`) |
+| `stop` | Stop the autotune (status `stopping`) |
+| `status` | Publish `idle`, `running`, `complete` or `failed` |
+| `params` | Publish the boiler PID gains to `boiler/status/pid/params` |
+| `method:<name>` | Set and persist the tuning method: `zn_pi`, `zn_pid`, `tyreus`, `cohen`, `lambda` |
+
+**Behaviour**:
+- Setpoint is the boiler target of the active request (55°C if none). A heating or water request must stay active; the autotune stops without one.
+- Start requires a valid, fresh boiler output between 15°C and 75°C, otherwise the result is `{"status":"rejected","reason":"boiler temp"}`.
+- Aborts when the boiler output becomes invalid or stale or exceeds 80°C: the heat demand is withdrawn and the result is `{"status":"aborted"}`.
+- Burner power-on during the relay test requires BurnerControlTask's permission and safety validation.
+- At most 90 minutes (`MAX_TUNING_TIME_SECONDS` = 5400), at least 3 oscillation cycles.
+- On success the gains are stored in the gain set of the active mode (`pid/waterHeater/*` or `pid/spaceHeating/*`), saved to NVS and published, e.g. `{"status":"complete","mode":"water","kp":7.1000,"ki":0.01200,"kd":0.0000}`. If the results cannot be applied the result is `{"status":"failed"}`.
+
+```bash
+mosquitto_pub -h $BROKER -u $USER -P $PASS -t "boiler/cmd/pid_autotune" -m "method:zn_pi"
+mosquitto_pub -h $BROKER -u $USER -P $PASS -t "boiler/cmd/pid_autotune" -m "start"
+```
+
 ### Error Log Commands
 
 **Topic Pattern**: `errors/{command}`
@@ -706,6 +764,8 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/status/sensors` | 10s | No | High | Temperature/pressure data |
 | `boiler/status/online` | On change | Yes | High | Connection status |
 | `boiler/status/safety_config` | On boot/change | No | Medium | Safety configuration |
+| `boiler/status/pid/autotune` | On command | Yes | High | Autotune status / method response |
+| `boiler/status/pid/autotune/result` | On start reject, abort, completion | Yes | High | Autotune result JSON |
 | `boiler/status/device/ip` | On boot | Yes | Low | IP address |
 | `boiler/status/device/hostname` | On boot | Yes | Low | Device hostname |
 | `boiler/scheduler/event` | On event | No | Medium | Schedule start/end |
@@ -1112,7 +1172,6 @@ mqtt:
 - Pressure trend analysis (`boiler/status/trends/pressure`)
 - Efficiency metrics (`boiler/status/efficiency`)
 - PID tuning history (`boiler/status/pid/history`)
-- Remote PID auto-tune trigger (`boiler/cmd/pid/autotune`)
 
 ---
 

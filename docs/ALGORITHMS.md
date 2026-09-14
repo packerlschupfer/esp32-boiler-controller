@@ -103,47 +103,52 @@ Where:
 
 **Fixed-Point Implementation:**
 ```cpp
-// All values in tenths of degrees (Temperature_t = int16_t)
-Temperature_t error = setpoint - currentTemp;
+// PIDControlModuleFixedPoint::calculatePIDAdjustment() (simplified)
+// Temperatures in tenths of °C, gains int32 scaled by PID_FIXED_POINT_SCALE (1000)
+Temperature_t error = setPoint - currentTemp;
 
-// Integral with anti-windup
-integral += error * dt_seconds;
-if (integral > integralMax) integral = integralMax;
-if (integral < -integralMax) integral = -integralMax;
+PIDValue_t P = (Kp * error) / SCALE;
+PIDValue_t D = (Kd * -(currentTemp - previousPV) * SCALE / dtMs) / SCALE;  // derivative on PV
+PIDValue_t I = (Ki * integral) / SCALE;
 
-// Derivative
-Temperature_t derivative = (error - previousError) / dt_seconds;
+// Clamp in the wide type, THEN narrow to int16 (PIDGainFixedPoint::clampToAdjustment).
+// Casting P+I+D to int16 first wrapped -44055 to +21481 (burner FULL above target).
+Temperature_t tentative = PIDGainFixedPoint::clampToAdjustment(P + I + D, outputMin, outputMax);
 
-// Output calculation (scaled by 100 for precision)
-int32_t output = (Kp * error + Ki * integral + Kd * derivative) / 100;
+// Anti-windup: integrate only while the output is not saturated in the error direction
+if (!(tentative >= outputMax && error > 0) && !(tentative <= outputMin && error < 0)) {
+    integral += (error * dtMs) / SCALE;
+    integral = clamp(integral, integralMin, integralMax);
+    I = (Ki * integral) / SCALE;
+}
 
-// Clamp to 0-100%
-if (output < 0) output = 0;
-if (output > 100) output = 100;
+Temperature_t adjustment = PIDGainFixedPoint::clampToAdjustment(P + I + D, outputMin, outputMax);
+
+// BoilerTempController::calculateModulating(): 50% = at target, clamped to 0-100,
+// then mapped to OFF/HALF/FULL with threshold hysteresis
+int32_t pidPower = 50 + (adjustment / 10);
 ```
 
 ### Tuning Parameters
 
-**Heating Control** (`HeatingControlModule`):
-- **Kp**: Proportional gain (typically 50-200)
-- **Ki**: Integral gain (typically 1-10)
-- **Kd**: Derivative gain (typically 10-50)
-- **Sample Rate**: ~10 seconds
-- **Output**: 0-100% heat demand
-
-**Water Heating Control** (`WheaterControlModule`):
-- Similar gains with different tuning for water mass
+**Boiler Temperature Control** (`BoilerTempController`, run by BoilerTempControlTask):
+- **Gain sets**: `pid/spaceHeating/kp|ki|kd` and `pid/waterHeater/kp|ki|kd` (float, both 0-100 / 0-10 / 0-50)
+- **Active set**: a WATER burner request selects the water gains, otherwise the space heating gains. `updateMode()` reads the active gains from SystemSettings every cycle and resets the PID when the mode or the gains change, so MQTT/UI gain changes apply without reboot
+- **Gain scaling**: `PIDGainFixedPoint::fromFloat()` multiplies by 1000 and rounds; negative or non-finite gains become 0, the result saturates at INT32_MAX. Unscaled float gains were truncated (Kp 34.206 became 0.034, Ki 0.189 became 0) and left the output near 50%, so the controller never commanded OFF
+- **Sample Rate**: every boiler output sensor update (~2.5 seconds)
+- **Pause reset**: if more than 10 s passed since the last PID run (no active request, autotune), the PID is reset and a nominal 2.5 s step is used instead of integrating the pause
+- **Output**: 0-100% (50% = at target), mapped to OFF/HALF/FULL
 
 ### Anti-Windup
 - **Integral Limits**: ±1000 tenths (±100°C equivalent)
 - **Prevents**: Integral accumulation during saturation
-- **Method**: Hard clamp on integral term
+- **Method**: Conditional integration (no accumulation while saturated) plus clamp to `integralMin`/`integralMax`
 
 ### Auto-Tuning Support
 - **Location**: `PIDAutoTuner.cpp`
-- **Method**: Relay feedback (Ziegler-Nichols variant)
+- **Method**: Relay feedback (see section 7)
 - **Process**: Oscillation analysis → Ku, Tu → PID gains
-- **Status**: Implemented but requires manual trigger
+- **Trigger**: MQTT `boiler/cmd/pid_autotune` with payload `start`
 
 ---
 
@@ -153,57 +158,61 @@ if (output > 100) output = 100;
 Prevents pump motor damage by enforcing minimum time between state changes.
 
 ### Location
-`src/modules/tasks/RelayControlTask.cpp:620`
+`src/modules/tasks/RelayControlTask.cpp` (`processSingleRelay`, `checkPumpProtection`), `src/modules/tasks/RelayVerificationManager.cpp`, `include/shared/RelayCommandPolicy.h`
 
 ### Algorithm
 
 **Rule:**
 ```
-Minimum 30 seconds between pump state changes
+Minimum SafetyConfig::pumpProtectionMs (default 15 s) between pump state changes
 
-For relays 1 and 2 (heating pump and water pump):
-  IF (current_time - last_state_change_time) < 30000 ms
+For the heating pump and water pump relays:
+  IF command does not change the desired relay state OR is an emergency command
+  THEN accept without protection check (timestamp unchanged)
+  ELSE IF (current_time - last_state_change_time) < pumpProtectionMs
   THEN block state change
   ELSE allow state change AND update last_state_change_time
 ```
 
 **Implementation:**
 ```cpp
-bool checkPumpProtection(uint8_t relayIndex, bool desiredState) {
-    // Only for relay 1 (heating pump) and relay 2 (water pump)
-    if (relayIndex != 1 && relayIndex != 2) {
-        return true;  // No protection needed
-    }
+// RelayControlTask::processSingleRelay() (simplified), relayIndex is 1-based
+const bool desiredState = g_relayState.getRelay(relayIndex - 1);
+const bool realChange = !RelayCommandPolicy::isNoOp(desiredState, state);
+const bool protect = RelayCommandPolicy::appliesProtection(desiredState, state, emergencyBypass);
 
-    uint8_t pumpIdx = relayIndex - 1;
-    TickType_t now = xTaskGetTickCount();
-    TickType_t elapsed = now - pumpLastStateChangeTime[pumpIdx];
-    uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
+if (protect && !checkRateLimit(relayIndex)) {
+    return false;  // MIN_RELAY_SWITCH_INTERVAL_MS / MAX_RELAY_TOGGLE_RATE_PER_MIN
+}
+if (protect && !checkPumpProtection(relayIndex, state)) {
+    return false;  // elapsed < SafetyConfig::pumpProtectionMs
+}
 
-    if (elapsedMs < 30000) {
-        uint32_t remainingMs = 30000 - elapsedMs;
-        LOG_WARN(TAG, "Pump %d blocked - %lu ms remaining",
-                 relayIndex, remainingMs);
-        return false;  // BLOCKED
-    }
+g_relayState.setRelay(relayIndex - 1, state);
 
-    return true;  // ALLOWED
+// Pump relays only: restart the protection window on a real state change
+if (realChange && relayIndex == heatingPumpPhysical) {
+    pumpLastStateChangeTime[0] = xTaskGetTickCount();
 }
 ```
 
 ### Parameters
-- **Protection Period**: 30,000 ms (30 seconds)
-- **Applies To**: Relay 1 (heating pump), Relay 2 (water pump)
-- **Does NOT Apply To**: Other relays (burner, valve, etc.)
+- **Protection Period**: `SafetyConfig::pumpProtectionMs` (default 15,000 ms, MQTT `boiler/cmd/config/pump_protection_ms`)
+- **Applies To**: Heating pump and water pump relays (`RelayIndex::HEATING_PUMP`, `RelayIndex::WATER_PUMP`)
+- **Does NOT Apply To**: Other relays (burner, valve, etc.), commands that do not change the relay state, emergency/failsafe commands
 
-### Example Timeline
+### Relay Rate Limiting
+All relays: at least `MIN_RELAY_SWITCH_INTERVAL_MS` (150 ms) between toggles and at most `MAX_RELAY_TOGGLE_RATE_PER_MIN` (30) toggles per minute. Like pump protection it applies only to real, non-emergency state changes (`RelayCommandPolicy::appliesProtection`). `BurnerSystemController::executeRelayBatch()` re-sends unchanged burner relays on a mode switch; counting those as toggles rejected the real POWER_BOOST change 2 ms later and escalated to an emergency stop.
+
+### Example Timeline (default 15 s)
 ```
-t=0s:    Pump ON  → allowed (first start)
-t=15s:   Pump OFF → BLOCKED (only 15s elapsed, need 30s)
-t=35s:   Pump OFF → allowed (35s > 30s threshold)
-         ↳ timestamp updated to t=35s
-t=50s:   Pump ON  → BLOCKED (only 15s since last change)
-t=70s:   Pump ON  → allowed (35s elapsed)
+t=0s:    Pump ON  → allowed (first start), timestamp t=0s
+t=10s:   Pump OFF → BLOCKED (only 10s elapsed, need 15s)
+t=20s:   Pump OFF → allowed (20s > 15s threshold)
+         ↳ timestamp updated to t=20s
+t=25s:   Pump OFF re-sent → no-op, accepted, timestamp unchanged
+t=30s:   Pump ON  → BLOCKED (only 10s since the last real change)
+t=35s:   Pump ON  → allowed (15s elapsed)
 ```
 
 ### Motor Protection Rationale
@@ -437,18 +446,23 @@ Automatically determine optimal PID gains using system response analysis.
 
 ### Algorithm
 
-**Method**: Ziegler-Nichols Relay Feedback
+**Method**: Relay feedback test, gains from a selectable tuning rule
 
 **Steps:**
-1. **Oscillation Induction**: Apply relay control (ON/OFF at setpoint)
-2. **Measure Ultimate Gain (Ku)**: Amplitude of oscillation
-3. **Measure Ultimate Period (Tu)**: Period of oscillation
-4. **Calculate PID Gains**:
-   ```
-   Kp = 0.6 × Ku
-   Ki = 1.2 × Ku / Tu
-   Kd = 0.075 × Ku × Tu
-   ```
+1. **Oscillation Induction**: Relay control around the setpoint with hysteresis; BoilerTempControlTask drives the burner OFF or FULL
+2. **Record Peaks/Troughs**: Extremes over whole relay phases (`RelayExtrema::Tracker`, see below)
+3. **Ultimate Gain and Period**: `Ku = 4 × d / (π × a)` (d = relay amplitude, a = oscillation amplitude), `Tu` = average period
+4. **Calculate PID Gains** with the configured method (`pid/autotune/method`):
+
+| Method | Kp | Ki | Kd |
+|--------|----|----|----|
+| 0 ZN_PI (default) | 0.45 × Ku | Kp / (0.83 × Tu) | 0 |
+| 1 ZN_PID | 0.6 × Ku | Kp / (0.5 × Tu) | Kp × 0.125 × Tu |
+| 2 Tyreus-Luyben | 0.3125 × Ku | Kp / (2.2 × Tu) | Kp × 0.37 × Tu |
+| 3 Cohen-Coon (approximation) | 0.35 × Ku | Kp / (1.2 × Tu) | Kp × 0.25 × Tu |
+| 4 Lambda | 0.2 × Ku | Kp / Tu | 0 |
+
+Results are limited to Kp 0.1-100, Ki 0-10, Kd 0-10. The method is loaded from `SystemSettings::autotuneMethod` at init (default 0 = ZN_PI) and the MQTT command `method:<name>` persists it.
 
 **Implementation Phases:**
 ```
@@ -469,33 +483,27 @@ Phase 4: COMPLETE
   - Return calculated gains
 ```
 
-### Tuning Process
-```cpp
-// Simplified algorithm
-while (auto_tuning) {
-    if (temp > setpoint && output == HIGH) {
-        output = LOW;
-        recordPeak(temp);
-    } else if (temp < setpoint && output == LOW) {
-        output = HIGH;
-        recordPeak(temp);
-    }
+### Peak/Trough Detection (Lagging Plant)
+The boiler keeps heating after the relay switches OFF (burner minimum on-time, stored heat) and keeps cooling after it switches ON (pre-purge, ignition). Values at the switch points understate the swing (2026-09-14 water run: 61.3/58.8°C recorded, 65.6/56.9°C real, amplitude about 3.4x too small).
 
-    if (sufficient_cycles) {
-        Ku = 4 × relay_amplitude / (π × oscillation_amplitude);
-        Tu = average_period;
-
-        Kp = 0.6 × Ku;
-        Ki = 1.2 × Ku / Tu;
-        Kd = 0.075 × Ku × Tu;
-    }
-}
+```
+Every sample:      extrema_.sample(temp, time)
+On a relay switch: extrema_.onSwitch(newRelayOn, temp, time)
+  relay now ON  → OFF phase ended → peak   = max over that OFF phase
+  relay now OFF → ON phase ended  → trough = min over that ON phase
 ```
 
+The warm-up phase is ignored: a phase not started by a switch, and a switch at the very first sample (a cold boiler switches ON at once), report nothing. Samples are counted by timestamp, so `sample()` followed by `onSwitch()` for the same sample (as `PIDAutoTuner::relayControl()` does) behaves the same as `onSwitch()` alone.
+
 ### Parameters
-- **Relay Amplitude**: 50% power level
-- **Minimum Cycles**: 3 complete oscillations
-- **Timeout**: 600 seconds (abort if no convergence)
+- **Relay Amplitude**: 50 (`BoilerTempController::startAutoTuning`)
+- **Hysteresis**: 1.0°C
+- **Setpoint**: target of the active burner request (55°C if none)
+- **Minimum Cycles**: `MIN_CYCLES` = 3 complete oscillations
+- **Timeout**: `MAX_TUNING_TIME_SECONDS` = 5400 seconds (90 minutes)
+- **Start Window**: boiler output valid, not stale, 15-75°C (`MIN_BOILER_TEMP` / `MAX_BOILER_TEMP`), otherwise rejected
+- **Abort**: boiler output invalid or stale, above 80°C (`MAX_TEMP_EXCURSION`), or no active heating/water request; the heat demand is withdrawn
+- **Power-On**: requires BurnerControlTask's `BurnerDemandGate` permission and `BurnerSafetyValidator`
 
 ---
 
@@ -995,7 +1003,7 @@ Idle ticks:   4 out of 10 (40% margin for future expansion)
 Provides simple, reliable hysteresis control for water tank heating without complex symmetric calculations. Prevents rapid on/off cycling while maintaining target temperature range.
 
 ### Location
-`src/modules/tasks/WheaterControlTask.cpp:476-504`
+`include/modules/control/WaterChargePolicy.h` (`limitsValid`, `nextChargeNeeded`), called from `checkIfWaterHeatingNeededEvent()` in `src/modules/tasks/WheaterControlTask.cpp`
 
 ### Algorithm
 
@@ -1009,33 +1017,50 @@ Stay in current state when: tempLimitLow ≤ temp ≤ tempLimitHigh
 
 **Implementation**:
 ```cpp
-Temperature_t currentTemp = readings.waterHeaterTempTank;
-Temperature_t lowLimit = settings.wHeaterConfTempLimitLow;   // e.g., 50.0°C
-Temperature_t highLimit = settings.wHeaterConfTempLimitHigh; // e.g., 60.0°C
+// WaterChargePolicy (tenths of °C)
+inline bool limitsValid(int16_t tempLimitLow, int16_t tempLimitHigh) {
+    return tempLimitLow > 0 && tempLimitHigh > 0 && tempLimitLow < tempLimitHigh;
+}
 
-if (!lastHeatingNeeded) {
-    // Currently OFF - check if we need to start
-    if (currentTemp < lowLimit) {
-        heatingNeeded = true;  // Start heating
-    }
+inline bool nextChargeNeeded(bool charging, int16_t tankTemp,
+                             int16_t tempLimitLow, int16_t tempLimitHigh) {
+    return charging ? !(tankTemp > tempLimitHigh) : (tankTemp < tempLimitLow);
+}
+
+// WheaterControlTask::checkIfWaterHeatingNeededEvent()
+if (readings.isWaterHeaterTempTankValid && limitsValid) {
+    heatingNeeded = WaterChargePolicy::nextChargeNeeded(
+        waterState.lastHeatingNeeded, currentTemp, lowLimit, highLimit);
+    waterState.lastHeatingNeeded = heatingNeeded;
 } else {
-    // Currently ON - check if we need to stop
-    if (currentTemp > highLimit) {
-        heatingNeeded = false;  // Stop heating
-    }
+    heatingNeeded = false;
 }
 ```
 
 ### Parameters
 
 **MQTT Configuration**:
-- `boiler/params/wheater/tempLimitLow` - Start heating threshold (default: 50.0°C / 500 tenths)
-- `boiler/params/wheater/tempLimitHigh` - Stop heating threshold (default: 60.0°C / 600 tenths)
+- `boiler/params/wheater/tempLimitLow` - Start heating threshold (default: 45.0°C / 450 tenths, range 300-600)
+- `boiler/params/wheater/tempLimitHigh` - Stop heating threshold (default: 65.0°C / 650 tenths, range 500-850)
 
 **Typical Values**:
 - Low limit: 45-55°C (DHW comfort minimum)
 - High limit: 55-65°C (DHW comfort target)
 - Hysteresis band: 5-15°C (prevents cycling)
+
+### Inverted Limits
+
+Each limit is range-checked on its own (low 30-60°C, high 50-85°C), so the pair can be inverted, for example when both are raised and low is sent first. `limitsValid()` treats `low >= high` as invalid: no charge, one WARN (`Water limits inconsistent: low X°C >= high Y°C - water heating paused`) and an INFO (`Water limits consistent again`) once the pair is valid. This also covers inverted values loaded from NVS. To raise both limits set `tempLimitHigh` first; to lower both set `tempLimitLow` first.
+
+### Charge Latch Reset
+
+The latch (`waterState.lastHeatingNeeded`) is cleared when water heating is switched off:
+- water heating or the boiler disabled (on every run while disabled)
+- durable water OFF override (`waterOverrideOff`) set
+- the transient `WATER_OFF_OVERRIDE` ends a charge
+- `notifyWheaterTaskSwitchedOff()` (StateManager disable/override, `CentralizedFailsafe::emergencyStop()`): the next run ends a running charge even if water heating was re-enabled within the same cycle
+
+After re-enabling, a new charge starts only below `tempLimitLow`. Heating preemption and sensor loss do not clear the latch; the interrupted charge resumes.
 
 ### Benefits
 
@@ -1080,13 +1105,79 @@ T=600s:  Tank 49°C < 50°C              → Turn heating ON again
 
 ---
 
+## 15. Burner Demand Gate
+
+### Purpose
+Two tasks write the burner heat demand (`BurnerStateMachine::setHeatDemand()`): BurnerControlTask on request start/change and safety blocks, BoilerTempControlTask from the PID power level. The gate makes them agree, so a request that starts while the boiler is already above target does not ignite and then run the minimum on-time.
+
+### Location
+`include/modules/control/BurnerDemandGate.h`, used by `src/modules/tasks/BurnerControlTask.cpp` and `src/modules/tasks/BoilerTempControlTask.cpp`
+
+### Algorithm
+
+**Permission** (published by BurnerControlTask, read with `getBurnerDemandPermission()`):
+- `permitted`: request present and BurnerControlTask's blocks passed (sensors fresh, safety validation, no return preheating); withdrawn when the boiler is disabled or sensor fallback cannot continue
+- `highPowerAllowed`: false while sensor fallback reduces the power factor
+- `maxTargetTemp`: sensor fallback target cap, 0 = none
+
+**BurnerControlTask arming** (`controlTaskMayArm`, new or changed request):
+```cpp
+if (!boilerTempValid) return true;           // PID does not run: arm as before
+if (decisionFresh) {                         // age <= DECISION_MAX_AGE_MS (6000)
+    if (abs(decisionTarget - target) <= DECISION_TARGET_TOLERANCE)  // 10 = 1.0°C
+        return decisionOn;                   // follow BoilerTempControlTask
+}
+return boilerTemp < target;
+```
+
+**BoilerTempControlTask sync** (`decide`, every cycle):
+
+| Permitted and PID wants heat | Demand armed | PID output changed | Action |
+|------------------------------|--------------|--------------------|--------|
+| yes | no | any | ARM (after safety validation) |
+| yes | yes | yes | SET_POWER (after safety validation) |
+| yes | yes | no | NONE |
+| no | yes | any | DISARM |
+| no | no | any | NONE |
+
+**Blocked request retry**: a request that is present but not permitted is re-evaluated by BurnerControlTask every 10 s, because request change events fire only when the request bits change.
+
+**Autotune**: relay power-on also requires `permitted`.
+
+---
+
+## 16. Burner Transition Rules
+
+### Purpose
+Next-state decisions of the burner state machine as header-only functions that native tests replay tick by tick. For the state diagram see [STATE_MACHINES.md](STATE_MACHINES.md).
+
+### Location
+`include/modules/control/BurnerTransitions.h` (`BurnerTransitions::step()`), `include/modules/control/BurnerTransitionPolicy.h`
+
+### Rules
+
+| Rule | Condition | Result |
+|------|-----------|--------|
+| Active mode demand | `HEATING_ON` and heating request, or `WATER_ON` and water request | Required to leave IDLE; PRE_PURGE aborts to IDLE without it or without heat demand |
+| Stale demand | Heat demand without active mode demand in IDLE | Stay IDLE |
+| No mode demand while running | Missing for `MODE_DEMAND_LOSS_GRACE_MS` (10 s) | POST_PURGE, anti-flapping bypassed |
+| Explicit disable | Running mode's `*_ENABLED` bit or `BOILER_ENABLED` cleared | POST_PURGE at once, minimum on-time bypassed (`stopForExplicitDisable`) |
+| Handover wait | MODE_SWITCHING without a heating request | Wait only while `heatingLikelyWanted()`, at most `MODE_SWITCH_MAX_WAIT_MS` (15 s) |
+| Mode revert | Demand points back to the running mode | RUNNING_LOW only if its ON bit is set, otherwise wait (15 s max), then POST_PURGE |
+| Hard timeout | MODE_SWITCHING for `MODE_SWITCH_HARD_TIMEOUT_MS` (30 s) | POST_PURGE |
+| Restart from post-purge | Heat demand and active mode demand, mode not just disabled, safety OK, minimum off-time over | PRE_PURGE |
+| Ignition | No flame after `IGNITION_TIME_MS` (5 s) | Retry via PRE_PURGE; `MAX_IGNITION_RETRIES` (3) → LOCKOUT. The StateMachine timeout `IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS` is a backstop |
+| Power level fault | `setPowerLevel()` fails entering RUNNING_LOW/HIGH | DEGRADED failsafe and POST_PURGE; the third fault within 10 min (`recordPowerFault`) escalates to an emergency stop |
+
+---
+
 ## Summary Table
 
 | Algorithm | Purpose | Key Parameter | Location |
 |-----------|---------|---------------|----------|
 | **Rate-of-Change** | Thermal runaway detection | 60s window, 10°C/min limit | BurnerSafetyValidator:295 |
 | **PID Control** | Temperature regulation | Kp/Ki/Kd gains | PIDControlModuleFixedPoint |
-| **Pump Protection** | Motor lifespan | 30s minimum interval | RelayControlTask:620 |
+| **Pump Protection** | Motor lifespan | pumpProtectionMs (15s default), real changes only | RelayControlTask |
 | **MQTT Queuing** | Message prioritization | 20/40 queue split | MQTTTask:150 |
 | **Sensor Fallback** | Redundancy | 3-tier fallback | TemperatureSensorFallback |
 | **Mutex Retry** | Deadlock prevention | 3 retries, exponential | MutexRetryHelper |
@@ -1094,7 +1185,9 @@ T=600s:  Tank 49°C < 50°C              → Turn heating ON again
 | **Temperature Math** | Fixed-point ops | int16_t tenths | Temperature.h |
 | **Relay Verification** | DELAY-aware checking | 2 mismatches = error | RYN4ProcessingTask:73 |
 | **Modbus Arbitration** | Bus collision prevention | 500ms ticks, 10-tick cycle | ModbusCoordinator.h:116 |
-| **Water Two-Threshold** | Tank heating control | tempLimitLow/High hysteresis | WheaterControlTask:476 |
+| **Water Two-Threshold** | Tank heating control | tempLimitLow/High hysteresis, low < high | WaterChargePolicy.h |
+| **Burner Demand Gate** | Heat demand arming | 6s decision age, 1°C tolerance, 10s retry | BurnerDemandGate.h |
+| **Burner Transitions** | Burner state decisions | 10s no-mode grace, 15s/30s mode switch bounds | BurnerTransitions.h |
 
 ---
 

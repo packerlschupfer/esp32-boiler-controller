@@ -24,7 +24,7 @@ This system controls combustion equipment and must be installed by qualified pro
 - **Event-driven architecture**: 18 FreeRTOS tasks, zero polling loops
 - **PID control**: Space and water heating with anti-windup
 - **Fixed-point arithmetic**: Temperature_t (0.1°C), Pressure_t (0.01 BAR)
-- **Burner state machine**: 8 states with anti-flapping protection
+- **Burner state machine**: 9 states with anti-flapping protection
 - **Equipment protection**: Configurable pump motor protection (5-60s, default 15s), 2min burner minimum runtime
 
 ### Communication
@@ -174,7 +174,8 @@ See [docs/TASK_ARCHITECTURE.md](docs/TASK_ARCHITECTURE.md) for details.
 
 **Burner States**:
 ```
-IDLE → PRE_PURGE → IGNITION → RUNNING_LOW/HIGH → POST_PURGE → (IDLE | LOCKOUT | ERROR)
+IDLE → PRE_PURGE → IGNITION → RUNNING_LOW/HIGH (↔ MODE_SWITCHING) → POST_PURGE → IDLE
+IGNITION → LOCKOUT (3 failed attempts), emergency stop → ERROR
 ```
 
 See [docs/STATE_MACHINES.md](docs/STATE_MACHINES.md) for complete state diagrams.

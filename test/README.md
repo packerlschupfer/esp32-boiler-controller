@@ -7,12 +7,21 @@ This directory contains unit and integration tests for the ESPlan Boiler Control
 ```
 test/
 ├── test_native/              # Tests that run on development machine
+│   ├── test_main.cpp                        # Unity runner: declares and runs all tests
 │   ├── test_temperature_conversion.cpp
 │   ├── test_burner_safety.cpp
 │   ├── test_memory_pool.cpp
 │   ├── test_burner_state_machine.cpp
+│   ├── test_burner_transitions.cpp          # BurnerTransitions::step() scenarios
+│   ├── test_burner_transition_policy.cpp    # BurnerTransitionPolicy
+│   ├── test_burner_demand_gate.cpp          # BurnerDemandGate
+│   ├── test_stage_c_policies.cpp            # Power fault escalation, WaterChargePolicy
+│   ├── test_relay_command_policy.cpp        # RelayCommandPolicy
+│   ├── test_relay_extrema_tracker.cpp       # RelayExtrema::Tracker (autotune)
+│   ├── test_pid_gain_fixed_point.cpp        # PIDGainFixedPoint
 │   ├── test_pid_autotuner.cpp
 │   ├── test_error_recovery_manager.cpp
+│   ├── test_concurrency.cpp
 │   ├── test_control_loop_integration.cpp
 │   ├── test_mqtt_integration.cpp
 │   ├── test_relay_integration.cpp
@@ -20,7 +29,6 @@ test/
 │   ├── test_persistent_storage_integration.cpp
 │   ├── test_system_e2e.cpp
 │   ├── test_safety_cascade.cpp      # 5-layer safety integration
-│   ├── test_main.cpp
 │   └── mocks/                        # Mock implementations
 │       ├── MockTime.h/cpp
 │       ├── MockBurnerStateMachine.h
@@ -67,6 +75,55 @@ pio test -e native_test -v
 
 ### Native Tests (`test_native/`)
 These tests run on your development machine and test pure logic without hardware dependencies.
+
+All native tests are declared and run from `test_main.cpp` (234 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
+
+`test_burner_state_machine.cpp` and `test_pid_autotuner.cpp` exercise simplified local models (no firmware headers, only Unity, standard headers and `MockTime`), not the firmware classes. The firmware burner transition logic is covered by `test_burner_transitions.cpp`, the firmware autotune peak/trough detection by `test_relay_extrema_tracker.cpp`.
+
+#### Burner Transition Tests (`test_burner_transitions.cpp`)
+Replay tick sequences through the firmware's header-only `BurnerTransitions::step()`. The simulator checks state timeouts before the step like `StateMachine::update()` (PRE_PURGE 2 s → IGNITION, IGNITION backstop 7 s → LOCKOUT).
+- Start sequence, minimum off-time, stale demand never starts the burner, request withdrawn during pre-purge
+- Demand end respects the minimum on-time; lost mode request stops after the grace period; flame loss bypasses the minimum on-time
+- Heating disable stops during the minimum on-time; water disable does not stop heating
+- Seamless HEATING → WATER, WATER → HEATING waiting for the heating request, bounded handover wait, revert with and without the ON bit, failed mode switch, mode change without flame, safety failure during mode switch
+- Power level follows the request with anti-flapping
+- Restart from POST_PURGE when demand returns; no restart without a mode request, of a disabled mode, or when safety fails
+- Ignition failures retry, then lock out; a successful retry resets the counter
+
+#### Burner Transition Policy Tests (`test_burner_transition_policy.cpp`)
+- `stopForExplicitDisable()`: only the running mode or the boiler stops the burner
+- `heatingLikelyWanted()`: enable/override, room mode, weather mode
+- Bounded mode switch wait; mode revert requires the ON bit
+
+#### Burner Demand Gate Tests (`test_burner_demand_gate.cpp`)
+- A request with a hot boiler is not armed; a cold boiler arms immediately
+- A fresh matching PID decision wins over the temperature; a decision for another target falls back to the temperature (handover)
+- Without a boiler temperature BurnerControlTask arms
+- BoilerTempControlTask arms a demand it did not see armed, drops a demand re-armed while coasting, never arms without permission, updates the power only on a PID change
+- Sensor fallback target cap
+
+#### Stage C Policy Tests (`test_stage_c_policies.cpp`)
+- `BurnerTransitionPolicy::recordPowerFault()`: escalation on the third fault within the window, window restart after ten minutes
+- `WaterChargePolicy::limitsValid()` (low below high) and `nextChargeNeeded()` (charge latch)
+
+#### Relay Command Policy Tests (`test_relay_command_policy.cpp`)
+- No-op commands skip rate limiting and pump protection; real changes are protected; emergency commands bypass protection
+- Replay of a mode-switch relay batch followed by a power level change (counted once)
+
+#### Relay Extrema Tracker Tests (`test_relay_extrema_tracker.cpp`)
+- Lagging plant replay: peaks include the overshoot after switching OFF, troughs the undershoot after switching ON
+- Cold-start (warm-up) phase ignored; recorded extreme times lie after the switch
+
+#### PID Fixed-Point Gain Tests (`test_pid_gain_fixed_point.cpp`)
+- `PIDGainFixedPoint::fromFloat()` scales by 1000 and rejects invalid gains
+- Scaled gains command OFF above target and FULL below target
+- `clampToAdjustment()` keeps the sign of large outputs
+
+#### Other Unit Tests
+- `test_error_recovery_manager.cpp`: recovery strategies, backoff, error history, escalation (simplified mock implementation)
+- `test_concurrency.cpp`: race conditions simulated by sequential calls with `MockTime` (mutex order, circuit breaker, mode switch races, sensor atomicity, anti-flapping)
+- `test_pid_autotuner.cpp`: circular buffer, relay control, peak detection, tuning method math (simplified model)
+- `test_burner_state_machine.cpp`: state sequence, lockout, mode switching (simplified model)
 
 #### Temperature Conversion Tests
 - Tests the Temperature_t fixed-point conversion functions
@@ -262,6 +319,7 @@ The Round 21 refactoring extracted helper classes from large files to improve ma
 ### Recommended Unit Tests
 
 #### BurnerStateMachine Helper Classes
+Note: the mode switch, shutdown and flame loss decisions moved from `BurnerSafetyChecks` to `BurnerTransitions.h` and are covered by `test_burner_transitions.cpp`; the list below predates that move.
 ```cpp
 // test/test_native/test_burner_safety_checks.cpp
 - test_isFlameDetected_relay_on()

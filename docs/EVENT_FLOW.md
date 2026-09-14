@@ -115,7 +115,9 @@ WheaterControlTask
 ├─ Receives schedule notification
 ├─ Reads current tank temperature via SRP::getSensorReadings()
 │  └─ Tank: 25.2°C (Temperature_t = 252)
-├─ Compares: 25.2°C < 55.0°C → NEEDS HEATING
+├─ Checks WaterChargePolicy::limitsValid(tempLimitLow, tempLimitHigh)
+│  └─ low >= high → no charge, one WARN "Water limits inconsistent"
+├─ WaterChargePolicy::nextChargeNeeded(): 25.2°C < tempLimitLow → NEEDS HEATING
 ├─ Calls BurnerRequestManager::setWaterRequest()
 │  ├─ Encode 65°C in bits 16-23 (85°C burner target = 55°C + 10°C)
 │  ├─ Set BurnerRequest::WATER
@@ -131,14 +133,23 @@ BurnerControlTask
 ├─ Reads request bits via xEventGroupGetBits()
 ├─ Decodes temperature: (bits >> 16) & 0xFF = 65°C
 ├─ Checks TempSensorFallback::getOperationMode()
-│  └─ Changes: BOTH → WATER_HEATING
-├─ Runs safety checks
+│  └─ Changes: NONE → WATER_HEATING
+├─ Runs safety checks (sensor staleness, BurnerSafetyValidator)
 │  ├─ Pressure OK (1.50 BAR)
 │  ├─ Temperature OK (25°C)
-│  ├─ Pump will start
-│  └─ All interlocks PASS
-└─ BurnerStateMachine::setHeatDemand(true, 650)  // 65.0°C
-   └─ Current state: IDLE → transition to PRE_PURGE
+│  ├─ All interlocks PASS
+│  └─ Validation passed → clears Error::SAFETY
+├─ Publishes BurnerDemandGate permission (getBurnerDemandPermission)
+└─ BurnerDemandGate::controlTaskMayArm()
+   ├─ Boiler 25°C < target 65°C → arm now
+   │  └─ BurnerStateMachine::setHeatDemand(true, 650, highPower)
+   └─ Boiler already above target → not armed; BoilerTempControlTask
+      arms on a later cycle when its PID wants heat
+
+BurnerStateMachine (IDLE)
+└─ Heat demand + WATER_ON + WATER request + safety OK
+   + minimum off-time over → PRE_PURGE
+   (heat demand without an active mode request is ignored)
 ```
 
 #### Step 4: Water Pump Starts
@@ -156,7 +167,8 @@ WheaterPumpControlTask
 
 #### Step 5: Burner Ignition Sequence
 ```
-BurnerStateMachine (10s PRE_PURGE)
+BurnerStateMachine (PRE_PURGE, PRE_PURGE_TIME_MS = 2s)
+├─ WATER_ON/WATER request or heat demand withdrawn → abort to IDLE
 └─ PRE_PURGE complete → IGNITION
 
 BurnerStateMachine (IGNITION state)
@@ -165,9 +177,11 @@ BurnerStateMachine (IGNITION state)
 │  ├─ Relay 3 (Burner) → ON
 │  ├─ Relay 5 (Water Mode) → ON
 │  └─ Relay 4 (Power) → OFF (full power)
-├─ Wait for flame detection
+├─ Wait BURNER_MIN_IGNITION_TIME_MS (3s), then check flame
 │  └─ Assumed TRUE (no flame sensor installed)
-└─ IGNITION → RUNNING_HIGH (500ms after relays)
+├─ IGNITION → RUNNING_HIGH (RUNNING_LOW if high power not allowed)
+└─ No flame within IGNITION_TIME_MS (5s) → retry via PRE_PURGE
+   └─ 3rd failed attempt (MAX_IGNITION_RETRIES) → LOCKOUT
 ```
 
 #### Step 6: Steady State Operation
@@ -178,6 +192,10 @@ RUNNING_HIGH state
 │  ├─ Check safety (pressure, temp)
 │  ├─ Check demand still present
 │  └─ Feed watchdog
+├─ BoilerTempControlTask on every SensorUpdate::BOILER_OUTPUT (~2.5s)
+│  ├─ PID power level OFF/HALF/FULL for the request target
+│  ├─ Publishes its decision (getBoilerTempDecision)
+│  └─ BurnerDemandGate::decide(): ARM / SET_POWER / DISARM every cycle
 ├─ MB8ARTTask reads temperatures every 2.5s
 │  ├─ Boiler output temp increasing
 │  ├─ Water tank temp rising
@@ -192,8 +210,8 @@ RUNNING_HIGH state
 #### Step 7: Target Reached
 ```
 WheaterControlTask
-├─ Detects tank temp ≥ 55.0°C (setpoint)
-├─ Calls BurnerRequestManager::clearWaterRequest()
+├─ Detects tank temp > tempLimitHigh (charge latch released)
+├─ Calls BurnerRequestManager::clearRequest(RequestSource::WATER)
 │  ├─ Clear BurnerRequest::WATER
 │  ├─ Set BurnerRequest::CHANGED
 │  └─ Clear BurnerRequest::WATER_CHANGED
@@ -205,13 +223,20 @@ WheaterControlTask
 BurnerControlTask
 ├─ Wakes on BurnerRequest::CHANGED
 ├─ Reads requests: WATER bit cleared
-├─ BurnerStateMachine::setHeatDemand(false)
-└─ RUNNING_HIGH → POST_PURGE
+├─ Withdraws BurnerDemandGate permission
+└─ BurnerStateMachine::setHeatDemand(false)
+
+BurnerStateMachine (RUNNING_HIGH)
+├─ Demand ended → POST_PURGE once the minimum on-time allows
+└─ No active mode request (WATER_ON + WATER request) for 10s
+   → POST_PURGE without waiting for the minimum on-time
 
 BurnerStateMachine (POST_PURGE)
 ├─ Close gas valve (relays 3,4,5 → OFF)
 ├─ Keep fan running (if equipped)
-├─ Wait 60 seconds
+├─ Heat demand + active mode request return → PRE_PURGE
+│  (same conditions as from IDLE, minimum off-time applies)
+├─ Wait SafetyConfig::postPurgeMs (default 90s)
 └─ POST_PURGE → IDLE
 ```
 
@@ -330,7 +355,8 @@ BurnerControlTask
 ├─ Safety check fails
 ├─ Calls BurnerStateMachine::emergencyStop()
 │  ├─ Current state: RUNNING_HIGH → ERROR
-│  ├─ Immediately close gas valve (all relays OFF)
+│  ├─ BurnerSystemController::emergencyShutdown(): burner relays OFF
+│  │  (BURNER_ENABLE, POWER_BOOST, WATER_MODE, rate limit bypassed)
 │  └─ Set SystemState::EMERGENCY_STOP | BURNER_ERROR
 └─ Call CentralizedFailsafe::triggerEmergency()
 ```
@@ -358,10 +384,12 @@ All Control Tasks detect EMERGENCY_STOP
 │  └─ Clears HEATING request, stops PID
 ├─ WheaterControlTask
 │  └─ Clears WATER request
-├─ HeatingPumpControl
-│  └─ Stops heating pump (with delay for cooldown)
-├─ WheaterPumpControl
-│  └─ Stops water pump (immediate)
+│     (CentralizedFailsafe::emergencyStop() clears BOILER_ENABLED and calls
+│      notifyWheaterTaskSwitchedOff(): the charge ends on the next run and
+│      does not resume after re-enable unless tank < tempLimitLow)
+├─ HeatingPumpTask / WaterPumpTask (PumpControlModule)
+│  └─ Pumps follow HEATING_ON / WATER_ON (with overrun); the
+│     emergency shutdown does not switch the pump relays
 └─ MQTTTask
    └─ Publishes emergency alert
       Topic: boiler/status/emergency
@@ -390,6 +418,69 @@ Operator fixes pressure leak
    ├─ Detects safety restored
    ├─ Clears SystemState::BURNER_ERROR
    └─ ERROR → IDLE (ready for operation)
+      └─ A heat demand still latched from before the stop is ignored
+         until a mode is active again (HEATING_ON/WATER_ON + request)
+```
+
+---
+
+## Burner Demand Arming Flow
+
+Two tasks write `BurnerStateMachine::setHeatDemand()`. `BurnerDemandGate` (`include/modules/control/BurnerDemandGate.h`) keeps them consistent, so a request that starts while the boiler is already above target does not ignite.
+
+```
+BurnerControlTask::updateBurnerState() (request start/change)
+├─ Blocks: return preheating, stale sensors, failed validation,
+│  sensor fallback cannot continue, boiler disabled
+├─ publishDemandPermission(permitted, maxTargetTemp, highPowerAllowed)
+├─ Not permitted → setHeatDemand(false)
+└─ Permitted → BurnerDemandGate::controlTaskMayArm()
+   ├─ No valid boiler temperature → arm (sensor fallback operation)
+   ├─ Fresh decision (≤ DECISION_MAX_AGE_MS 6s) for target ±1°C → follow it
+   └─ Otherwise → arm only if boiler output < target
+
+BoilerTempControlTask (each cycle with an active request)
+├─ controller.updateMode() → active mode gains from SystemSettings
+├─ Target capped by Permission.maxTargetTemp (sensor fallback)
+├─ controller.calculate() → OFF/HALF/FULL, publishDecision()
+└─ BurnerDemandGate::decide(permitted, pidWantsHeat, changed, armed)
+   ├─ ARM       → BurnerSafetyValidator, setHeatDemand(true, target, power)
+   ├─ SET_POWER → BurnerSafetyValidator, update power level
+   ├─ DISARM    → setHeatDemand(false)
+   │              (re-armed while coasting, or permission withdrawn)
+   └─ NONE
+
+BurnerControlTask main loop
+└─ Request present but not permitted → processBurnerRequest() every 10s
+   (change events fire only when the request bits change)
+```
+
+---
+
+## Water Heating Switch-Off Flow
+
+```
+StateManager::setBoilerEnabled(false)
+StateManager::setWaterEnabled(false)
+StateManager::setWaterOverrideOff(true)
+CentralizedFailsafe::emergencyStop()   (clears BOILER_ENABLED)
+└─ notifyWheaterTaskSwitchedOff()
+   ├─ Increments the switch-off counter
+   └─ xTaskNotifyGive(WheaterControlTask)
+
+WheaterControlTask::processWaterHeatingState() (next run)
+├─ Counter changed → clear charge latch (lastHeatingNeeded = false)
+├─ Charge running → end it, even if water is already enabled again
+│  ├─ RelayControl::WATER_PUMP_OFF, clear WATER_ON
+│  ├─ BurnerRequestManager::clearRequest(RequestSource::WATER)
+│  ├─ Set ControlRequest::WATER_PRIORITY_RELEASED
+│  └─ Log: "Water heating switched off - ending charge"
+└─ While boiler/water disabled or waterOverrideOff set:
+   latch cleared on every run
+
+After re-enable
+└─ New charge only when tank < tempLimitLow
+   (heating preemption and sensor loss keep the latch → charge resumes)
 ```
 
 ---
@@ -686,17 +777,19 @@ Overflow Strategy:
 ### Typical Burner Start (from IDLE to RUNNING)
 ```
 Time    Event
-0s      Heat demand detected
+0s      Heat demand armed, active mode request present
 0s      Safety checks PASS
 0s      Anti-flapping check PASS
 0s      State: IDLE → PRE_PURGE
-0-10s   Pre-purge fan running, relays OFF
-10s     State: PRE_PURGE → IGNITION
-10s     Enable ignition, open gas valve
-10.5s   Flame detected (or assumed)
-10.5s   State: IGNITION → RUNNING_HIGH
-10.5-?  Burner running at full power
+0-2s    Pre-purge (PRE_PURGE_TIME_MS), relays OFF
+2s      State: PRE_PURGE → IGNITION
+2s      Enable ignition, open gas valve
+5s      Flame checked after BURNER_MIN_IGNITION_TIME_MS (assumed)
+5s      State: IGNITION → RUNNING_HIGH
+5-?     Burner running at full power
 ```
+
+No flame within `IGNITION_TIME_MS` (5s in IGNITION): retry via PRE_PURGE; the 3rd failed attempt (`MAX_IGNITION_RETRIES`) goes to LOCKOUT. The IGNITION StateMachine timeout (`IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS` = 7s) is only a backstop.
 
 ### Typical Burner Stop (from RUNNING to IDLE)
 ```
@@ -705,10 +798,12 @@ Time    Event
 0s      Check anti-flapping: ON time = 5 min > 2 min MIN ✓
 0s      State: RUNNING_HIGH → POST_PURGE
 0s      Close gas valve immediately
-0-60s   Fan continues running (purge cycle)
-60s     State: POST_PURGE → IDLE
-60s     All burner activity stopped
+0-90s   Post-purge (SafetyConfig::postPurgeMs, default 90s)
+90s     State: POST_PURGE → IDLE
+90s     All burner activity stopped
 ```
+
+If heat demand and an active mode request return during post-purge, POST_PURGE → PRE_PURGE once the minimum off-time is over. Explicit disable of the running mode or the boiler, and 10s without an active mode request, go to POST_PURGE without waiting for the minimum on-time.
 
 ### MQTT Sensor Publishing Cycle
 ```
@@ -829,6 +924,38 @@ MB8ART Communication Timeout
    │  └─ If >5s no update: Emergency stop
    └─ If burner IDLE:
       └─ Block start until sensor restored
+```
+
+### 4. Explicit Disable While Burner Runs
+```
+MQTT/UI: heating, water or boiler disable
+├─ StateManager clears HEATING_ENABLED / WATER_ENABLED / BOILER_ENABLED
+└─ BurnerStateMachine (RUNNING_LOW/HIGH, next tick)
+   ├─ BurnerTransitionPolicy::stopForExplicitDisable()
+   │  └─ Running mode (from BurnerSystemController) disabled, or boiler disabled
+   ├─ → POST_PURGE immediately, minimum on-time bypassed
+   │  Log: "Space heating disabled - stopping burner now (minimum on-time bypassed)"
+   └─ Disabling the mode that is not running does not stop the burner
+
+POST_PURGE never restarts a mode that was just disabled
+```
+
+### 5. Water → Heating Handover (MODE_SWITCHING)
+```
+RUNNING (water mode), WATER_ON cleared, HEATING_ON set
+├─ Safety OK and flame → MODE_SWITCHING
+└─ Otherwise → POST_PURGE
+
+MODE_SWITCHING
+├─ Heating request present → BurnerSystemController::switchMode() → RUNNING_LOW/HIGH
+├─ No heating request yet
+│  ├─ heatingLikelyWanted() (enabled, not overridden, weather or room rule)
+│  │  → wait, at most MODE_SWITCH_MAX_WAIT_MS (15s)
+│  └─ Otherwise → POST_PURGE
+├─ Demand points back to the running mode
+│  ├─ Its ON bit set → RUNNING_LOW
+│  └─ ON bit not set → wait (max 15s), then POST_PURGE
+└─ StateMachine timeout MODE_SWITCH_HARD_TIMEOUT_MS (30s) → POST_PURGE
 ```
 
 ---
