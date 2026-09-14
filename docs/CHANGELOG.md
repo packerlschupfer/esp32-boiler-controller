@@ -70,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Sensor recovery (TemperatureSensorFallback SHUTDOWN -> NORMAL) cleared `EMERGENCY_STOP` whatever had set it; it now releases only a stop caused by stale sensor data (`EmergencyStopRelease::Cause`, `CentralizedFailsafe::releaseAfterSensorRecovery()`)
 - MQTT_API.md boiler enable example used `boiler/cmd/boiler` (handled topic: `boiler/cmd/system`); MQTT_QUICK_REFERENCE.txt listed non-existent `cmd/boiler/...` topics and test scripts, rewritten from the handlers
 - Removed unused `STACK_SIZE_PID_CONTROL_TASK` and `PRIORITY_PID_CONTROL_TASK`
+- OTA_UPDATE_GUIDE.md / OTA_QUICK_REFERENCE.txt used non-existent `cmd/boiler/diagnostics/memory/response` and `cmd/boiler/ota/start` topics, an MQTT OTA progress payload that is never published (`OTATask::initWithMQTT()` has no caller) and missing scripts (`ota_update.sh`, `test_ota_update.py`, `monitor_ota_status.py`); memory monitoring now points to `boiler/status/health`, password to `credentials.ini`
 - BoilerTempControlTask refused to arm the heat demand above 85°C boiler output (validator default), capping water charge targets below what the request check allowed
 
 ---

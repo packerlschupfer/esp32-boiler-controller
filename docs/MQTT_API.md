@@ -958,43 +958,21 @@ normalPriorityConfig.overflowStrategy = QueueManager::OverflowStrategy::DROP_OLD
 
 ---
 
-## Diagnostic Topics (Implemented)
+## Diagnostic Topics
 
-### Task Information
-**Topic**: `boiler/status/diagnostics/tasks`
-**Trigger**: MQTT command or periodic
-**Payload**: FreeRTOS task status
+There are no `diagnostics/tasks` or `diagnostics/memory` topics: `MQTTDiagnostics` (`src/diagnostics/`) is never initialized, so none of its topics are published.
 
-```json
-{
-  "tasks": [
-    {
-      "name": "BurnerControl",
-      "state": "Running",
-      "priority": 5,
-      "stack_free": 1024,
-      "cpu_percent": 2.1
-    },
-    ...
-  ]
-}
-```
-
-### Memory Statistics
-**Topic**: `boiler/status/diagnostics/memory`
+### System Health (memory and task count)
+**Topic**: `boiler/status/health` (not retained)
 
 ```json
-{
-  "heap": {
-    "free": 112472,
-    "min_free": 108956,
-    "largest_block": 57332
-  },
-  "tasks": {
-    "total_allocated": 25600
-  }
-}
+{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_hwm":1084}}
 ```
+
+- `heap_free` / `heap_min`: free heap now / minimum since boot (bytes)
+- `heap_max_blk`: largest free block; `heap_frag`: fragmentation in percent (`100 - heap_max_blk * 100 / heap_free`)
+- `uptime`: seconds (`millis()` based, wraps after 49.7 days)
+- `health.tasks`: number of FreeRTOS tasks; `health.stack_hwm`: stack high water mark of the publishing task
 
 ---
 

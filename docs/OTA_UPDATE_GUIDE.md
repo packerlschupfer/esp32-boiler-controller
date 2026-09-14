@@ -1,60 +1,45 @@
 # OTA (Over-The-Air) Update Guide
 
 ## Overview
-The ESPlan Boiler Controller supports Over-The-Air firmware updates via Ethernet connection. This allows remote firmware updates without physical access to the device.
+The ESPlan Boiler Controller supports Over-The-Air firmware updates via Ethernet connection (ArduinoOTA / espota). This allows remote firmware updates without physical access to the device.
 
 ## Prerequisites
 
 1. **Network Connection**: Device must be connected via Ethernet
 2. **Known IP Address**: Device IP address (static or via DHCP reservation recommended)
-3. **OTA Password**: Default is `update-password` (change in production!)
+3. **OTA Password**: Set with `-DOTA_PASSWORD` in `credentials.ini`; without it the `ProjectConfig.h` default `update-password` is used
 4. **PlatformIO**: Installed on your computer
 5. **Python 3**: Required for espota.py tool
 
 ## Configuration
 
-### Device Configuration (ProjectConfig.h)
+### Device Configuration
 ```cpp
-#define OTA_PASSWORD "update-password"  // Change this!
-#define OTA_PORT 3232                   // Default OTA port
+// src/config/ProjectConfig.h (defaults, used only if not set by build flags)
+#define OTA_PASSWORD "update-password"  // Overridden by -DOTA_PASSWORD in credentials.ini
+#define OTA_PORT 3232                   // Also set by -D OTA_PORT=3232 in platformio.ini
 ```
 
 ### PlatformIO Configuration
-Three OTA environments are available:
+Three OTA environments are available (`upload_protocol = espota`):
 - `esp32dev_ota_release` - Production firmware (smallest size)
 - `esp32dev_ota_debug_selective` - Selective debug logging
 - `esp32dev_ota_debug_full` - Full debug logging (largest)
 
+Each has `upload_port = 192.168.20.40` (device IP, `ETH_STATIC_IP` default in `src/config/ProjectConfig.h` and platformio.ini `[base_prod]`) and `upload_flags = --host_ip=192.168.20.16 --auth=update-password`. Adjust `--host_ip` to your computer and `--auth` to the password in `credentials.ini`.
+
 ## Update Methods
 
-### Method 1: Using ota_update.sh Script (Recommended)
+### Method 1: Using PlatformIO (Recommended)
 
-```bash
-# Basic usage
-./ota_update.sh <device_ip>
-
-# Example (device IP = ETH_STATIC_IP: 192.168.20.40, default in src/config/ProjectConfig.h
-# and platformio.ini [base_prod]; also the upload_port of the esp32dev_ota_* envs)
-./ota_update.sh 192.168.20.40
-
-# With specific environment
-./ota_update.sh 192.168.20.40 esp32dev_ota_debug_selective
-```
-
-### Method 2: Using PlatformIO Directly
-
-1. Edit `platformio.ini` to set your device IP:
-```ini
-[env:esp32dev_ota_release]
-upload_port = YOUR_DEVICE_IP_HERE
-```
-
-2. Upload firmware:
 ```bash
 pio run -e esp32dev_ota_release -t upload
+
+# Other device IP
+pio run -e esp32dev_ota_release -t upload --upload-port 192.168.20.40
 ```
 
-### Method 3: Manual with espota.py
+### Method 2: Manual with espota.py
 
 ```bash
 # Build firmware
@@ -64,7 +49,7 @@ pio run -e esp32dev_ota_release
 python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py \
   -i 192.168.20.40 \
   -p 3232 \
-  -a update-password \
+  -a YOUR_OTA_PASSWORD \
   -f .pio/build/esp32dev_ota_release/firmware.bin \
   --progress
 ```
@@ -81,13 +66,18 @@ python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py \
 - OTA partition size: 1.5 MB (configured in partitions)
 - Update requires 2x firmware size temporarily
 
-### Memory Monitoring During Update
-Monitor memory via MQTT:
+### Memory Monitoring
+Free heap is published with the system health status on `boiler/status/health` (not retained):
 ```bash
 # broker = MQTT_SERVER: 192.168.20.27 (src/config/ProjectConfig.h, platformio.ini [base_prod])
-mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P password \
-  -t "cmd/boiler/diagnostics/memory/response" -v
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD \
+  -t "boiler/status/health" -v
 ```
+```json
+{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_hwm":1084}}
+```
+
+There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initialized.
 
 ## Safety Features
 
@@ -104,29 +94,15 @@ mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P password \
 ### 3. Update Process Safety
 - Watchdog disabled during update
 - Non-critical tasks may be suspended
-- MQTT diagnostics continue if possible
 
 ## Testing OTA Updates
 
-### Automated Test Suite
-```bash
-python3 test_ota_update.py
-```
-
-This test suite:
-1. Discovers device via mDNS
-2. Monitors memory before update
-3. Builds and uploads firmware
-4. Verifies successful update
-5. Analyzes memory impact
-6. Generates test report
-
 ### Manual Testing Checklist
 - [ ] Verify device IP and connectivity
-- [ ] Check current firmware version
-- [ ] Monitor free heap (should be >100KB)
+- [ ] Check current firmware version (`boiler/status/device/firmware`)
+- [ ] Monitor free heap (`heap_free` on `boiler/status/health`)
 - [ ] Perform update
-- [ ] Verify device reboots
+- [ ] Verify device reboots (`boiler/status/online`)
 - [ ] Check new firmware version
 - [ ] Test all critical functions
 
@@ -138,17 +114,17 @@ This test suite:
 - Check device IP address
 - Verify device is on same network
 - Ensure no firewall blocking port 3232
+- Check `--host_ip` in the env's `upload_flags` is your computer's IP
 
 #### "Authentication Failed"
-- Verify OTA password matches device
-- Check password in ProjectConfig.h
+- Verify the `--auth` upload flag (or espota `-a`) matches `-DOTA_PASSWORD` in `credentials.ini`
+- An image built without `credentials.build_flags` uses the `ProjectConfig.h` default
 - Rebuild and upload via USB if needed
 
 #### "Not Enough Space"
 - Device needs ~100KB free heap
-- Check memory diagnostics
+- Check `heap_free` / `heap_max_blk` on `boiler/status/health`
 - Consider using smaller build (release)
-- May need to clear MQTT diagnostics
 
 #### Update Succeeds but Device Doesn't Boot
 - Automatic rollback should occur
@@ -190,7 +166,6 @@ This test suite:
 ### 3. Production Deployment
 - Change default OTA password
 - Use static IP or DHCP reservation
-- Implement update scheduling via MQTT
 - Monitor update success/failure
 
 ### 4. Rollback Strategy
@@ -202,8 +177,8 @@ This test suite:
 ## Security Considerations
 
 ### 1. Password Protection
-```cpp
-// In credentials.ini or build flags
+```ini
+; credentials.ini build flags (not committed)
 -DOTA_PASSWORD=\"your-secure-password\"
 ```
 
@@ -224,19 +199,15 @@ This test suite:
 # Example GitHub Actions
 - name: Build OTA Firmware
   run: pio run -e esp32dev_ota_release
-  
+
 - name: Deploy to Device
-  run: ./ota_update.sh ${{ secrets.DEVICE_IP }}
-  env:
-    OTA_PASSWORD: ${{ secrets.OTA_PASSWORD }}
+  run: pio run -e esp32dev_ota_release -t upload --upload-port ${{ secrets.DEVICE_IP }}
 ```
 
-### MQTT-Triggered Updates
-Future enhancement to trigger OTA via MQTT:
-```
-Topic: cmd/boiler/ota/start
-Payload: {"url": "http://server/firmware.bin", "checksum": "md5hash"}
-```
+### MQTT and OTA
+OTA is not controlled or reported over MQTT:
+- There is no MQTT command to start an update; updates are pushed with espota.
+- No OTA status or progress topic is published. `OTATask_MQTT.cpp` contains MQTT callbacks (topic `state/ota`) but `OTATask::initWithMQTT()` is never called; `OTATask.cpp` registers the callbacks without MQTT.
 
 ## Performance Impact
 
@@ -260,18 +231,8 @@ Payload: {"url": "http://server/firmware.bin", "checksum": "md5hash"}
 esp_log_level_set("OTA", ESP_LOG_DEBUG);
 ```
 
-### MQTT Status Updates:
-```json
-{
-  "status": "updating",
-  "progress": 45,
-  "total": 1234567,
-  "speed": 98304
-}
-```
-
 ### Post-Update Verification:
-- Check firmware version
-- Verify all sensors reading
-- Confirm MQTT connection
+- Check firmware version (`boiler/status/device/firmware`)
+- Verify all sensors reading (`boiler/status/sensors`)
+- Confirm MQTT connection (`boiler/status/online`)
 - Test control functions
