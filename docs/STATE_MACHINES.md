@@ -82,7 +82,7 @@ The boiler controller uses explicit state machines for managing burner operation
 | State | Handler | `timeoutMs` | On timeout |
 |-------|---------|-------------|------------|
 | IDLE | `BurnerTransitions::step()` | 0 | - |
-| PRE_PURGE | `BurnerTransitions::step()` | `PRE_PURGE_TIME_MS` (2000) | IGNITION |
+| PRE_PURGE | `BurnerTransitions::step()` (IGNITION after `PRE_PURGE_TIME_MS` 2000) | `PRE_PURGE_TIME_MS + PRE_PURGE_BACKSTOP_MARGIN_MS` (4000) | IGNITION (backstop only) |
 | IGNITION | `BurnerTransitions::step()` | `IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS` (7000) | LOCKOUT (backstop only) |
 | RUNNING_LOW / RUNNING_HIGH | `BurnerTransitions::step()` | 0 | - |
 | MODE_SWITCHING | `BurnerTransitions::step()` | `MODE_SWITCH_HARD_TIMEOUT_MS` (30000) | POST_PURGE |
@@ -143,8 +143,10 @@ bool isWater = WATER_ON && (!HEATING_ON || WATER_PRIORITY);
 ✗ No active mode request        -> IDLE (Reason::MODE_WITHDRAWN)
 ✗ heatDemand cleared            -> IDLE (Reason::DEMAND_WITHDRAWN)
 
-// PRE_PURGE_TIME_MS (2 s) elapsed -> IGNITION (StateMachine timeout)
+// Then: PRE_PURGE_TIME_MS (2 s) exceeded -> IGNITION (Reason::PRE_PURGE_DONE)
 ```
+
+The StateMachine timeout of PRE_PURGE (4 s) is only a backstop. As the transition itself it was checked before the handler, so the first tick after 2 s ignited without the checks above; BurnerControlTask ticks about once a second, so a demand withdrawn in the last second still fired the burner.
 
 #### IGNITION
 ```cpp
@@ -382,7 +384,7 @@ Prevents rapid cycling that damages equipment:
 
 The minimum ON time only delays a stop for "heat demand ended" or "safety check failed". Explicit disable, loss of the mode request, flame loss, a mode change that cannot be done seamlessly and a refused power level change stop the burner immediately. Faults that call `emergencyStop()` go to ERROR regardless.
 
-Power levels are recorded in the transition callback (`logStateTransition()`): IDLE, PRE_PURGE, POST_PURGE, LOCKOUT and ERROR count as OFF. IGNITION records the start power in `onEnterIgnition()`.
+Power levels are recorded in the transition callback (`logStateTransition()`, `BurnerTransitionPolicy::recordsPowerLevelOnTransition()`): IDLE, PRE_PURGE, POST_PURGE, LOCKOUT and ERROR count as OFF. IGNITION records the start power in `onEnterIgnition()`; entering MODE_SWITCHING keeps the level. Transitions out of MODE_SWITCHING are recorded (they were skipped, so a stop from MODE_SWITCHING left anti-flapping "on" and the restart from POST_PURGE ignored the minimum off-time).
 
 ### Safety Interlocks
 
@@ -602,8 +604,11 @@ The burner ignition retry counter is intentionally not persisted.
 States with automatic timeout transitions:
 
 ```cpp
-// PRE_PURGE: StateMachine timeout
+// PRE_PURGE: handler after the demand/mode checks, StateMachine timeout is a backstop
 if (timeInState > PRE_PURGE_TIME_MS) {                                   // 2 s
+    return IGNITION;
+}
+if (timeInState > PRE_PURGE_TIME_MS + PRE_PURGE_BACKSTOP_MARGIN_MS) {    // 4 s
     return IGNITION;
 }
 
@@ -850,6 +855,7 @@ MODE_DEMAND_LOSS_GRACE_MS = 10000      // RUNNING without active mode request
 MODE_SWITCH_MAX_WAIT_MS = 15000        // MODE_SWITCHING bounded waits
 MODE_SWITCH_HARD_TIMEOUT_MS = 30000    // MODE_SWITCHING StateMachine timeout
 IGNITION_BACKSTOP_MARGIN_MS = 2000     // IGNITION StateMachine timeout = 7 s
+PRE_PURGE_BACKSTOP_MARGIN_MS = 2000    // PRE_PURGE StateMachine timeout = 4 s
 POWER_FAULT_MAX_COUNT = 3              // Power level faults before emergency stop
 POWER_FAULT_WINDOW_MS = 600000         // 10 minutes
 

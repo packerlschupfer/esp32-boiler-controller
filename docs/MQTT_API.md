@@ -287,6 +287,13 @@ mosquitto_pub -t "boiler/cmd/water" -m "enable"
 mosquitto_pub -t "boiler/cmd/water" -m "disable"
 ```
 
+**Overrides** (`boiler/cmd/heating` and `boiler/cmd/water`), handled by HeatingControlTask / WheaterControlTask within about 1 s:
+- `override_on`: clears a stored OFF override and starts the mode now. Water charges up to `wheater/tempLimitHigh` even when the tank is above `tempLimitLow`; it does not start while heating runs without water priority. Heating starts and ends when it is no longer needed.
+- `override_off`: stores the OFF override (persisted) and ends the running mode.
+- `normal`: clears the stored OFF override.
+
+The overrides no longer set `HEATING_ON`/`WATER_ON` directly (ControlTask did, without a burner request, which made the burner bounce between RUNNING_LOW and MODE_SWITCHING while the mode task never saw the override).
+
 **Switch-off behaviour**:
 - Disabling the mode the burner is running in, or the boiler, stops the burner at once (post-purge) without waiting for the anti-flapping minimum on-time. Disabling the other mode does not stop the burner.
 - Disabling water heating or the boiler (and the water OFF override) ends a running charge, also when water heating is enabled again within the same control cycle. After re-enabling, a new charge starts only when the tank is below `wheater/tempLimitLow`; the interrupted charge does not resume.
