@@ -42,6 +42,7 @@ void test_policy_mode_revert_requires_on_bit();
 void test_power_fault_escalates_on_third_fault_in_window();
 void test_power_fault_window_restarts_after_ten_minutes();
 void test_water_limits_valid_only_when_low_below_high();
+void test_water_charge_latch_resumes_only_while_latched();
 
 // Burner transitions (state machine scenarios through BurnerTransitions::step)
 void test_bsm_step_idle_without_demand_skips_safety_check();
@@ -546,6 +547,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_power_fault_escalates_on_third_fault_in_window);
     RUN_TEST(test_power_fault_window_restarts_after_ten_minutes);
     RUN_TEST(test_water_limits_valid_only_when_low_below_high);
+    RUN_TEST(test_water_charge_latch_resumes_only_while_latched);
 
     // Burner transitions (state machine scenarios through BurnerTransitions::step)
     RUN_TEST(test_bsm_step_idle_without_demand_skips_safety_check);

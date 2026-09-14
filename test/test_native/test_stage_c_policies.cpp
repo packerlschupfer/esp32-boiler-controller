@@ -43,3 +43,13 @@ void test_water_limits_valid_only_when_low_below_high() {
     TEST_ASSERT_FALSE(WaterChargePolicy::limitsValid(0, 500));
     TEST_ASSERT_FALSE(WaterChargePolicy::limitsValid(400, 0));
 }
+
+void test_water_charge_latch_resumes_only_while_latched() {
+    using WaterChargePolicy::nextChargeNeeded;
+    // Tank 47.0 between low 40.0 and high 50.0 (2026-09-14 18:12)
+    TEST_ASSERT_TRUE(nextChargeNeeded(true, 470, 400, 500));    // charge in progress continues
+    TEST_ASSERT_FALSE(nextChargeNeeded(false, 470, 400, 500));  // latch cleared by a disable: no new charge
+    TEST_ASSERT_TRUE(nextChargeNeeded(false, 399, 400, 500));   // new charge only below low
+    TEST_ASSERT_TRUE(nextChargeNeeded(true, 500, 400, 500));    // at high: still charging
+    TEST_ASSERT_FALSE(nextChargeNeeded(true, 501, 400, 500));   // stops above high
+}

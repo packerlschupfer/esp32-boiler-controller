@@ -279,6 +279,9 @@ static void processWaterHeatingState() {
 
             waterState.state = WheaterOff;
         }
+        // Switching water heating off also ends an interrupted charge: after
+        // re-enabling, a new charge starts only below tempLimitLow
+        waterState.lastHeatingNeeded = false;
         return;
     }
 
@@ -384,6 +387,10 @@ static void processWaterHeatingState() {
                 }
                 
                 LOG_INFO(TAG, "Deactivating water heating - reason: %s", reason);
+
+                if (controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) {
+                    waterState.lastHeatingNeeded = false;  // switched off: the charge does not resume
+                }
                 
                 // Turn off circulation pump
                 xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_OFF);
@@ -499,6 +506,7 @@ static bool checkIfWaterHeatingNeededEvent() {
     // so a remote "water off" was usually lost and never survived a reboot. The
     // persisted waterOverrideOff flag is now the single durable block point.
     if (snappedOverrideOff) {
+        waterState.lastHeatingNeeded = false;  // an interrupted charge does not resume after the override
         return false;  // water heating blocked by override - not needed
     }
 
@@ -532,26 +540,20 @@ static bool checkIfWaterHeatingNeededEvent() {
             Temperature_t highLimit = snappedLimitHigh;  // Stop heating above this
 
             // Simple two-threshold control (no symmetric hysteresis calculation)
-            if (!waterState.lastHeatingNeeded) {
-                // Currently OFF - turn ON if temperature drops below low limit
-                if (currentTemp < lowLimit) {
-                    heatingNeeded = true;
-                    char currBuf[16], lowBuf[16];
-                    formatTemp(currBuf, sizeof(currBuf), currentTemp);
-                    formatTemp(lowBuf, sizeof(lowBuf), lowLimit);
-                    LOG_INFO(TAG, "Water heating needed: tank %s°C < low limit %s°C",
-                            currBuf, lowBuf);
-                }
-            } else {
-                // Currently ON - turn OFF if temperature rises above high limit
-                if (currentTemp > highLimit) {
-                    heatingNeeded = false;
-                    char currBuf[16], highBuf[16];
-                    formatTemp(currBuf, sizeof(currBuf), currentTemp);
-                    formatTemp(highBuf, sizeof(highBuf), highLimit);
-                    LOG_INFO(TAG, "Water heating complete: tank %s°C > high limit %s°C",
-                            currBuf, highBuf);
-                }
+            heatingNeeded = WaterChargePolicy::nextChargeNeeded(
+                waterState.lastHeatingNeeded, currentTemp, lowLimit, highLimit);
+            if (heatingNeeded && !waterState.lastHeatingNeeded) {
+                char currBuf[16], lowBuf[16];
+                formatTemp(currBuf, sizeof(currBuf), currentTemp);
+                formatTemp(lowBuf, sizeof(lowBuf), lowLimit);
+                LOG_INFO(TAG, "Water heating needed: tank %s°C < low limit %s°C",
+                        currBuf, lowBuf);
+            } else if (!heatingNeeded && waterState.lastHeatingNeeded) {
+                char currBuf[16], highBuf[16];
+                formatTemp(currBuf, sizeof(currBuf), currentTemp);
+                formatTemp(highBuf, sizeof(highBuf), highLimit);
+                LOG_INFO(TAG, "Water heating complete: tank %s°C > high limit %s°C",
+                        currBuf, highBuf);
             }
 
             // Update state

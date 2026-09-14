@@ -19,6 +19,19 @@ namespace WaterChargePolicy {
         return tempLimitLow > 0 && tempLimitHigh > 0 && tempLimitLow < tempLimitHigh;
     }
 
+    /**
+     * @brief Two-threshold charge latch: start below tempLimitLow, stop above tempLimitHigh.
+     *
+     * WheaterControlTask clears the latch whenever water heating is switched off
+     * (water/boiler disabled, water OFF override). Otherwise re-enabling resumed an
+     * interrupted charge up to tempLimitHigh although the tank was above
+     * tempLimitLow (2026-09-14 18:12).
+     */
+    inline bool nextChargeNeeded(bool charging, int16_t tankTemp,
+                                 int16_t tempLimitLow, int16_t tempLimitHigh) {
+        return charging ? !(tankTemp > tempLimitHigh) : (tankTemp < tempLimitLow);
+    }
+
 } // namespace WaterChargePolicy
 
 #endif // WATER_CHARGE_POLICY_H
