@@ -16,14 +16,15 @@ The boiler controller implements a **4-layer safety architecture**: three softwa
 
 **Location**: `src/modules/control/BurnerSafetyValidator.cpp`
 
-**Validation Steps** (`validateBurnerOperation()`, 7 checks in this order):
+**Validation Steps** (`validateBurnerOperation()`, 6 checks in this order):
 1. **Emergency stop** - `EMERGENCY_STOP` bit must be clear
 2. **Sensor validity** - At least 2 of boiler output, boiler return and water tank valid and within sensor range; all count as invalid if the MB8ART data is older than `SafetyConfig::sensorStaleMs`
-3. **Temperature limits** - Boiler output below `maxBoilerTemp` (BurnerControlTask: 110.0°C `MAX_BOILER_TEMP_C` from `TemperatureSensorFallback::getSafeOperatingParams()`; BoilerTempControlTask: struct default 85.0°C). In water mode the tank must also be below `wHeaterConfTempSafeLimitHigh`
-4. **Runtime limits** - 1 h continuous, 4 h per day. The start time and daily runtime counters are never updated in the current code, so this check does not trigger
-5. **Pressure bounds** - 1.00-3.50 BAR; without a valid pressure reading the burner is blocked unless built with `ALLOW_NO_PRESSURE_SENSOR`
-6. **Hardware interlocks** - Stub, always passes
-7. **Thermal shock** - Boiler output more than 35.0°C above return (`ReturnPreheat::MAX_DIFFERENTIAL`) -> `THERMAL_SHOCK_RISK`
+3. **Temperature limits** - Boiler output below `maxBoilerTemp` in heating and water mode: 110.0°C (`MAX_BOILER_TEMP_C`) for both callers - BurnerControlTask passes the limit from `TemperatureSensorFallback::getSafeOperatingParams()` (110.0°C in NORMAL mode), BoilerTempControlTask uses the `SafetyConfig` default. Only in water mode the tank must also be below `wHeaterConfTempSafeLimitHigh` (`maxWaterTemp`)
+4. **Pressure bounds** - 1.00-3.50 BAR; without a valid pressure reading the burner is blocked unless built with `ALLOW_NO_PRESSURE_SENSOR`
+5. **Hardware interlocks** - Stub, always passes
+6. **Thermal shock** - Boiler output more than 35.0°C above return (`ReturnPreheat::MAX_DIFFERENTIAL`) -> `THERMAL_SHOCK_RISK`
+
+There is no runtime limit: the former 1 h continuous / 4 h daily check read counters that were never updated and was removed.
 
 Not checked here: pumps (the pump check was removed; the burner requires an active mode request instead) and anti-flapping (minimum on-time 120 s and off-time 20 s are enforced by the burner state machine, power level changes by `BurnerAntiFlapping` in BoilerTempController).
 
@@ -33,7 +34,7 @@ Not checked here: pumps (the pump check was removed; the burner requires an acti
   - Adjustable via MQTT: `boiler/cmd/config/sensor_stale_ms`
 
 **Fixed Safety Limits** (not configurable):
-- Boiler output limit: 110.0°C (`MAX_BOILER_TEMP_C`, BurnerControlTask) / 85.0°C (BoilerTempControlTask demand arming)
+- Boiler output limit: 110.0°C (`MAX_BOILER_TEMP_C`, `SafetyConfig::maxBoilerTemp` default; BurnerControlTask request check and BoilerTempControlTask demand arming)
 - Minimum pressure: 1.00 BAR
 - Maximum pressure: 3.50 BAR
 - Thermal shock differential: 35.0°C
@@ -82,11 +83,21 @@ Pump verification was removed (Round 18/19): SafetyInterlocks does not check the
 |----------|---------------------|-------|-----------------|
 | `BurnerSystemController::emergencyShutdown()` | OFF via `RelayControlTask::setRelayStateEmergency()` (rate limiting bypassed) | Not commanded - PumpControlModule keeps running them while HEATING_ON/WATER_ON are set | Relay failure sets `Error::RELAY` and `Error::SAFETY` bits |
 | `BurnerStateMachine::emergencyStop()` | OFF via `emergencyShutdown()` | Not commanded | Clears `BURNER_ON`, state ERROR |
-| `CentralizedFailsafe::emergencyStop()` | OFF via `emergencyShutdown()` | Both forced ON via `setRelayStateEmergency()` for heat dissipation | Sets `EMERGENCY_STOP`, clears `BOILER_ENABLED`, logs the error |
+| `CentralizedFailsafe::emergencyStop()` | OFF via `emergencyShutdown()` | Both forced ON via `setRelayStateEmergency()` for heat dissipation; PumpControlModule keeps them on until the boiler output is below 60.0°C (again from 65.0°C, always without a valid, fresh reading) | Sets `EMERGENCY_STOP`, clears `BOILER_ENABLED`, logs the error |
 
 The burner never switches pumps off: the former `setAllRelays(false)` in `emergencyShutdown()` also stopped the pumps, and PumpControlModule only writes on its own state changes, so they stayed off with the heat exchanger still hot.
 
 `CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (stale sensor data during operation, critical temperature, burner request watchdog) and the EMERGENCY failsafe level. The emergency state is written to FRAM (`saveEmergencyState()`) when the failsafe level first reaches CRITICAL or higher.
+
+**Emergency Stop Latch**: `EMERGENCY_STOP` stays set until released. BurnerControlTask reads it without clearing and stops the burner once per onset; while it is set the burner stays in ERROR (safety check fails), and `boiler/cmd/system` `on` alone does not restart it. A reboot clears it (event bits are not persisted; the FRAM emergency record is only logged at boot).
+
+**Emergency Stop Release**: `EMERGENCY_STOP` is cleared by `TemperatureSensorFallback` when the sensors return from SHUTDOWN to NORMAL (`BOILER_ENABLED` is not restored on this path), or by the MQTT command `boiler/cmd/emergency_reset` with payload `reset`, which calls `CentralizedFailsafe::clearEmergencyStop()`. The checks, in this order (rules in `include/modules/control/EmergencyStopRelease.h`):
+1. `EMERGENCY_STOP` set, else `emergency_not_active`
+2. Boiler output valid and below 110.0°C (`MAX_BOILER_TEMP_C`), boiler return below it too if valid, else `emergency_release_refused:temperature_high`. The readings are checked directly, not through `SafetyInterlocks::checkTemperatureLimits()`, which would trigger a new emergency shutdown
+3. `TemperatureSensorFallback::canContinueOperation()` and no `SENSOR_FAILURE` error bit, else `emergency_release_refused:sensors_unavailable`
+4. `SafetyInterlocks::checkSystemErrors()` (no SENSOR_FAILURE, MODBUS or RELAY error bit), else `emergency_release_refused:system_errors`
+
+On release: `EMERGENCY_STOP` cleared, `BOILER_ENABLED` set only if the saved `boilerEnabled` setting is true, failsafe level WARNING, `recoveryAttempts` reset; result `emergency_released`. The result is published (not retained) on `boiler/status/burner`. The burner state machine still waits out its ERROR recovery delay (`SafetyConfig::errorRecoveryMs`, default 5 min). `CentralizedFailsafe::attemptRecovery()` exists but has no caller.
 
 **Runtime-Configurable Parameters**:
 - **Post-Purge Duration**: 30-180s (default: 90s)
@@ -386,6 +397,8 @@ Trigger: emergencyStop() - interlock failure, emergency stop, failed burner deac
 Action: BurnerSystemController::emergencyShutdown() (burner relays 1-3 off)
 Recovery: Automatic after SafetyConfig::errorRecoveryMs (default 5 min) once the
           safety check passes
+          The safety check fails while EMERGENCY_STOP is set: release it with
+          MQTT emergency_reset (see Emergency Stop Release)
 ```
 
 ### Heat Demand Arming
@@ -585,6 +598,12 @@ mosquitto_pub -t "boiler/cmd/config/post_purge_ms" -m "60000"
 ```bash
 # Disable entire system
 mosquitto_pub -t "boiler/cmd/system" -m "off"
+
+# Release a latched emergency stop (refused while its causes persist)
+mosquitto_pub -t "boiler/cmd/emergency_reset" -m "reset"
+
+# Leave burner LOCKOUT
+mosquitto_pub -t "boiler/cmd/burner_reset" -m "lockout"
 
 # Check error log
 mosquitto_pub -t "errors/list" -m "20"

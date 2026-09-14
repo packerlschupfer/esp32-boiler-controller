@@ -337,6 +337,7 @@ Because the retry counter is kept on automatic expiry, one more failed ignition 
 - Every `STATUS_PUBLISH_INTERVAL_MS` (30 s) `{"state":"error","recovery_in":<seconds>}` is published to `boiler/status/burner`
 - After the delay, if `checkSafetyConditions()` passes: clear `BURNER_ERROR`, go to IDLE
 - `resetLockout()` only acts in LOCKOUT, not in ERROR
+- `checkSafetyConditions()` fails while `EMERGENCY_STOP` is set (`CentralizedFailsafe::emergencyStop()`). Release it with `boiler/cmd/emergency_reset` (payload `reset`, refused while the causes persist, see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md)); the recovery delay still applies
 - `heatDemand` is not cleared by ERROR; IDLE ignores it until an active mode request exists
 
 ### Heat Demand Arming (`BurnerDemandGate`)
@@ -470,7 +471,9 @@ BOILER_ENABLED && mode bit cleared since last check      -> start overrun
 overrun running && elapsed < pumpCooldownMs              -> ON  (SystemSettings, default 300000 ms = 5 min)
 BOILER_ENABLED cleared                                    -> OFF (no overrun)
 heating pump only: ReturnPreheater PREHEATING            -> ReturnPreheater::shouldPumpBeOn()
-EMERGENCY_STOP set                                        -> ON  (heat dissipation, overrides all)
+EMERGENCY_STOP set                                        -> ON  (heat dissipation, overrides all) until boiler
+                                                             output < 60.0°C, ON again from 65.0°C; always ON
+                                                             without a valid, fresh reading
 ```
 
 On a change the task sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`), sets or clears `SystemState::HEATING_PUMP_ON`/`WATER_PUMP_ON` and counts pump starts in FRAM. RelayControlTask applies pump motor protection (`SafetyConfig::pumpProtectionMs`). Both pumps behave the same (the water pump also has the overrun). The pumps do not wait for the burner, and the burner does not check the pumps.
@@ -704,9 +707,11 @@ if (!SafetyInterlocks::continuousSafetyMonitor()) {
 |----------|-----------------|-------|-----------------|
 | `BurnerSystemController::emergencyShutdown()` | BURNER_ENABLE, POWER_BOOST, WATER_MODE OFF via `setRelayStateEmergency()` | Not touched (PumpControlModule keeps following the mode bits) | On relay failure: set `Error::RELAY` and `Error::SAFETY` bits, return `RELAY_OPERATION_FAILED` |
 | `BurnerStateMachine::emergencyStop()` | Via `emergencyShutdown()` | Not touched | Clear `BURNER_ON`, go to ERROR |
-| `CentralizedFailsafe::emergencyStop()` | Via `emergencyShutdown()`, then burner relays OFF again | Both pumps forced ON via `setRelayStateEmergency()` (heat dissipation) | Set `EMERGENCY_STOP`, clear `BOILER_ENABLED`, log error |
+| `CentralizedFailsafe::emergencyStop()` | Via `emergencyShutdown()`, then burner relays OFF again | Both pumps forced ON via `setRelayStateEmergency()`; PumpControlModule keeps them on until the boiler output is below 60.0°C | Set `EMERGENCY_STOP`, clear `BOILER_ENABLED`, log error |
 
 `CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (e.g. stale sensor data during operation, critical temperature, burner request watchdog after `REQUEST_EXPIRATION_MS`) and the EMERGENCY failsafe level.
+
+`EMERGENCY_STOP` is a level latch: BurnerControlTask reads it without clearing and calls `BurnerStateMachine::emergencyStop()` once per onset (`EmergencyStopRelease::onsetDetected()`). While it is set the safety check fails, so the burner stays in ERROR. It is released by `TemperatureSensorFallback` on sensor recovery (SHUTDOWN -> NORMAL) or by the MQTT command `boiler/cmd/emergency_reset` (`CentralizedFailsafe::clearEmergencyStop()`), which also sets `BOILER_ENABLED` again if the saved boiler setting is enabled. The burner then leaves ERROR through the normal recovery delay.
 
 ### Non-Blocking Safety
 
@@ -803,7 +808,7 @@ Some failures don't force ERROR state:
 {"state":"error","recovery_in":240}
 ```
 
-Published every 30 s while in ERROR. `lockout_reset` is published after a `burner_reset` command.
+Published every 30 s while in ERROR. `lockout_reset` is published (retained) after a `burner_reset` command; `emergency_released`, `emergency_not_active` or `emergency_release_refused:<reason>` (not retained) after an `emergency_reset` command.
 
 ### Via Serial Logs
 ```

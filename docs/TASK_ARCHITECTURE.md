@@ -45,7 +45,7 @@ The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (ta
 
 *Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Fixed in all modes: HeatingPump/WaterPump 2048, BoilerTempCtrl 3072, NTPTask 4096, SyslogTask 4096 (literals in the start calls). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
 
-Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` and `PIDControlTask` exist in `src/modules/tasks/` but are not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task.
+Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task.
 
 ---
 
@@ -544,15 +544,7 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 
 ---
 
-### 16. PIDControlTask (Skeleton)
-
-**Status**: Not started (`PIDControlTask::startTask()` is never called, not counted)
-
-**Purpose**: Future PID control expansion - currently just logs and delays
-
----
-
-### 17. RYN4ProcessingTask
+### 16. RYN4ProcessingTask
 
 **Purpose**: Process Modbus packets from RYN4 relay controller via ModbusCoordinator scheduling
 
@@ -615,7 +607,7 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 
 ---
 
-### 18. BoilerTempControlTask
+### 17. BoilerTempControlTask
 
 **File**: `src/modules/tasks/BoilerTempControlTask.cpp`
 **Priority**: 4 (same as BurnerControlTask)
@@ -749,7 +741,6 @@ See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
 
 **Disabled Watchdog**:
 - OTATask (firmware update in progress)
-- PIDControlTask (skeleton)
 - TimerSchedulerTask (event-driven)
 - PersistentStorageTask (NVS operations)
 
@@ -798,7 +789,7 @@ See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
 Based on runtime profiling showing only 60-100 bytes free:
 
 **Increased** (safety margin):
-- PIDControlTask: 3072 → 4096 bytes (was showing 60 bytes free)
+- PIDControlTask: 3072 → 4096 bytes (was showing 60 bytes free; the task was later removed as never started)
 - MonitoringTask: 3072 → 3584 bytes (task status allocation)
 
 **Optimized** (based on HWM profiling):

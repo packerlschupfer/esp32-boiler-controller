@@ -389,7 +389,7 @@ CentralizedFailsafe::emergencyStop(reason)
 ├─ Relays 1-3 OFF again via setRelayState() (redundant)
 ├─ Relay 5 (HEATING_PUMP) and Relay 6 (WATER_PUMP) forced ON via
 │  setRelayStateEmergency() for heat dissipation
-├─ Set SystemState::EMERGENCY_STOP
+├─ Set SystemState::EMERGENCY_STOP (level latch, stays set until released)
 ├─ Clear SystemState::BOILER_ENABLED, notifyWheaterTaskSwitchedOff()
 └─ ErrorHandler::logError(SYSTEM_FAILSAFE_TRIGGERED, reason)
    (the emergency state is written to FRAM by saveEmergencyState() when the
@@ -406,9 +406,12 @@ All Control Tasks detect EMERGENCY_STOP
 │     (CentralizedFailsafe::emergencyStop() clears BOILER_ENABLED and calls
 │      notifyWheaterTaskSwitchedOff(): the charge ends on the next run and
 │      does not resume after re-enable unless tank < tempLimitLow)
+├─ BurnerControlTask
+│  └─ Reads EMERGENCY_STOP without clearing, BurnerStateMachine::emergencyStop()
+│     once per onset; burner stays in ERROR while it is set
 ├─ HeatingPumpTask / WaterPumpTask (PumpControlModule)
-│  └─ Pumps follow HEATING_ON / WATER_ON (with overrun); the
-│     emergency shutdown does not switch the pump relays
+│  └─ Both pumps ON while EMERGENCY_STOP is set until boiler output
+│     < 60.0°C (again from 65.0°C, always without a usable reading)
 └─ MQTTTask
    └─ Publishes emergency alert
       Topic: boiler/status/emergency
@@ -431,7 +434,7 @@ All Control Tasks detect EMERGENCY_STOP
 
 #### Step 7: Recovery
 
-Recovery: see [STATE_MACHINES.md](STATE_MACHINES.md).
+Burner ERROR recovery: see [STATE_MACHINES.md](STATE_MACHINES.md). A latched `SystemState::EMERGENCY_STOP` (Step 4) is released by the MQTT command `boiler/cmd/emergency_reset` (payload `reset`, `CentralizedFailsafe::clearEmergencyStop()`) or by TemperatureSensorFallback on sensor recovery, see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md).
 
 ---
 
@@ -681,14 +684,14 @@ onPreheatingStart() [called 3 hours before start]
    │  └─ INFO → Log only
    └─ Modifies operation accordingly
 
-5. Recovery Attempt
-   ├─ ErrorRecoveryManager evaluates
-   ├─ Checks if error cleared
-   ├─ Attempts automatic recovery
-   │  └─ Max 3 attempts per error
-   └─ If successful:
-      ├─ Clear error bits
-      └─ Resume normal operation
+5. Recovery (no central recovery manager)
+   ├─ Burner ERROR: back to IDLE after errorRecoveryMs (default 5 min)
+   │  once checkSafetyConditions() passes
+   ├─ TemperatureSensorFallback back to NORMAL: clears SENSOR_FAILURE
+   │  (and EMERGENCY_STOP after SHUTDOWN)
+   └─ EMERGENCY_STOP: MQTT boiler/cmd/emergency_reset
+      → CentralizedFailsafe::clearEmergencyStop() (refused while the
+        causes persist, see SAFETY_SYSTEM.md)
 ```
 
 ### Error Rate Limiting

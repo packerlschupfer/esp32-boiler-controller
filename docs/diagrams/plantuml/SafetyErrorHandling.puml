@@ -174,8 +174,10 @@ note right of EmergencyStop
   - pumps stay with PumpControlModule
 
   CentralizedFailsafe::emergencyStop() additionally
-  - forces heating and water pumps ON (F13 dissipation)
-  - sets EMERGENCY_STOP
+  - forces heating and water pumps ON (F13 dissipation,
+    kept on until boiler output < 60°C)
+  - sets EMERGENCY_STOP (latched until emergency_reset,
+    sensor recovery or reboot)
   - clears BOILER_ENABLED
   - tells WheaterControlTask to end a running charge
 

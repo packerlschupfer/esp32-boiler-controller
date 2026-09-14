@@ -137,7 +137,7 @@ Defined in `src/shared/Temperature.h` and `src/shared/Pressure.h`.
 
 ### Safety System (4 Layers)
 
-1. **BurnerSafetyValidator**: Pre-operation validation (7 checks)
+1. **BurnerSafetyValidator**: Pre-operation validation (6 checks)
 2. **SafetyInterlocks**: Continuous monitoring during operation
 3. **CentralizedFailsafe**: Coordinated emergency shutdown
 4. **DELAY Watchdog**: Hardware-enforced relay auto-OFF (10s, renewed every 5s) - protects against ESP32 failures
@@ -361,6 +361,8 @@ Result of 20+ rounds of deep code analysis:
 boiler/cmd/system                    - on/off/reboot
 boiler/cmd/heating                   - on/off/override_on/override_off
 boiler/cmd/water                     - on/off/override_on/override_off
+boiler/cmd/burner_reset              - lockout/reset (leave burner LOCKOUT)
+boiler/cmd/emergency_reset           - reset (release emergency stop once its causes cleared)
 boiler/cmd/config/sensor_stale_ms    - 30000-300000 (safety config)
 boiler/cmd/config/pump_protection_ms - 5000-60000 (equipment protection)
 boiler/cmd/config/post_purge_ms      - 30000-180000 (post-purge duration)

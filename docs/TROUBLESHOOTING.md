@@ -358,18 +358,27 @@ Stack canary watchpoint triggered (TaskName)
 EMERGENCY STOP: <reason>
 ```
 
-**Causes:**
-1. Over-temperature condition
-2. Pressure fault
-3. Multiple consecutive safety check failures
-4. Third power level relay fault within 10 minutes
+**Causes** (`CentralizedFailsafe::emergencyStop()` via `SafetyInterlocks::triggerEmergencyShutdown()`):
+1. Critical boiler temperature: output at or above 115.0°C (`Critical temperature exceeded`)
+2. Stale boiler sensor data while the burner runs (`Sensor data stale during operation`)
+3. Burner request not refreshed for 10 min (`Burner request watchdog expired`)
 
-**Note:** The emergency shutdown switches off only the burner relays (BURNER_ENABLE, POWER_BOOST, WATER_MODE). The pumps keep following their mode, see [Pumps keep running after an emergency stop](#pumps-keep-running-after-an-emergency-stop).
+This path sets `EMERGENCY_STOP` and clears `BOILER_ENABLED`. Other burner faults (pressure out of range, failed interlock check, third power level relay fault within 10 minutes) call only `BurnerStateMachine::emergencyStop()`: burner in ERROR, no `EMERGENCY STOP:` log, automatic recovery after `errorRecoveryMs`.
+
+**Note:** The emergency shutdown switches off only the burner relays (BURNER_ENABLE, POWER_BOOST, WATER_MODE). `EMERGENCY_STOP` stays set until released; meanwhile both pumps run until the boiler output is below 60.0°C, see [Pumps keep running after an emergency stop](#pumps-keep-running-after-an-emergency-stop).
 
 **Recovery:**
 1. Check error logs for cause
-2. Fix underlying issue
-3. Reset via MQTT or power cycle
+2. Fix underlying issue; let the boiler cool below 110.0°C
+3. Release via MQTT: `mosquitto_pub -t "boiler/cmd/emergency_reset" -m "reset"`. The result is published (not retained) on `boiler/status/burner`:
+   - `emergency_released` - `EMERGENCY_STOP` cleared; `BOILER_ENABLED` set again if the boiler is enabled in the saved settings. The burner still leaves ERROR only after `errorRecoveryMs` (default 5 min)
+   - `emergency_not_active` - `EMERGENCY_STOP` is not set
+   - `emergency_release_refused:temperature_high` - boiler output invalid or at/above 110.0°C, or boiler return at/above 110.0°C
+   - `emergency_release_refused:sensors_unavailable` - sensor fallback cannot continue operation, or `SENSOR_FAILURE` error bit set
+   - `emergency_release_refused:system_errors` - `SENSOR_FAILURE`, `MODBUS` or `RELAY` error bit set
+4. Without the command, `EMERGENCY_STOP` stays set until the sensor fallback recovers from SHUTDOWN to NORMAL (`BOILER_ENABLED` then stays cleared, `boiler/cmd/system` `on` sets it) or a reboot. `boiler/cmd/system` `on` alone does not restart the burner while `EMERGENCY_STOP` is set
+
+`boiler/cmd/burner_reset` does not release an emergency stop; it only acts in LOCKOUT.
 
 ---
 
@@ -495,6 +504,11 @@ A new charge starts only when the tank drops below `wheater/tempLimitLow`. Heati
 **Symptom:** Burner is in ERROR, but a circulation pump is still on.
 
 **Cause:** Expected. The emergency shutdown switches off only the burner relays. The pumps are controlled by PumpControlModule and follow `HEATING_ON`/`WATER_ON` (including overrun), so the heat in the exchanger is still carried away.
+
+While `EMERGENCY_STOP` is set (`CentralizedFailsafe::emergencyStop()`), both pumps run until the boiler output is below 60.0°C, and again from 65.0°C; without a valid, fresh boiler output reading they keep running:
+```
+[HeatingPumpCtrl][W] Emergency heat dissipation done (boiler output 59.8°C)
+```
 
 ---
 

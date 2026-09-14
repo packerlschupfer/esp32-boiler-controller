@@ -129,6 +129,8 @@ boiler/status/device/firmware  - Firmware version
 boiler/cmd/system                       - on/off/reboot
 boiler/cmd/heating                      - on/off/override_on/override_off
 boiler/cmd/water                        - on/off/override_on/override_off
+boiler/cmd/burner_reset                 - lockout/reset (leave burner LOCKOUT)
+boiler/cmd/emergency_reset              - reset (release emergency stop once its causes cleared)
 boiler/cmd/config/pump_protection_ms    - Set pump protection delay (5000-60000ms)
 boiler/cmd/config/sensor_stale_ms       - Set sensor staleness timeout (30000-300000ms)
 boiler/cmd/config/post_purge_ms         - Set post-purge duration (30000-180000ms)

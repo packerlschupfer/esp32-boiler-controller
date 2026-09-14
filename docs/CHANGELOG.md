@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - PID autotune limits: start only with a valid, fresh boiler output within 15-75°C (`{"status":"rejected"}`), abort above 80°C or on an invalid/stale boiler sensor (`{"status":"aborted"}`)
 - Autotune method persisted: loaded from settings at init, `method:<name>` command saves it
 - Native tests: `test_pid_gain_fixed_point.cpp`, `test_relay_extrema_tracker.cpp`, `test_burner_transition_policy.cpp`, `test_burner_transitions.cpp`, `test_burner_demand_gate.cpp`, `test_relay_command_policy.cpp`, `test_stage_c_policies.cpp`
+- MQTT command `boiler/cmd/emergency_reset` (payload `reset`): `CentralizedFailsafe::clearEmergencyStop()` releases a latched emergency stop once the boiler output/return are below 110°C, the sensors are available and no SENSOR_FAILURE/MODBUS/RELAY error bit is set; restores `BOILER_ENABLED` from the saved setting; result on `boiler/status/burner` (`emergency_released`, `emergency_not_active`, `emergency_release_refused:<reason>`). Rules in `EmergencyStopRelease.h`, native test `test_emergency_stop_release.cpp`
 
 ### Changed
 - CLAUDE.md: Corrected "8-state" to "9-state" burner FSM
@@ -41,6 +42,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ANDRTF3 temperature pointers no longer bound (`bindTemperaturePointers(nullptr, nullptr)`); ANDRTF3Task is the sole writer of the room temperature
 - Autotune reads `pid/autotune/amplitude` and `pid/autotune/hysteresis` (defaults 50 % / 1.0°C, were 40 % / 2.0°C and ignored); a warning shows the gain scale when the amplitude differs from the OFF/FULL swing
 - Removed unused `SystemConstants::Burner::POST_PURGE_TIME_MS`, `ERROR_RECOVERY_DELAY_MS` and the unconsumed `RelayControl::WATER_PUMP_ON/OFF` writes in WheaterControlTask
+- `BurnerSafetyValidator::SafetyConfig::maxBoilerTemp` default is `MAX_BOILER_TEMP_C` (110°C, was 85°C): BurnerControlTask and BoilerTempControlTask check the boiler output against the same limit
+- Removed the BurnerSafetyValidator runtime limit check (1 h continuous / 4 h daily, counters never updated), `checkDailyReset()`, `RUNTIME_EXCEEDED` and the validator state mutex
+- Removed unused code: `ErrorRecoveryManager` (never constructed) and its native test, `PIDControlTask` (never started), `CentralizedFailsafe::monitorSystemHealth()` (no caller)
 
 ### Fixed
 - ANDRTF3 HAL: Removed ineffective retry loop (was generating 4 errors instead of 1)
@@ -61,6 +65,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Inverted tank limits toggled water and heating every control cycle
 - Interrupted water charge resumed after switching water heating off and on, also within one task cycle
 - Autotune ignored the `pid/autotune/amplitude` and `pid/autotune/hysteresis` settings (hard-coded 50 % / 1.0°C)
+- A latched emergency stop could only be released by a reboot: only the sensor fallback cleared `EMERGENCY_STOP` (on recovery from SHUTDOWN) and `BOILER_ENABLED` was never restored
+- `EMERGENCY_STOP` was not a latch: BurnerControlTask read-and-cleared it within 3 s, so the pump heat dissipation stopped after seconds, `boiler/cmd/system on` restarted without checks and `emergency_reset` found nothing to release. It is now read without clearing and acted on once per onset; while it is set both pumps run until the boiler output is below 60.0°C (again from 65.0°C, always without a valid, fresh reading). Native tests in `test_emergency_stop_release.cpp`
+- BoilerTempControlTask refused to arm the heat demand above 85°C boiler output (validator default), capping water charge targets below what the request check allowed
 
 ---
 

@@ -289,6 +289,30 @@ mosquitto_pub -t "boiler/cmd/water" -m "disable"
 - Disabling the mode the burner is running in, or the boiler, stops the burner at once (post-purge) without waiting for the anti-flapping minimum on-time. Disabling the other mode does not stop the burner.
 - Disabling water heating or the boiler (and the water OFF override) ends a running charge, also when water heating is enabled again within the same control cycle. After re-enabling, a new charge starts only when the tank is below `wheater/tempLimitLow`; the interrupted charge does not resume.
 
+#### Reset Burner Lockout
+```bash
+mosquitto_pub -t "boiler/cmd/burner_reset" -m "lockout"
+```
+
+Payload `lockout` or `reset`. `BurnerStateMachine::resetLockout()` acts only in LOCKOUT (retry counter reset, back to IDLE). Publishes `lockout_reset` (retained) on `boiler/status/burner`. It does not release an emergency stop.
+
+#### Release Emergency Stop
+```bash
+mosquitto_pub -t "boiler/cmd/emergency_reset" -m "reset"
+```
+
+Payload `reset` (other payloads are logged and ignored). Calls `CentralizedFailsafe::clearEmergencyStop()`, which releases the `EMERGENCY_STOP` latch set by `CentralizedFailsafe::emergencyStop()` (critical boiler temperature 115.0°C, stale sensor data during operation, burner request watchdog). Checked in this order; the first failing check is reported on `boiler/status/burner` (not retained):
+
+| Result | Condition |
+|--------|-----------|
+| `emergency_not_active` | `EMERGENCY_STOP` not set |
+| `emergency_release_refused:temperature_high` | Boiler output invalid or >= 110.0°C (`MAX_BOILER_TEMP_C`), or boiler return valid and >= 110.0°C |
+| `emergency_release_refused:sensors_unavailable` | `TemperatureSensorFallback::canContinueOperation()` false or `SENSOR_FAILURE` error bit set |
+| `emergency_release_refused:system_errors` | `SENSOR_FAILURE`, `MODBUS` or `RELAY` error bit set (`SafetyInterlocks::checkSystemErrors()`) |
+| `emergency_released` | All checks passed |
+
+On release `EMERGENCY_STOP` is cleared, `BOILER_ENABLED` is set only if the saved boiler setting (`boilerEnabled`) is enabled, and the failsafe level returns to WARNING. The burner state machine still waits out its ERROR recovery delay (`errorRecoveryMs`, default 5 min) before it can start again.
+
 ### Configuration Commands
 
 `boiler/config/+` is subscribed, but `MQTTSubscriptionManager` only logs incoming messages; no setting is changed. There are no `water_setpoint`, `room_setpoint` or `pid` config commands. Use instead:
@@ -760,6 +784,7 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/status/sensors` | 10s | No | High | Temperature/pressure data |
 | `boiler/status/online` | On change | Yes | High | Connection status |
 | `boiler/status/safety_config` | On boot/change | No | Medium | Safety configuration |
+| `boiler/status/burner` | Every 30s in ERROR, on `burner_reset`/`emergency_reset` | No (`lockout_reset`: Yes) | Medium/High | Burner ERROR status, reset command results |
 | `boiler/status/pid/autotune` | On command | Yes | High | Autotune status / method response |
 | `boiler/status/pid/autotune/result` | On start reject, abort, completion | Yes | High | Autotune result JSON |
 | `boiler/status/device/ip` | On boot | Yes | Low | IP address |

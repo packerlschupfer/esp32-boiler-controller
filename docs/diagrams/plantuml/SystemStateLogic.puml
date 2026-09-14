@@ -118,7 +118,7 @@ state EmergencyStop {
     [*] --> BurnerShutdown
     BurnerShutdown --> BurnerRelaysOff : BurnerSystemController::emergencyShutdown()
     BurnerRelaysOff --> PumpsOn : R1-R3 OFF
-    PumpsOn --> EmergencyBits : heating + water pumps ON (F13)
+    PumpsOn --> EmergencyBits : heating + water pumps ON (F13)\nuntil boiler output < 60°C
     EmergencyBits --> EndWaterCharge : EMERGENCY_STOP set,\nBOILER_ENABLED cleared
     EndWaterCharge --> LogError : WheaterControlTask ends a running charge
     LogError --> [*] : ErrorHandler::logError
