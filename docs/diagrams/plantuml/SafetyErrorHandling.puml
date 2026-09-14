@@ -34,7 +34,7 @@ package "Error Classification System" {
 
     storage "WARNING\nlog only" as Minor
 
-    storage "Transient (retry)\nnot a failsafe level\nErrorRecoveryManager policies\nexist but are not active" as Transient
+    storage "Transient (retry)\nnot a failsafe level\nMQTT reconnect backoff" as Transient
 }
 
 package "Safety Monitors" {
@@ -44,7 +44,7 @@ package "Safety Monitors" {
 
     component [Safety Interlocks\nBurner safety chain\nPump protection\n15s sensor staleness] as Interlocks
 
-    component [Memory Monitor\nFree heap below 20KB: WARNING\nbelow 10KB: CRITICAL\n(monitorSystemHealth - not called in current code)\nStack high-water marks: HealthMonitor] as MemoryCheck
+    component [Memory Monitor\nFree heap and stack high-water marks:\nHealthMonitor / MonitoringTask\n(no failsafe level from heap)] as MemoryCheck
 }
 
 package "Error Actions" {
@@ -66,7 +66,7 @@ package "Error Storage (FRAM)" {
 package "Recovery Mechanisms" {
     component [Auto Recovery\nRetry logic\nSensor reinit\nNetwork reconnect\nBackoff strategy] as AutoRecovery
 
-    component [Manual Reset\nMQTT burner_reset (LOCKOUT only)\nno physical button] as ManualReset
+    component [Manual Reset\nMQTT burner_reset (LOCKOUT only)\nMQTT emergency_reset (EMERGENCY_STOP)\nno physical button] as ManualReset
 
     component [Burner SM Recovery\nERROR: automatic after errorRecoveryMs\n(default 5 min) once safe\nLOCKOUT: after 5 min or manual reset] as BurnerRecovery
 
@@ -76,7 +76,7 @@ package "Recovery Mechanisms" {
 package "Failsafe States" {
     storage "Relay Failsafe\nBurner relays OFF\nPumps per PumpControlModule\n(ON during emergency dissipation)" as RelayFailsafe
 
-    storage "Temperature Failsafe\nrequired sensor missing: SHUTDOWN mode\nburner emergency-stopped on heat demand\nEMERGENCY_STOP cleared when sensors recover" as TempFailsafe
+    storage "Temperature Failsafe\nrequired sensor missing: SHUTDOWN mode\nburner emergency-stopped on heat demand\nEMERGENCY_STOP cleared when sensors recover\nor by MQTT emergency_reset" as TempFailsafe
 
     storage "Communication Failsafe\nLocal control only\nIgnore MQTT\nAutonomous mode" as CommFailsafe
 }
@@ -179,6 +179,15 @@ note right of EmergencyStop
   - clears BOILER_ENABLED
   - tells WheaterControlTask to end a running charge
 
+  Release of EMERGENCY_STOP:
+  - MQTT boiler/cmd/emergency_reset "reset"
+    (CentralizedFailsafe::clearEmergencyStop)
+  - refused while boiler output/return >= 110 °C,
+    sensors unavailable or critical error bits set
+  - restores BOILER_ENABLED from the saved setting
+  - or cleared by TemperatureSensorFallback on
+    sensor recovery
+
   Burner state machine recovery:
   - ERROR: automatic after errorRecoveryMs
     (default 5 min) once safety conditions pass
@@ -202,19 +211,7 @@ note bottom of ErrorLog
 end note
 
 note bottom of AutoRecovery
-  Recovery Strategies:
-
-  ErrorRecoveryManager defines these policies,
-  but it is never constructed in current code:
-  - SENSOR_FAILURE: retry x3, 1-10 s backoff,
-    then degrade service
-  - NETWORK_ERROR: retry x5, 2-30 s backoff,
-    then reset component
-  - MODBUS_TIMEOUT: retry x3, 0.5-5 s backoff,
-    then restart task
-  - RELAY_FAULT: reset x2, then emergency stop
-
-  Active in code:
+  Recovery Strategies (active in code):
   - MQTT reconnect with 1-30 s interval
   - Memory: ErrorHandler::attemptMemoryRecovery
     (sets MEMORY error bit, lowers log level)

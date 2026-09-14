@@ -217,7 +217,6 @@ note bottom of TaskMgr
     WheaterControl (P3, 3584), ControlTask (P3, 3584),
     HeatingPump (P3, 2048), WaterPump (P3, 2048),
     PersistentStorage (P2, 5120), Syslog (P1, 4096)
-  PIDControlTask exists but is not started.
 end note
 
 @enduml

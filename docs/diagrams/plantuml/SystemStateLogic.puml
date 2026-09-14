@@ -124,7 +124,7 @@ state EmergencyStop {
     LogError --> [*] : ErrorHandler::logError
 }
 
-EmergencyStop --> SystemIdle : EMERGENCY_STOP cleared\n(only on sensor recovery)\nand boiler re-enabled
+EmergencyStop --> SystemIdle : EMERGENCY_STOP released\n(MQTT emergency_reset once causes cleared,\nor sensor recovery)
 
 state SystemError {
     SystemError : Entry: ErrorHandler::enterFailsafeMode()
@@ -169,13 +169,16 @@ note bottom of EmergencyStop
   - Burner safety check failure
   - Maximum burner runtime exceeded
   Not implemented: rate-of-change limit,
-  E-STOP button, MQTT emergency command
+  E-STOP button, MQTT command to trigger an emergency stop
 
   Recovery:
   - Burner ERROR: automatic after errorRecoveryMs
     (default 5 min) once safety conditions pass
   - Burner LOCKOUT: after 5 min or MQTT burner_reset
-  - EMERGENCY_STOP bit: cleared when sensors recover
+  - EMERGENCY_STOP: MQTT boiler/cmd/emergency_reset "reset"
+    (refused while boiler >= 110 °C, sensors unavailable
+    or critical error bits set; restores the saved boiler
+    enable), or cleared by sensor recovery
 end note
 
 @enduml

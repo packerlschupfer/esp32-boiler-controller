@@ -42,7 +42,6 @@ package "Not pinned to a core" #708090 {
     component [Arduino loop()] as LoopTask
 }
 
-component [PIDControlTask\nnot started in current code] as PIDTask
 
 package "Shared Data Structures\n(Mutex Protected)" #8B7355 {
     storage [SharedSensorReadings\n8 Temperatures\nValidity Flags\nTemperature_t int16] as SensorData
