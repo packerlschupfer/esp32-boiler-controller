@@ -26,7 +26,7 @@ Three OTA environments are available (`upload_protocol = espota`):
 - `esp32dev_ota_debug_selective` - Selective debug logging
 - `esp32dev_ota_debug_full` - Full debug logging (largest)
 
-Each has `upload_port = 192.168.20.40` (device IP, `ETH_STATIC_IP` default in `src/config/ProjectConfig.h` and platformio.ini `[base_prod]`) and `upload_flags = --host_ip=192.168.20.16 --auth=update-password`. Adjust `--host_ip` to your computer and `--auth` to the password in `credentials.ini`.
+Each has `upload_port = 192.168.20.40` (device IP, `ETH_STATIC_IP` default in `src/config/ProjectConfig.h` and platformio.ini `[base_prod]`) and `upload_flags = --host_ip=192.168.20.16 --auth=${credentials.ota_password}`. Adjust `--host_ip` to your computer. The upload password comes from `ota_password` in `credentials.ini` and must equal `-DOTA_PASSWORD` there (the password built into the running image).
 
 ## Update Methods
 
@@ -117,7 +117,7 @@ There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initializ
 - Check `--host_ip` in the env's `upload_flags` is your computer's IP
 
 #### "Authentication Failed"
-- Verify the `--auth` upload flag (or espota `-a`) matches `-DOTA_PASSWORD` in `credentials.ini`
+- Verify `ota_password` (used by the `--auth` upload flag) or espota `-a` matches `-DOTA_PASSWORD` in `credentials.ini`, and that the device runs an image built with that password (a changed password takes effect only after the next USB flash)
 - An image built without `credentials.build_flags` uses the `ProjectConfig.h` default
 - Rebuild and upload via USB if needed
 
@@ -178,8 +178,11 @@ There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initializ
 
 ### 1. Password Protection
 ```ini
-; credentials.ini build flags (not committed)
--DOTA_PASSWORD=\"your-secure-password\"
+; credentials.ini (not committed)
+[credentials]
+build_flags =
+    -DOTA_PASSWORD=\"your-secure-password\"
+ota_password = your-secure-password   ; upload auth, must be the same value
 ```
 
 ### 2. Network Security

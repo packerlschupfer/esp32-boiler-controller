@@ -5,8 +5,8 @@ Prerequisites:
 - Device IP: 192.168.20.40 (ETH_STATIC_IP default in src/config/ProjectConfig.h,
   same in platformio.ini [base_prod] and upload_port of the esp32dev_ota_* envs;
   [base_dev] builds use 192.168.20.41)
-- OTA Password: -DOTA_PASSWORD in credentials.ini (ProjectConfig.h default: update-password)
-  must match --auth in the env's upload_flags
+- OTA Password: -DOTA_PASSWORD in credentials.ini (ProjectConfig.h default: update-password);
+  ota_password in credentials.ini (--auth=${credentials.ota_password}) must be the same value
 - OTA Port: 3232
 
 Quick Update Commands:
@@ -39,7 +39,8 @@ Memory Requirements:
 Troubleshooting:
 ---------------
 1. Authentication failed
-   - Check -DOTA_PASSWORD in credentials.ini and --auth in upload_flags
+   - Check -DOTA_PASSWORD and ota_password in credentials.ini are equal
+   - A new password needs a USB flash before OTA accepts it
    - Rebuild and upload via USB
 
 2. Connection failed
