@@ -60,21 +60,29 @@ state HeatingMode {
 
 state WaterMode {
     [*] --> CheckWaterDemand
-    CheckWaterDemand --> WaterActive : Temp < Target - 4°C
-    CheckWaterDemand --> WaterStandby : Temp OK
+    CheckWaterDemand --> WaterActive : tank < tempLimitLow
+    CheckWaterDemand --> WaterStandby : tank >= tempLimitLow
+    CheckWaterDemand --> WaterPaused : limits inverted\n(low >= high)
 
     state WaterActive {
-        WaterActive : Entry: Start burner & water pump
-        WaterActive : Do: Heat to 60°C
-        WaterActive : Mode: Full power
+        WaterActive : Entry: burner water request
+        WaterActive : Charge until tank > tempLimitHigh
+        WaterActive : Defaults 45 / 65 °C (this boiler: 40 / 50 °C)
     }
 
     state WaterStandby {
-        WaterStandby : Entry: Stop burner
-        WaterStandby : Do: Pump overrun (2 min)
+        WaterStandby : Burner water request off
+        WaterStandby : Do: Pump overrun (5 min)
     }
 
-    WaterActive --> WaterStandby : Temp > Target + 4°C
+    state WaterPaused {
+        WaterPaused : Water heating paused
+        WaterPaused : until the limits are consistent again
+    }
+
+    WaterActive --> WaterStandby : tank > tempLimitHigh
+    WaterActive --> WaterStandby : water switched off\n(disable, boiler disable, override):\nrunning charge ends
+    WaterStandby --> WaterActive : tank < tempLimitLow\n(an interrupted charge does not resume)
     WaterStandby --> [*] : Overrun complete
 }
 
@@ -129,7 +137,7 @@ state SystemError {
 SystemError --> [*] : Power cycle
 
 note right of Initialization
-  **8-Stage Initialization:**
+  8-Stage Initialization:
   1. Logging
   2. Shared Resources
   3. Hardware (I2C, FRAM, RTC)
@@ -139,21 +147,21 @@ note right of Initialization
   7. MQTT (connect)
   8. Tasks (start all 16)
 
-  **Duration:** ~5-10 seconds
+  Duration: ~5-10 seconds
 end note
 
 note right of MixedMode
-  **Priority Logic:**
+  Priority Logic:
   Water always has priority
   when WATER_PRIORITY_BIT set
 
-  **Make-Before-Break:**
+  Make-Before-Break:
   Smooth pump transitions
   No heating interruption
 end note
 
 note bottom of EmergencyStop
-  **Safety Triggers:**
+  Safety Triggers:
   - Over-temperature > 95°C
   - Rate of change > 5°C/min
   - Sensor failure
@@ -161,7 +169,7 @@ note bottom of EmergencyStop
   - Manual E-STOP button
   - MQTT emergency command
 
-  **Recovery:**
+  Recovery:
   Manual reset required
   5 minute lockout minimum
 end note

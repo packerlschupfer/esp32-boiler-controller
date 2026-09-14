@@ -23,6 +23,7 @@ package "Core 1 - Control Logic" #4682B4 {
     component [HeatingControlTask\nSpace Heating\nP:3, Stack:4KB] as HeatingTask
     component [WheaterControlTask\nWater Heating\nP:3, Stack:4KB] as WaterTask
     component [SpaceHeatingPIDTask\nPID Computation\nP:3, Stack:3.5KB] as PIDTask
+    component [BoilerTempControlTask\nHeat demand arming + power level\nevery boiler sensor update (~2.5 s)] as BoilerTempTask
 }
 
 package "Core 1 - Services" #52BE80 {
@@ -47,17 +48,7 @@ package "Event Groups\n(FreeRTOS)" #708090 {
 }
 
 package "SystemResourceProvider (SRP)\nService Locator" #68228B {
-    interface " " as SRP {
-        getMB8ART()
-        getRYN4()
-        getANDRTF3()
-        getBurnerSystemController()
-        getHeatingControl()
-        getPIDControl()
-        getMQTTManager()
-        getPersistentStorage()
-        getSharedResourceManager()
-    }
+    component [SRP::get...()\ngetMB8ART()  getRYN4()  getANDRTF3()\ngetBurnerSystemController()\ngetHeatingControl()  getPIDControl()\ngetMQTTManager()  getPersistentStorage()\ngetSharedResourceManager()] as SRP
 }
 
 package "Hardware Devices\n(via SRP)" #CD5B45 {
@@ -67,10 +58,12 @@ package "Hardware Devices\n(via SRP)" #CD5B45 {
 }
 
 package "Control Modules\n(via SRP)" #FFD93D {
-    component [BurnerSystemController\nUnified Burner+Pump\nH1 Refactoring] as BurnerSysCtrl
+    component [BurnerSystemController\nBurner relays R1-R3] as BurnerSysCtrl
     component [HeatingControlModule\nPID + Heating Curve] as HeatingCtrl
     component [PIDControlModule\nFixed-Point PID] as PIDCtrl
 }
+
+component [StateManager\nsystem / water switches] as StateMgr
 
 ' Hardware Interface Flow
 MB8ARTTask --> MB8ART : poll\n5s
@@ -97,13 +90,21 @@ WaterTask --> BurnerReq : SetBits\nWATER_REQUEST
 
 BurnerTask --> BurnerReq : WaitBits
 BurnerTask --> BurnerSysCtrl : control
-BurnerSysCtrl --> RYN4 : batch commands
+BurnerSysCtrl --> RelayTask : setRelayState\nR1-R3
 BurnerTask --> RelayEvents : SetBits
 
 PIDTask --> BurnerReq : check active
 PIDTask --> SensorData : read boiler temp
 PIDTask --> PIDCtrl : calculate
 PIDTask --> BurnerReq : SetBits\nPOWER bits
+
+' Heat demand arming (BurnerDemandGate)
+BurnerTask --> BoilerTempTask : demand permission
+BoilerTempTask --> SensorData : read boiler temp
+BoilerTempTask --> BurnerTask : arm / drop heat demand\n+ power level
+
+' Switch-off ends a running water charge
+StateMgr --> WaterTask : notifyWheaterTaskSwitchedOff()
 
 ' Service Flow
 MQTTTask --> SystemSettings : read
@@ -136,31 +137,31 @@ SRP --> HeatingCtrl
 SRP --> PIDCtrl
 
 note right of SensorData
-  **Thread Safety:**
+  Thread Safety:
   All shared data protected
   by mutexes via RAII pattern
 
-  **Temperature Format:**
+  Temperature Format:
   Temperature_t = int16_t
   Resolution: 0.1°C
   No float arithmetic
 end note
 
 note right of BurnerReq
-  **Temperature Encoding:**
+  Temperature Encoding:
   Bits 0-15: Control flags
   Bits 16-23: Target temp
 
   Example: 70°C heating
   = 0x00004601
 
-  **Atomic Operation:**
+  Atomic Operation:
   Request + temperature
   in single SetBits call
 end note
 
 note bottom of BurnerTask
-  **Priority Arbitration:**
+  Priority Arbitration:
   1. Read all request bits
   2. Water has priority
   3. Decode target temperature
@@ -170,7 +171,7 @@ note bottom of BurnerTask
 end note
 
 note bottom of SRP
-  **Service Locator Pattern:**
+  Service Locator Pattern:
   - O(1) static access
   - Compile-time type safety
   - No ServiceContainer overhead

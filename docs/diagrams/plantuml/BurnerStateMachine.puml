@@ -1,154 +1,105 @@
 @startuml BurnerStateMachine
 !include theme.puml
 
-title Burner State Machine - 8 States with Safety Interlocks
+title Burner State Machine - 9 States\nTransition logic in BurnerTransitions::step() (pure function, native scenario tests)
 
-[*] --> IDLE : System Ready
+[*] --> IDLE : System ready
 
-state IDLE {
-    IDLE : Entry: All relays OFF
-    IDLE : Do: Wait for demand
-    IDLE : Exit: Check safety conditions
-}
+IDLE : Burner relays off
+IDLE : Waiting for heat demand
 
-IDLE --> PRE_PURGE : Heat demand\n& Safety OK
+PRE_PURGE : Entry: burner relays off
+PRE_PURGE : Duration: 2 s
 
-state PRE_PURGE {
-    PRE_PURGE : Entry: Fan ON, Gas OFF
-    PRE_PURGE : Do: Purge combustion chamber
-    PRE_PURGE : Timer: 30 seconds
-    PRE_PURGE : Exit: Verify fan operation
-}
+IGNITION : Entry: activate R1 (heating) or R3 (water)
+IGNITION : and start the requested power level
+IGNITION : Flame checked after 3 s, handler timeout 5 s
+IGNITION : StateMachine backstop 7 s
 
-PRE_PURGE --> IGNITION : Timer complete
-PRE_PURGE --> ERROR : Safety fault
-PRE_PURGE --> IDLE : Demand lost
+RUNNING_LOW : Half power (R2 POWER_BOOST off)
+RUNNING_HIGH : Full power (R2 POWER_BOOST on)
 
-state IGNITION {
-    IGNITION : Entry: Gas valve ON, Igniter ON
-    IGNITION : Do: Attempt flame ignition
-    IGNITION : Timer: 5 seconds
-    IGNITION : Retries: Max 3 attempts
-    IGNITION : Exit: Verify flame sensor
-}
+MODE_SWITCHING : Switch burner relays between R1 and R3
+MODE_SWITCHING : Bounded waits 15 s, hard timeout 30 s
 
-IGNITION --> RUNNING_LOW : Flame detected
-IGNITION --> IGNITION : Retry < 3\n[close gas, wait 5s]
-IGNITION --> LOCKOUT : Max retries\nexceeded
-IGNITION --> ERROR : Safety fault
+POST_PURGE : Entry: burner relays off
+POST_PURGE : Duration: postPurgeMs (default 90 s, 30-180 s)
 
-state RUNNING_LOW {
-    RUNNING_LOW : Entry: Set power 50%
-    RUNNING_LOW : Do: Monitor operation
-    RUNNING_LOW : Power: POWER_SELECT = ON
-    RUNNING_LOW : Check: Temperature, pressure
-    RUNNING_LOW : Exit: Log runtime
-}
+LOCKOUT : Entry: burner off, alarm R8 ON
+LOCKOUT : Exit: alarm R8 OFF
+LOCKOUT : Duration: 5 min
 
-state RUNNING_HIGH {
-    RUNNING_HIGH : Entry: Set power 100%
-    RUNNING_HIGH : Do: Full power operation
-    RUNNING_HIGH : Power: POWER_SELECT = OFF
-    RUNNING_HIGH : Check: Delta-T limits
-    RUNNING_HIGH : Exit: Log runtime
-}
+ERROR : Entry: emergency shutdown (R1-R3 off)
+ERROR : Recovery delay: errorRecoveryMs (default 5 min, 1-30 min)
 
-RUNNING_LOW --> RUNNING_HIGH : PID ≥ 50%
-RUNNING_HIGH --> RUNNING_LOW : PID < 50%
-RUNNING_LOW --> POST_PURGE : No demand\n| Flame lost
-RUNNING_HIGH --> POST_PURGE : No demand\n| Flame lost
-RUNNING_LOW --> ERROR : Safety fault
-RUNNING_HIGH --> ERROR : Safety fault
+IDLE --> PRE_PURGE : heat demand AND active mode request\nAND safety OK AND minimum off-time (20 s) over
 
-state POST_PURGE {
-    POST_PURGE : Entry: Gas valve OFF, Fan ON
-    POST_PURGE : Do: Clear residual gases
-    POST_PURGE : Timer: 60 seconds
-    POST_PURGE : Exit: Cool down complete
-}
+PRE_PURGE --> IGNITION : after 2 s
+PRE_PURGE --> IDLE : mode request or\nheat demand withdrawn
+PRE_PURGE --> ERROR : safety failure
 
-POST_PURGE --> IDLE : Timer complete
-POST_PURGE --> LOCKOUT : Fault during\nshutdown
+IGNITION --> RUNNING_HIGH : flame after 3 s\n(high power requested and allowed)
+IGNITION --> RUNNING_LOW : flame after 3 s\n(high power not requested or not allowed)
+IGNITION --> PRE_PURGE : no flame at 5 s:\nretry (1st and 2nd failure)
+IGNITION --> LOCKOUT : 3rd failed attempt\nor 7 s backstop
+IGNITION --> ERROR : safety interlock failure\nor emergencyStop()
 
-state LOCKOUT {
-    LOCKOUT : Entry: Log fault to FRAM
-    LOCKOUT : Do: Wait for reset
-    LOCKOUT : Timer: 5 minutes minimum
-    LOCKOUT : Reason: Log error code
-    LOCKOUT : Exit: Publish MQTT alert
-}
+RUNNING_LOW --> RUNNING_HIGH : PID requests high power\n(15 s between changes, boiler below 80 °C)
+RUNNING_HIGH --> RUNNING_LOW : PID requests low power\n(15 s between changes)
 
-LOCKOUT --> IDLE : Manual reset\n& Timer expired
-LOCKOUT --> ERROR : Critical fault
+RUNNING_LOW --> MODE_SWITCHING : WATER_ON / HEATING_ON changed\n(safety OK, flame present)
+RUNNING_HIGH --> MODE_SWITCHING : WATER_ON / HEATING_ON changed\n(safety OK, flame present)
 
-state ERROR {
-    ERROR : Entry: Emergency shutdown
-    ERROR : Do: Log to FRAM
-    ERROR : All: Relays to safe position
-    ERROR : Notify: MQTT emergency
-    ERROR : Exit: Requires service
-}
+RUNNING_LOW --> POST_PURGE : stop (see note)
+RUNNING_HIGH --> POST_PURGE : stop (see note)
 
-ERROR --> [*] : Power cycle\nrequired
+RUNNING_LOW --> ERROR : safety interlock failure\nor emergencyStop()
+RUNNING_HIGH --> ERROR : safety interlock failure\nor emergencyStop()
 
-' Emergency transitions from any state
-IGNITION --> EmergencyStop : EMERGENCY_STOP\nevent
-RUNNING_LOW --> EmergencyStop : EMERGENCY_STOP\nevent
-RUNNING_HIGH --> EmergencyStop : EMERGENCY_STOP\nevent
+MODE_SWITCHING --> RUNNING_HIGH : relays switched\n(high power requested and allowed)
+MODE_SWITCHING --> RUNNING_LOW : relays switched (low power), or\ndemand reverted with running mode ON bit set
+MODE_SWITCHING --> POST_PURGE : no request for the new mode,\nrelay switch failed,\nrevert without ON bit after 15 s,\nor 30 s hard timeout
+MODE_SWITCHING --> ERROR : safety failure
 
-state EmergencyStop <<choice>>
-EmergencyStop --> ERROR : < 100ms\nshutdown
+POST_PURGE --> IDLE : after postPurgeMs (90 s)
+POST_PURGE --> PRE_PURGE : early restart: heat demand + active mode request\n+ safety OK + minimum off-time over,\nand the mode was not just disabled
 
-note right of PRE_PURGE
-  **Safety Checks:**
-  - Gas pressure OK
-  - Air pressure OK
-  - Temperature within limits
-  - Flame sensor ready
-  - No lockout active
-end note
+LOCKOUT --> IDLE : after 5 min\nor manual reset (MQTT)
+ERROR --> IDLE : after the recovery delay\nonce safety conditions pass
 
-note right of IGNITION
-  **Flame Detection:**
-  Currently simulated
-  Real sensor planned
-
-  **Retry Logic:**
-  1. Close gas valve
-  2. Wait 5 seconds
-  3. Try again (max 3)
-end note
-
-note right of RUNNING_LOW
-  **Relay States:**
-  R3 (BURNER_ENABLE): ON
-  R4 (POWER_SELECT): ON
-  R5 (WATER_MODE): per mode
-
-  **Power: 50%**
-  Modulated gas valve
+note right of IDLE
+  A latched heat demand without an active mode
+  request (HEATING_ON + HEATING request, or
+  WATER_ON + WATER request) is ignored.
 end note
 
 note right of RUNNING_HIGH
-  **Relay States:**
-  R3 (BURNER_ENABLE): ON
-  R4 (POWER_SELECT): OFF
-  R5 (WATER_MODE): per mode
+  Stop to POST_PURGE:
+  - explicit disable of the running mode or boiler:
+    immediate, bypasses the minimum on-time
+  - no active mode request for 10 s
+    (bypasses anti-flapping)
+  - heat demand ended or safety check failed,
+    once the 2 min minimum on-time is over
+  - flame lost (no flame sensor: flame means
+    the burner relays are active)
+  - mode change while a seamless switch is not possible
+  - power level relay fault on entering RUNNING_LOW/HIGH
+    (3rd within 10 min: emergency stop to ERROR)
 
-  **Power: 100%**
-  Full gas valve
+  High power is blocked while boiler output >= 80.0 °C.
 end note
 
-note right of LOCKOUT
-  **Lockout Reasons:**
-  - Max ignition failures
-  - Safety violations
-  - Communication errors
-  - Over-temperature
+note right of POST_PURGE
+  The burner never commands pumps.
+  PumpControlModule keeps them running
+  (follows HEATING_ON / WATER_ON, 5 min overrun).
+end note
 
-  **Recovery:**
-  Manual reset required
-  MQTT command or button
+note right of ERROR
+  emergencyStop() leads here from any state;
+  safety interlocks are checked continuously
+  in IGNITION, RUNNING_LOW and RUNNING_HIGH.
 end note
 
 @enduml

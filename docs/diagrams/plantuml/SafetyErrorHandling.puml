@@ -1,6 +1,19 @@
 @startuml SafetyErrorHandling
 !include theme.puml
 
+' File-local: stock PlantUML gives storage and database a light fill, which
+' leaves the theme's white text unreadable.
+skinparam storage {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
 title Safety and Error Handling - Four-Layer Protection\nCritical Safety Interlocks with FRAM Logging
 
 package "Error Detection Sources" {
@@ -9,81 +22,37 @@ package "Error Detection Sources" {
     component [Communication\nModbus Timeouts\nMQTT Disconnect] as CommErrors
     component [System Errors\nTask Watchdog\nMemory Failures] as SystemErrors
     component [Safety Sensors\nFlame Detection\nPressure (future)] as SafetySensors
+    component [Power Level Relay Fault\non entering RUNNING_LOW/HIGH] as PowerFault
 }
 
 package "Error Classification System" {
     component [ErrorHandler\nClassify Severity] as ErrorHandler
 
-    storage "Critical" as Critical {
-        Immediate shutdown
-        Manual reset required
-    }
+    storage "Critical\nImmediate shutdown\nERROR recovers automatically when safe" as Critical
 
-    storage "Major" as Major {
-        Degraded operation
-        Auto-recovery attempt
-    }
+    storage "Major\nDegraded operation\nAuto-recovery attempt" as Major
 
-    storage "Minor" as Minor {
-        Log & continue
-        Increment counter
-    }
+    storage "Minor\nLog & continue\nIncrement counter" as Minor
 
-    storage "Transient" as Transient {
-        Retry with backoff
-        Auto-clear on success
-    }
+    storage "Transient\nRetry with backoff\nAuto-clear on success" as Transient
 }
 
 package "Safety Monitors" {
-    component [Temperature Monitor] as TempMon {
-        Over-temp: > 95°C
-        Delta-T: > 30°C
-        Rate: > 5°C/min
-        Under-temp: < 5°C
-    }
+    component [Temperature Monitor\nOver-temp: > 95°C\nDelta-T: > 30°C\nRate: > 5°C/min\nUnder-temp: < 5°C] as TempMon
 
-    component [Task Watchdog] as Watchdog {
-        All critical tasks
-        20-30s timeouts
-        ESP-IDF integration
-    }
+    component [Task Watchdog\nAll critical tasks\n20-30s timeouts\nESP-IDF integration] as Watchdog
 
-    component [Safety Interlocks] as Interlocks {
-        Burner safety chain
-        Pump protection
-        15s sensor staleness
-    }
+    component [Safety Interlocks\nBurner safety chain\nPump protection\n15s sensor staleness] as Interlocks
 
-    component [Memory Monitor] as MemoryCheck {
-        Heap > 10KB free
-        Stack > 512B free
-        per task
-    }
+    component [Memory Monitor\nHeap > 10KB free\nStack > 512B free\nper task] as MemoryCheck
 }
 
 package "Error Actions" {
-    component [Emergency Shutdown\n< 100ms] as EmergencyStop {
-        1. Burner OFF
-        2. Relays safe
-        3. Pumps ON (heat dissipation)
-        4. Notify MQTT
-        5. Lockout
-    }
+    component [Emergency Shutdown\nBurner relays R1-R3 OFF\nPumps stay with PumpControlModule] as EmergencyStop
 
-    component [Degraded Mode] as DegradedMode {
-        Half power operation
-        Widen limits
-        Fallback control
-        Continue monitoring
-    }
+    component [Degraded Mode\nHalf power operation\nWiden limits\nFallback control\nContinue monitoring] as DegradedMode
 
-    component [Error Logging] as LogError {
-        Console output
-        FRAM storage
-        MQTT publish
-        Increment counters
-    }
+    component [Error Logging\nConsole output\nFRAM storage\nMQTT publish\nIncrement counters] as LogError
 }
 
 package "Error Storage (FRAM)" {
@@ -95,43 +64,21 @@ package "Error Storage (FRAM)" {
 }
 
 package "Recovery Mechanisms" {
-    component [Auto Recovery] as AutoRecovery {
-        Retry logic
-        Sensor reinit
-        Network reconnect
-        Backoff strategy
-    }
+    component [Auto Recovery\nRetry logic\nSensor reinit\nNetwork reconnect\nBackoff strategy] as AutoRecovery
 
-    component [Manual Reset] as ManualReset {
-        MQTT command
-        Physical button
-        Power cycle
-    }
+    component [Manual Reset\nMQTT burner_reset\nPhysical button] as ManualReset
 
-    component [Factory Reset] as FactoryReset {
-        Clear all data
-        Restore defaults
-        Full reinit
-    }
+    component [Burner SM Recovery\nERROR: automatic after errorRecoveryMs\n(default 5 min) once safe\nLOCKOUT: after 5 min or manual reset] as BurnerRecovery
+
+    component [Factory Reset\nClear all data\nRestore defaults\nFull reinit] as FactoryReset
 }
 
 package "Failsafe States" {
-    storage "Relay Failsafe" as RelayFailsafe {
-        All relays OFF
-        Pumps ON
-        Safe position
-    }
+    storage "Relay Failsafe\nBurner relays OFF\nPumps per PumpControlModule\n(ON during emergency dissipation)" as RelayFailsafe
 
-    storage "Temperature Failsafe" as TempFailsafe {
-        Assume 20°C
-        if sensor fails
-    }
+    storage "Temperature Failsafe\nAssume 20°C\nif sensor fails" as TempFailsafe
 
-    storage "Communication Failsafe" as CommFailsafe {
-        Local control only
-        Ignore MQTT
-        Autonomous mode
-    }
+    storage "Communication Failsafe\nLocal control only\nIgnore MQTT\nAutonomous mode" as CommFailsafe
 }
 
 package "Error Reporting" {
@@ -184,6 +131,14 @@ Major --> AutoRecovery
 ManualReset -.-> AutoRecovery : reset\nsuccessful
 Critical --> FactoryReset : critical\nfault
 
+' Power level relay fault
+PowerFault --> DegradedMode : DEGRADED failsafe logged,\ngraceful stop via POST_PURGE
+PowerFault --> EmergencyStop : 3rd fault\nwithin 10 min
+
+' Burner state machine recovery
+EmergencyStop --> BurnerRecovery : burner in ERROR
+ManualReset --> BurnerRecovery : burner_reset
+
 ' Failsafe
 EmergencyStop --> RelayFailsafe
 TempSensor --> TempFailsafe : on failure
@@ -196,98 +151,90 @@ Critical --> LEDStatus
 Critical --> MQTTReport : urgent
 
 note right of ErrorHandler
-  **Error Classification Logic:**
+  Error Classification Logic:
 
-  **Critical (Emergency Stop):**
+  Critical (Emergency Stop):
   - Over-temperature > 95°C
   - Rate of change > 5°C/min
   - Task watchdog timeout
   - Safety interlock broken
   - Multiple sensor failures
 
-  **Major (Degraded Mode):**
+  Major (Degraded Mode):
   - Delta-T > 30°C
   - Single sensor failure
   - Communication degraded
   - Low memory warning
 
-  **Minor (Log & Continue):**
+  Minor (Log & Continue):
   - Transient read errors
   - Network glitches
   - Queue pressure
 
-  **Transient (Retry):**
+  Transient (Retry):
   - Modbus timeouts
   - Sensor 0xE0 errors
   - MQTT reconnect
 end note
 
 note right of EmergencyStop
-  **Emergency Shutdown Sequence:**
-  Time budget: < 100ms
+  Emergency shutdown:
 
-  1. **Immediate** (< 1ms):
-     - Set EMERGENCY_STOP bit
-     - Stop all control loops
+  BurnerSystemController::emergencyShutdown()
+  - burner relays R1-R3 OFF (setRelayStateEmergency)
+  - pumps stay with PumpControlModule
 
-  2. **Hardware** (< 10ms):
-     - Burner OFF (R3)
-     - Gas valve CLOSED
-     - All relays to safe state
+  CentralizedFailsafe::emergencyStop() additionally
+  - forces heating and water pumps ON (F13 dissipation)
+  - sets EMERGENCY_STOP
+  - clears BOILER_ENABLED
+  - tells WheaterControlTask to end a running charge
 
-  3. **Safety** (< 50ms):
-     - Pumps ON (heat dissipation)
-     - Monitor temperatures
-
-  4. **Notification** (< 100ms):
-     - Log to FRAM
-     - MQTT emergency alert
-     - LED error code
-
-  5. **Lockout**:
-     - Manual reset required
-     - 5 minute minimum
+  Burner state machine recovery:
+  - ERROR: automatic after errorRecoveryMs
+    (default 5 min) once safety conditions pass
+  - LOCKOUT: after 5 min or manual reset
 end note
 
 note bottom of ErrorLog
-  **FRAM Error Logging:**
+  FRAM Error Logging:
 
-  **Structure (256 entries):**
+  Structure (256 entries):
   - Timestamp (from DS3231)
   - Error code & severity
   - Source module
   - Context data (temps, states)
   - CRC32 checksum
 
-  **Circular Buffer:**
+  Circular Buffer:
   - Oldest entry overwritten
   - Survives power loss
   - Queryable via MQTT
 
-  **Retention:**
+  Retention:
   - 256 last errors
   - Years of storage
   - Diagnostic gold mine
 end note
 
 note bottom of AutoRecovery
-  **Recovery Strategies:**
+  Recovery Strategies:
 
-  **Sensor Errors:**
+  Sensor Errors:
   1. Wait 1 second
   2. Reinit device
   3. Retry read
   4. Max 3 attempts
   5. Fallback to degraded
 
-  **Network Errors:**
+  Network Errors:
   1. Reconnect attempt
   2. Exponential backoff
   3. 1s, 2s, 4s, 8s...
   4. Max 60s delay
   5. Continue indefinitely
 
-  **Memory Errors:**
+  Memory Errors:
   1. Force garbage collection
   2. Clear non-critical buffers
   3. Reduce logging
