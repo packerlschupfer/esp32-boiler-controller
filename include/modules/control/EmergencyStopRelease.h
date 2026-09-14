@@ -57,6 +57,29 @@ namespace EmergencyStopRelease {
         return "emergency_release_refused:unknown";
     }
 
+    /**
+     * EMERGENCY_STOP is a level latch: BurnerControlTask reads it without clearing and
+     * stops the burner once per onset (clearing it there ended the pump heat dissipation
+     * within seconds and left emergency_reset nothing to release).
+     */
+    inline bool onsetDetected(bool emergencySet, bool& wasSet) {
+        const bool onset = emergencySet && !wasSet;
+        wasSet = emergencySet;
+        return onset;
+    }
+
+    // Heat dissipation while latched: both pumps run until the boiler output has cooled
+    constexpr int16_t DISSIPATION_END_TENTHS = 600;      // 60.0 °C - pumps may stop below this
+    constexpr int16_t DISSIPATION_RESTART_TENTHS = 650;  // 65.0 °C - pumps on again (hysteresis)
+
+    inline bool dissipationPumpOn(bool outputUsable, int16_t outputTenths, bool wasOn) {
+        if (!outputUsable) {
+            return true;  // invalid or stale boiler output: keep circulating
+        }
+        return wasOn ? outputTenths >= DISSIPATION_END_TENTHS
+                     : outputTenths >= DISSIPATION_RESTART_TENTHS;
+    }
+
 } // namespace EmergencyStopRelease
 
 #endif // EMERGENCY_STOP_RELEASE_H

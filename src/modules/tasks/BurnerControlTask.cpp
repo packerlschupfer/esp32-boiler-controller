@@ -313,28 +313,16 @@ void BurnerControlTask(void* parameter) {
         // Feed watchdog between each handler to prevent timeout during cascading failures
 
         // 1. Emergency stop has highest priority
-        // Round 20 Issue #3: Add state tracking to prevent re-entry within cooldown
-        // C5: Use atomic to prevent race with timer callbacks
-        static std::atomic<bool> emergencyStopActive{false};
-        static std::atomic<uint32_t> emergencyStopTime{0};
-        constexpr uint32_t EMERGENCY_COOLDOWN_MS = 5000;  // 5 second re-entry prevention
-
-        // Use atomic read-and-clear to prevent race condition
-        EventBits_t emergencyBits = xEventGroupWaitBits(
-            cachedHandles.systemStateEventGroup,
-            SystemEvents::SystemState::EMERGENCY_STOP,
-            pdTRUE,   // Clear bits on exit (atomic with read)
-            pdFALSE,  // Wait for any bit
-            0         // No wait - just check current state
-        );
-        if ((emergencyBits & SystemEvents::SystemState::EMERGENCY_STOP) && !emergencyStopActive.load()) {
-            emergencyStopActive.store(true);
-            emergencyStopTime.store(millis());
+        // 2026-09-14: EMERGENCY_STOP is a level latch (released by boiler/cmd/emergency_reset,
+        // sensor-fallback recovery or a reboot). It was read-and-cleared here, which ended the
+        // pump heat dissipation within seconds and left the release command nothing to release.
+        // Read without clearing and stop the burner once per onset.
+        static bool emergencyStopWasSet = false;
+        const bool emergencyStopSet =
+            (xEventGroupGetBits(cachedHandles.systemStateEventGroup) & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+        if (EmergencyStopRelease::onsetDetected(emergencyStopSet, emergencyStopWasSet)) {
             LOG_ERROR(TAG, "Emergency stop initiated");
             BurnerStateMachine::emergencyStop();
-        } else if (emergencyStopActive.load() && Utils::elapsedMs(emergencyStopTime.load()) > EMERGENCY_COOLDOWN_MS) {
-            // Allow re-triggering after cooldown period
-            emergencyStopActive.store(false);
         }
         (void)SRP::getTaskManager().feedWatchdog();
 

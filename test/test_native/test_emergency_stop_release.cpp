@@ -51,3 +51,27 @@ void test_emergency_release_refused_on_sensor_or_system_errors() {
     TEST_ASSERT_TRUE(evaluate(c) == Result::SYSTEM_ERRORS);
     TEST_ASSERT_TRUE(std::strncmp(toString(Result::SYSTEM_ERRORS), "emergency_release_refused", 25) == 0);
 }
+
+void test_emergency_stop_onset_once_per_latch() {
+    // 2026-09-14: the burner task read-and-cleared the bit; it now reacts once per onset
+    bool wasSet = false;
+    TEST_ASSERT_FALSE(onsetDetected(false, wasSet));
+    TEST_ASSERT_TRUE(onsetDetected(true, wasSet));
+    TEST_ASSERT_FALSE(onsetDetected(true, wasSet));   // still latched: no repeat
+    TEST_ASSERT_FALSE(onsetDetected(false, wasSet));  // released
+    TEST_ASSERT_TRUE(onsetDetected(true, wasSet));    // new emergency stop
+}
+
+void test_emergency_dissipation_until_boiler_cooled() {
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 1150, true));
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 600, true));
+    TEST_ASSERT_FALSE(dissipationPumpOn(true, 599, true));
+    // Hysteresis: once stopped, on again only from 65.0 °C
+    TEST_ASSERT_FALSE(dissipationPumpOn(true, 640, false));
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 650, false));
+}
+
+void test_emergency_dissipation_without_usable_output() {
+    TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, false));
+    TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, true));
+}

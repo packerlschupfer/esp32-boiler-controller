@@ -10,7 +10,11 @@
 #include "config/SystemSettingsStruct.h"
 #include "events/SystemEventsGenerated.h"
 #include "modules/control/ReturnPreheater.h"  // For yield during preheating
+#include "modules/control/EmergencyStopRelease.h"  // Emergency heat dissipation rule
+#include "core/StateManager.h"
+#include "shared/SharedSensorReadings.h"
 #include "LoggingMacros.h"
+#include <MutexGuard.h>
 #include <TaskManager.h>
 #include <RuntimeStorage.h>
 
@@ -134,6 +138,9 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
     uint32_t overrunStartTime = 0;
     bool inOverrun = false;
 
+    // Emergency heat dissipation (starts ON at every emergency stop onset)
+    bool dissipating = true;
+
     while (true) {
         // Feed watchdog
         (void)SRP::getTaskManager().feedWatchdog();
@@ -155,7 +162,33 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         // the exchanger. The failsafe explicitly turns pumps ON for dissipation;
         // without this override PumpControlModule would compute Off (systemEnabled
         // false) and stop the pump within one 500ms cycle, defeating the failsafe.
-        bool emergencyDissipation = (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+        // While EMERGENCY_STOP is latched the pumps run until the boiler output is below
+        // 60.0 °C (again from 65.0 °C, always without a usable reading).
+        bool emergencyDissipation = false;
+        if (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) {
+            bool outputUsable = false;
+            Temperature_t output = 0;
+            {
+                MutexGuard guard(SRP::getSensorReadingsMutex(), pdMS_TO_TICKS(50));
+                if (guard.hasLock()) {
+                    const SharedSensorReadings& readings = SRP::getSensorReadings();
+                    outputUsable = readings.isBoilerTempOutputValid;
+                    output = readings.boilerTempOutput;
+                }
+            }
+            outputUsable = outputUsable &&
+                           !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT);
+
+            const bool wasDissipating = dissipating;
+            dissipating = EmergencyStopRelease::dissipationPumpOn(outputUsable, output, dissipating);
+            if (wasDissipating != dissipating) {
+                LOG_WARN(TAG, "Emergency heat dissipation %s (boiler output %d.%d°C)",
+                         dissipating ? "resumed" : "done", output / 10, abs(output % 10));
+            }
+            emergencyDissipation = dissipating;
+        } else {
+            dissipating = true;
+        }
 
         // Pump should be on if system is enabled AND in the appropriate mode
         bool modeActive = (systemBits & config->modeActiveBit) != 0;
@@ -198,8 +231,8 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         }
 
         // F13: emergency heat-dissipation has final say - keep the pump running
-        // for as long as the emergency-stop latch is set, regardless of enabled
-        // state, overrun, or preheating.
+        // while the emergency-stop latch is set and the boiler is still hot,
+        // regardless of enabled state, overrun, or preheating.
         if (emergencyDissipation) {
             desiredState = PumpState::On;
             inOverrun = false;
