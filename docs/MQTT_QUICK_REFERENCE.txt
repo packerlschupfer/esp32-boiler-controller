@@ -1,0 +1,59 @@
+ESPlan Boiler Controller - MQTT Quick Reference
+==============================================
+
+Connection:
+  Host: 192.168.20.27:1883  (MQTT_SERVER in src/config/ProjectConfig.h and
+                             platformio.ini [base_prod]; [base_dev]: 192.168.20.16)
+  User: YOUR_MQTT_USER
+  Pass: YOUR_MQTT_PASSWORD
+
+Control Commands (topic boiler/cmd/<command>):
+  boiler/cmd/system      on|off|reboot|nvs_erase               # Master boiler switch (also enable/disable/1/0)
+  boiler/cmd/heating     on|off|override_on|override_off|normal
+  boiler/cmd/water       on|off|override_on|override_off|normal|priority_on|priority_off
+  boiler/cmd/room_target 21.5                                  # Room target in °C (15.0-30.0)
+  boiler/cmd/pid_autotune start|stop|status|params|method:<name>
+
+Safety:
+  boiler/cmd/burner_reset    lockout|reset   # Leave burner LOCKOUT (no effect in ERROR)
+  boiler/cmd/emergency_reset reset           # Release a latched emergency stop once its causes cleared
+                                             # Result on boiler/status/burner:
+                                             #   emergency_released | emergency_not_active |
+                                             #   emergency_release_refused:<temperature_high|sensors_unavailable|system_errors>
+
+Safety Configuration:
+  boiler/cmd/config/sensor_stale_ms    30000-300000
+  boiler/cmd/config/pump_protection_ms 5000-60000
+  boiler/cmd/config/post_purge_ms      30000-180000
+
+Temperature Settings (payload in tenths of °C):
+  boiler/params/set/heating/targetTemp       215   # Room target (100-300)
+  boiler/params/set/heating/hysteresis       5     # Heating hysteresis (1-20)
+  boiler/params/set/wheater/tempLimitLow     450   # Water start (300-600)
+  boiler/params/set/wheater/tempLimitHigh    650   # Water stop (500-850)
+  Keep tempLimitLow < tempLimitHigh: when raising both send High first, when lowering send Low first.
+
+Parameter Management:
+  boiler/params/set/<name>  <value>   # Change a parameter
+  boiler/params/get/<name>  (empty)   # Publish to boiler/params/status/<name>
+  boiler/params/get/all     (empty)   # Publish all parameters
+  boiler/params/list        (empty)   # Names to boiler/params/list/response
+  boiler/params/save        (empty)   # Save to NVS
+
+Error Log:
+  errors/list      20       # Last N errors (1-50, empty = 10)
+  errors/stats | errors/critical | errors/clear | errors/dump
+
+Status Topics:
+  boiler/status/sensors          # Temperatures (tenths °C), pressure, relay bits, every 10 s
+  boiler/status/burner           # ERROR status, reset command results
+  boiler/status/device/firmware  # Firmware version
+  boiler/status/online           # Online / LWT
+
+Monitor All Topics:
+  mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD -t "boiler/#" -v
+
+Diagnostics:
+  scripts/diagnose_mqtt.sh
+
+Full reference: docs/MQTT_API.md

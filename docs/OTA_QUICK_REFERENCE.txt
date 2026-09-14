@@ -1,0 +1,72 @@
+ESPlan Boiler Controller - OTA Quick Reference
+============================================
+
+Prerequisites:
+- Device IP: 192.168.20.40 (ETH_STATIC_IP default in src/config/ProjectConfig.h,
+  same in platformio.ini [base_prod] and upload_port of the esp32dev_ota_* envs;
+  [base_dev] builds use 192.168.20.41)
+- OTA Password: -DOTA_PASSWORD in credentials.ini (ProjectConfig.h default: update-password)
+  must match --auth in the env's upload_flags
+- OTA Port: 3232
+
+Quick Update Commands:
+---------------------
+# Using PlatformIO (espota)
+pio run -e esp32dev_ota_release -t upload
+
+# Other device IP
+pio run -e esp32dev_ota_release -t upload --upload-port 192.168.20.40
+
+# Check device connectivity
+ping 192.168.20.40
+
+Monitoring (MQTT):
+-----------------
+# Free heap (heap_free, heap_min, heap_max_blk, heap_frag)
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD -t "boiler/status/health" -v
+# Firmware version / online after the reboot
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD -t "boiler/status/device/firmware" -t "boiler/status/online" -v
+
+Note: OTA has no MQTT command and publishes no MQTT progress/status
+(OTATask::initWithMQTT() is never called); no diagnostics/... topics exist.
+
+Memory Requirements:
+-------------------
+- Minimum free heap: 100KB
+- Firmware size: ~1.2MB (release)
+- Update duration: 30-60 seconds
+
+Troubleshooting:
+---------------
+1. Authentication failed
+   - Check -DOTA_PASSWORD in credentials.ini and --auth in upload_flags
+   - Rebuild and upload via USB
+
+2. Connection failed
+   - Verify device IP
+   - Check --host_ip in upload_flags is this computer
+   - Check network connectivity
+   - Ensure port 3232 not blocked
+
+3. Not enough memory
+   - Check heap_free / heap_max_blk on boiler/status/health
+   - Use release build (smaller)
+   - Wait for idle period
+
+Recovery:
+---------
+If OTA fails, connect via USB:
+pio run -e esp32dev_usb_release -t upload --upload-port /dev/ttyACM0
+
+Build Environments:
+------------------
+esp32dev_ota_release       - Production (smallest)
+esp32dev_ota_debug_selective - Some debug output
+esp32dev_ota_debug_full    - Full debug (largest)
+
+Safety Notes:
+------------
+- Device auto-reboots after successful update
+- Rollback occurs if new firmware fails to boot
+- Critical tasks suspended during update
+- Watchdog disabled during transfer
