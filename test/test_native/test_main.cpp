@@ -69,6 +69,8 @@ void test_bsm_step_post_purge_restarts_when_demand_returns();
 void test_bsm_step_post_purge_no_restart_without_mode_request();
 void test_bsm_step_post_purge_no_restart_of_disabled_mode();
 void test_bsm_step_post_purge_restart_requires_safety();
+void test_bsm_step_ignition_failure_retries_then_locks_out();
+void test_bsm_step_ignition_retry_success_resets_counter();
 
 // Burner demand gate (who may arm the heat demand)
 void test_gate_hot_boiler_request_does_not_arm();
@@ -574,6 +576,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bsm_step_post_purge_no_restart_without_mode_request);
     RUN_TEST(test_bsm_step_post_purge_no_restart_of_disabled_mode);
     RUN_TEST(test_bsm_step_post_purge_restart_requires_safety);
+    RUN_TEST(test_bsm_step_ignition_failure_retries_then_locks_out);
+    RUN_TEST(test_bsm_step_ignition_retry_success_resets_counter);
 
     // Burner demand gate (who may arm the heat demand)
     RUN_TEST(test_gate_hot_boiler_request_does_not_arm);

@@ -4,7 +4,7 @@
  *
  * Replays tick sequences through the real transition function. The simulator
  * mirrors StateMachine::update(): state timeouts (PRE_PURGE 2 s -> IGNITION,
- * IGNITION 5 s -> LOCKOUT) are checked before the step, and entering IGNITION
+ * IGNITION backstop 7 s -> LOCKOUT) are checked before the step, and entering IGNITION
  * records the running mode like onEnterIgnition().
  */
 
@@ -23,6 +23,8 @@ constexpr uint32_t TICK_MS = 100;
 constexpr uint32_t PRE_PURGE_TIME_MS = 2000;     // SystemConstants::Burner::PRE_PURGE_TIME_MS
 constexpr uint32_t IGNITION_TIME_MS = 5000;      // SystemConstants::Burner::IGNITION_TIME_MS
 constexpr uint32_t MIN_IGNITION_TIME_MS = 3000;  // SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS
+constexpr uint32_t IGNITION_STATE_TIMEOUT_MS =    // BurnerStateMachine IGNITION StateMachine timeout
+    IGNITION_TIME_MS + BurnerTransitionPolicy::IGNITION_BACKSTOP_MARGIN_MS;
 
 class FakeEnvironment : public Environment {
 public:
@@ -83,10 +85,12 @@ struct Simulator {
     bool highPower;
     Decision last;
     int visits[9];
+    uint32_t tickMs;
 
     Simulator()
         : memory(Memory()), timing(Timing()), state(BurnerSMState::IDLE),
-          nowMs(1000), entryMs(1000), heatDemand(false), highPower(false), last(Decision()) {
+          nowMs(1000), entryMs(1000), heatDemand(false), highPower(false), last(Decision()),
+          tickMs(TICK_MS) {
         timing.ignitionMinTimeMs = MIN_IGNITION_TIME_MS;
         timing.ignitionTimeoutMs = IGNITION_TIME_MS;
         timing.maxIgnitionRetries = 3;
@@ -114,14 +118,14 @@ struct Simulator {
     }
 
     void tick() {
-        nowMs += TICK_MS;
+        nowMs += tickMs;
         const uint32_t inState = nowMs - entryMs;
         // StateMachine::update(): timeout first (strictly greater), then the handler
         if (state == BurnerSMState::PRE_PURGE && inState > PRE_PURGE_TIME_MS) {
             enter(BurnerSMState::IGNITION);
             return;
         }
-        if (state == BurnerSMState::IGNITION && inState > IGNITION_TIME_MS) {
+        if (state == BurnerSMState::IGNITION && inState > IGNITION_STATE_TIMEOUT_MS) {
             enter(BurnerSMState::LOCKOUT);
             return;
         }
@@ -507,4 +511,43 @@ void test_bsm_step_post_purge_restart_requires_safety() {
     sim.run(1000);
     TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
     TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}
+
+// --- Ignition retries -------------------------------------------------------
+
+// BurnerControlTask ticks do not land exactly on IGNITION_TIME_MS. With the
+// StateMachine timeout at the same 5 s (checked before the handler) the first
+// tick past 5 s locked out after a single attempt.
+void test_bsm_step_ignition_failure_retries_then_locks_out() {
+    sim = Simulator();
+    sim.tickMs = 130;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.flame = false;  // burner never reports active
+    for (int i = 0; i < 400 && sim.state != BurnerSMState::LOCKOUT; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::LOCKOUT);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::IGNITION_LOCKOUT);
+    TEST_ASSERT_EQUAL_INT(3, sim.visitsOf(BurnerSMState::IGNITION));
+    TEST_ASSERT_EQUAL_INT(3, sim.visitsOf(BurnerSMState::PRE_PURGE));  // start + 2 retries
+}
+
+void test_bsm_step_ignition_retry_success_resets_counter() {
+    sim = Simulator();
+    sim.tickMs = 130;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.flame = false;
+    for (int i = 0; i < 400 && sim.visitsOf(BurnerSMState::IGNITION) < 2; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_EQUAL_INT(2, sim.visitsOf(BurnerSMState::IGNITION));
+    TEST_ASSERT_EQUAL_INT(1, sim.memory.ignitionRetries);
+    sim.env.flame = true;  // second attempt lights
+    for (int i = 0; i < 100 && !isRunning(); i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(isRunning());
+    TEST_ASSERT_EQUAL_INT(0, sim.memory.ignitionRetries);
 }

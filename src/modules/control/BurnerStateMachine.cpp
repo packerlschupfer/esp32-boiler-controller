@@ -106,7 +106,8 @@ void BurnerStateMachine::initialize() {
         .handler = handleIgnitionState,
         .onEntry = onEnterIgnition,
         .onExit = nullptr,
-        .timeoutMs = IGNITION_TIME_MS,
+        // Backstop only: the handler retries (PRE_PURGE) or locks out at IGNITION_TIME_MS
+        .timeoutMs = IGNITION_TIME_MS + BurnerTransitionPolicy::IGNITION_BACKSTOP_MARGIN_MS,
         .timeoutNextState = BurnerSMState::LOCKOUT
     });
     
