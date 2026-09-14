@@ -27,7 +27,6 @@ public:
         WATER_FLOW_FAILURE,
         PRESSURE_EXCEEDED,
         FLAME_DETECTION_FAILURE,
-        RUNTIME_EXCEEDED,
         EMERGENCY_STOP_ACTIVE,
         INSUFFICIENT_SENSORS,
         HARDWARE_INTERLOCK_OPEN,
@@ -39,10 +38,6 @@ public:
         // Temperature limits
         Temperature_t maxBoilerTemp;
         Temperature_t maxWaterTemp;
-
-        // Runtime limits
-        uint32_t maxContinuousRuntimeMs;
-        uint32_t maxDailyRuntimeMs;
 
         // Sensor requirements
         uint8_t minRequiredSensors;
@@ -57,10 +52,8 @@ public:
 
         // Constructor with defaults
         SafetyConfig()
-            : maxBoilerTemp(tempFromWhole(85))     // 85.0°C
+            : maxBoilerTemp(SystemConstants::Temperature::MAX_BOILER_TEMP_C)  // 110.0°C, as burner start check and SafetyInterlocks
             , maxWaterTemp(tempFromWhole(65))      // 65.0°C
-            , maxContinuousRuntimeMs(3600000)
-            , maxDailyRuntimeMs(14400000)
             , minRequiredSensors(2)
             , sensorTimeoutMs(30000)
             , pumpStartupTimeMs(5000)
@@ -122,17 +115,8 @@ public:
 
 private:
     // Thread protection for static members
-    static SemaphoreHandle_t stateMutex_;
     static constexpr TickType_t MUTEX_TIMEOUT = pdMS_TO_TICKS(100);
-    static void initMutex();
 
-    // Track runtime for limits
-    static uint32_t lastBurnerStartTime;
-    static uint32_t totalRuntimeToday;
-    static uint32_t lastDayReset;
-
-    // Reset daily runtime counter
-    static void checkDailyReset();
 };
 
 #endif // BURNER_SAFETY_VALIDATOR_H

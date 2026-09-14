@@ -20,16 +20,6 @@
 static const char* TAG = "BurnerSafetyValidator";
 
 // Static member definitions
-SemaphoreHandle_t BurnerSafetyValidator::stateMutex_ = nullptr;
-uint32_t BurnerSafetyValidator::lastBurnerStartTime = 0;
-uint32_t BurnerSafetyValidator::totalRuntimeToday = 0;
-uint32_t BurnerSafetyValidator::lastDayReset = 0;
-
-void BurnerSafetyValidator::initMutex() {
-    if (stateMutex_ == nullptr) {
-        stateMutex_ = xSemaphoreCreateMutex();
-    }
-}
 
 BurnerSafetyValidator::ValidationResult BurnerSafetyValidator::validateBurnerOperation(
     const SharedSensorReadings& readings,
@@ -73,40 +63,6 @@ BurnerSafetyValidator::ValidationResult BurnerSafetyValidator::validateBurnerOpe
         return ValidationResult::TEMPERATURE_EXCEEDED;
     }
 
-    // 4. Check runtime limits (protected by mutex)
-    checkDailyReset();  // checkDailyReset has its own mutex protection
-    {
-        uint32_t currentRuntime = 0;
-        uint32_t dailyRuntime = 0;
-        uint32_t startTime = 0;
-
-        // RAII guard for state access
-        {
-            initMutex();
-            auto guard = MutexRetryHelper::acquireGuard(stateMutex_, "checkRuntime");
-            if (guard) {
-                uint32_t now = millis();
-                startTime = lastBurnerStartTime;
-                dailyRuntime = totalRuntimeToday;
-                if (startTime > 0) {
-                    currentRuntime = now - startTime;
-                }
-            }
-        }  // Guard auto-releases
-
-        if (startTime > 0 && currentRuntime > config.maxContinuousRuntimeMs) {
-            LOG_ERROR(TAG, "Continuous runtime %lu ms exceeds limit %lu ms",
-                     currentRuntime, config.maxContinuousRuntimeMs);
-            return ValidationResult::RUNTIME_EXCEEDED;
-        }
-
-        if (dailyRuntime > config.maxDailyRuntimeMs) {
-            LOG_ERROR(TAG, "Daily runtime %lu ms exceeds limit %lu ms",
-                     dailyRuntime, config.maxDailyRuntimeMs);
-            return ValidationResult::RUNTIME_EXCEEDED;
-        }
-    }
-    
     // 5. Check system pressure (critical for safety)
     if (readings.isSystemPressureValid) {
         using namespace SystemConstants::Safety::Pressure;
@@ -277,21 +233,6 @@ bool BurnerSafetyValidator::checkHardwareInterlocks() {
     return true;  // Always returns true - no hardware interlocks wired
 }
 
-void BurnerSafetyValidator::checkDailyReset() {
-    // RAII guard for state access
-    initMutex();
-    auto guard = MutexRetryHelper::acquireGuard(stateMutex_, "checkDailyReset");
-    if (!guard) return;
-
-    // H1: Use Utils::elapsedMs() for safe elapsed time (handles millis() wraparound)
-    if (Utils::elapsedMs(lastDayReset) > SystemConstants::Timing::MS_PER_DAY) {
-        totalRuntimeToday = 0;
-        lastDayReset = millis();
-        LOG_INFO(TAG, "Daily runtime counter reset");
-    }
-    // Guard auto-releases
-}
-
 const char* BurnerSafetyValidator::getValidationErrorMessage(ValidationResult result) {
     switch (result) {
         case ValidationResult::SAFE_TO_OPERATE:
@@ -308,8 +249,6 @@ const char* BurnerSafetyValidator::getValidationErrorMessage(ValidationResult re
             return "Pressure limit exceeded";
         case ValidationResult::FLAME_DETECTION_FAILURE:
             return "No flame detected";
-        case ValidationResult::RUNTIME_EXCEEDED:
-            return "Runtime limit exceeded";
         case ValidationResult::EMERGENCY_STOP_ACTIVE:
             return "Emergency stop is active";
         case ValidationResult::INSUFFICIENT_SENSORS:
