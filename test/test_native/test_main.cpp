@@ -44,6 +44,11 @@ void test_power_fault_window_restarts_after_ten_minutes();
 void test_water_limits_valid_only_when_low_below_high();
 void test_water_charge_latch_resumes_only_while_latched();
 
+// Autotune relay settings (amplitude, hysteresis)
+void test_autotune_amplitude_setting_used_within_range();
+void test_autotune_hysteresis_setting_used_within_range();
+void test_autotune_amplitude_vs_two_stage_swing();
+
 // Burner transitions (state machine scenarios through BurnerTransitions::step)
 void test_bsm_step_idle_without_demand_skips_safety_check();
 void test_bsm_step_stale_demand_never_starts_burner();
@@ -550,6 +555,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_power_fault_window_restarts_after_ten_minutes);
     RUN_TEST(test_water_limits_valid_only_when_low_below_high);
     RUN_TEST(test_water_charge_latch_resumes_only_while_latched);
+
+    // Autotune relay settings (amplitude, hysteresis)
+    RUN_TEST(test_autotune_amplitude_setting_used_within_range);
+    RUN_TEST(test_autotune_hysteresis_setting_used_within_range);
+    RUN_TEST(test_autotune_amplitude_vs_two_stage_swing);
 
     // Burner transitions (state machine scenarios through BurnerTransitions::step)
     RUN_TEST(test_bsm_step_idle_without_demand_skips_safety_check);

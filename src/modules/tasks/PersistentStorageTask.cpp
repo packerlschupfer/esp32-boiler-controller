@@ -1,6 +1,7 @@
 // src/modules/tasks/PersistentStorageTask.cpp
 // Persistent storage task - handles parameter save/load operations
 #include "PersistentStorageTask.h"
+#include "modules/control/AutotuneRelayConfig.h"  // autotune setting ranges
 #include <TaskManager.h>
 #include "LoggingMacros.h"
 #include "core/SystemResourceProvider.h"
@@ -294,10 +295,12 @@ void PersistentStorageTask(void* pvParameters) {
 
     // PID auto-tuning configuration
     storage->registerFloat("pid/autotune/amplitude", &settings.autotuneRelayAmplitude,
-                          10.0f, 100.0f, "Auto-tune relay amplitude (%)");
+                          AutotuneRelayConfig::AMPLITUDE_MIN, AutotuneRelayConfig::AMPLITUDE_MAX,
+                          "Auto-tune relay output half-swing (%), 50 = OFF/FULL two-stage burner");
 
     storage->registerFloat("pid/autotune/hysteresis", &settings.autotuneHysteresis,
-                          0.5f, 10.0f, "Auto-tune hysteresis band (°C)");
+                          AutotuneRelayConfig::HYSTERESIS_MIN, AutotuneRelayConfig::HYSTERESIS_MAX,
+                          "Auto-tune relay switching band around the setpoint (°C)");
 
     storage->registerInt("pid/autotune/method", &settings.autotuneMethod,
                         0, 4, "Auto-tune method (0=ZN_PI,1=ZN_PID,2=TL,3=CC,4=Lambda)");

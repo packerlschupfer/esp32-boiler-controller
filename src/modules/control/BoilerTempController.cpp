@@ -1,5 +1,6 @@
 // src/modules/control/BoilerTempController.cpp
 #include "modules/control/BoilerTempController.h"
+#include "modules/control/AutotuneRelayConfig.h"  // autotune amplitude/hysteresis settings
 #include "modules/control/BurnerAntiFlapping.h"
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/PIDGainFixedPoint.h"
@@ -617,6 +618,20 @@ bool BoilerTempController::setTuningMethod(const char* method) {
 }
 
 bool BoilerTempController::startAutoTuning(Temperature_t setpoint) {
+    // Relay test parameters from settings (pid/autotune/amplitude, pid/autotune/hysteresis),
+    // read before taking mutex_ so the settings mutex is never held behind it
+    float relayAmplitude = SystemConstants::PID::Autotune::DEFAULT_RELAY_AMPLITUDE;
+    float hysteresis = SystemConstants::PID::Autotune::DEFAULT_RELAY_HYSTERESIS;
+    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
+        const SystemSettings& settings = SRP::getSystemSettings();
+        relayAmplitude = AutotuneRelayConfig::amplitudeOrDefault(settings.autotuneRelayAmplitude, relayAmplitude);
+        hysteresis = AutotuneRelayConfig::hysteresisOrDefault(settings.autotuneHysteresis, hysteresis);
+        SRP::giveSystemSettingsMutex();
+    } else {
+        LOG_WARN(TAG, "startAutoTuning: settings mutex timeout - using default amplitude %.1f%% / hysteresis %.1f°C",
+                 relayAmplitude, hysteresis);
+    }
+
     MutexGuard guard(mutex_, MUTEX_TIMEOUT);
     if (!guard.hasLock()) {
         LOG_ERROR(TAG, "startAutoTuning: mutex timeout");
@@ -633,9 +648,13 @@ bool BoilerTempController::startAutoTuning(Temperature_t setpoint) {
         return false;
     }
 
-    // Use relay feedback test parameters
-    float relayAmplitude = 50.0f;  // 50% output swing (HALF power)
-    float hysteresis = 1.0f;       // 1°C hysteresis band
+    // The relay test below drives the burner OFF <-> FULL (updateAutoTuning), a half-swing
+    // of 50 %. Another amplitude is used as-is in Ku = 4d/(pi a) and scales the gains.
+    if (!AutotuneRelayConfig::matchesOutputSwing(relayAmplitude, AutotuneRelayConfig::TWO_STAGE_SWING)) {
+        LOG_WARN(TAG, "Autotune amplitude %.1f%% differs from the OFF/FULL output swing (%.0f%%) - tuned gains scale by %.2f",
+                 relayAmplitude, AutotuneRelayConfig::TWO_STAGE_SWING,
+                 AutotuneRelayConfig::gainScale(relayAmplitude, AutotuneRelayConfig::TWO_STAGE_SWING));
+    }
     float setpointFloat = tempToFloat(setpoint);
 
     if (autoTuner_->startTuning(setpointFloat, relayAmplitude, hysteresis, tuningMethod_)) {

@@ -71,8 +71,8 @@ struct SystemSettings {
     bool useBoilerTempPID = true;       // true = PID-driven bang-bang (DEFAULT), false = simple bang-bang
 
     // PID Auto-Tuning Configuration
-    float autotuneRelayAmplitude = 40.0f;   // Relay output amplitude (0-100%)
-    float autotuneHysteresis = 2.0f;        // Hysteresis band in °C
+    float autotuneRelayAmplitude = 50.0f;   // Relay output half-swing (%): 50 = OFF/FULL on a two-stage burner
+    float autotuneHysteresis = 1.0f;        // Relay switching band around the setpoint (°C)
     int32_t autotuneMethod = 0;             // Tuning method: 0=ZN_PI, 1=ZN_PID, 2=TL, 3=CC, 4=Lambda (PI: relay period ~9 min makes Kd absurd)
 
     // System Enable States (persisted - survive reboot)
@@ -163,8 +163,8 @@ struct SystemSettings {
         float wHeaterKi = 0.5f,
         float wHeaterKd = 0.1f,
         bool useBoilerTempPID = true,
-        float autotuneRelayAmplitude = 40.0f,
-        float autotuneHysteresis = 2.0f,
+        float autotuneRelayAmplitude = 50.0f,
+        float autotuneHysteresis = 1.0f,
         int32_t autotuneMethod = 0)
         : wheaterPriorityEnabled(wheaterPriorityEnabled),
           wHeaterConfTempLimitLow(wHeaterConfTempLimitLow),
