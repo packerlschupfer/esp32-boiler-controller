@@ -198,12 +198,21 @@ Result<void> BurnerSystemController::emergencyShutdown(const char* reason) {
     LOG_ERROR(TAG, "EMERGENCY SHUTDOWN: %s", reason);
 
     // Bypass mutex - emergency takes priority
-    // Turn off ALL relays immediately
-    bool relaySuccess = RelayControlTask::setAllRelays(false);
+    // Turn off the burner relays only, bypassing rate limiting. The pumps belong to
+    // PumpControlModule (mode bits, overrun, F13 emergency dissipation); the burner
+    // never commands them. setAllRelays(false) also switched the pumps off, and
+    // PumpControlModule only writes on its own state changes, so they stayed off
+    // with the exchanger still hot (2026-09-14 15:41:28).
+    bool relaySuccess = true;
+    for (uint8_t index : {RelayIndex::BURNER_ENABLE, RelayIndex::POWER_BOOST, RelayIndex::WATER_MODE}) {
+        if (!RelayControlTask::setRelayStateEmergency(RelayIndex::toPhysical(index), false)) {
+            relaySuccess = false;
+        }
+    }
 
     // C2: Enhanced error handling for relay failure during emergency
     if (!relaySuccess) {
-        LOG_ERROR(TAG, "CRITICAL: setAllRelays FAILED during emergency shutdown!");
+        LOG_ERROR(TAG, "CRITICAL: burner relay shutdown FAILED during emergency shutdown!");
         LOG_ERROR(TAG, "Physical safety devices (thermal fuse, pressure relief) are last line of defense");
 
         // Set error bit so monitoring can detect this critical failure
