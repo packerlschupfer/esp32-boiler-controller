@@ -18,8 +18,13 @@
  * just ended:
  *   - OFF phase ended (relay now ON)  -> peak   = max over that OFF phase
  *   - ON phase ended  (relay now OFF) -> trough = min over that ON phase
- * The initial phase (not started by a switch, e.g. warm-up from cold) is
- * ignored, otherwise the cold start would be reported as a trough.
+ * The initial phase is ignored: both a phase that was not started by a switch
+ * and a phase started by a switch at the very first sample (PIDAutoTuner starts
+ * with the relay OFF, so a cold boiler switches ON immediately) are warm-up,
+ * otherwise the start temperature would be reported as a trough.
+ *
+ * Calling sample() and then onSwitch() for the same sample is allowed (that is
+ * what PIDAutoTuner::relayControl() does): samples are counted by timestamp.
  *
  * Header-only and FreeRTOS-free so it can be unit tested natively.
  */
@@ -38,15 +43,22 @@ namespace RelayExtrema {
 
         void reset() {
             phaseStartedBySwitch_ = false;
-            haveSample_ = false;
+            sampleCount_ = 0;
+            lastSampleTime_ = 0.0f;
             phaseMax_ = phaseMin_ = 0.0f;
             phaseMaxTime_ = phaseMinTime_ = 0.0f;
         }
 
         void sample(float temp, float time) {
-            if (!haveSample_) {
+            if (sampleCount_ == 0) {
                 startPhase(temp, time);
+                sampleCount_ = 1;
+                lastSampleTime_ = time;
                 return;
+            }
+            if (time != lastSampleTime_) {
+                sampleCount_++;
+                lastSampleTime_ = time;
             }
             if (temp > phaseMax_) {
                 phaseMax_ = temp;
@@ -59,11 +71,8 @@ namespace RelayExtrema {
         }
 
         Event onSwitch(bool newRelayOn, float temp, float time) {
-            // PIDAutoTuner starts with the relay OFF, so a cold boiler switches it
-            // ON at the very first sample. That phase is the warm-up, not a real
-            // oscillation phase, and must not produce a trough.
-            bool firstSample = !haveSample_;
             sample(temp, time);
+            bool switchAtFirstSample = (sampleCount_ <= 1);
 
             Event event = {false, false, 0.0f, 0.0f};
             if (phaseStartedBySwitch_) {
@@ -75,7 +84,7 @@ namespace RelayExtrema {
             }
 
             startPhase(temp, time);
-            phaseStartedBySwitch_ = !firstSample;
+            phaseStartedBySwitch_ = !switchAtFirstSample;
             return event;
         }
 
@@ -83,11 +92,11 @@ namespace RelayExtrema {
         void startPhase(float temp, float time) {
             phaseMax_ = phaseMin_ = temp;
             phaseMaxTime_ = phaseMinTime_ = time;
-            haveSample_ = true;
         }
 
         bool phaseStartedBySwitch_;
-        bool haveSample_;
+        unsigned sampleCount_;
+        float lastSampleTime_;
         float phaseMax_;
         float phaseMin_;
         float phaseMaxTime_;

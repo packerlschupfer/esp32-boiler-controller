@@ -22,7 +22,10 @@ struct Recorded {
 
 // relayStartsOn=false reproduces PIDAutoTuner: relay starts OFF and switches
 // ON at the very first sample when the boiler is cold.
-Recorded runLaggingPlant(float startTemp, int halfCycles, bool relayStartsOn) {
+// sampleBeforeSwitch=true reproduces PIDAutoTuner::relayControl(): sample() is
+// called for every sample and onSwitch() additionally on switch samples.
+Recorded runLaggingPlant(float startTemp, int halfCycles, bool relayStartsOn,
+                         bool sampleBeforeSwitch) {
     const float setpoint = 60.0f, hysteresis = 1.0f;
     const float riseRate = 0.9f, fallRate = 0.6f;   // C per sample
     const int lagSamples = 5;
@@ -42,6 +45,10 @@ Recorded runLaggingPlant(float startTemp, int halfCycles, bool relayStartsOn) {
         }
         t += 1.0f;
 
+        if (sampleBeforeSwitch) {
+            tracker.sample(temp, t);
+        }
+
         bool newRelay = relayOn;
         if (relayOn && temp > setpoint + hysteresis) newRelay = false;
         if (!relayOn && temp < setpoint - hysteresis) newRelay = true;
@@ -55,7 +62,7 @@ Recorded runLaggingPlant(float startTemp, int halfCycles, bool relayStartsOn) {
             relayOn = newRelay;
             lagLeft = lagSamples;
             switches++;
-        } else {
+        } else if (!sampleBeforeSwitch) {
             tracker.sample(temp, t);
         }
 
@@ -70,7 +77,7 @@ Recorded runLaggingPlant(float startTemp, int halfCycles, bool relayStartsOn) {
 } // namespace
 
 void test_relay_extrema_peaks_include_post_switch_overshoot() {
-    Recorded rec = runLaggingPlant(25.0f, 9, true);
+    Recorded rec = runLaggingPlant(25.0f, 9, false, true);
 
     TEST_ASSERT_TRUE(rec.peaks.size() >= 3);
     for (float p : rec.peaks) {
@@ -80,7 +87,7 @@ void test_relay_extrema_peaks_include_post_switch_overshoot() {
 }
 
 void test_relay_extrema_troughs_include_post_switch_undershoot() {
-    Recorded rec = runLaggingPlant(25.0f, 9, true);
+    Recorded rec = runLaggingPlant(25.0f, 9, false, true);
 
     TEST_ASSERT_TRUE(rec.troughs.size() >= 3);
     for (float v : rec.troughs) {
@@ -90,20 +97,22 @@ void test_relay_extrema_troughs_include_post_switch_undershoot() {
 }
 
 void test_relay_extrema_ignores_cold_start_phase() {
-    // Relay already ON at start, and relay OFF at start with an immediate switch
-    // at the first sample (PIDAutoTuner behaviour): the warm-up from 25C must
-    // never be reported as a trough.
+    // All combinations of relay state at start and call order. The case
+    // relayStartsOn=false + sampleBeforeSwitch=true is the real PIDAutoTuner
+    // (2026-09-14 heating run recorded the 53.0C start temperature as a trough).
     for (bool relayStartsOn : {true, false}) {
-        Recorded rec = runLaggingPlant(25.0f, 10, relayStartsOn);
-        TEST_ASSERT_TRUE(rec.troughs.size() >= 3);
-        for (float v : rec.troughs) {
-            TEST_ASSERT_TRUE(v > 50.0f);
+        for (bool sampleBeforeSwitch : {true, false}) {
+            Recorded rec = runLaggingPlant(25.0f, 10, relayStartsOn, sampleBeforeSwitch);
+            TEST_ASSERT_TRUE(rec.troughs.size() >= 3);
+            for (float v : rec.troughs) {
+                TEST_ASSERT_TRUE(v > 50.0f);
+            }
         }
     }
 }
 
 void test_relay_extrema_extreme_times_are_after_switch() {
-    Recorded rec = runLaggingPlant(25.0f, 9, false);
+    Recorded rec = runLaggingPlant(25.0f, 9, false, true);
 
     // Peaks and troughs must alternate in time (peak of OFF phase, then trough
     // of the following ON phase), giving a usable period.
