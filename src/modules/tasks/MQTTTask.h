@@ -153,7 +153,7 @@ private:
     static constexpr uint32_t CONNECTION_CHECK_INTERVAL_MS = SystemConstants::Tasks::MQTT::CONNECTION_CHECK_INTERVAL_MS;
     static constexpr uint8_t MAX_RECONNECT_ATTEMPTS = 10;
     static constexpr uint32_t CIRCUIT_BREAKER_COOLDOWN_MS = 600000;  // 10 minutes cooldown
-    static const size_t HIGH_PRIORITY_QUEUE_SIZE = 3;    // Optimized for typical usage
+    static const size_t HIGH_PRIORITY_QUEUE_SIZE = 5;    // 2026-09-14: was 3 - a command reply plus a sensor fallback mode change (2 messages) filled it; +2 slots ~800 B
     static const size_t NORMAL_PRIORITY_QUEUE_SIZE = 5;   // Reduced from 10 - saves 1.6KB
     
     // Remove duplicate declarations - these are already declared above

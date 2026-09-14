@@ -770,7 +770,7 @@ SystemSettings
 ### Queue-Based Communication
 ```
 MQTT Publish Requests
-├─ High Priority Queue (3 slots, sizeof(MQTTPublishRequest))
+├─ High Priority Queue (5 slots, sizeof(MQTTPublishRequest))
 │  └─ Sensor data, critical alerts
 └─ Normal Priority Queue (5 slots)
    └─ Status updates, config responses

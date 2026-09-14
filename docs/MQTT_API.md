@@ -826,7 +826,7 @@ The system uses 2 priority queues for MQTT publishing:
 
 Sizes: `HIGH_PRIORITY_QUEUE_SIZE` and `NORMAL_PRIORITY_QUEUE_SIZE` in `src/modules/tasks/MQTTTask.h`; item size `sizeof(MQTTPublishRequest)` (64-byte topic, 320-byte payload).
 
-### High Priority Queue (3 slots)
+### High Priority Queue (5 slots)
 - Sensor data (real-time monitoring)
 - Critical alerts
 - Connection status
@@ -944,7 +944,7 @@ Repeated errors are rate-limited:
 **File**: `src/modules/tasks/MQTTTask.cpp`
 
 ```cpp
-// MQTTTask.h: HIGH_PRIORITY_QUEUE_SIZE = 3, NORMAL_PRIORITY_QUEUE_SIZE = 5
+// MQTTTask.h: HIGH_PRIORITY_QUEUE_SIZE = 5, NORMAL_PRIORITY_QUEUE_SIZE = 5
 QueueManager::QueueConfig highPriorityConfig;
 highPriorityConfig.length = HIGH_PRIORITY_QUEUE_SIZE;
 highPriorityConfig.itemSize = sizeof(MQTTPublishRequest);

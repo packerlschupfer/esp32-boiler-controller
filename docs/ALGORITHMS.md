@@ -238,7 +238,7 @@ Manage MQTT message backlog with priority-based queue and backpressure handling.
 
 **Dual Queue System:**
 ```
-High Priority Queue (3 messages, HIGH_PRIORITY_QUEUE_SIZE in MQTTTask.h):
+High Priority Queue (5 messages, HIGH_PRIORITY_QUEUE_SIZE in MQTTTask.h):
 - Safety alerts
 - Error notifications
 - Critical state changes

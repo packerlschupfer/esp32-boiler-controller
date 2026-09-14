@@ -206,7 +206,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 - **General System Event Group** (sets): `MQTT_QUEUE_PRESSURE` (throttling signal)
 
 **Queues**:
-- **High priority queue**: 3 messages (`HIGH_PRIORITY_QUEUE_SIZE`, `MQTTTask.h`)
+- **High priority queue**: 5 messages (`HIGH_PRIORITY_QUEUE_SIZE`, `MQTTTask.h`)
 - **Normal priority queue**: 5 messages (`NORMAL_PRIORITY_QUEUE_SIZE`)
 - **Overflow strategy**: DROP_OLDEST with logging
 - **Backpressure**: Sets `MQTT_QUEUE_PRESSURE` bit at 80% utilization
