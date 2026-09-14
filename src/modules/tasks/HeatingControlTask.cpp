@@ -9,7 +9,6 @@
 #include "modules/control/HeatingControlModule.h"
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"
-#include "modules/control/ErrorRecoveryManager.h"
 #include "modules/control/TemperatureSensorFallback.h"
 #include "utils/ResourceGuard.h"
 #include "utils/MutexRetryHelper.h"

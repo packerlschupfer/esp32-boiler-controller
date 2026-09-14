@@ -12,7 +12,6 @@
 #include "modules/control/SafetyInterlocks.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/ReturnPreheater.h"
-// Note: ErrorRecoveryManager.h removed - its sync retry logic can exceed watchdog timeout
 #include "shared/SharedResources.h"
 #include "events/SystemEventsGenerated.h"
 #include "events/TemperatureEventHelpers.h"
@@ -752,9 +751,6 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
 
                 // For sensor/pump failures, disable heat demand immediately (fail-safe)
                 // Recovery will happen on subsequent loop iterations when conditions improve
-                // NOTE: We do NOT call ErrorRecoveryManager::handleError() synchronously here
-                // because its retry logic with delays can exceed the 15s watchdog timeout.
-                // The ErrorRecoveryManager's RecoveryMonitor task handles async recovery.
                 heatDemand = false;
 
                 // Special handling for thermal shock - start return preheating

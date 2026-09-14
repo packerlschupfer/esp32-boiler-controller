@@ -2,6 +2,7 @@
 #define CENTRALIZED_FAILSAFE_H
 
 #include <cstdint>
+#include "modules/control/EmergencyStopRelease.h"
 #include <atomic>
 #include <functional>
 #include <vector>
@@ -75,15 +76,16 @@ public:
     
     // Emergency stop - immediate shutdown
     static void emergencyStop(const char* reason);
+
+    // Release a latched emergency stop (MQTT boiler/cmd/emergency_reset) once the
+    // causes have cleared; restores BOILER_ENABLED from the saved setting
+    static EmergencyStopRelease::Result clearEmergencyStop();
     
     // Perform orderly shutdown
     static void orderlyShutdown(const char* reason);
     
     // Save critical state before shutdown
     static void saveEmergencyState();
-    
-    // Monitor system health and trigger failsafe if needed
-    static void monitorSystemHealth();
     
     // Get failsafe status string
     static const char* getFailsafeStatusString();
@@ -93,7 +95,7 @@ private:
     static SemaphoreHandle_t stateMutex_;
 
     // F28: atomic so the unguarded writes from emergencyStop/orderlyShutdown/
-    // attemptRecovery/monitorSystemHealth (which run outside stateMutex_) cannot
+    // attemptRecovery/clearEmergencyStop (which run outside stateMutex_) cannot
     // tear against triggerFailsafe's guarded read-modify-write of the level.
     static std::atomic<FailsafeLevel> currentLevel;
     static SystemError lastError;

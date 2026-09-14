@@ -7,6 +7,7 @@
  */
 
 #include "MQTTCommandHandlers.h"
+#include "modules/control/CentralizedFailsafe.h"  // emergency stop release
 
 #include "config/SystemConstants.h"
 #include "config/SafetyConfig.h"
@@ -956,6 +957,18 @@ void routeControlCommand(const char* topic, const char* payload) {
             MQTTTask::publish(MQTT_STATUS_BURNER, "lockout_reset", 0, true, MQTTPriority::PRIORITY_HIGH);
         } else {
             LOG_WARN(TAG_CMD, "Unknown burner_reset payload: %s (use 'lockout' or 'reset')", payload);
+        }
+    }
+    else if (strcmp(command, "emergency_reset") == 0) {
+        // Release a latched emergency stop once its causes have cleared
+        if (strcmp(payload, "reset") == 0) {
+            const EmergencyStopRelease::Result result = CentralizedFailsafe::clearEmergencyStop();
+            LOG_WARN(TAG_CMD, "Remote command: emergency stop release -> %s",
+                     EmergencyStopRelease::toString(result));
+            MQTTTask::publish(MQTT_STATUS_BURNER, EmergencyStopRelease::toString(result), 0, false,
+                              MQTTPriority::PRIORITY_HIGH);
+        } else {
+            LOG_WARN(TAG_CMD, "Unknown emergency_reset payload: %s (use 'reset')", payload);
         }
     }
     else if (strstr(topic, "/config/") != nullptr) {

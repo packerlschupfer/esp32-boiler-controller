@@ -49,6 +49,12 @@ void test_autotune_amplitude_setting_used_within_range();
 void test_autotune_hysteresis_setting_used_within_range();
 void test_autotune_amplitude_vs_two_stage_swing();
 
+// Emergency stop release (MQTT emergency_reset)
+void test_emergency_release_when_causes_cleared();
+void test_emergency_release_not_active();
+void test_emergency_release_refused_while_hot();
+void test_emergency_release_refused_on_sensor_or_system_errors();
+
 // Burner transitions (state machine scenarios through BurnerTransitions::step)
 void test_bsm_step_idle_without_demand_skips_safety_check();
 void test_bsm_step_stale_demand_never_starts_burner();
@@ -227,22 +233,6 @@ void test_concurrency_antiflapping_minimum_off_time();
 void test_concurrency_antiflapping_power_level_throttle();
 void test_concurrency_antiflapping_concurrent_demands();
 
-// ErrorRecoveryManager tests
-void test_erm_initial_state();
-void test_erm_recovery_disabled();
-void test_erm_unknown_error_fails();
-void test_erm_in_progress_detection();
-void test_erm_backoff_calculation();
-void test_erm_backoff_max_delay_cap();
-void test_erm_error_history_tracking();
-void test_erm_error_history_expiration();
-void test_erm_escalation_trigger();
-void test_erm_emergency_stop_escalation();
-void test_erm_stats_tracking();
-void test_erm_clear_error_history();
-void test_erm_custom_recovery_action();
-void test_erm_multiple_components_isolated();
-void test_erm_degrade_service_strategy();
 
 // PIDAutoTuner tests
 void test_pid_circular_buffer_basic();
@@ -457,22 +447,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_concurrency_antiflapping_power_level_throttle);
     RUN_TEST(test_concurrency_antiflapping_concurrent_demands);
 
-    // ErrorRecoveryManager tests
-    RUN_TEST(test_erm_initial_state);
-    RUN_TEST(test_erm_recovery_disabled);
-    RUN_TEST(test_erm_unknown_error_fails);
-    RUN_TEST(test_erm_in_progress_detection);
-    RUN_TEST(test_erm_backoff_calculation);
-    RUN_TEST(test_erm_backoff_max_delay_cap);
-    RUN_TEST(test_erm_error_history_tracking);
-    RUN_TEST(test_erm_error_history_expiration);
-    RUN_TEST(test_erm_escalation_trigger);
-    RUN_TEST(test_erm_emergency_stop_escalation);
-    RUN_TEST(test_erm_stats_tracking);
-    RUN_TEST(test_erm_clear_error_history);
-    RUN_TEST(test_erm_custom_recovery_action);
-    RUN_TEST(test_erm_multiple_components_isolated);
-    RUN_TEST(test_erm_degrade_service_strategy);
 
     // PIDAutoTuner tests
     RUN_TEST(test_pid_circular_buffer_basic);
@@ -560,6 +534,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_autotune_amplitude_setting_used_within_range);
     RUN_TEST(test_autotune_hysteresis_setting_used_within_range);
     RUN_TEST(test_autotune_amplitude_vs_two_stage_swing);
+
+    // Emergency stop release (MQTT emergency_reset)
+    RUN_TEST(test_emergency_release_when_causes_cleared);
+    RUN_TEST(test_emergency_release_not_active);
+    RUN_TEST(test_emergency_release_refused_while_hot);
+    RUN_TEST(test_emergency_release_refused_on_sensor_or_system_errors);
 
     // Burner transitions (state machine scenarios through BurnerTransitions::step)
     RUN_TEST(test_bsm_step_idle_without_demand_skips_safety_check);

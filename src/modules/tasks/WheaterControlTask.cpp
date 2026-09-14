@@ -10,7 +10,6 @@
 #include "events/SystemEventsGenerated.h"
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"
-#include "modules/control/ErrorRecoveryManager.h"
 #include "modules/control/TemperatureSensorFallback.h"
 #include "utils/ResourceGuard.h"
 #include "LoggingMacros.h"

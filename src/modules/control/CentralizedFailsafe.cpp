@@ -1,5 +1,8 @@
 // src/modules/control/CentralizedFailsafe.cpp
 #include "modules/control/CentralizedFailsafe.h"
+#include "config/SystemSettingsStruct.h"
+#include "modules/control/TemperatureSensorFallback.h"
+#include "modules/control/SafetyInterlocks.h"
 #include "modules/tasks/WheaterControlTask.h"  // notifyWheaterTaskSwitchedOff()
 #include "modules/control/BurnerSystemController.h"
 #include "modules/tasks/RelayControlTask.h"
@@ -437,44 +440,55 @@ bool CentralizedFailsafe::attemptRecovery() {
     return true;
 }
 
-void CentralizedFailsafe::monitorSystemHealth() {
-    static uint32_t lastHealthCheck = 0;
-    uint32_t now = millis();
+EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
+    EmergencyStopRelease::Conditions conditions;
+    conditions.emergencyActive =
+        (xEventGroupGetBits(SRP::getSystemStateEventGroup()) & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
 
-    // Check at configured interval
-    if ((now - lastHealthCheck) < SystemConstants::Timing::HEALTH_CHECK_INTERVAL_MS) {
-        return;
-    }
-    lastHealthCheck = now;
-
-    // Check memory using centralized thresholds
-    uint32_t freeHeap = esp_get_free_heap_size();
-    if (freeHeap < SystemConstants::System::MIN_FREE_HEAP_CRITICAL) {
-        LOG_ERROR(TAG, "Critical low memory: %ld bytes", freeHeap);
-        triggerFailsafe(FailsafeLevel::CRITICAL, SystemError::SYSTEM_LOW_MEMORY);
-    } else if (freeHeap < SystemConstants::System::MIN_FREE_HEAP_WARNING) {
-        LOG_WARN(TAG, "Low memory warning: %ld bytes", freeHeap);
-        triggerFailsafe(FailsafeLevel::WARNING, SystemError::SYSTEM_LOW_MEMORY);
-    }
-
-    // Check temperature sensors
-    EventBits_t errorBits = xEventGroupGetBits(SRP::getErrorNotificationEventGroup());
-    if (errorBits & SystemEvents::Error::SENSOR_FAILURE) {
-        triggerFailsafe(FailsafeLevel::DEGRADED, SystemError::SENSOR_READ_FAILED);
+    // Temperatures read directly: SafetyInterlocks::checkTemperatureLimits() would itself
+    // trigger a new emergency shutdown at the critical limit
+    conditions.temperaturesOk = false;
+    {
+        auto guard = MutexRetryHelper::acquireGuard(SRP::getSensorReadingsMutex(), "Failsafe-ClearEmergency");
+        if (guard) {
+            const SharedSensorReadings& readings = SRP::getSensorReadings();
+            const Temperature_t limit = SystemConstants::Temperature::MAX_BOILER_TEMP_C;
+            conditions.temperaturesOk = readings.isBoilerTempOutputValid &&
+                                        readings.boilerTempOutput < limit &&
+                                        (!readings.isBoilerTempReturnValid || readings.boilerTempReturn < limit);
+        }
     }
 
-    // Check communication errors
-    if (errorBits & SystemEvents::Error::MODBUS) {
-        triggerFailsafe(FailsafeLevel::WARNING, SystemError::MODBUS_COMMUNICATION_ERROR);
+    const EventBits_t errorBits = xEventGroupGetBits(SRP::getErrorNotificationEventGroup());
+    conditions.sensorsOk = TemperatureSensorFallback::canContinueOperation() &&
+                           (errorBits & SystemEvents::Error::SENSOR_FAILURE) == 0;
+    conditions.systemErrorsClear = SafetyInterlocks::checkSystemErrors();
+
+    const EmergencyStopRelease::Result result = EmergencyStopRelease::evaluate(conditions);
+    if (result != EmergencyStopRelease::Result::RELEASED) {
+        LOG_WARN(TAG, "Emergency stop release: %s", EmergencyStopRelease::toString(result));
+        return result;
     }
 
-    // If everything is OK and we're in warning state, try to clear it
-    if (currentLevel.load() == FailsafeLevel::WARNING && errorBits == 0 &&
-        freeHeap > SystemConstants::System::MIN_HEAP_FOR_MQTT) {
-        LOG_INFO(TAG, "System health restored - clearing warning state");
-        currentLevel.store(FailsafeLevel::NORMAL);
-        executeFailsafeActions(FailsafeLevel::NORMAL, SystemError::SUCCESS);
+    // emergencyStop() clears BOILER_ENABLED in RAM only; restore the saved user setting
+    bool boilerEnabled = true;
+    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100)) == pdTRUE) {
+        boilerEnabled = SRP::getSystemSettings().boilerEnabled;
+        SRP::giveSystemSettingsMutex();
     }
+
+    xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
+    if (boilerEnabled) {
+        xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
+    }
+
+    // triggerFailsafe() never downgrades the level; without this a later failsafe
+    // trigger at a lower level would be ignored after the release
+    currentLevel.store(FailsafeLevel::WARNING);
+    recoveryAttempts = 0;
+
+    LOG_WARN(TAG, "Emergency stop released by command (boiler %s)", boilerEnabled ? "re-enabled" : "stays disabled");
+    return result;
 }
 
 const char* CentralizedFailsafe::getFailsafeStatusString() {

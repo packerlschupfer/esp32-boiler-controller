@@ -28,7 +28,6 @@
 #include "modules/tasks/ControlTask.h"
 #include "modules/tasks/HeatingControlTask.h"
 #include "modules/tasks/WheaterControlTask.h"
-#include "modules/tasks/PIDControlTask.h"
 #include "modules/tasks/BurnerControlTask.h"
 #include "modules/tasks/BoilerTempControlTask.h"
 #include "modules/tasks/PersistentStorageTask.h"
