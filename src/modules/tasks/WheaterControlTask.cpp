@@ -2,6 +2,7 @@
 // Water heater control task - manages hot water heating
 #include "WheaterControlTask.h"
 #include "modules/control/WaterChargePolicy.h"  // tank limit consistency
+#include <atomic>
 #include <cmath>  // Round 15 Issue #10: For std::isfinite
 
 #include "shared/SharedResources.h"
@@ -45,6 +46,10 @@ static struct {
 static void safetyCheckCallback(TimerHandle_t xTimer);
 static void processTimerCallback(TimerHandle_t xTimer);
 static void processWaterHeatingState();
+
+// Incremented by notifyWheaterTaskSwitchedOff() (water/boiler disable, water OFF
+// override); compared on every processWaterHeatingState() run
+static std::atomic<uint32_t> switchOffEvents{0};
 static bool checkIfWaterHeatingNeededEvent();
 static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const SharedSensorReadings& readings);
 
@@ -254,6 +259,28 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
 }
 
 static void processWaterHeatingState() {
+    // Water heating switched off since the last run: end the charge even if it is
+    // already enabled again. The task runs on its timer, so an off/on within one
+    // cycle was never seen - the charge latch and the burner request survived and
+    // the interrupted charge resumed (2026-09-14 18:38).
+    static uint32_t seenSwitchOffEvents = 0;
+    const uint32_t switchOffs = switchOffEvents.load();
+    if (switchOffs != seenSwitchOffEvents) {
+        seenSwitchOffEvents = switchOffs;
+        waterState.lastHeatingNeeded = false;
+        if (waterState.state == WheaterOn) {
+            LOG_INFO(TAG, "Water heating switched off - ending charge");
+            // Same shutdown as the disable path below; the pump follows WATER_ON via
+            // PumpControlModule (overrun)
+            xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_OFF);
+            SRP::clearSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
+            BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::WATER);
+            xEventGroupSetBits(SRP::getControlRequestsEventGroup(),
+                              SystemEvents::ControlRequest::WATER_PRIORITY_RELEASED);
+            waterState.state = WheaterOff;
+        }
+    }
+
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
     
     // Check if both boiler and water heating are enabled
@@ -579,6 +606,13 @@ TaskHandle_t getWheaterTaskHandle() {
 
 void notifyWheaterTaskPreempted() {
     // Wake the task immediately to handle preemption
+    if (wheaterTaskHandle != nullptr) {
+        xTaskNotifyGive(wheaterTaskHandle);
+    }
+}
+
+void notifyWheaterTaskSwitchedOff() {
+    switchOffEvents.fetch_add(1);
     if (wheaterTaskHandle != nullptr) {
         xTaskNotifyGive(wheaterTaskHandle);
     }

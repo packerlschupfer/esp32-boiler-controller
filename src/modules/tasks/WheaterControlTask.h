@@ -28,4 +28,9 @@ TaskHandle_t getWheaterTaskHandle();
 // Notify task to wake immediately (for preemption response)
 void notifyWheaterTaskPreempted();
 
+// Water heating, the boiler or the water OFF override was switched off. Wakes the
+// task, which ends a running charge on that run even if water heating has been
+// enabled again in the meantime (off/on within one task cycle).
+void notifyWheaterTaskSwitchedOff();
+
 #endif // WHEATER_CONTROL_TASK_H

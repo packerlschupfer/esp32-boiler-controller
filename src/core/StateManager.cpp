@@ -1,5 +1,6 @@
 // src/core/StateManager.cpp
 #include "core/StateManager.h"
+#include "modules/tasks/WheaterControlTask.h"  // notifyWheaterTaskSwitchedOff()
 #include "core/SystemResourceProvider.h"
 #include "events/SystemEventsGenerated.h"
 #include "shared/SharedSensorReadings.h"
@@ -72,6 +73,7 @@ void StateManager::setBoilerEnabled(bool enabled, bool persist) {
         SRP::setSystemStateEventBits(SystemEvents::SystemState::BOILER_ENABLED);
     } else {
         SRP::clearSystemStateEventBits(SystemEvents::SystemState::BOILER_ENABLED);
+        notifyWheaterTaskSwitchedOff();  // end a running water charge now
     }
 
     if (persist) {
@@ -123,6 +125,10 @@ void StateManager::setWaterEnabled(bool enabled, bool persist) {
         xEventGroupSetBits(SRP::getControlRequestsEventGroup(),
                           SystemEvents::ControlRequest::WATER_PRIORITY_RELEASED);
         LOG_DEBUG(TAG, "Water priority released - heating notified for potential handoff");
+
+        // End a running charge now, even if water heating is re-enabled before the
+        // water task's next cycle
+        notifyWheaterTaskSwitchedOff();
     }
 
     if (persist) {
@@ -181,6 +187,10 @@ void StateManager::setWaterOverrideOff(bool blocked, bool persist) {
         if (guard.hasLock()) {
             SRP::getSystemSettings().waterOverrideOff = blocked;
         }
+    }
+
+    if (blocked) {
+        notifyWheaterTaskSwitchedOff();  // end a running water charge now
     }
 
     if (persist) {

@@ -1,5 +1,6 @@
 // src/modules/control/CentralizedFailsafe.cpp
 #include "modules/control/CentralizedFailsafe.h"
+#include "modules/tasks/WheaterControlTask.h"  // notifyWheaterTaskSwitchedOff()
 #include "modules/control/BurnerSystemController.h"
 #include "modules/tasks/RelayControlTask.h"
 #include "core/SystemResourceProvider.h"
@@ -289,6 +290,7 @@ void CentralizedFailsafe::emergencyStop(const char* reason) {
     
     // 5. Disable system
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
+    notifyWheaterTaskSwitchedOff();  // end a running water charge
     
     // 6. Log to persistent storage
     ErrorHandler::logError(TAG, SystemError::SYSTEM_FAILSAFE_TRIGGERED, reason);
