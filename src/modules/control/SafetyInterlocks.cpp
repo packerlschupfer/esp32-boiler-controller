@@ -501,7 +501,7 @@ bool SafetyInterlocks::continuousSafetyMonitor() {
     if (StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT)) {
         uint32_t age = StateManager::getSensorAge(StateManager::SensorChannel::BOILER_OUTPUT);
         LOG_ERROR(TAG, "Critical safety check failed: Sensor data stale (%lu ms)", age);
-        triggerEmergencyShutdown("Sensor data stale during operation");
+        triggerEmergencyShutdown("Sensor data stale during operation", EmergencyStopRelease::Cause::SENSOR_STALE);
         return false;
     }
     
@@ -529,7 +529,7 @@ bool SafetyInterlocks::continuousSafetyMonitor() {
     return lastStatus.allInterlocksPassed();
 }
 
-void SafetyInterlocks::triggerEmergencyShutdown(const char* reason) {
+void SafetyInterlocks::triggerEmergencyShutdown(const char* reason, EmergencyStopRelease::Cause cause) {
     LOG_ERROR(TAG, "EMERGENCY SHUTDOWN triggered: %s", reason);
 
     // Route through CentralizedFailsafe for coordinated emergency response
@@ -539,5 +539,5 @@ void SafetyInterlocks::triggerEmergencyShutdown(const char* reason) {
     // - Event bit management (EMERGENCY_STOP)
     // - Error logging
     // - State persistence
-    CentralizedFailsafe::emergencyStop(reason);
+    CentralizedFailsafe::emergencyStop(reason, cause);
 }

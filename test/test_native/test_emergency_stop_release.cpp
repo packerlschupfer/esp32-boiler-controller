@@ -71,6 +71,23 @@ void test_emergency_dissipation_until_boiler_cooled() {
     TEST_ASSERT_TRUE(dissipationPumpOn(true, 650, false));
 }
 
+void test_emergency_sensor_recovery_releases_only_stale_sensor_stop() {
+    // 2026-09-14: sensor recovery cleared EMERGENCY_STOP whatever had set it
+    TEST_ASSERT_TRUE(releasableBySensorRecovery(true, Cause::SENSOR_STALE));
+    TEST_ASSERT_FALSE(releasableBySensorRecovery(true, Cause::OTHER));
+    TEST_ASSERT_FALSE(releasableBySensorRecovery(true, Cause::NONE));
+    TEST_ASSERT_FALSE(releasableBySensorRecovery(false, Cause::SENSOR_STALE));
+}
+
+void test_emergency_cause_merge_while_latched() {
+    TEST_ASSERT_TRUE(mergeCause(false, Cause::OTHER, Cause::SENSOR_STALE) == Cause::SENSOR_STALE);
+    TEST_ASSERT_TRUE(mergeCause(true, Cause::NONE, Cause::SENSOR_STALE) == Cause::SENSOR_STALE);
+    TEST_ASSERT_TRUE(mergeCause(true, Cause::SENSOR_STALE, Cause::SENSOR_STALE) == Cause::SENSOR_STALE);
+    // Stale sensors, then critical temperature while latched: not sensor-releasable
+    TEST_ASSERT_TRUE(mergeCause(true, Cause::SENSOR_STALE, Cause::OTHER) == Cause::OTHER);
+    TEST_ASSERT_TRUE(mergeCause(true, Cause::OTHER, Cause::SENSOR_STALE) == Cause::OTHER);
+}
+
 void test_emergency_dissipation_without_usable_output() {
     TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, false));
     TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, true));

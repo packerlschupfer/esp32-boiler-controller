@@ -24,6 +24,7 @@ static const char* TAG = "CentralizedFailsafe";
 // Static member definitions
 SemaphoreHandle_t CentralizedFailsafe::stateMutex_ = nullptr;  // Round 20 Issue #10
 std::atomic<CentralizedFailsafe::FailsafeLevel> CentralizedFailsafe::currentLevel{FailsafeLevel::NORMAL};
+std::atomic<EmergencyStopRelease::Cause> CentralizedFailsafe::latchCause_{EmergencyStopRelease::Cause::NONE};
 SystemError CentralizedFailsafe::lastError = SystemError::SUCCESS;
 uint32_t CentralizedFailsafe::failsafeStartTime = 0;
 uint32_t CentralizedFailsafe::recoveryAttempts = 0;
@@ -265,8 +266,14 @@ void CentralizedFailsafe::defaultPumpFailsafe(FailsafeLevel level) {
     }
 }
 
-void CentralizedFailsafe::emergencyStop(const char* reason) {
+void CentralizedFailsafe::emergencyStop(const char* reason, EmergencyStopRelease::Cause cause) {
     LOG_ERROR(TAG, "EMERGENCY STOP: %s", reason);
+
+    // Record the cause before the bit is set, so a sensor recovery cannot release a
+    // latch that a critical temperature or the request watchdog also set
+    const bool alreadyLatched =
+        (xEventGroupGetBits(SRP::getSystemStateEventGroup()) & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+    latchCause_.store(EmergencyStopRelease::mergeCause(alreadyLatched, latchCause_.load(), cause));
 
     currentLevel.store(FailsafeLevel::EMERGENCY);
 
@@ -478,6 +485,7 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
     }
 
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
+    latchCause_.store(EmergencyStopRelease::Cause::NONE);
     if (boilerEnabled) {
         xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
     }
@@ -489,6 +497,24 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
 
     LOG_WARN(TAG, "Emergency stop released by command (boiler %s)", boilerEnabled ? "re-enabled" : "stays disabled");
     return result;
+}
+
+bool CentralizedFailsafe::releaseAfterSensorRecovery() {
+    const bool active =
+        (xEventGroupGetBits(SRP::getSystemStateEventGroup()) & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+    if (!EmergencyStopRelease::releasableBySensorRecovery(active, latchCause_.load())) {
+        if (active) {
+            LOG_WARN(TAG, "Sensors recovered - emergency stop kept (not caused by stale sensor data), "
+                          "release with boiler/cmd/emergency_reset");
+        }
+        return false;
+    }
+
+    xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
+    latchCause_.store(EmergencyStopRelease::Cause::NONE);
+    currentLevel.store(FailsafeLevel::WARNING);
+    LOG_WARN(TAG, "Emergency stop released after sensor recovery (boiler stays disabled)");
+    return true;
 }
 
 const char* CentralizedFailsafe::getFailsafeStatusString() {

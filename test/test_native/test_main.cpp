@@ -57,6 +57,8 @@ void test_emergency_release_refused_on_sensor_or_system_errors();
 void test_emergency_stop_onset_once_per_latch();
 void test_emergency_dissipation_until_boiler_cooled();
 void test_emergency_dissipation_without_usable_output();
+void test_emergency_sensor_recovery_releases_only_stale_sensor_stop();
+void test_emergency_cause_merge_while_latched();
 
 // Burner transitions (state machine scenarios through BurnerTransitions::step)
 void test_bsm_step_idle_without_demand_skips_safety_check();
@@ -546,6 +548,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_emergency_stop_onset_once_per_latch);
     RUN_TEST(test_emergency_dissipation_until_boiler_cooled);
     RUN_TEST(test_emergency_dissipation_without_usable_output);
+    RUN_TEST(test_emergency_sensor_recovery_releases_only_stale_sensor_stop);
+    RUN_TEST(test_emergency_cause_merge_while_latched);
 
     // Burner transitions (state machine scenarios through BurnerTransitions::step)
     RUN_TEST(test_bsm_step_idle_without_demand_skips_safety_check);

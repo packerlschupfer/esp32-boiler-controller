@@ -209,7 +209,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_SENSOR_TASK           2048  // After fix: sensor processing
     #define STACK_SIZE_CONTROL_TASK          2048  // After fix: needs more for logging
     #define STACK_SIZE_WHEATER_CONTROL_TASK  3072  // After fix: needs significant stack for float formatting
-    #define STACK_SIZE_PID_CONTROL_TASK      4096  // Safety: increased from 3072 (was showing only 60 bytes free)
     #define STACK_SIZE_MQTT_TASK             3072  // After fix: MQTT with debug
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // Optimized publishGroupedCategory() reduces stack usage
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // M1 fix: was 2560 (inverted vs DEBUG_SELECTIVE 4096); DEBUG_FULL needs MORE stack for logging
@@ -232,7 +231,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_SENSOR_TASK           3584  // Dec 2025: was 4096, ANDRTF3 had 2272 free
     #define STACK_SIZE_CONTROL_TASK          3584  // H3: Safety-critical +512 (was 3072)
     #define STACK_SIZE_WHEATER_CONTROL_TASK  3584  // Dec 2025: was 4096, had 2344 free
-    #define STACK_SIZE_PID_CONTROL_TASK      4096  // Safety: keep for PID calculations
     #define STACK_SIZE_MQTT_TASK             3584  // Dec 2025: was 3072, had 712 free
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // Keep - not stress tested yet
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // H3: Safety-critical +512 (was 3584)
@@ -254,7 +252,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_SENSOR_TASK           1024  // After fix: sensor reading
     #define STACK_SIZE_CONTROL_TASK          1024  // After fix: needs margin for control tasks
     #define STACK_SIZE_WHEATER_CONTROL_TASK  2048  // After fix: needs margin for float ops in release
-    #define STACK_SIZE_PID_CONTROL_TASK      2048  // Safety: increased for PID calculations and formatting
     #define STACK_SIZE_MQTT_TASK             1536  // After fix: MQTT operations
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 1536  // After fix: JSON operations
     #define STACK_SIZE_BURNER_CONTROL_TASK   1536  // After fix: needs margin for logging
@@ -277,7 +274,6 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 #define PRIORITY_SENSOR_TASK 3
 #define PRIORITY_CONTROL_TASK 3
 #define PRIORITY_WHEATER_CONTROL_TASK 3
-#define PRIORITY_PID_CONTROL_TASK 3  // Control logic: intentionally same as HeatingControlTask/WheaterControlTask
 #define PRIORITY_MQTT_TASK 2
 #define PRIORITY_PUMP_CONTROL_TASK 3
 #define PRIORITY_BURNER_CONTROL_TASK 4  // Safety-critical: higher than other control tasks

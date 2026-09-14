@@ -5,6 +5,7 @@
 #include <string>
 #include "shared/Temperature.h"
 #include "config/SystemConstants.h"
+#include "modules/control/EmergencyStopRelease.h"
 
 /**
  * @brief Safety interlock system for burner control
@@ -67,7 +68,8 @@ public:
     static bool continuousSafetyMonitor();
     
     // Emergency response
-    static void triggerEmergencyShutdown(const char* reason);
+    static void triggerEmergencyShutdown(const char* reason,
+                                         EmergencyStopRelease::Cause cause = EmergencyStopRelease::Cause::OTHER);
     
 private:
     static InterlockStatus lastStatus;

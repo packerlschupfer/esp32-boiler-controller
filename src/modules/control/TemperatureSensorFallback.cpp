@@ -1,6 +1,7 @@
 // src/modules/control/TemperatureSensorFallback.cpp
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/SafetyInterlocks.h"
+#include "modules/control/CentralizedFailsafe.h"
 #include "core/SystemResourceProvider.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"  // For tempToFloat
@@ -240,8 +241,9 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
             // Attempt to recover from emergency shutdown if sensors have recovered
             if (previousMode == FallbackMode::SHUTDOWN) {
                 LOG_INFO(TAG, "Sensors recovered - attempting to clear emergency shutdown");
-                // Clear emergency stop bit to allow system restart
-                SRP::clearSystemStateEventBits(SystemEvents::SystemState::EMERGENCY_STOP);
+                // Releases EMERGENCY_STOP only if stale sensor data caused it; a critical
+                // temperature or request watchdog stop needs boiler/cmd/emergency_reset
+                CentralizedFailsafe::releaseAfterSensorRecovery();
 
                 // Record recovery in health monitor
                 HealthMonitor* healthMonitor = SRP::getHealthMonitor();

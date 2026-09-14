@@ -57,6 +57,26 @@ namespace EmergencyStopRelease {
         return "emergency_release_refused:unknown";
     }
 
+    // What latched the emergency stop. Sensor recovery (TemperatureSensorFallback
+    // SHUTDOWN -> NORMAL) may only release a stop caused by stale sensor data.
+    enum class Cause : uint8_t {
+        NONE,
+        SENSOR_STALE,
+        OTHER               // critical temperature, request watchdog, failsafe level
+    };
+
+    // A second trigger while latched with a different cause makes the latch OTHER
+    inline Cause mergeCause(bool alreadyLatched, Cause latched, Cause incoming) {
+        if (!alreadyLatched || latched == Cause::NONE) {
+            return incoming;
+        }
+        return latched == incoming ? latched : Cause::OTHER;
+    }
+
+    inline bool releasableBySensorRecovery(bool emergencyActive, Cause cause) {
+        return emergencyActive && cause == Cause::SENSOR_STALE;
+    }
+
     /**
      * EMERGENCY_STOP is a level latch: BurnerControlTask reads it without clearing and
      * stops the burner once per onset (clearing it there ended the pump heat dissipation

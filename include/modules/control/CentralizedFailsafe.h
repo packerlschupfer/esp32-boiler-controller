@@ -75,11 +75,16 @@ public:
     static bool attemptRecovery();
     
     // Emergency stop - immediate shutdown
-    static void emergencyStop(const char* reason);
+    static void emergencyStop(const char* reason,
+                              EmergencyStopRelease::Cause cause = EmergencyStopRelease::Cause::OTHER);
 
     // Release a latched emergency stop (MQTT boiler/cmd/emergency_reset) once the
     // causes have cleared; restores BOILER_ENABLED from the saved setting
     static EmergencyStopRelease::Result clearEmergencyStop();
+
+    // Sensor recovery: releases the latch only if stale sensor data caused it
+    // (BOILER_ENABLED stays cleared); returns true if released
+    static bool releaseAfterSensorRecovery();
     
     // Perform orderly shutdown
     static void orderlyShutdown(const char* reason);
@@ -98,6 +103,7 @@ private:
     // attemptRecovery/clearEmergencyStop (which run outside stateMutex_) cannot
     // tear against triggerFailsafe's guarded read-modify-write of the level.
     static std::atomic<FailsafeLevel> currentLevel;
+    static std::atomic<EmergencyStopRelease::Cause> latchCause_;
     static SystemError lastError;
     static uint32_t failsafeStartTime;
     static uint32_t recoveryAttempts;

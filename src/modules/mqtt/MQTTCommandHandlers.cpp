@@ -916,7 +916,7 @@ void routeControlCommand(const char* topic, const char* payload) {
 
     LOG_INFO(TAG_CMD, "Control command on %s: %s", topic, payload);
 
-    // Extract the command from the topic (after "cmd/boiler/")
+    // Extract the command from the topic (after "boiler/cmd/")
     const char* lastSlash = strrchr(topic, '/');
     if (!lastSlash) return;
     const char* command = lastSlash + 1;
