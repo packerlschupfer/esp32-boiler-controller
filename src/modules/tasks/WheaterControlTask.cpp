@@ -239,8 +239,7 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
         if (!TemperatureSensorFallback::canContinueOperation()) {
             LOG_ERROR(TAG, "Sensor failure detected during water heating - shutting down");
 
-            // Turn off circulation pump
-            xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_OFF);
+            // Water pump follows WATER_ON via PumpControlModule (overrun)
 
             // Clear water heating state
             SRP::clearSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
@@ -272,7 +271,6 @@ static void processWaterHeatingState() {
             LOG_INFO(TAG, "Water heating switched off - ending charge");
             // Same shutdown as the disable path below; the pump follows WATER_ON via
             // PumpControlModule (overrun)
-            xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_OFF);
             SRP::clearSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
             BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::WATER);
             xEventGroupSetBits(SRP::getControlRequestsEventGroup(),
@@ -291,8 +289,7 @@ static void processWaterHeatingState() {
         if (waterState.state == WheaterOn) {
             LOG_INFO(TAG, "System disabled - turning off water heating");
             
-            // Turn off circulation pump
-            xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_OFF);
+            // Water pump follows WATER_ON via PumpControlModule (overrun)
 
             // Clear water heating state
             SRP::clearSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
@@ -347,11 +344,10 @@ static void processWaterHeatingState() {
                 }
                 SharedSensorReadings readings = SRP::getSensorReadings();
 
-                // Calculate boiler target: returnTemp + chargeDelta
+                // Calculate boiler target: tank temperature + chargeDelta
                 Temperature_t boilerTargetTemp = calculateBoilerTarget(settingsSnap, readings);
 
-                // Turn on circulation pump
-                xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_ON);
+                // Water pump follows WATER_ON via PumpControlModule
 
                 // Set water heating state
                 SRP::setSystemStateEventBits(SystemEvents::SystemState::WATER_ON);
@@ -419,8 +415,7 @@ static void processWaterHeatingState() {
                     waterState.lastHeatingNeeded = false;  // switched off: the charge does not resume
                 }
                 
-                // Turn off circulation pump
-                xEventGroupSetBits(SRP::getRelayEventGroup(), SystemEvents::RelayControl::WATER_PUMP_OFF);
+                // Water pump follows WATER_ON via PumpControlModule (overrun)
                 
                 // Clear water heating state
                 SRP::clearSystemStateEventBits(SystemEvents::SystemState::WATER_ON);

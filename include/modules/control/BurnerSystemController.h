@@ -25,8 +25,8 @@ enum class BurnerMode {
  * @brief Power level for burner operation
  */
 enum class PowerLevel : uint8_t {
-    HALF = 0,     ///< Half power (POWER_SELECT = ON)
-    FULL = 1,     ///< Full power (POWER_SELECT = OFF)
+    HALF = 0,     ///< Half power (POWER_BOOST relay R2 OFF)
+    FULL = 1,     ///< Full power (POWER_BOOST relay R2 ON)
     AUTO = 2      ///< Automatic (determined by state machine)
 };
 

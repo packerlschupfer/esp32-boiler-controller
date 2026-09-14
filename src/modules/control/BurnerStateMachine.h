@@ -25,7 +25,6 @@ private:
     // Use timing constants from SystemConstants::Burner
     static constexpr uint32_t PRE_PURGE_TIME_MS = SystemConstants::Burner::PRE_PURGE_TIME_MS;
     static constexpr uint32_t IGNITION_TIME_MS = SystemConstants::Burner::IGNITION_TIME_MS;
-    static constexpr uint32_t POST_PURGE_TIME_MS = SystemConstants::Burner::POST_PURGE_TIME_MS;
     static constexpr uint32_t LOCKOUT_TIME_MS = SystemConstants::Burner::LOCKOUT_TIME_MS;
     static constexpr uint8_t MAX_IGNITION_RETRIES = SystemConstants::Burner::MAX_IGNITION_RETRIES;
 

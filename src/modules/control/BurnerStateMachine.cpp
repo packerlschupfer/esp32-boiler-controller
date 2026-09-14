@@ -618,7 +618,7 @@ BurnerSMState BurnerStateMachine::handleErrorState() {
 
     if (timeInError < recoveryDelayMs) {
         // Still in mandatory hold period - no auto-recovery yet
-        // User can still use resetLockout() for manual recovery
+        // No manual exit: resetLockout() only acts in LOCKOUT
         return BurnerSMState::ERROR;
     }
 

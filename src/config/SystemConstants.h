@@ -376,7 +376,6 @@ namespace SystemConstants {
         // For atmospheric burners (natural draft, no forced fan):
         constexpr uint32_t PRE_PURGE_TIME_MS = 2000;     // 2s pre-purge (atmospheric burner, minimal purge needed)
         constexpr uint32_t IGNITION_TIME_MS = 5000;      // 5s for ignition sequence
-        constexpr uint32_t POST_PURGE_TIME_MS = 60000;   // 60s post-purge
         constexpr uint32_t LOCKOUT_TIME_MS = 300000;     // 5 minutes lockout on failure
         // NOTE: For forced-draft burners, increase PRE_PURGE to 15-30s
         
@@ -462,7 +461,6 @@ namespace SystemConstants {
 
         // Error thresholds
         constexpr uint32_t MAX_CONSECUTIVE_ERRORS = 5;
-        constexpr uint32_t ERROR_RECOVERY_DELAY_MS = 60000;  // 1 minute
 
         // System monitoring
         constexpr uint32_t MEMORY_REPORT_INTERVAL_MS = 300000;  // 5 minutes - memory status reporting
