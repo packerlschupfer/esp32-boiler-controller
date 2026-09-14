@@ -1,9 +1,8 @@
 @startuml LibraryEcosystem
 !include theme.puml
 
-title ESP32 Custom Library Ecosystem - 18 Libraries\nLayered Architecture with Dependencies
+title ESP32 Library Ecosystem - 21 Custom Libraries\nDependencies from each library.json and #include lines
 
-' Legend
 legend right
   |<#2F4F2F> Foundation |
   |<#4682B4> Core Infrastructure |
@@ -14,134 +13,126 @@ legend right
 endlegend
 
 package "Application" #8B2500 {
-    component [main.cpp\nSystemInitializer\n16 FreeRTOS Tasks] as MainApp
+    component [main.cpp and src/\nSystemInitializer\n19 FreeRTOS tasks] as MainApp
 }
 
-package "Layer 1: Foundation\n(No Dependencies)" #2F4F2F {
-    component [ESP32-LibraryCommon\nCommon utilities\nShared types] as LibCommon
-    component [ESP32-Logger\nNon-blocking logger\nRing buffer\nRate limiting] as Logger
-    component [ESP32-MutexGuard\nRAII Mutex wrapper\nDeadlock prevention] as MutexGuard
-    component [ESP32-SemaphoreGuard\nRAII Semaphore wrapper\nBinary/Counting] as SemaphoreGuard
+package "Foundation" #2F4F2F {
+    component [ESP32-LibraryCommon] as LibCommon
+    component [ESP32-Logger] as Logger
+    component [ESP32-MutexGuard] as MutexGuard
+    component [ESP32-SemaphoreGuard] as SemaphoreGuard
+    component [ESP32-Watchdog] as Watchdog
 }
 
-package "Layer 2: Core Infrastructure" #4682B4 {
-    component [ESP32-Watchdog\nTask watchdog wrapper\nAuto-feeding] as Watchdog
-    component [ESP32-TaskManager\nTask lifecycle\nStack monitoring\nWatchdog integration] as TaskManager
+package "Core Infrastructure" #4682B4 {
+    component [ESP32-TaskManager] as TaskManager
+    component [ESP32-Syslog] as Syslog
 }
 
-package "Layer 3A: Network Services" #52BE80 {
-    component [ESP32-EthernetManager\nLAN8720A driver\nStatic/DHCP IP] as EthernetMgr
-    component [ESP32-OTAManager\nFirmware updates\nPassword protected] as OTAMgr
-    component [ESP32-NTPClient\nMulti-server NTP\nTime sync] as NTPClient
-    component [ESP32-MQTTManager\nMQTT client\nPriority queues] as MQTTMgr
+package "Network Services" #52BE80 {
+    component [ESP32-EthernetManager\nLAN8720, static IP in this project] as EthernetMgr
+    component [ESP32-OTAManager] as OTAMgr
+    component [ESP32-NTPClient] as NTPClient
+    component [ESP32-MQTTClient] as MQTTClient
+    component [ESP32-MQTTManager] as MQTTMgr
 }
 
-package "Layer 3B: Storage Services" #8B4513 {
-    component [ESP32-PersistentStorage\nNVS manager\n32 parameters\nType-safe registry] as PersistentStorage
-    component [ESP32-RuntimeStorage\nFRAM I2C driver\nMB85RC256V\nCRC32 protection] as RuntimeStorage
-    component [ESP32-DS3231Controller\nRTC I2C driver\nTime + SRAM\nAlarm support] as DS3231Ctrl
+package "Storage Services" #8B4513 {
+    component [ESP32-PersistentStorage\nNVS parameters via Preferences] as PersistentStorage
+    component [ESP32-RuntimeStorage\nFRAM MB85RC256V, 32KB] as RuntimeStorage
+    component [ESP32-DS3231Controller\nDS3231 RTC] as DS3231Ctrl
 }
 
-package "Layer 3C: Modbus Framework" #CD5B45 {
-    interface "IDeviceInstance" as IDevice
-    component [ESP32-ModbusDevice\nGeneric Modbus\nRegister mapping\nAuto-reconnect] as ModbusDevice
-    component [ESP32-MB8ART\n8-Ch temperature\nPT1000 support\n0.1°C resolution] as MB8ART
-    component [ESP32-RYN4\n8-Ch relay module\nBatch commands\nState feedback] as RYN4
-    component [ESP32-ANDRTF3\nRoom sensor\nWall-mount Modbus] as ANDRTF3
+package "Modbus Framework" #CD5B45 {
+    component [esp32ModbusRTU\nfork] as esp32ModbusRTU
+    component [ESP32-IDeviceInstance] as IDevice
+    component [ESP32-ModbusDevice] as ModbusDevice
+    component [ESP32-MB8ART\n8-channel temperature] as MB8ART
+    component [ESP32-RYN4\n8-channel relay] as RYN4
+    component [ESP32-ANDRTF3\nroom sensor] as ANDRTF3
 }
 
 package "External Dependencies" #708090 {
-    component [ArduinoJSON\nJSON parsing] as ArduinoJSON
-    component [PubSubClient\nMQTT protocol] as PubSubClient
-    component [esp32ModbusRTU\nModbus RTU master] as esp32ModbusRTU
-    component [ESP-IDF Framework\nFreeRTOS, NVS\nHAL, I2C, SPI] as ESPIDF
+    component [ArduinoJson 7] as ArduinoJSON
+    component [RTClib] as RTClib
+    component [Adafruit BusIO] as BusIO
+    component [Arduino-ESP32 framework\nWire, WiFi, Preferences] as Framework
 }
 
-' Application dependencies
-MainApp --> LibCommon
+' Libraries the application includes directly (#include in src/ and include/)
 MainApp --> Logger
+MainApp --> MutexGuard
+MainApp --> SemaphoreGuard
+MainApp --> Watchdog
 MainApp --> TaskManager
+MainApp --> Syslog
 MainApp --> EthernetMgr
+MainApp --> OTAMgr
+MainApp --> NTPClient
+MainApp --> MQTTClient
 MainApp --> MQTTMgr
 MainApp --> PersistentStorage
 MainApp --> RuntimeStorage
 MainApp --> DS3231Ctrl
+MainApp --> esp32ModbusRTU
+MainApp --> IDevice
+MainApp --> ModbusDevice
 MainApp --> MB8ART
 MainApp --> RYN4
 MainApp --> ANDRTF3
-MainApp --> OTAMgr
-MainApp --> NTPClient
+MainApp --> ArduinoJSON
 
-' Layer 2 dependencies
-Watchdog --> Logger
-TaskManager --> Logger
+' library.json dependencies (solid)
 TaskManager --> Watchdog
-
-' Layer 3A Network dependencies
-EthernetMgr --> Logger
-EthernetMgr --> ESPIDF
-OTAMgr --> Logger
-OTAMgr --> EthernetMgr
-OTAMgr --> ESPIDF
-NTPClient --> Logger
-NTPClient --> EthernetMgr
-NTPClient --> DS3231Ctrl
-NTPClient --> ESPIDF
-MQTTMgr --> Logger
-MQTTMgr --> EthernetMgr
-MQTTMgr --> MutexGuard
-MQTTMgr --> ArduinoJSON
-MQTTMgr --> PubSubClient
-MQTTMgr --> ESPIDF
-
-' Layer 3B Storage dependencies
-PersistentStorage --> Logger
-PersistentStorage --> MutexGuard
-PersistentStorage --> ESPIDF
-RuntimeStorage --> Logger
-RuntimeStorage --> MutexGuard
-RuntimeStorage --> ESPIDF
-DS3231Ctrl --> Logger
-DS3231Ctrl --> ESPIDF
-
-' Layer 3C Modbus dependencies
-ModbusDevice ..|> IDevice : implements
-ModbusDevice --> Logger
+TaskManager --> MutexGuard
+Syslog --> Logger
+EthernetMgr --> MutexGuard
+EthernetMgr --> LibCommon
+OTAMgr --> MutexGuard
+MQTTMgr --> LibCommon
+MQTTMgr --> MQTTClient
+PersistentStorage --> ArduinoJSON
+RuntimeStorage --> Framework : Wire
+DS3231Ctrl --> BusIO
+DS3231Ctrl --> RTClib
+DS3231Ctrl --> MutexGuard
+IDevice --> LibCommon
 ModbusDevice --> MutexGuard
+ModbusDevice --> LibCommon
+ModbusDevice --> IDevice
 ModbusDevice --> esp32ModbusRTU
-MB8ART --|> ModbusDevice : extends
 MB8ART --> esp32ModbusRTU
-RYN4 --|> ModbusDevice : extends
-RYN4 --> esp32ModbusRTU
-ANDRTF3 --|> ModbusDevice : extends
-ANDRTF3 --> esp32ModbusRTU
+MB8ART --> ModbusDevice
+MB8ART --> MutexGuard
+MB8ART --> IDevice
+RYN4 --> ModbusDevice
+RYN4 --> MutexGuard
+RYN4 --> LibCommon
+ANDRTF3 --> ModbusDevice
+ANDRTF3 --> IDevice
+ANDRTF3 --> MutexGuard
+
+' #include without a library.json entry (dashed)
+esp32ModbusRTU ..> Logger
+esp32ModbusRTU ..> Watchdog
+NTPClient ..> Logger
+RuntimeStorage ..> MutexGuard
+RYN4 ..> IDevice
 
 note right of MainApp
-  **Total Custom Libraries: 18**
-  - Foundation: 4
-  - Core: 2
-  - Network: 4
-  - Storage: 3
-  - Modbus: 5
+  platformio.ini lib_deps: 21 custom libraries
+  (including the esp32ModbusRTU fork) plus
+  ArduinoJson. RTClib and Adafruit BusIO come
+  in through ESP32-DS3231Controller.
 
-  **External Dependencies: 4**
+  MainApp edges: libraries the application
+  includes directly (ESP32-LibraryCommon only
+  indirectly). Library edges: library.json
+  dependencies (solid) or #include only (dashed).
 
-  **Lines of Code: ~15,000**
-  **Development: 20+ rounds**
-end note
-
-note bottom of MutexGuard
-  **RAII Pattern:**
-  Automatic unlock on scope exit
-  Prevents resource leaks
-  Thread-safe by design
-end note
-
-note bottom of ModbusDevice
-  **Polymorphic Device API:**
-  All Modbus devices share
-  common interface via
-  IDeviceInstance abstract class
+  PubSubClient is not used; MQTT goes through
+  ESP32-MQTTClient and ESP32-MQTTManager.
+  Lines of code and history: not verified.
 end note
 
 @enduml

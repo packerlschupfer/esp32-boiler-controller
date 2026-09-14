@@ -14,15 +14,14 @@ PowerOn --> Initialization : Boot complete
 
 state Initialization {
     [*] --> InitLogging
-    InitLogging --> InitSharedResources : Logger ready
-    InitSharedResources --> InitHardware : Event groups/mutexes
-    InitHardware --> InitNetwork : I2C, FRAM, RTC
-    InitNetwork --> InitStorage : Ethernet async
-    InitStorage --> InitModbus : Load NVS parameters
-    InitModbus --> InitControlModules : MB8ART, RYN4, ANDRTF3
-    InitControlModules --> InitMQTT : Burner, Heating, PID
-    InitMQTT --> InitTasks : Connect broker
-    InitTasks --> [*] : Start 16 tasks
+    InitLogging --> InitSharedResources : initializeLogging()
+    InitSharedResources --> InitHardware : event groups, mutexes
+    InitHardware --> InitModbus : I2C, FRAM, RTC
+    InitModbus --> InitNetwork : MB8ART, RYN4, ANDRTF3
+    InitNetwork --> InitControlModules : Ethernet (async)
+    InitControlModules --> InitMQTT : control modules
+    InitMQTT --> InitTasks : MQTT
+    InitTasks --> [*] : start tasks (19 in total)
 }
 
 Initialization --> SystemIdle : STARTUP_COMPLETE
@@ -137,17 +136,18 @@ state SystemError {
 SystemError --> [*] : reset or power cycle
 
 note right of Initialization
-  8-Stage Initialization:
+  8-Stage Initialization (initializeSystem):
   1. Logging
   2. Shared Resources
   3. Hardware (I2C, FRAM, RTC)
-  4. Network (Ethernet async)
-  5. Modbus Devices (background)
+  4. Modbus Devices
+  5. Network (Ethernet, async)
   6. Control Modules
-  7. MQTT (connect)
-  8. Tasks (start all 16)
+  7. MQTT
+  8. Tasks (19 FreeRTOS tasks in total,
+     some started by main.cpp and modules)
 
-  Duration: ~5-10 seconds
+  Duration: not verified
 end note
 
 note right of MixedMode

@@ -1,6 +1,14 @@
 @startuml SystemArchitectureOverview
 !include theme.puml
 
+' File-local: stock PlantUML gives database shapes a light fill, which
+' leaves the theme's white text unreadable.
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
 title System Architecture Overview - High-Level Deployment\nESP32 Boiler Controller Production System
 
 !define HARDWARE #8B4513
@@ -10,7 +18,7 @@ title System Architecture Overview - High-Level Deployment\nESP32 Boiler Control
 cloud "External Network" {
     [MQTT Broker] as Broker
     [NTP Servers] as NTP
-    [Home Assistant] as HA
+    [Home Assistant\nno integration code found] as HA
 }
 
 node "LAN8720A\nEthernet PHY" HARDWARE {
@@ -19,23 +27,23 @@ node "LAN8720A\nEthernet PHY" HARDWARE {
 
 node "ESP32 DevKit" {
 
-    package "Application\n16 FreeRTOS Tasks" {
+    package "Application\n19 FreeRTOS Tasks" {
         [Burner Control] as Burner
         [Heating Control] as Heating
         [Water Control] as Water
-        [PID Control] as PID
+        [Boiler Temp Control\nPID power level] as PID
         [Sensor Tasks] as Sensors
         [Service Tasks] as Services
     }
 
     package "Core Services" CORE {
         [SystemResourceProvider\nSRP] as SRP
-        [SharedResourceManager\n12 Event Groups] as SRM
+        [SharedResourceManager\n11 Event Groups] as SRM
         [ModbusCoordinator] as ModbusC
     }
 
     package "Storage" SERVICE {
-        database "NVS Flash\n16KB Config" as NVS
+        database "NVS Flash\nconfiguration (esplan)" as NVS
     }
 }
 
@@ -73,10 +81,10 @@ ModbusC --> MB8ART : sequential
 ModbusC --> RYN4 : sequential
 ModbusC --> ANDRTF3 : sequential
 
-Burner --> RYN4 : control relays
+Burner --> RYN4 : burner relays R1-R3\n(via RelayControlTask)
 Services --> NVS : persist config
-Services --> FRAM : log errors
-Services --> RTC : schedules
+Services --> FRAM : errors, schedules, counters
+Services --> RTC : time
 
 Services --> ETH : network
 ETH --> Broker : MQTT
@@ -90,36 +98,32 @@ MB8ART <-- TempSensors : PT1000
 ANDRTF3 <-- TempSensors : room
 
 note right of SRP
-  **Service Locator Pattern:**
-  - Static O(1) access
-  - Replaced ServiceContainer
-  - All services registered
-    during initialization
-  - Thread-safe access
+  Static accessors:
+  - ServiceContainer removed
+  - device and module getters forward
+    to SystemInitializer
+  - thread safety: not verified
 end note
 
 note right of SRM
-  **Resource Management:**
-  - 12 Event Groups
-  - 5 Core Mutexes
-  - Managed Queues
-  - RAII patterns
-  - M1 refactoring
+  Resource management:
+  - 11 event groups
+  - 4 standard mutexes
+  - queues created on demand (getQueue)
+  - MutexGuard RAII (ESP32-MutexGuard)
 end note
 
 note bottom of ModbusC
-  **Bus Arbitration:**
-  - Sequential access
-  - No contention
-  - 500ms timer
-  - Coordinated polling
+  Bus arbitration:
+  - 500 ms ticks
+  - ANDRTF3, RYN4 write, MB8ART, RYN4 verify
 end note
 
 note bottom of NVS
-  **Three-Layer Storage:**
-  **NVS:** Config params
-  **FRAM:** Runtime/errors
-  **RTC:** Schedules (battery)
+  Storage:
+  NVS: configuration parameters
+  FRAM: runtime data, errors, schedules
+  RTC: time
 end note
 
 @enduml

@@ -77,12 +77,12 @@ package "Control Modules\n(via SRP)" #FFD93D {
 component [StateManager\nsystem / water switches] as StateMgr
 
 ' Hardware Interface Flow
-MB8ARTTask --> MB8ART : poll\n5s
+MB8ARTTask --> MB8ART : poll\n2.5 s
 MB8ART --> MB8ARTProc : raw data
 MB8ARTProc --> SensorData : update
 MB8ARTProc --> SensorEvents : SetBits
 
-ANDRTF3Task --> ANDRTF3 : poll\n5s
+ANDRTF3Task --> ANDRTF3 : poll\n5 s
 ANDRTF3 --> SensorData : update
 ANDRTF3 --> SensorEvents : SetBits
 
@@ -134,7 +134,8 @@ StorageTask --> SystemSettings : auto-save\n5 min
 
 ' Scheduler Flow
 SchedulerTask --> SensorData : read tank temp
-SchedulerTask --> BurnerReq : SetBits\nWATER_REQUEST
+SchedulerTask --> BurnerReq : setWaterRequest\n(water schedules)
+SchedulerTask --> HeatingTask : HEATING_ON_OVERRIDE\n(heating schedules)
 
 ' SRP Access
 HeatingTask ..> SRP : getHeatingControl()

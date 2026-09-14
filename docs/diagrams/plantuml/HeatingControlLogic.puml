@@ -1,85 +1,84 @@
 @startuml HeatingControlLogic
 !include theme.puml
 
-title Heating Control Logic - Space Heating with PID\nWeather Compensation and Hysteresis
+' File-local: the theme has no activity colours, so stock PlantUML draws light
+' activity boxes and diamonds under the theme's white text.
+skinparam activity {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+    DiamondBackgroundColor #36648B
+    DiamondBorderColor #ffffff
+    DiamondFontColor #ffffff
+}
+
+title Heating Control Logic - HeatingControlTask\nWeather Compensation, Room Mode and Burner Request
 
 start
 
-:HeatingControlTask\n(1s interval);
+:HeatingControlTask\n(5 s timer and control events);
 
-if (Boiler Enabled?) then (no)
-  :Clear HEATING_REQUEST_BIT;
+if (Boiler and heating enabled?) then (no)
+  :stopHeating() - clear HEATING_ON\nclearRequest(HEATING);
   stop
 else (yes)
 endif
 
-if (Heating Enabled?) then (no)
-  :Clear HEATING_REQUEST_BIT;
+if (PID autotune running?) then (yes)
+  :Keep heating demand;
+elseif (heatingOverrideOff set?) then (yes)
+  :Heating not needed;
+  stop
+else (no)
+  if (Weather-compensated control?) then (yes)
+    :Needed when outside is below outsideThreshold\nand the room is not overheated\n(stop above target + overheat margin,\nrestart below that limit - heating_hysteresis);
+  else (room mode)
+    :When off: start when room is below target\nWhen on: stop at room >= target + heating_hysteresis;
+  endif
+endif
+
+if (Heating needed or HEATING_ON_OVERRIDE?) then (no)
+  :If heating: stopHeating()\nclearRequest(HEATING);
   stop
 else (yes)
 endif
 
-:Read Sensor Data\n- Inside temp (ANDRTF3)\n- Outside temp (MB8ART ch3)\n- Boiler temps (MB8ART ch0,1);
+if (Water request active and WATER_PRIORITY set?) then (yes)
+  :Defer heating\n(clear HEATING_ON_OVERRIDE);
+  stop
+else (no)
+endif
 
-:Calculate Boiler Target\nUsing Heating Curve;
+:startHeating() - set HEATING_ON;
 
+:Boiler target from the heating curve\n(room deviation shift in weather mode);
 note right
-  **Heating Curve Formula:**
-  dar = outside - inside
-  boilerTarget = targetRoomTemp + shift -
-    coeff * dar * (1.4347 + 0.021*dar + 248e-6*dar²)
-
-  **Parameters from SystemSettings:**
-  - targetRoomTemp (default 20°C)
-  - shift (adjustment factor)
-  - coeff (compensation coefficient)
+  HeatingControlModuleFixedPoint:
+  coefficients 1.4347, 0.021, 0.000248
+  shift: heating/curveShift
+  + room deviation x heating/roomCurveShiftFactor
+  clamped to burner_low_limit (default 38 °C)
+  .. heating_high_limit (default 75 °C)
 end note
 
-if (boilerTarget < Burner Low Limit?) then (yes)
-  :Set to 30°C\n(minimum);
-elseif (boilerTarget > Heating High Limit?) then (yes)
-  :Set to 80°C\n(maximum);
-else (in range)
-  :Use calculated\nboiler target;
-endif
+:BurnerRequestManager::setHeatingRequest(target)\nHEATING + POWER_LOW + target in bits 16-23;
+note right
+  Example: 70 °C = 0x00460001
+  Power level HALF/FULL is decided
+  by BoilerTempControlTask.
+end note
 
-partition "Hysteresis Logic with State Memory" {
-  if (Room Temp vs Target?) then (< Target - 2°C\nAND not heating)
-    :Start Heating\nwasHeating = true;
-    :Set HEATING_REQUEST_BIT\nEncode boiler target\nin bits 16-23;
+:BurnerControlTask arms the heat demand\n(BurnerDemandGate);
 
-    note right
-      **Request Encoding:**
-      Bit 0 = HEATING_REQUEST
-      Bits 16-23 = Target temp
-
-      Example: 70°C = 0x00004601
-    end note
-
-    :BurnerControlTask\nwill respond;
-    stop
-  elseif (> Target + 2°C\nAND heating) then (yes)
-    :Stop Heating\nwasHeating = false;
-    :Clear HEATING_REQUEST_BIT;
-    stop
-  else (within ±2°C band)
-    if (wasHeating?) then (true)
-      :Maintain heating\nSet HEATING_REQUEST_BIT;
-      stop
-    else (false)
-      :Stay off\nClear HEATING_REQUEST_BIT;
-      stop
-    endif
-  endif
-}
+stop
 
 floating note right
-  **Hysteresis Benefits:**
-  - Prevents rapid cycling
-  - ±2°C dead band
-  - State memory (wasHeating)
-  - Reduces wear on components
-  - More efficient operation
+  heating_hysteresis (default 0.5 °C):
+  room mode starts below the target and stops
+  at target + hysteresis; weather mode uses it
+  for the room overheat restart limit.
+  There is no static wasHeating flag - the task
+  uses its current heating state.
 end note
 
 @enduml

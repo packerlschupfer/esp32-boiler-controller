@@ -1,27 +1,32 @@
 @startuml HotWaterScheduler
 !include theme.puml
 
-title Hot Water Scheduler with Pre-Heating - STATE DIAGRAM\n⚠️ FUTURE FEATURE - NOT YET IMPLEMENTED ⚠️
+' File-local: wider than PlantUML's 4096 px image limit - scale down instead
+' of letting the right edge be cropped.
+scale max 4000 width
+
+title Hot Water Scheduler with Pre-Heating - STATE DIAGRAM\nASPIRATIONAL - NOT IMPLEMENTED (current code: TimerSchedulerTask)
 
 note as Warning
-  **⚠️ ASPIRATIONAL DIAGRAM ⚠️**
+  ASPIRATIONAL DIAGRAM - NOT IMPLEMENTED
 
-  This diagram shows planned pre-heating functionality
-  that is NOT YET IMPLEMENTED in the codebase.
+  What exists: TimerSchedulerTask
+  (generic timer scheduler that replaced HotWaterScheduler)
+  - checks schedules every 30 s
+  - up to 20 schedules: id, type, name, day mask,
+    start and end time, enabled, action data
+  - water heating schedules: setWaterRequest(target)
+    while active, clearRequest(WATER) at the end
+  - space heating schedules: set HEATING_ON_OVERRIDE
+    (deferred while water heating is active)
+  - stored in FRAM at 0x6200, persisted 5 min after changes
+  - scheduler commands handled: add, remove, list, status
+  - installs the NTP callback that updates the DS3231
 
-  **Current Implementation:**
-  - Basic schedule checking (30s interval)
-  - Simple ON/OFF scheduling
-  - NO pre-heating calculation
-  - NO estimated ready time
-
-  **Future Enhancement:**
-  When implemented, this will enable:
-  - Smart pre-heating before scheduled times
-  - Heating rate calculation (1°C/min)
-  - Safety margin (10% or 5 min)
-  - MQTT status with estimated ready time
-  - Heat recovery optimization
+  Not implemented: pre-heating calculation,
+  estimated ready time, vacation mode and pump
+  exercise (MQTT topics are only defined),
+  update / enable / disable / clear handlers
 end note
 
 [*] --> IDLE : Task Start
@@ -199,7 +204,7 @@ state ERROR {
 ERROR --> IDLE : Recovery
 
 note right of CALCULATE_PREHEAT
-  **Pre-heat Calculation Example:**
+  Pre-heat Calculation Example:
 
   Current temp: 40°C
   Target temp: 60°C
@@ -216,7 +221,7 @@ note right of CALCULATE_PREHEAT
 end note
 
 note right of PRE_HEATING
-  **MQTT Pre-heat Status:**
+  MQTT Pre-heat Status:
   {
     "preheating": true,
     "scheduleName": "Morning",
@@ -232,7 +237,7 @@ note right of PRE_HEATING
 end note
 
 note bottom of MAINTAINING
-  **Pre-heated and Ready:**
+  Pre-heated and Ready:
   - Target temperature reached early
   - Minimal heat cycles to maintain
   - Ready for immediate use
@@ -241,7 +246,7 @@ note bottom of MAINTAINING
 end note
 
 note bottom of VACATION
-  **Vacation Mode:**
+  Vacation Mode (not implemented):
   - All schedules ignored
   - No pre-heating
   - Manual control only

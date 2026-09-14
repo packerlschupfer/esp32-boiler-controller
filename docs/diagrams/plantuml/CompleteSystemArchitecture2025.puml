@@ -1,7 +1,17 @@
 @startuml CompleteSystemArchitecture2025
 !include theme.puml
 
-title Complete System Architecture - January 2025\nProduction System Post H1/M1 Refactoring
+' File-local: stock PlantUML gives database shapes a light fill, which leaves the
+' theme's white text unreadable. The diagram is wider than PlantUML's 4096 px
+' image limit, so scale it down instead of letting the right edge be cropped.
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+scale max 4000 width
+
+title Complete System Architecture\n19 FreeRTOS Tasks, Shared Resources, Modbus, Storage and Network
 
 !define HARDWARE #8B4513
 !define INFRASTRUCTURE #4682B4
@@ -9,12 +19,11 @@ title Complete System Architecture - January 2025\nProduction System Post H1/M1 
 !define SERVICE #52BE80
 !define STORAGE #8B7355
 
-node "ESP32 DevKit" {
+node "ESP32" {
 
     node "Core 0" #2F4F4F {
-        [NTPTask] as NTP
         [TimerSchedulerTask] as Scheduler
-        [Arduino Loop] as Loop
+        [MonitoringTask] as MonitorTask
     }
 
     node "Core 1" #36648B {
@@ -23,243 +32,192 @@ node "ESP32 DevKit" {
             [MB8ARTProcessingTask] as MB8ARTProc
             [ANDRTF3Task] as ANDRTF3Task
             [RelayControlTask] as RelayTask
+            [RYN4ProcessingTask] as RYN4Proc
         }
 
         package "Control Tasks" CONTROL {
             [BurnerControlTask] as BurnerTask
-            [HeatingControlTask] as HeatingTask
-            [WheaterControlTask] as WaterTask
-            [SpaceHeatingPIDTask] as PIDTask
+            [BoilerTempControlTask] as BoilerTempTask
         }
 
         package "Service Tasks" SERVICE {
+            [NTPTask] as NTP
             [MQTTTask] as MQTTTask
-            [MonitoringTask] as MonitorTask
             [OTATask] as OTATask
-            [PersistentStorageTask] as StorageTask
         }
+    }
+
+    node "Not pinned" #708090 {
+        [HeatingControlTask] as HeatingTask
+        [WheaterControlTask] as WaterTask
+        [ControlTask] as ControlTask
+        [HeatingPumpTask] as HeatPumpTask
+        [WaterPumpTask] as WaterPumpTask
+        [PersistentStorageTask] as StorageTask
+        [SyslogTask] as SyslogTask
+        [Arduino loop()] as Loop
     }
 
     package "Core Services" INFRASTRUCTURE {
         [SystemResourceProvider\nSRP] as SRP
-        [SharedResourceManager\n12 Event Groups\n5 Mutexes] as SRM
-        [TaskManager\n16 Tasks] as TaskMgr
-        [ModbusCoordinator\nBus Arbitration] as ModbusCoord
+        [SharedResourceManager\n11 event groups\n4 standard mutexes] as SRM
+        [TaskManager\nwatchdog per task] as TaskMgr
+        [ModbusCoordinator\n500 ms ticks] as ModbusCoord
     }
 
     package "Control Modules" CONTROL {
-        [BurnerSystemController\nH1: Unified Burner+Pump] as BurnerCtrl
-        [HeatingControlModule\nWeather Compensation] as HeatingCtrl
-        [PIDControlModule\nFixed-Point PID] as PIDCtrl
-        [WaterControlModule\n60°C Fixed Target] as WaterCtrl
+        [BurnerSystemController\nburner relays R1-R3] as BurnerCtrl
+        [HeatingControlModule\nheating curve] as HeatingCtrl
+        [PIDControlModule] as PIDCtrl
+        [WheaterControlModule] as WaterCtrl
+        [PumpControlModule] as PumpCtrl
     }
 
     package "Shared Data\n(Mutex Protected)" STORAGE {
-        database "SharedSensorReadings\n8 Temperatures\nTemperature_t" as SensorData
-        database "SharedRelayReadings\n8 Relay States" as RelayData
-        database "SystemSettings\n32 Parameters" as Settings
+        database "SharedSensorReadings" as SensorData
+        database "SharedRelayReadings" as RelayData
+        database "SystemSettings\n52 parameters" as Settings
     }
 }
 
 node "RS485 Modbus RTU\n9600 baud" HARDWARE {
-    [MB8ART\n8-Ch PT1000\n0.1°C Resolution] as MB8ART
-    [RYN4\n8-Ch Relay Module\nBatch Commands] as RYN4
-    [ANDRTF3\nRoom Sensor\nWall-mount] as ANDRTF3
+    [MB8ART\n8-channel temperature] as MB8ART
+    [RYN4\n8-channel relay module] as RYN4
+    [ANDRTF3\nroom sensor] as ANDRTF3
 }
 
-node "I2C Bus\nSDA=21, SCL=22" HARDWARE {
-    database "DS3231 RTC\nBattery-backed\n±2ppm\n236B SRAM" as DS3231
-    database "MB85RC256V FRAM\n32KB\nUnlimited writes\nCRC32" as FRAM
+node "I2C Bus" HARDWARE {
+    database "DS3231 RTC" as DS3231
+    database "MB85RC256V FRAM\n32KB, 0x50" as FRAM
 }
 
 node "ESP32 Internal" HARDWARE {
-    database "NVS Flash\n~16KB\nKey-Value Store" as NVS
+    database "NVS Flash\nnamespace esplan" as NVS
 }
 
 cloud "External Systems" {
-    [MQTT Broker\nmosquitto] as MQTTBroker
-    [Home Assistant\nYAML Integration] as HomeAssist
-    [Web Clients\nMQTT Control] as WebClient
+    [MQTT Broker] as MQTTBroker
+    [MQTT clients] as MQTTClients
 }
 
-node "Ethernet\nLAN8720A PHY" HARDWARE {
-    [EthernetManager\nStatic IP] as EthMgr
+node "Ethernet\nLAN8720" HARDWARE {
+    [EthernetManager\nstatic IP] as EthMgr
 }
 
-' Hardware connections
-MB8ARTTask --> ModbusCoord : coordinated
-ANDRTF3Task --> ModbusCoord : coordinated
-ModbusCoord --> MB8ART : sequential\naccess
-ModbusCoord --> RYN4 : sequential\naccess
-ModbusCoord --> ANDRTF3 : sequential\naccess
-
-MB8ARTTask --> SensorData : update
-MB8ARTProc --> SensorData : process
+' Modbus bus access (ModbusCoordinator ticks)
+MB8ARTTask ..> ModbusCoord : scheduled
+ANDRTF3Task ..> ModbusCoord : scheduled
+RYN4Proc ..> ModbusCoord : scheduled
+MB8ARTTask --> MB8ART : read
+ANDRTF3Task --> ANDRTF3 : read
+RYN4Proc --> RYN4 : write and verify
+MB8ARTProc --> SensorData : update
 ANDRTF3Task --> SensorData : update
-
-RelayTask --> RYN4 : execute\nbatch
-RYN4 --> RelayData : states
+RelayTask --> RYN4Proc : desired relay states
 
 ' Control flow
-HeatingTask --> HeatingCtrl : use
+HeatingTask --> HeatingCtrl : heating curve
 WaterTask --> WaterCtrl : use
-PIDTask --> PIDCtrl : use
-BurnerTask --> BurnerCtrl : use
-
-BurnerCtrl --> RYN4 : atomic\nbatch
+BurnerTask --> BurnerCtrl : via BurnerStateMachine
+BoilerTempTask --> BurnerTask : heat demand,\npower level
+HeatPumpTask --> PumpCtrl : part of
+WaterPumpTask --> PumpCtrl : part of
+BurnerCtrl --> RelayTask : setRelayState R1-R3
+PumpCtrl --> RelayTask : RelayRequest pump bits
 
 HeatingTask --> SensorData : read
 WaterTask --> SensorData : read
-PIDTask --> SensorData : read
-
+BoilerTempTask --> SensorData : read
 HeatingTask --> Settings : read
 WaterTask --> Settings : read
-PIDTask --> Settings : read
 
-' Storage connections
-StorageTask --> NVS : save\n5 min
-StorageTask --> Settings : manage
+' Storage
+StorageTask --> Settings : registered parameters
+StorageTask --> NVS : Preferences
+Scheduler --> FRAM : schedules
+NTP --> DS3231 : time fallback
+Scheduler --> DS3231 : RTC update from NTP
 
-DS3231 <-- Scheduler : schedules
-FRAM <-- MonitorTask : error log
-
-' Service flow
+' Network
 MQTTTask --> EthMgr : network
 EthMgr --> MQTTBroker : TCP/IP
-MQTTBroker <--> HomeAssist
-MQTTBroker <--> WebClient
-
-MQTTTask --> SensorData : publish
-MQTTTask --> RelayData : publish
-MQTTTask --> Settings : update
-
-NTP --> DS3231 : sync
+MQTTBroker <--> MQTTClients
+MQTTTask --> StorageTask : boiler/params/*
+MQTTTask --> SensorData : publish status
 NTP --> EthMgr : network
-
 OTATask --> EthMgr : updates
+SyslogTask --> EthMgr : remote logging
 
 ' SRP access
 BurnerTask ..> SRP : getBurnerSystemController()
 HeatingTask ..> SRP : getHeatingControl()
-MB8ARTTask ..> SRP : getMB8ART()
-MQTTTask ..> SRP : getMQTTManager()
-
-SRP --> SRM
 SRP --> TaskMgr
 SRP --> BurnerCtrl
 SRP --> HeatingCtrl
 SRP --> PIDCtrl
+SRP --> WaterCtrl
 
-note right of BurnerCtrl
-  **H1 Refactoring:**
-  ✓ Unified burner + pump control
-  ✓ Atomic relay operations
-  ✓ 30s pump motor protection
-  ✓ Heat recovery mode
-  ✓ Automatic cooldown
-
-  **Eliminated:**
-  ✗ Separate pump tasks
-  ✗ Coordination complexity
-  ✗ Race conditions
+note bottom of BurnerCtrl
+  BurnerSystemController drives only the
+  burner relays R1-R3 through RelayControlTask.
+  HeatingPumpTask / WaterPumpTask (PumpControlModule)
+  follow HEATING_ON / WATER_ON with a 5 min
+  overrun and request R5 / R6.
+  Pump motor protection: RelayControlTask.
 end note
 
-note right of SRM
-  **M1 Refactoring:**
-  12 Event Groups (was ~15)
-  ✓ GeneralSystem
-  ✓ SystemState
-  ✓ ControlRequests
-  ✓ BurnerRequest
-  ✓ Sensor
-  ✓ Relay/Request/Status
-  ✓ Heating
-  ✓ Burner
-  ✓ ErrorNotification
-  ✓ DeviceReady
-
-  5 Core Mutexes:
-  ✓ sensorReadingsMutex
-  ✓ relayReadingsMutex
-  ✓ systemSettingsMutex
-  ✓ mqttMutex
-  ✓ modbusMutex
+note bottom of SRM
+  Event groups: GeneralSystem, SystemState,
+  ControlRequests, Heating, Burner, BurnerRequest,
+  Sensor, ErrorNotification, Relay, RelayStatus,
+  RelayRequest
+  Standard mutexes: SensorReadings, RelayReadings,
+  SystemSettings, MQTT
+  SRP also exposes a DeviceMap mutex;
+  ModbusCoordinator keeps its own mutex.
 end note
 
 note bottom of SRP
-  **ServiceContainer → SRP:**
-  Replaced HashMap with
-  static service locator
-
-  ✓ O(1) access vs O(log n)
-  ✓ Compile-time type safety
-  ✓ Zero overhead
-  ✓ Simple API: SRP::getXXX()
+  SRP: static accessors. Device and module
+  getters forward to gSystemInitializer;
+  shared data and TaskManager are globals.
 end note
 
-note right of NVS
-  **Storage Strategy:**
-
-  **NVS:** Configuration params
-  - Infrequent writes
-  - Survives firmware update
-
-  **FRAM:** Runtime data
-  - Frequent writes (ns)
-  - Error logging (256 entries)
-  - Runtime counters
-  - PID state
-
-  **RTC SRAM:** Critical data
-  - Battery-backed
-  - 10 hot water schedules
-  - Vacation flag
+note bottom of NVS
+  NVS: configuration parameters (Preferences,
+  namespace esplan, 52 parameters).
+  FRAM: ErrorLogFRAM (50 entries), critical data
+  (emergency state, PID tuning, runtime counters,
+  safety events), up to 20 schedules, PID state.
+  DS3231: time (NTP fallback, updated from NTP).
 end note
 
-note right of MQTTBroker
-  **MQTT Topics:**
-
-  **Status (Published):**
-  - boiler/status/sensors
-  - boiler/status/health
-  - boiler/status/system
-
-  **Control (Subscribed):**
-  - boiler/cmd/system
-  - boiler/cmd/heating
-  - boiler/cmd/water
-
-  **Parameters:**
-  - esplan/params/set/+
-  - esplan/params/get/+
-  - esplan/params/save
+note bottom of MQTTBroker
+  MQTT topics (prefix boiler):
+  Status: boiler/status/sensors, health, system,
+  heating, water, burner, error, fram_errors/...
+  Commands: boiler/cmd/system, heating, water,
+  water_priority, pid_autotune, scheduler/...
+  Parameters: boiler/params/{set,get,list,save},
+  status under boiler/params/status/...
+  Home Assistant integration: no code found.
 end note
 
 note bottom of TaskMgr
-  **16 FreeRTOS Tasks:**
-
-  **Core 0:** (3 tasks)
-  - NTP (P2, 4KB)
-  - Scheduler (P2, 4KB)
-  - Loop
-
-  **Core 1 Hardware:** (4 tasks)
-  - MB8ART (P3, 4KB)
-  - MB8ARTProc (P3, 3KB)
-  - ANDRTF3 (P3, 3KB)
-  - Relay (P4, 3KB)
-
-  **Core 1 Control:** (4 tasks)
-  - Burner (P4, 5KB)
-  - Heating (P3, 4KB)
-  - Water (P3, 4KB)
-  - PID (P3, 3.5KB)
-
-  **Core 1 Services:** (4 tasks)
-  - MQTT (P2, 8KB)
-  - Monitor (P2, 8KB)
-  - OTA (P1, 8KB)
-  - Storage (P2, 4KB)
+  19 FreeRTOS tasks (P = priority, stack in bytes
+  for env esp32dev_usb_debug_selective):
+  Core 0: TimerScheduler (P2, 3072),
+    Monitoring (P2, 3584)
+  Core 1: MB8ART (P4, 3584), MB8ARTProc (P3, 3072),
+    ANDRTF3 (P3, 3584), RelayControl (P4, 4096),
+    RYN4Proc (P3, 2560), BurnerControl (P4, 4096),
+    BoilerTempCtrl (P4, 3072), NTP (P2, 4096),
+    MQTT (P2, 3584), OTA (P1, 3072)
+  Not pinned: HeatingControl (P3, 3584),
+    WheaterControl (P3, 3584), ControlTask (P3, 3584),
+    HeatingPump (P3, 2048), WaterPump (P3, 2048),
+    PersistentStorage (P2, 5120), Syslog (P1, 4096)
+  PIDControlTask exists but is not started.
 end note
 
 @enduml

@@ -1,205 +1,107 @@
 @startuml StorageArchitecture
 !include theme.puml
 
-title Storage Architecture - Three-Layer Persistence System\nNVS Flash + FRAM (MB85RC256V) + RTC SRAM (DS3231)
+' File-local: stock PlantUML gives storage and database a light fill, which
+' leaves the theme's white text unreadable.
+skinparam storage {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
 
-package "Application Layer" {
-    component [HeatingControlModule] as HeatingCtrl
-    component [WaterControlModule] as WaterCtrl
-    component [PIDControlModule] as PIDCtrl
-    component [BurnerStateMachine] as BurnerSM
-    component [MQTTManager] as MQTTMgr
-    component [HotWaterScheduler] as Scheduler
+title Storage Architecture - NVS Flash + FRAM (MB85RC256V)\nDS3231 RTC for time
+
+package "Application" {
+    component [PersistentStorageTask] as PSTask
+    component [MQTTTask] as MQTTTask
     component [ErrorHandler] as ErrorHandler
+    component [CentralizedFailsafe] as Failsafe
+    component [TimerSchedulerTask] as Scheduler
+    component [BurnerRuntimeTracker] as RuntimeTracker
+    component [PIDControlModuleFixedPoint] as PIDCtrl
+    component [NTPTask] as NTPTask
 }
 
-package "Storage Abstraction Layer" {
-
-    component [PersistentStorage] as PersistSvc {
-        [Parameter Registry\n32 Parameters] as ParamReg
-        [Validation Engine] as Validators
-        [Change Callbacks] as Callbacks
-        [Auto-Save Timer\n5 minutes] as AutoSave
+package "Storage Modules and Libraries" {
+    rectangle "ESP32-PersistentStorage" as PersistSvc {
+        component [52 registered parameters\nrange check, setOnChange] as ParamReg
+        component [save / saveAll\nPreferences] as NVSOps
     }
 
-    component [RuntimeStorage] as RuntimeSvc {
-        [Error Log\n256 entries\nCircular buffer] as ErrorLog
-        [Runtime Counters\nBurner cycles\nPump starts] as Counters
-        [Runtime Hours\nTotal/Heating/Water] as RuntimeHours
-        [PID State\nIntegral terms] as PIDState
-        [CRC32 Protection] as CRC32
+    rectangle "FRAM users (RuntimeStorage driver)" as FramUsers {
+        component [ErrorLogFRAM\n50-entry error log\nCRC-protected stats] as ErrorLog
+        component [CriticalDataStorage\nemergency state, PID tuning,\nruntime counters, error log area,\nsafety events (CRC32)] as Critical
+        component [ScheduleStorage\nup to 20 schedules at 0x6200, CRC] as Schedules
+        component [PID state\nsaveState / restoreState] as PIDState
     }
 
-    component [DS3231Controller] as DS3231Mgr {
-        [Schedule Storage\n10 schedules] as ScheduleRTC
-        [Vacation Flag] as VacationFlag
-        [Pump Exercise Config] as PumpExercise
-        [Time Sync\nNTP → RTC] as TimeSync
-    }
-}
-
-package "Parameter Categories" {
-    storage "Water Heater\n7 params\ntempLimitLow\ntempLimitHigh\nhysteresis\npriorityDelay\nheatingRate\nboostDuration\ntankCapacity" as WaterParams
-
-    storage "Heating\n6 params\ntargetTemp\nhysteresis\nnightSetback\noutsideTempComp\nminBoilerTemp\nmaxBoilerTemp" as HeatParams
-
-    storage "PID Tuning\n6 params\nKp, Ki, Kd\noutputMin\noutputMax\nsampleTime" as PIDParams
-
-    storage "Sensors\n1 param\noutsideTempOffset" as SensorParams
-
-    storage "Status\n12 params\nRead-only\nsensor values" as StatusParams
+    component [DS3231Controller\nRTC time] as DS3231Mgr
 }
 
 package "Physical Storage Hardware" {
-    database "ESP32 NVS Flash\n~16KB Partition\nKey-Value Store" as NVS {
-    }
-
-    database "MB85RC256V FRAM\n32KB I2C (0x50)\nFast writes\nNo wear limit" as FRAM {
-    }
-
-    database "DS3231 RTC\nBattery-backed\n±2ppm accuracy\n236 bytes SRAM" as RTC {
-    }
+    database "ESP32 NVS Flash\nnamespace esplan" as NVS
+    database "MB85RC256V FRAM\n32KB, I2C 0x50" as FRAM
+    database "DS3231 RTC" as RTC
 }
 
 package "Runtime Data Structures" {
-    storage [SystemSettings\nMutex Protected] as SystemSettings
-    storage [SharedSensorReadings\nMutex Protected] as SensorData
+    storage "SystemSettings\nmutex protected" as SystemSettings
 }
 
-' Application to Services
-HeatingCtrl --> SystemSettings : read
-WaterCtrl --> SystemSettings : read
-PIDCtrl --> SystemSettings : read
-BurnerSM --> SystemSettings : read
-MQTTMgr --> PersistSvc : set/get parameters
-Scheduler --> DS3231Mgr : read/write schedules
-ErrorHandler --> RuntimeSvc : log errors
+' Parameters (NVS)
+MQTTTask --> PSTask : boiler/params/* messages
+PSTask --> ParamReg : register, handleMqttCommand
+ParamReg --> SystemSettings : registered variables
+PSTask --> NVSOps : save / saveAll
+NVSOps --> NVS : Preferences put*
 
-' PersistentStorage internals
-PersistSvc *-- ParamReg
-PersistSvc *-- Validators
-PersistSvc *-- Callbacks
-PersistSvc *-- AutoSave
+' FRAM
+ErrorHandler --> ErrorLog : logError()
+Failsafe --> Critical : saveEmergencyState()
+RuntimeTracker --> Critical : runtime and cycle counters
+PIDCtrl --> PIDState
+Scheduler --> Schedules : persist 5 min after changes
+ErrorLog --> FRAM
+Critical --> FRAM
+Schedules --> FRAM
+PIDState --> FRAM
 
-ParamReg --> WaterParams
-ParamReg --> HeatParams
-ParamReg --> PIDParams
-ParamReg --> SensorParams
-ParamReg --> StatusParams
-
-' Storage operations
-PersistSvc --> Validators : validate
-Validators --> SystemSettings : update if valid
-PersistSvc --> Callbacks : execute
-Callbacks --> SystemSettings : notify changes
-AutoSave --> NVS : periodic save
-PersistSvc --> NVS : load/save
-
-NVS --> SystemSettings : restore on boot
-
-' RuntimeStorage internals
-RuntimeSvc *-- ErrorLog
-RuntimeSvc *-- Counters
-RuntimeSvc *-- RuntimeHours
-RuntimeSvc *-- PIDState
-RuntimeSvc *-- CRC32
-
-ErrorLog --> FRAM : write
-Counters --> FRAM : write
-RuntimeHours --> FRAM : write
-PIDState --> FRAM : write
-CRC32 --> FRAM : verify
-
-' DS3231 internals
-DS3231Mgr *-- ScheduleRTC
-DS3231Mgr *-- VacationFlag
-DS3231Mgr *-- PumpExercise
-DS3231Mgr *-- TimeSync
-
-ScheduleRTC --> RTC : battery-backed
-VacationFlag --> RTC : battery-backed
-PumpExercise --> RTC : battery-backed
-
-' MQTT integration
-storage "MQTT Topics\nesplan/params/set/+\nesplan/params/get/+\nesplan/params/list\nesplan/params/save\nesplan/params/status/+" as MQTT
-
-MQTT --> MQTTMgr
-MQTTMgr ..> PersistSvc : commands
+' Time
+NTPTask --> DS3231Mgr : time fallback after\n5 NTP failures
+Scheduler --> DS3231Mgr : updateRTCFromNTP\n(NTP callback)
+DS3231Mgr --> RTC
 
 note right of PersistSvc
-  **Parameter Update Flow:**
-  1. MQTT pub to esplan/params/set/heating/targetTemp
-  2. MQTTManager receives JSON {"value": 22.5}
-  3. PersistentStorage validates range
-  4. Update SystemSettings in RAM
-  5. Execute change callbacks
-  6. SetBits SETTINGS_CHANGED_BIT
-  7. Modules read updated value
-  8. Auto-save to NVS after 5 min
-
-  **Thread-safe:** All operations
-  use mutex protection
+  Parameters: MQTT boiler/params/{set,get,list,save},
+  handled by handleMqttCommand() in PersistentStorageTask.
+  52 parameters: system, heating, limits, wheater,
+  pid, sensor offsets, syslog.
+  SAVE_INTERVAL_MS (5 min) is defined; a periodic
+  auto-save is not verified.
 end note
 
-note right of RuntimeSvc
-  **Error Logging Flow:**
-  1. Error occurs in module
-  2. ErrorHandler::logError() called
-  3. Format error entry:
-     - Timestamp from DS3231
-     - Error code & severity
-     - Context data
-  4. Write to FRAM circular buffer
-  5. Calculate CRC32
-  6. Update buffer pointer
-  7. Publish to MQTT
-
-  **Capacity:** 256 error entries
-  **Retention:** Survives power loss
-end note
-
-note right of DS3231Mgr
-  **Schedule Persistence:**
-  Schedules stored in TWO places:
-
-  1. **FRAM (RuntimeStorage):**
-     - Full schedule details
-     - Metadata, names
-     - Backup copy
-
-  2. **DS3231 RTC SRAM:**
-     - Active schedules only
-     - Battery-backed
-     - Fast access by scheduler
-     - Survives power loss
-
-  Synchronized by
-  RuntimeStorageSchedules.cpp
+note right of FramUsers
+  FRAM layout from code:
+  - CriticalDataStorage 0x4C20 - 0x6120
+  - schedules from 0x6200 (4KB)
+  - ErrorLogFRAM and PID state through RuntimeStorage
+  Current code writes only safety events into the
+  CriticalDataStorage error log area.
 end note
 
 note bottom of NVS
-  **Storage Selection Strategy:**
-
-  **NVS Flash:**
-  ✓ Configuration parameters
-  ✓ Infrequent writes
-  ✓ Survives firmware update
-  ✗ Limited write cycles (~10K)
-  ✗ Slow writes (ms)
-
-  **FRAM:**
-  ✓ Frequent writes (ns)
-  ✓ Unlimited write cycles
-  ✓ Runtime/logging data
-  ✗ Requires external IC
-  ✗ Higher cost
-
-  **RTC SRAM:**
-  ✓ Battery-backed (years)
-  ✓ Small critical data
-  ✓ Time-related data
-  ✗ Only 236 bytes
-  ✗ Requires RTC IC + battery
+  NVS: configuration parameters (Preferences).
+  FRAM: error log, critical data, counters,
+  schedules, PID state.
+  DS3231: time only - no SRAM use found,
+  no schedules or vacation flag stored there.
+  Not verified: NVS partition size,
+  write endurance figures.
 end note
 
 @enduml
