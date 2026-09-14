@@ -23,27 +23,27 @@ The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (ta
 
 | Task | Priority | Stack (SEL) | Core | Purpose |
 |------|----------|-------------|------|---------|
-| BurnerControlTask | 4 | 3584 | Any | Burner state machine, safety-critical |
-| RelayControlTask | 4 | 3584 | 1 | Physical relay control, motor protection |
+| BurnerControlTask | 4 | 4096 | 1 | Burner state machine, safety-critical |
+| RelayControlTask | 4 | 4096 | 1 | Physical relay control, motor protection |
 | HeatingControlTask | 3 | 3584 | Any | Space heating: heating curve target, heating request |
 | WheaterControlTask | 3 | 3584 | Any | Water heating: charge decision, water request |
 | BoilerTempControlTask | 4 | 3072 | 1 | Boiler temperature PID, heat demand, autotune |
 | MB8ARTTask | 4 | 3584 | 1 | MB8ART temperature data acquisition |
-| MB8ARTProcessingTask | 3 | 3072 | Any | Temperature sensor data processing |
-| ANDRTF3Task | 3 | 3584 | Any | Room temperature sensor (only if the device is present) |
-| RYN4ProcessingTask | 3 | 2560 | Any | Relay module data processing |
-| ControlTask | 3 | 3072 | Any | Remote control command handler |
+| MB8ARTProcessingTask | 3 | 3072 | 1 | Temperature sensor data processing |
+| ANDRTF3Task | 3 | 3584 | 1 | Room temperature sensor (only if the device is present) |
+| RYN4ProcessingTask | 3 | 2560 | 1 | Relay module data processing |
+| ControlTask | 3 | 3584 | Any | Remote control command handler |
 | MQTTTask | 2 | 3584 | 1 | MQTT communication & queuing |
 | MonitoringTask | 2 | 3584 | 0 | System health & diagnostics |
-| HeatingPumpTask | 2 | 3072 | Any | Heating circulation pump control |
-| WaterPumpTask | 2 | 3072 | Any | Hot water loading pump control |
+| HeatingPumpTask | 3 | 2048 | Any | Heating circulation pump control |
+| WaterPumpTask | 3 | 2048 | Any | Hot water loading pump control |
 | OTATask | 1 | 3072 | 1 | Over-the-air firmware updates |
-| TimerSchedulerTask | - | 3072 | Any | Schedule management |
-| PersistentStorageTask | - | 5120 | Any | NVS parameter persistence |
-| NTPTask | - | default | Any | Time synchronization |
+| TimerSchedulerTask | 2 | 3072 | 0 | Schedule management |
+| PersistentStorageTask | 2 | 5120 | Any | NVS parameter persistence |
+| NTPTask | 2 | 4096 | 1 | Time synchronization |
 | SyslogTask | 1 | 4096 | Any | Remote syslog |
 
-*Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (active development mode)*
+*Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Fixed in all modes: HeatingPump/WaterPump 2048, BoilerTempCtrl 3072, NTPTask 4096, SyslogTask 4096 (literals in the start calls). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
 
 Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` and `PIDControlTask` exist in `src/modules/tasks/` but are not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task.
 
@@ -55,8 +55,8 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 
 **File**: `src/modules/tasks/BurnerControlTask.cpp`
 **Priority**: 4 (Highest)
-**Stack**: 2560 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1536 (RELEASE)
-**Core**: Not pinned (tskNO_AFFINITY)
+**Stack**: 4096 (DEBUG_FULL) | 4096 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 1 (pinned)
 **Watchdog**: 15000ms (WDT_BURNER_CONTROL_MS)
 
 **Purpose**: Manages the burner state machine, enforces safety interlocks, coordinates heating/water demand, and handles emergency shutdown.
@@ -89,7 +89,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 
 **File**: `src/modules/tasks/RelayControlTask.cpp`
 **Priority**: 4 (Highest)
-**Stack**: 2560 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Stack**: 2560 (DEBUG_FULL) | 4096 (DEBUG_SELECTIVE) | 1536 (RELEASE)
 **Core**: 1 (pinned)
 **Watchdog**: 15000ms (WDT_RELAY_CONTROL_MS)
 
@@ -130,7 +130,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 
 **File**: `src/modules/tasks/HeatingControlTask.cpp`
 **Priority**: 3
-**Stack**: 3072 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 2048 (RELEASE)
+**Stack**: 2048 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1024 (RELEASE)
 **Core**: Not pinned
 **Watchdog**: Dynamic - max(sensorInterval * 4, WDT_HEATING_CONTROL_MS)
 
@@ -253,7 +253,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 - **MQTT health publish**: 60s (via MQTTTask)
 
 **Diagnostics**:
-- FreeRTOS task status (all 16 tasks)
+- FreeRTOS task status (all running tasks)
 - Stack high water mark analysis
 - Heap fragmentation tracking
 - Error log dumping (FRAM circular buffer)
@@ -266,7 +266,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **File**: `src/modules/tasks/MB8ARTProcessingTask.cpp`
 **Priority**: 3
 **Stack**: 3072 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1536 (RELEASE)
-**Core**: Not pinned
+**Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
 **Watchdog**: 15000ms (WDT_SENSOR_PROCESSING_MS)
 
 **Purpose**: Process Modbus packets from MB8ART 8-channel temperature sensor, update SharedSensorReadings.
@@ -301,7 +301,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **File**: `src/modules/tasks/ANDRTF3Task.cpp`
 **Priority**: 3
 **Stack**: 2048 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1024 (RELEASE)
-**Core**: Not pinned
+**Core**: 1 (pinned)
 **Watchdog**: 20000ms (ANDRTF3_SENSOR_READ_INTERVAL_MS * 4)
 
 **Purpose**: Read room temperature from ANDRTF3 Modbus sensor via ModbusCoordinator.
@@ -326,9 +326,9 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 ### 9. TimerSchedulerTask
 
 **File**: `src/modules/tasks/TimerSchedulerTask.cpp`
-**Priority**: Not explicitly defined (likely default)
-**Stack**: 3072 bytes
-**Core**: Not pinned
+**Priority**: 2 (started in `src/main.cpp`)
+**Stack**: 3072 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 0 (pinned)
 **Watchdog**: Disabled
 
 **Purpose**: Generic timer scheduler for water/space heating schedules, FRAM persistence, MQTT command interface.
@@ -358,8 +358,8 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 ### 10. PersistentStorageTask
 
 **File**: `src/modules/tasks/PersistentStorageTask.cpp`
-**Priority**: Not explicitly defined
-**Stack**: 5120 bytes (large for JSON operations)
+**Priority**: 2 (`PRIORITY_CONTROL_TASK - 1`)
+**Stack**: 5120 (DEBUG_FULL) | 5120 (DEBUG_SELECTIVE) | 1536 (RELEASE)
 **Core**: Not pinned
 **Watchdog**: Not registered (event-driven)
 
@@ -375,17 +375,18 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 
 **MQTT Parameter API**:
 ```
-boiler/params/wheater/tempLimitLow       - Water start threshold (45.0°C, 300-600 tenths)
-boiler/params/wheater/tempLimitHigh      - Water stop threshold (65.0°C, 500-850 tenths)
-boiler/params/heating/hysteresis         - Space heating hysteresis (0.5°C)
-boiler/params/heating/setpoint           - Comfort temperature (21.0°C)
-boiler/params/pid/spaceHeating/kp        - PID proportional gain (0-100)
-boiler/params/pid/spaceHeating/ki        - PID integral gain (0-10)
-boiler/params/pid/spaceHeating/kd        - PID derivative gain (0-50)
-boiler/params/pid/waterHeater/kp|ki|kd   - Water PID gains (0-100 / 0-10 / 0-50)
-boiler/params/get/all                    - Request all parameters
-boiler/params/save                       - Save all to NVS
-boiler/params/save/changed               - Save only changed parameters
+boiler/params/set/wheater/tempLimitLow       - Water start threshold (45.0°C, 300-600 tenths)
+boiler/params/set/wheater/tempLimitHigh      - Water stop threshold (65.0°C, 500-850 tenths)
+boiler/params/set/heating/hysteresis         - Space heating hysteresis (0.5°C, 1-20 tenths)
+boiler/params/set/heating/targetTemp         - Room target temperature (100-300 tenths)
+boiler/params/set/pid/spaceHeating/kp        - PID proportional gain (0-100)
+boiler/params/set/pid/spaceHeating/ki        - PID integral gain (0-10)
+boiler/params/set/pid/spaceHeating/kd        - PID derivative gain (0-50)
+boiler/params/set/pid/waterHeater/kp|ki|kd   - Water PID gains (0-100 / 0-10 / 0-50)
+boiler/params/get/<name>                     - Publish one parameter to boiler/params/status/<name>
+boiler/params/get/all                        - Request all parameters
+boiler/params/list                           - Parameter names to boiler/params/list/response
+boiler/params/save                           - Save all to NVS
 ```
 
 **Live Changes**: The int32_t temperature parameters (tank limits, burner/heating/water limits, room target, hysteresis) are applied through their onChange callbacks and once after `loadAll()`. `TemperatureParameterWrapper::applyToSettings()` writes only the sensor offsets, so a save no longer reverts live changes.
@@ -397,9 +398,9 @@ boiler/params/save/changed               - Save only changed parameters
 ### 11. NTPTask
 
 **File**: `src/modules/tasks/NTPTask.cpp`
-**Priority**: Not explicitly defined
-**Stack**: Default
-**Core**: Not pinned
+**Priority**: 2 (started in `src/main.cpp`)
+**Stack**: 4096 (all modes)
+**Core**: 1 (pinned)
 **Watchdog**: 60000ms
 
 **Purpose**: NTP time synchronization, DS3231 RTC fallback, timezone handling, drift tracking.
@@ -460,10 +461,10 @@ boiler/params/save/changed               - Save only changed parameters
 ### 13. HeatingPumpTask
 
 **File**: `src/modules/control/PumpControlModule.cpp`
-**Priority**: 2 (Medium)
-**Stack**: 2560 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1024 (RELEASE)
+**Priority**: 3 (`PRIORITY_PUMP_TASK`, local constant in `TaskInitializer::initializePumpTasks()`)
+**Stack**: 2048 (all modes, local `STACK_SIZE_PUMP_TASK`; the `STACK_SIZE_PUMP_CONTROL_TASK` / `PRIORITY_PUMP_CONTROL_TASK` macros in `ProjectConfig.h` are not used)
 **Core**: Any (not pinned)
-**Watchdog**: Disabled
+**Watchdog**: 10000ms (TaskManager, critical)
 
 **Purpose**: Controls heating circulation pump independently of burner state machine. Provides clean separation between burner operation and pump control, with motor protection enforced at the relay layer.
 
@@ -504,10 +505,10 @@ Uses unified `PumpControlModule` with parameterized configuration for code reuse
 ### 14. WaterPumpTask
 
 **File**: `src/modules/control/PumpControlModule.cpp`
-**Priority**: 2 (Medium)
-**Stack**: 2560 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1024 (RELEASE)
+**Priority**: 3 (same start code as HeatingPumpTask)
+**Stack**: 2048 (all modes)
 **Core**: Any (not pinned)
-**Watchdog**: Disabled
+**Watchdog**: 10000ms (TaskManager, critical)
 
 **Purpose**: Controls hot water tank loading pump during water heating cycles. Operates independently from burner, allowing pump to run before/after burner as needed for heat transfer.
 
@@ -557,8 +558,8 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 
 **File**: `src/modules/tasks/RYN4ProcessingTask.cpp`
 **Priority**: 3
-**Stack**: 2560 bytes
-**Core**: Not pinned
+**Stack**: 1536 (DEBUG_FULL) | 2560 (DEBUG_SELECTIVE) | 768 (RELEASE)
+**Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
 **Watchdog**: WDT_SENSOR_PROCESSING_MS (15s)
 
 **Architecture**: Coordinated Modbus operations with relay verification
@@ -657,12 +658,15 @@ Normal control tasks with sensor coordination:
 - HeatingControlTask, WheaterControlTask
 - MB8ARTProcessingTask, ANDRTF3Task
 - RYN4ProcessingTask, ControlTask
-
-### Priority 2 (Non-Critical Communication & Pump Control)
-- **MQTTTask**: Network communication (can tolerate delays)
-- **MonitoringTask**: Diagnostics and logging
 - **HeatingPumpTask**: Heating circulation pump control
 - **WaterPumpTask**: Hot water loading pump control
+
+### Priority 2 (Non-Critical Communication & Services)
+- **MQTTTask**: Network communication (can tolerate delays)
+- **MonitoringTask**: Diagnostics and logging
+- **TimerSchedulerTask**: Schedule management
+- **NTPTask**: Time synchronization
+- **PersistentStorageTask**: NVS parameters (`PRIORITY_CONTROL_TASK - 1`)
 
 ### Priority 1 (Lowest)
 - **OTATask**: Firmware updates (background operation)
@@ -672,23 +676,23 @@ Normal control tasks with sensor coordination:
 
 ## Core Affinity
 
-### Core 0 (Default)
-Most tasks run here unless explicitly pinned:
-- BurnerControlTask, HeatingControlTask, WheaterControlTask
-- MB8ARTProcessingTask, ANDRTF3Task
-- RYN4ProcessingTask, ControlTask
+Core numbers are fixed in the start calls (`startTaskPinned()`); tasks started with `TaskManager::startTask()` have no core affinity.
+
+### Not Pinned (either core)
+- HeatingControlTask, WheaterControlTask, ControlTask
 - HeatingPumpTask, WaterPumpTask
-- TimerSchedulerTask, PersistentStorageTask, NTPTask
-- MonitoringTask (explicitly pinned to Core 0)
+- PersistentStorageTask, SyslogTask
+
+### Core 0 (Explicitly Pinned)
+- **MonitoringTask**
+- **TimerSchedulerTask** (`src/main.cpp`)
 
 ### Core 1 (Explicitly Pinned)
-Time-critical communication tasks:
-- **RelayControlTask**: Deterministic relay control timing
-- **MQTTTask**: Isolate network I/O
-- **OTATask**: Isolate firmware update operations
-- **BoilerTempControlTask**: Boiler temperature loop
-
-**Rationale**: Pinning communication tasks to Core 1 prevents interference with critical control loops on Core 0.
+- **BurnerControlTask**, **RelayControlTask**, **BoilerTempControlTask** (`TaskInitializer.cpp`, `RelayControlTask.cpp`)
+- **MB8ARTTask**, **MB8ARTProcessingTask**, **RYN4ProcessingTask** (`ModbusDeviceInitializer.cpp`)
+- **ANDRTF3Task** (`TaskInitializer::initializeSensorTasks()`)
+- **MQTTTask**, **OTATask** (their `start()` functions)
+- **NTPTask** (`src/main.cpp`)
 
 ---
 
@@ -813,9 +817,11 @@ Based on runtime profiling showing only 60-100 bytes free:
 
 | Mode | Total Stack | Notes |
 |------|-------------|-------|
-| DEBUG_FULL | ~53 KB | Conservative for development |
-| DEBUG_SELECTIVE | ~57 KB | Optimized for active development |
-| RELEASE | ~28 KB | Aggressive optimization for production |
+| DEBUG_FULL | ~54 KB (54,784 bytes) | Conservative for development |
+| DEBUG_SELECTIVE | ~64 KB (65,536 bytes) | Optimized for active development |
+| RELEASE | ~35 KB (36,096 bytes) | Aggressive optimization for production |
+
+Totals are the sum of the configured stacks of the 19 tasks in the Task Summary (including the fixed-size ones).
 
 ### Memory Savings (Rounds 1-7)
 

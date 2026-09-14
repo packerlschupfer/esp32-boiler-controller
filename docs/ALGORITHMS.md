@@ -1022,8 +1022,8 @@ if (readings.isWaterHeaterTempTankValid && limitsValid) {
 ### Parameters
 
 **MQTT Configuration**:
-- `boiler/params/wheater/tempLimitLow` - Start heating threshold (default: 45.0°C / 450 tenths, range 300-600)
-- `boiler/params/wheater/tempLimitHigh` - Stop heating threshold (default: 65.0°C / 650 tenths, range 500-850)
+- `boiler/params/set/wheater/tempLimitLow` - Start heating threshold (default: 45.0°C / 450 tenths, range 300-600)
+- `boiler/params/set/wheater/tempLimitHigh` - Stop heating threshold (default: 65.0°C / 650 tenths, range 500-850)
 
 **Typical Values**:
 - Low limit: 45-55°C (DHW comfort minimum)

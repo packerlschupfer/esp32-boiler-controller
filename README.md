@@ -21,7 +21,7 @@ This system controls combustion equipment and must be installed by qualified pro
 - **Runtime Configuration**: Safety parameters adjustable via MQTT (sensor staleness, pump protection, post-purge duration)
 
 ### Control Systems
-- **Event-driven architecture**: 18 FreeRTOS tasks, zero polling loops
+- **Event-driven architecture**: 19 FreeRTOS tasks, zero polling loops
 - **PID control**: Space and water heating with anti-windup
 - **Fixed-point arithmetic**: Temperature_t (0.1°C), Pressure_t (0.01 BAR)
 - **Burner state machine**: 9 states with anti-flapping protection
@@ -138,35 +138,43 @@ boiler/cmd/scheduler/remove             - Remove schedule by ID
 
 ### Parameter Topics
 ```
-boiler/params/heating/setpoint       - Room temperature setpoint
-boiler/params/wheater/tempLimitLow   - Water start threshold
-boiler/params/wheater/tempLimitHigh  - Water stop threshold
-boiler/params/pid/spaceHeating/kp    - PID gains
-boiler/params/get/all                - Request all parameters
-boiler/params/save                   - Save to NVS
+boiler/params/set/heating/targetTemp     - Room target temperature (tenths °C)
+boiler/params/set/wheater/tempLimitLow   - Water start threshold (tenths °C)
+boiler/params/set/wheater/tempLimitHigh  - Water stop threshold (tenths °C)
+boiler/params/set/pid/spaceHeating/kp    - PID gains
+boiler/params/get/<name>                 - Publish one parameter
+boiler/params/get/all                    - Request all parameters
+boiler/params/list                       - List parameter names
+boiler/params/save                       - Save to NVS
 ```
 
 See [docs/MQTT_API.md](docs/MQTT_API.md) for complete reference.
 
 ## Architecture
 
-### Task Structure (16 FreeRTOS Tasks)
+### Task Structure (19 FreeRTOS Tasks)
 
 **Safety-Critical (Priority 4)**:
 - BurnerControlTask - State machine, safety interlocks
 - RelayControlTask - Physical relay control
+- BoilerTempControlTask - Boiler temperature PID, heat demand
+- MB8ARTTask - Temperature data acquisition
 
 **Control Logic (Priority 3)**:
-- HeatingControlTask - Space heating PID
-- WheaterControlTask - Water heating PID
-- SensorTasks - MB8ART, ANDRTF3
+- HeatingControlTask - Space heating (heating curve, heating request)
+- WheaterControlTask - Water heating (charge decision, water request)
+- MB8ARTProcessingTask, ANDRTF3Task, RYN4ProcessingTask - Sensor and relay processing
+- ControlTask - Remote control commands
+- HeatingPumpTask, WaterPumpTask - Pump control
 
-**Communication (Priority 2)**:
+**Communication and Services (Priority 2)**:
 - MQTTTask - MQTT with priority queues
 - MonitoringTask - System diagnostics
+- TimerSchedulerTask, NTPTask, PersistentStorageTask
 
 **Background (Priority 1)**:
 - OTATask - Firmware updates
+- SyslogTask - Remote syslog
 
 See [docs/TASK_ARCHITECTURE.md](docs/TASK_ARCHITECTURE.md) for details.
 
@@ -210,7 +218,7 @@ See [docs/DEEP_CODE_ANALYSIS_HISTORY.md](docs/DEEP_CODE_ANALYSIS_HISTORY.md) for
 
 Comprehensive technical documentation (~180KB):
 
-- [TASK_ARCHITECTURE.md](docs/TASK_ARCHITECTURE.md) - All 18 FreeRTOS tasks (28KB)
+- [TASK_ARCHITECTURE.md](docs/TASK_ARCHITECTURE.md) - All 19 FreeRTOS tasks (28KB)
 - [INITIALIZATION_ORDER.md](docs/INITIALIZATION_ORDER.md) - 7-stage startup sequence (9.5KB)
 - [MEMORY_OPTIMIZATION.md](docs/MEMORY_OPTIMIZATION.md) - ESP32 memory strategy (12KB)
 - [ALGORITHMS.md](docs/ALGORITHMS.md) - 13 control algorithms (24KB)

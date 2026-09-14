@@ -154,7 +154,7 @@ docs/
 ├── ARCHITECTURE_PATTERNS.md             # Design patterns
 ├── INITIALIZATION_ORDER.md ⭐          # Startup sequence
 ├── MEMORY_OPTIMIZATION.md ⭐           # ESP32 memory strategy
-├── TASK_ARCHITECTURE.md ⭐             # 18 FreeRTOS tasks
+├── TASK_ARCHITECTURE.md ⭐             # 19 FreeRTOS tasks
 ├── EVENT_SYSTEM.md ⭐                   # Event reference
 ├── STATE_MACHINES.md ⭐                 # State machine guide (9 states)
 ├── EVENT_FLOW.md ⭐                     # Flow scenarios
@@ -190,7 +190,7 @@ docs/
 **Start Here** (in order):
 1. Read [../CLAUDE.md](../CLAUDE.md) - Project overview and build notes
 2. Read [INITIALIZATION_ORDER.md](INITIALIZATION_ORDER.md) - Understand system startup
-3. Read [TASK_ARCHITECTURE.md](TASK_ARCHITECTURE.md) - Learn 18 FreeRTOS tasks
+3. Read [TASK_ARCHITECTURE.md](TASK_ARCHITECTURE.md) - Learn the 19 FreeRTOS tasks
 4. Read [EVENT_SYSTEM.md](EVENT_SYSTEM.md) - Understand event architecture
 5. Read [STATE_MACHINES.md](STATE_MACHINES.md) - Learn burner control flow
 6. Read [MQTT_API.md](MQTT_API.md) - Learn API for testing
@@ -203,8 +203,9 @@ docs/
 
 **MQTT Testing Quick Commands**:
 ```bash
-# Monitor sensors
-mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass -t "boiler/status/sensors" -v
+# Monitor sensors (broker = MQTT_SERVER: 192.168.20.27 in src/config/ProjectConfig.h and
+# platformio.ini [base_prod]; the [base_dev] build uses 192.168.20.16)
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass -t "boiler/status/sensors" -v
 
 # List schedules
 mosquitto_pub -t "boiler/cmd/scheduler/list" -m '{}'

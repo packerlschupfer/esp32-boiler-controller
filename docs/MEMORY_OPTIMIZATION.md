@@ -33,7 +33,7 @@ This codebase uses **static buffers** in several places instead of stack-local b
 Total RAM:        327,680 bytes
 Used:              45,400 bytes (13.9%)
 Free heap:        ~282,000 bytes
-Task stacks:       54,000 bytes (16 tasks)
+Task stacks:       54,000 bytes (16 tasks when measured; now 19 tasks, 65,536 bytes configured)
 Static buffers:     1,200 bytes (our static buffers)
 ```
 
@@ -436,13 +436,13 @@ class TempBuffer {
 ```cpp
 // WRONG: Would allocate buffer for EVERY task!
 const char* getFailureReason() const {
-    thread_local char buffer[192];  // ❌ 192B × 16 tasks = 3KB wasted!
+    thread_local char buffer[192];  // ❌ 192B × 19 tasks = 3.6KB wasted!
     // ...
 }
 ```
 
 **Problem**: ESP32 FreeRTOS allocates thread_local per task
-**Cost**: 192B × 16 tasks = **3,072 bytes wasted** (vs. 192B static)
+**Cost**: 192B × 19 tasks = **3,648 bytes wasted** (vs. 192B static)
 
 ---
 

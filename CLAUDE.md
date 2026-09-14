@@ -109,14 +109,14 @@ Zero polling loops. All tasks use FreeRTOS event groups for inter-task communica
 - **RelayEventGroup**: Relay state changes
 - **ControlRequestsEventGroup**: User commands
 
-### Task Structure (18 FreeRTOS Tasks)
+### Task Structure (19 FreeRTOS Tasks)
 
 | Priority | Tasks | Purpose |
 |----------|-------|---------|
-| 4 | BurnerControl, RelayControl | Safety-critical operations |
-| 3 | Heating, Water, MB8ART, ANDRTF3, Sensor, RYN4, Control | Control logic and sensors |
-| 2 | MQTT, Monitoring, HeatingPump, WaterPump | Communication, diagnostics, pump control |
-| 1 | OTA | Background firmware updates |
+| 4 | BurnerControl, RelayControl, BoilerTempCtrl, MB8ART | Safety-critical operations, boiler temperature loop, sensor acquisition |
+| 3 | HeatingControl, WheaterControl, MB8ARTProc, ANDRTF3, RYN4Proc, ControlTask, HeatingPump, WaterPump | Control logic, sensor/relay processing, pump control |
+| 2 | MQTT, Monitoring, TimerSched, NTPTask, PersistentStorage | Communication, diagnostics, services |
+| 1 | OTA, Syslog | Background tasks |
 
 See `docs/TASK_ARCHITECTURE.md` for complete details.
 
@@ -380,11 +380,13 @@ boiler/status/device/ip       - Device IP address
 
 ### Parameter Topics
 ```
-boiler/params/heating/setpoint       - Room temperature setpoint
-boiler/params/wheater/tempLimitLow   - Water heating start threshold
-boiler/params/pid/spaceHeating/kp    - PID proportional gain
-boiler/params/get/all                - Request all parameters
-boiler/params/save                   - Save to NVS
+boiler/params/set/heating/targetTemp     - Room target temperature (tenths °C)
+boiler/params/set/wheater/tempLimitLow   - Water heating start threshold (tenths °C)
+boiler/params/set/pid/spaceHeating/kp    - PID proportional gain
+boiler/params/get/<name>                 - Publish one parameter
+boiler/params/get/all                    - Request all parameters
+boiler/params/list                       - List parameter names
+boiler/params/save                       - Save to NVS
 ```
 
 See `docs/MQTT_API.md` for complete reference.
@@ -574,7 +576,7 @@ See `docs/ARCHITECTURE_PATTERNS.md` for the module extraction pattern details.
 - **Full documentation**: `docs/` directory (~180KB technical documentation)
 - **Initialization sequence**: `docs/INITIALIZATION_ORDER.md` - System startup order and dependencies
 - **Memory strategy**: `docs/MEMORY_OPTIMIZATION.md` - ESP32 static buffer rationale and memory pool documentation
-- **Task architecture**: `docs/TASK_ARCHITECTURE.md` - All 18 FreeRTOS tasks
+- **Task architecture**: `docs/TASK_ARCHITECTURE.md` - All 19 FreeRTOS tasks
 - **Architecture patterns**: `docs/ARCHITECTURE_PATTERNS.md` - SRP pattern, module extraction, thread safety
 - **Algorithms**: `docs/ALGORITHMS.md` - 13 control algorithms including Modbus scheduling
 - **Library repositories**: https://github.com/packerlschupfer

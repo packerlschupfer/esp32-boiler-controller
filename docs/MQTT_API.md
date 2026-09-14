@@ -96,8 +96,9 @@ boiler/
 **Topic**: `boiler/status/device/ip`
 **Retained**: Yes
 ```
-192.168.16.138
+192.168.20.40
 ```
+(`ETH_STATIC_IP`: default in `src/config/ProjectConfig.h`, same in `platformio.ini` `[base_prod]`; the `[base_dev]` build uses 192.168.20.41)
 
 **Topic**: `boiler/status/device/hostname`
 **Retained**: Yes
@@ -489,7 +490,7 @@ All values use **fixed-point integers** matching the internal representation:
 - **Temperature offsets**: Tenths of °C (e.g., `-14` = -1.4°C)
 - **Pressure offset**: Hundredths of BAR (e.g., `-5` = -0.05 BAR)
 
-**Topic Pattern**: `boiler/params/sensor/offset/{sensor}`
+**Topic Pattern**: `boiler/params/set/sensor/offset/{sensor}`
 
 | Sensor | Topic | Range | Default | Description |
 |--------|-------|-------|---------|-------------|
@@ -507,15 +508,15 @@ All values use **fixed-point integers** matching the internal representation:
 ```bash
 # Room temperature reads 1.4°C too high → subtract 14 tenths
 mosquitto_pub -h $BROKER -u $USER -P $PASS \
-  -t "boiler/params/sensor/offset/room" -m "-14"
+  -t "boiler/params/set/sensor/offset/room" -m "-14"
 
 # Boiler output reads 0.5°C too low → add 5 tenths
 mosquitto_pub -h $BROKER -u $USER -P $PASS \
-  -t "boiler/params/sensor/offset/boilerOutput" -m "5"
+  -t "boiler/params/set/sensor/offset/boilerOutput" -m "5"
 
 # Pressure sensor reads 0.1 BAR too high → subtract 10 hundredths
 mosquitto_pub -h $BROKER -u $USER -P $PASS \
-  -t "boiler/params/sensor/offset/pressure" -m "-10"
+  -t "boiler/params/set/sensor/offset/pressure" -m "-10"
 ```
 
 #### Get Current Offsets
@@ -537,7 +538,17 @@ all reported temperatures. Changes take effect on the next sensor read cycle.
 
 ### Water Heating and PID Parameters
 
-**Topic Pattern**: `boiler/params/{parameter}`
+**Topic Pattern**: `boiler/params/set/{parameter}`
+
+Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscription `boiler/params/#`):
+
+| Topic | Payload | Action |
+|-------|---------|--------|
+| `boiler/params/set/{parameter}` | value (plain or `{"value":...}`) | Set a parameter (range-checked) |
+| `boiler/params/get/{parameter}` | empty | Publish the value to `boiler/params/status/{parameter}` (a group name such as `heating` publishes the group) |
+| `boiler/params/get/all` | empty | Publish all parameters grouped (`boiler/params/status/...`, then `boiler/params/status/complete`) |
+| `boiler/params/list` | empty | Publish the parameter names to `boiler/params/list/response` |
+| `boiler/params/save` | empty | Save all parameters to NVS |
 
 | Parameter | Topic | Range | Default | Description |
 |-----------|-------|-------|---------|-------------|
@@ -559,9 +570,9 @@ all reported temperatures. Changes take effect on the next sensor read cycle.
 ```bash
 # Raise tank limits from 45/65°C to 60/75°C: high first, then low
 mosquitto_pub -h $BROKER -u $USER -P $PASS \
-  -t "boiler/params/wheater/tempLimitHigh" -m "750"
+  -t "boiler/params/set/wheater/tempLimitHigh" -m "750"
 mosquitto_pub -h $BROKER -u $USER -P $PASS \
-  -t "boiler/params/wheater/tempLimitLow" -m "600"
+  -t "boiler/params/set/wheater/tempLimitLow" -m "600"
 ```
 
 ### PID Auto-Tuning
@@ -603,18 +614,20 @@ mosquitto_pub -t "errors/list" -m "20"
 **Response**: `boiler/status/errors/list`
 ```json
 {
-  "count": 20,
   "errors": [
     {
-      "timestamp": 1692345678,
-      "code": 5,
-      "description": "PRESSURE_EXCEEDED",
-      "value": 0.35
+      "time": 1692345678,
+      "code": 504,
+      "count": 1,
+      "msg": "",
+      "ctx": "Pressure sensor disconnected (o"
     },
     ...
-  ]
+  ],
+  "stats": {"total": 142, "critical": 3, "oldest": 1692000000, "latest": 1692345678}
 }
 ```
+`msg` is empty for entries logged through `ErrorHandler::logError()`; `ctx` holds at most 31 characters of the context. `code` is the `SystemError` value (see Error Codes).
 
 #### Clear Error Log
 ```bash
@@ -630,14 +643,7 @@ mosquitto_pub -t "errors/stats" -m ""
 
 **Response**: `boiler/status/errors/stats`
 ```json
-{
-  "total": 142,
-  "by_type": {
-    "SENSOR_READ_FAILED": 85,
-    "PRESSURE_EXCEEDED": 12,
-    "COMMUNICATION_TIMEOUT": 45
-  }
-}
+{"total": 142, "critical": 3, "last": 1692345678, "oldest": 1692000000, "unique": 7}
 ```
 
 ---
@@ -848,20 +854,27 @@ Days of week as integers (1=Monday, 7=Sunday):
 
 ## Error Codes
 
-Common error codes in notifications:
+The `code` field (error log `errors/*` responses, `alert/critical` failsafe message) is the numeric `SystemError` value from `src/utils/ErrorHandler.h`. Ranges: 1-99 general, 100-199 mutex/task, 200-299 network, 300-399 MQTT, 400-449 Modbus, 450-499 device, 500-599 sensor, 600-609 relay, 610-629 pump, 700-799 system, 800-899 configuration.
+
+Common codes:
 
 | Code | Name | Description |
 |------|------|-------------|
-| 1 | MEMORY_ALLOCATION_FAILED | Heap exhausted |
-| 2 | RELAY_OPERATION_FAILED | Relay control error |
-| 3 | SENSOR_READ_FAILED | Sensor communication timeout |
-| 4 | COMMUNICATION_TIMEOUT | Modbus timeout |
-| 5 | SAFETY_CHECK_FAILED | Safety interlock failed |
-| 6 | INITIALIZATION_FAILED | Startup error |
-| 7 | PRESSURE_EXCEEDED | Pressure out of range |
-| 8 | TEMPERATURE_EXCEEDED | Temperature too high |
-| 9 | BURNER_IGNITION_FAILED | Failed to ignite |
-| 10 | SYSTEM_FAILSAFE_TRIGGERED | Emergency stop |
+| 6 | MEMORY_ALLOCATION_FAILED | Memory allocation failed |
+| 400 | MODBUS_TIMEOUT | Modbus timeout |
+| 404 | MODBUS_INIT_FAILED | Modbus device initialization failed |
+| 500 | SENSOR_READ_FAILED | Sensor read failed |
+| 502 | SENSOR_OUT_OF_RANGE | Sensor value out of range |
+| 504 | SENSOR_FAILURE | Sensor failure (e.g. pressure sensor open or short circuit) |
+| 600 | RELAY_OPERATION_FAILED | Relay control error |
+| 601 | RELAY_SAFETY_INTERLOCK | Relay command blocked by a safety interlock |
+| 700 | SYSTEM_OVERHEATED | System overheated |
+| 703 | SYSTEM_FAILSAFE_TRIGGERED | Failsafe triggered (also: critical system error bits in the safety check) |
+| 704 | TEMPERATURE_CRITICAL | Temperature limits exceeded |
+| 705 | IGNITION_FAILURE | Failed to ignite |
+| 707 | EMERGENCY_STOP | Emergency stop active |
+
+There is no `SAFETY_CHECK_FAILED` code. A failed `BurnerSystemController::performSafetyCheck()` reports `EMERGENCY_STOP` (707), `TEMPERATURE_CRITICAL` (704) or `SYSTEM_FAILSAFE_TRIGGERED` (703). Codes >= 700 are treated as critical.
 
 ---
 
@@ -1109,7 +1122,7 @@ mqtt:
 
 ### Device Not Publishing
 **Check**:
-1. Network connected: `ping 192.168.16.138`
+1. Network connected: `ping 192.168.20.40` (`ETH_STATIC_IP`, see Device Information)
 2. MQTT online status: `mosquitto_sub -t "boiler/status/online" -C 1 -W 5`
 3. Broker logs: Check mosquitto.log for connection attempts
 

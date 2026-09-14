@@ -273,14 +273,14 @@ The following checks were removed as **redundant or counterproductive**:
 #### 1. Rate-of-Change Detection
 **Removed**: Temperature change rate limiting
 **Reason**:
-- Industrial boiler can heat 10-15�C in 15 seconds (normal operation)
+- Industrial boiler can heat 10-15°C in 15 seconds (normal operation)
 - False positives prevented legitimate heating
 - Over-temperature protection (110°C limit, 115°C emergency stop) already provides thermal safety
 
 #### 2. Cross-Validation
 **Removed**: Inter-sensor agreement checking
 **Reason**:
-- Boiler output vs return can differ by 30�C (normal during heating)
+- Boiler output vs return can differ by 30°C (normal during heating)
 - False positives due to legitimate thermal gradients
 - Individual sensor validity checks remain active
 
@@ -498,10 +498,10 @@ See [MQTT_API.md](MQTT_API.md) for complete command reference.
 
 **Recommended Tests**:
 1. **Over-temperature**: Simulate boiler output >=110°C -> expect burner start blocked; >=115°C during operation -> expect emergency stop (`CentralizedFailsafe::emergencyStop()`)
-2. **Sensor staleness**: Disconnect Modbus � expect shutdown after timeout
-3. **Pressure loss**: Simulate low pressure � expect burner inhibit
+2. **Sensor staleness**: Disconnect Modbus -> expect shutdown after timeout
+3. **Pressure loss**: Simulate low pressure -> expect burner inhibit
 4. **Thermal shock**: Boiler output more than 35°C above return -> expect burner blocked and return preheating (heating pump cycling). There is no pump interlock: a stopped pump does not cut off the burner directly
-5. **Post-purge**: Shutdown during heating � verify burner relays stay off for `SafetyConfig::postPurgeMs` (default 90s) while pumps follow their mode
+5. **Post-purge**: Shutdown during heating -> verify burner relays stay off for `SafetyConfig::postPurgeMs` (default 90s) while pumps follow their mode
 
 ---
 
@@ -592,4 +592,4 @@ mosquitto_pub -t "errors/list" -m "20"
 
 ---
 
-**� Critical Safety Warning**: Only modify safety parameters if you fully understand the implications. Incorrect values can compromise safety. When in doubt, use defaults - they are proven safe in field testing.
+**Critical Safety Warning**: Only modify safety parameters if you fully understand the implications. Incorrect values can compromise safety. When in doubt, use defaults - they are proven safe in field testing.

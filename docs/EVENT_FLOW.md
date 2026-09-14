@@ -337,34 +337,43 @@ HeatingControlTask (5s process timer)
 
 #### Step 1: Sensor Detects Low Pressure
 ```
-MB8ARTTask (real sensor mode)
-├─ Reads channel 7: 3.8mA current
-├─ Convert to pressure: 0.35 BAR (Pressure_t = 35)
-├─ Compare: 35 < ALARM_MIN (50)
-│  └─ CRITICAL: Below minimum!
-├─ Sets Burner::ERROR_PRESSURE event bit
-└─ Sets SensorUpdate::PRESSURE_ERROR
+MB8ARTTask (real sensor mode, USE_REAL_PRESSURE_SENSOR in ProjectConfig.h)
+├─ Reads the pressure channel (SensorIndex::PRESSURE_CHANNEL): 5.12 mA
+├─ Convert 4-20 mA to 0-5 BAR: 0.35 BAR (Pressure_t = 35, plus pressure offset)
+│  (below 3.5 mA or above 20.5 mA = sensor fault: pressure invalid,
+│   SensorUpdate::PRESSURE_ERROR instead of the steps below)
+├─ Sets SensorUpdate::PRESSURE (valid reading)
+├─ Compare: 35 < Safety::Pressure::ALARM_MIN (50 = 0.50 BAR)
+│  └─ LOG_WARN "Pressure alarm"
+└─ Sets Burner::ERROR_PRESSURE event bit
+   (no firmware code reads this bit; the burner reacts through Step 2)
 ```
 
 #### Step 2: Safety Interlock Triggers
 ```
-SafetyInterlocks::performFullSafetyCheck()
-├─ Called by BurnerControl on every cycle
-├─ Checks pressure: 0.35 BAR < 1.0 BAR minimum
+SafetyInterlocks::continuousSafetyMonitor()
+├─ Called by BurnerStateMachine::update() in IGNITION/RUNNING_LOW/RUNNING_HIGH
+├─ Every 5 s (FULL_CHECK_INTERVAL_MS), while HEATING_ON or WATER_ON is set:
+│  performFullSafetyCheck(isWaterMode)
+├─ Checks pressure: 0.35 BAR < MIN_OPERATING (1.00 BAR)
 │  └─ status.pressureInRange = FALSE
 ├─ Result: allInterlocksPassed() = FALSE
-└─ Returns INTERLOCK_FAILED
+└─ continuousSafetyMonitor() returns FALSE
 ```
 
 #### Step 3: Burner Control Emergency Stop
 ```
-BurnerControlTask
-├─ Safety check fails
+BurnerStateMachine::update() (BurnerControlTask)
+├─ continuousSafetyMonitor() returns FALSE in IGNITION/RUNNING_LOW/RUNNING_HIGH
 ├─ Calls BurnerStateMachine::emergencyStop()
-│  ├─ Current state: RUNNING_HIGH → ERROR
 │  ├─ BurnerSystemController::emergencyShutdown(): burner relays OFF
 │  │  (BURNER_ENABLE, POWER_BOOST, WATER_MODE, rate limit bypassed)
-│  └─ Set SystemState::EMERGENCY_STOP | BURNER_ERROR
+│  ├─ Clears SystemState::BURNER_ON
+│  └─ Current state: RUNNING_HIGH → ERROR (onEnterError() calls
+│     emergencyShutdown() again and records the ERROR entry time)
+├─ SystemState::EMERGENCY_STOP is NOT set on this path
+├─ SystemState::BURNER_ERROR is set by BurnerControlTask's burner state bit
+│  update (ERROR and LOCKOUT map to BURNER_ERROR)
 └─ CentralizedFailsafe::emergencyStop() is not called on this path
    (see Step 4 for the triggers that reach it)
 ```
@@ -408,29 +417,21 @@ All Control Tasks detect EMERGENCY_STOP
 
 #### Step 6: Error Indication
 ```
-├─ SystemState::BURNER_ERROR bit remains set
-├─ All attempts to start burner blocked
-│  └─ checkSafetyConditions() returns FALSE
-├─ Error logged with exponential backoff
-│  └─ 1s → 2s → 4s → ... → 300s (5 min max)
-└─ Waits for manual intervention
+├─ SystemState::BURNER_ERROR set while the burner is in ERROR
+├─ No burner start while in ERROR
+│  (checkSafetyConditions() calls BurnerSystemController::performSafetyCheck():
+│   EMERGENCY_STOP bit, temperature limits, critical error bits
+│   SENSOR_FAILURE/MODBUS/RELAY; it does not check pressure)
+└─ Log output only: LOG_WARN from MB8ARTTask ("Pressure alarm", every read)
+   and SafetyInterlocks ("System pressure ... out of range"), LOG_ERROR from
+   BurnerStateMachine ("Safety interlock failed during operation!").
+   This path does not call ErrorHandler::logError(), so its exponential
+   backoff (per error code, 1 s doubling to 300 s) does not apply.
 ```
 
-#### Step 7: Recovery (After Pressure Restored)
-```
-Operator fixes pressure leak
-├─ Pressure rises to 1.5 BAR
-├─ MB8ARTTask detects: 1.5 BAR > ALARM_MIN
-│  └─ Clears Burner::ERROR_PRESSURE
-├─ SafetyInterlocks::performFullSafetyCheck()
-│  └─ All checks now PASS
-└─ BurnerStateMachine::handleErrorState()
-   ├─ Detects safety restored
-   ├─ Clears SystemState::BURNER_ERROR
-   └─ ERROR → IDLE (ready for operation)
-      └─ A heat demand still latched from before the stop is ignored
-         until a mode is active again (HEATING_ON/WATER_ON + request)
-```
+#### Step 7: Recovery
+
+Recovery: see [STATE_MACHINES.md](STATE_MACHINES.md).
 
 ---
 

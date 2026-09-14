@@ -33,11 +33,12 @@ Three OTA environments are available:
 # Basic usage
 ./ota_update.sh <device_ip>
 
-# Example
-./ota_update.sh 192.168.16.138
+# Example (device IP = ETH_STATIC_IP: 192.168.20.40, default in src/config/ProjectConfig.h
+# and platformio.ini [base_prod]; also the upload_port of the esp32dev_ota_* envs)
+./ota_update.sh 192.168.20.40
 
 # With specific environment
-./ota_update.sh 192.168.16.138 esp32dev_ota_debug_selective
+./ota_update.sh 192.168.20.40 esp32dev_ota_debug_selective
 ```
 
 ### Method 2: Using PlatformIO Directly
@@ -61,7 +62,7 @@ pio run -e esp32dev_ota_release
 
 # Upload using espota.py
 python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py \
-  -i 192.168.16.138 \
+  -i 192.168.20.40 \
   -p 3232 \
   -a update-password \
   -f .pio/build/esp32dev_ota_release/firmware.bin \
@@ -83,7 +84,8 @@ python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py \
 ### Memory Monitoring During Update
 Monitor memory via MQTT:
 ```bash
-mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P password \
+# broker = MQTT_SERVER: 192.168.20.27 (src/config/ProjectConfig.h, platformio.ini [base_prod])
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P password \
   -t "cmd/boiler/diagnostics/memory/response" -v
 ```
 
