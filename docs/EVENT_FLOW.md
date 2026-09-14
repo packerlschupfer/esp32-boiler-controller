@@ -434,7 +434,7 @@ All Control Tasks detect EMERGENCY_STOP
 
 #### Step 7: Recovery
 
-Burner ERROR recovery: see [STATE_MACHINES.md](STATE_MACHINES.md). A latched `SystemState::EMERGENCY_STOP` (Step 4) is released by the MQTT command `boiler/cmd/emergency_reset` (payload `reset`, `CentralizedFailsafe::clearEmergencyStop()`) or by TemperatureSensorFallback on sensor recovery, see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md).
+Burner ERROR recovery: see [STATE_MACHINES.md](STATE_MACHINES.md). A latched `SystemState::EMERGENCY_STOP` (Step 4) is released by the MQTT command `boiler/cmd/emergency_reset` (payload `reset`, `CentralizedFailsafe::clearEmergencyStop()`) or by TemperatureSensorFallback on sensor recovery (only a stop caused by stale sensor data), see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md).
 
 ---
 
@@ -688,7 +688,7 @@ onPreheatingStart() [called 3 hours before start]
    ├─ Burner ERROR: back to IDLE after errorRecoveryMs (default 5 min)
    │  once checkSafetyConditions() passes
    ├─ TemperatureSensorFallback back to NORMAL: clears SENSOR_FAILURE
-   │  (and EMERGENCY_STOP after SHUTDOWN)
+   │  (and EMERGENCY_STOP after SHUTDOWN if stale sensor data caused it)
    └─ EMERGENCY_STOP: MQTT boiler/cmd/emergency_reset
       → CentralizedFailsafe::clearEmergencyStop() (refused while the
         causes persist, see SAFETY_SYSTEM.md)

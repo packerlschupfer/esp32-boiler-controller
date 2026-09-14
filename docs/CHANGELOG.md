@@ -67,6 +67,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Autotune ignored the `pid/autotune/amplitude` and `pid/autotune/hysteresis` settings (hard-coded 50 % / 1.0°C)
 - A latched emergency stop could only be released by a reboot: only the sensor fallback cleared `EMERGENCY_STOP` (on recovery from SHUTDOWN) and `BOILER_ENABLED` was never restored
 - `EMERGENCY_STOP` was not a latch: BurnerControlTask read-and-cleared it within 3 s, so the pump heat dissipation stopped after seconds, `boiler/cmd/system on` restarted without checks and `emergency_reset` found nothing to release. It is now read without clearing and acted on once per onset; while it is set both pumps run until the boiler output is below 60.0°C (again from 65.0°C, always without a valid, fresh reading). Native tests in `test_emergency_stop_release.cpp`
+- Sensor recovery (TemperatureSensorFallback SHUTDOWN -> NORMAL) cleared `EMERGENCY_STOP` whatever had set it; it now releases only a stop caused by stale sensor data (`EmergencyStopRelease::Cause`, `CentralizedFailsafe::releaseAfterSensorRecovery()`)
+- MQTT_API.md boiler enable example used `boiler/cmd/boiler` (handled topic: `boiler/cmd/system`); MQTT_QUICK_REFERENCE.txt listed non-existent `cmd/boiler/...` topics and test scripts, rewritten from the handlers
+- Removed unused `STACK_SIZE_PID_CONTROL_TASK` and `PRIORITY_PID_CONTROL_TASK`
 - BoilerTempControlTask refused to arm the heat demand above 85°C boiler output (validator default), capping water charge targets below what the request check allowed
 
 ---

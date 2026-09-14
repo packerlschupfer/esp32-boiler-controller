@@ -711,7 +711,7 @@ if (!SafetyInterlocks::continuousSafetyMonitor()) {
 
 `CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (e.g. stale sensor data during operation, critical temperature, burner request watchdog after `REQUEST_EXPIRATION_MS`) and the EMERGENCY failsafe level.
 
-`EMERGENCY_STOP` is a level latch: BurnerControlTask reads it without clearing and calls `BurnerStateMachine::emergencyStop()` once per onset (`EmergencyStopRelease::onsetDetected()`). While it is set the safety check fails, so the burner stays in ERROR. It is released by `TemperatureSensorFallback` on sensor recovery (SHUTDOWN -> NORMAL) or by the MQTT command `boiler/cmd/emergency_reset` (`CentralizedFailsafe::clearEmergencyStop()`), which also sets `BOILER_ENABLED` again if the saved boiler setting is enabled. The burner then leaves ERROR through the normal recovery delay.
+`EMERGENCY_STOP` is a level latch: BurnerControlTask reads it without clearing and calls `BurnerStateMachine::emergencyStop()` once per onset (`EmergencyStopRelease::onsetDetected()`). While it is set the safety check fails, so the burner stays in ERROR. It is released by `TemperatureSensorFallback` on sensor recovery (SHUTDOWN -> NORMAL, only if stale sensor data caused the stop) or by the MQTT command `boiler/cmd/emergency_reset` (`CentralizedFailsafe::clearEmergencyStop()`), which also sets `BOILER_ENABLED` again if the saved boiler setting is enabled. The burner then leaves ERROR through the normal recovery delay.
 
 ### Non-Blocking Safety
 

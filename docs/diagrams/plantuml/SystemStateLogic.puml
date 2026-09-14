@@ -124,7 +124,7 @@ state EmergencyStop {
     LogError --> [*] : ErrorHandler::logError
 }
 
-EmergencyStop --> SystemIdle : EMERGENCY_STOP released\n(MQTT emergency_reset once causes cleared,\nor sensor recovery)
+EmergencyStop --> SystemIdle : EMERGENCY_STOP released\n(MQTT emergency_reset once causes cleared,\nor sensor recovery after a stale-sensor stop)
 
 state SystemError {
     SystemError : Entry: ErrorHandler::enterFailsafeMode()

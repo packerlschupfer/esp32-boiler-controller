@@ -376,7 +376,7 @@ This path sets `EMERGENCY_STOP` and clears `BOILER_ENABLED`. Other burner faults
    - `emergency_release_refused:temperature_high` - boiler output invalid or at/above 110.0°C, or boiler return at/above 110.0°C
    - `emergency_release_refused:sensors_unavailable` - sensor fallback cannot continue operation, or `SENSOR_FAILURE` error bit set
    - `emergency_release_refused:system_errors` - `SENSOR_FAILURE`, `MODBUS` or `RELAY` error bit set
-4. Without the command, `EMERGENCY_STOP` stays set until the sensor fallback recovers from SHUTDOWN to NORMAL (`BOILER_ENABLED` then stays cleared, `boiler/cmd/system` `on` sets it) or a reboot. `boiler/cmd/system` `on` alone does not restart the burner while `EMERGENCY_STOP` is set
+4. Without the command, `EMERGENCY_STOP` stays set until a reboot. Only a stop caused by stale sensor data is also released when the sensor fallback recovers from SHUTDOWN to NORMAL (`BOILER_ENABLED` then stays cleared, `boiler/cmd/system` `on` sets it); after a critical temperature or request watchdog stop the log shows `Sensors recovered - emergency stop kept`. `boiler/cmd/system` `on` alone does not restart the burner while `EMERGENCY_STOP` is set
 
 `boiler/cmd/burner_reset` does not release an emergency stop; it only acts in LOCKOUT.
 

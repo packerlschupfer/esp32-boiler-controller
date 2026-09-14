@@ -76,7 +76,7 @@ package "Recovery Mechanisms" {
 package "Failsafe States" {
     storage "Relay Failsafe\nBurner relays OFF\nPumps per PumpControlModule\n(ON during emergency dissipation)" as RelayFailsafe
 
-    storage "Temperature Failsafe\nrequired sensor missing: SHUTDOWN mode\nburner emergency-stopped on heat demand\nEMERGENCY_STOP cleared when sensors recover\nor by MQTT emergency_reset" as TempFailsafe
+    storage "Temperature Failsafe\nrequired sensor missing: SHUTDOWN mode\nburner emergency-stopped on heat demand\nEMERGENCY_STOP cleared when sensors recover\n(only a stale-sensor stop)\nor by MQTT emergency_reset" as TempFailsafe
 
     storage "Communication Failsafe\nLocal control only\nIgnore MQTT\nAutonomous mode" as CommFailsafe
 }

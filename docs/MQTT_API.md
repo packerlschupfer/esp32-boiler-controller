@@ -269,9 +269,11 @@ ESPlan-Boiler
 
 #### Enable/Disable Boiler
 ```bash
-mosquitto_pub -t "boiler/cmd/boiler" -m "enable"
-mosquitto_pub -t "boiler/cmd/boiler" -m "disable"
+mosquitto_pub -t "boiler/cmd/system" -m "enable"
+mosquitto_pub -t "boiler/cmd/system" -m "disable"
 ```
+
+Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`.
 
 #### Enable/Disable Heating
 ```bash
