@@ -96,6 +96,30 @@ namespace BurnerTransitionPolicy {
                                                          : RevertAction::STOP;
     }
 
+    // MODE_SWITCHING hard limit (StateMachine timeout -> POST_PURGE) behind the
+    // bounded waits above, in case a future path keeps returning MODE_SWITCHING.
+    constexpr uint32_t MODE_SWITCH_HARD_TIMEOUT_MS = 30000;
+
+    // A refused power level change while entering RUNNING_LOW/HIGH stops the burner
+    // gracefully; only repeated faults escalate to an emergency stop.
+    constexpr uint8_t POWER_FAULT_MAX_COUNT = 3;
+    constexpr uint32_t POWER_FAULT_WINDOW_MS = 600000;  // 10 min
+
+    /**
+     * @brief Record a power level relay fault; true if it must escalate.
+     *
+     * Without escalation a relay that keeps failing would re-ignite the burner on
+     * every post-purge restart (about every 25 s).
+     */
+    inline bool recordPowerFault(uint8_t& count, uint32_t& windowStartMs, uint32_t nowMs) {
+        if (count == 0 || nowMs - windowStartMs >= POWER_FAULT_WINDOW_MS) {
+            count = 0;
+            windowStartMs = nowMs;
+        }
+        count++;
+        return count >= POWER_FAULT_MAX_COUNT;
+    }
+
 } // namespace BurnerTransitionPolicy
 
 #endif // BURNER_TRANSITION_POLICY_H

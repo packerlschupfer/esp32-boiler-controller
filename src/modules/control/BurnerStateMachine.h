@@ -103,6 +103,7 @@ private:
     static void onEnterError();
     static void onExitLockout();
     static void onExitRunning();
+    static void handlePowerLevelFault(bool high);
 
     // Helper functions
     // Round 21: Most helper functions moved to BurnerSafetyChecks, BurnerPowerController, BurnerRuntimeTracker

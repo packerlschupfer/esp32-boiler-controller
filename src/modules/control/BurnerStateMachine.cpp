@@ -130,8 +130,10 @@ void BurnerStateMachine::initialize() {
         .handler = handleModeSwitchingState,
         .onEntry = onEnterModeSwitching,
         .onExit = nullptr,
-        .timeoutMs = 0,  // Poll handler immediately (like RUNNING states)
-        .timeoutNextState = BurnerSMState::MODE_SWITCHING  // No timeout
+        // Hard limit behind the bounded waits of BurnerTransitionPolicy; the handler
+        // still runs every update, a normal switch completes within milliseconds
+        .timeoutMs = BurnerTransitionPolicy::MODE_SWITCH_HARD_TIMEOUT_MS,
+        .timeoutNextState = BurnerSMState::POST_PURGE
     });
 
     stateMachine.registerState(BurnerSMState::POST_PURGE, {
@@ -726,18 +728,8 @@ void BurnerStateMachine::onEnterRunningLow() {
         // L10: Check power level change result
         auto result = controller->setPowerLevel(PowerLevel::HALF);
         if (result.isError()) {
-            LOG_ERROR(TAG, "RUNNING_LOW: Failed to set power level - entering failsafe");
-
-            // Trigger centralized failsafe with DEGRADED level
-            CentralizedFailsafe::triggerFailsafe(
-                CentralizedFailsafe::FailsafeLevel::DEGRADED,
-                SystemError::RELAY_OPERATION_FAILED,
-                "Failed to set power level to LOW"
-            );
-
-            // Emergency shutdown to prevent operation at wrong power level
-            emergencyStop();
-            return;  // onEntry action aborted - state machine will transition to ERROR
+            handlePowerLevelFault(false);
+            return;  // onEntry action aborted - state machine already left RUNNING_LOW
         }
     }
     // Clear any error bits
@@ -755,24 +747,45 @@ void BurnerStateMachine::onEnterRunningHigh() {
         // L10: Check power level change result
         auto result = controller->setPowerLevel(PowerLevel::FULL);
         if (result.isError()) {
-            LOG_ERROR(TAG, "RUNNING_HIGH: Failed to set power level - entering failsafe");
-
-            // Trigger centralized failsafe with DEGRADED level
-            CentralizedFailsafe::triggerFailsafe(
-                CentralizedFailsafe::FailsafeLevel::DEGRADED,
-                SystemError::RELAY_OPERATION_FAILED,
-                "Failed to set power level to HIGH"
-            );
-
-            // Emergency shutdown to prevent operation at wrong power level
-            emergencyStop();
-            return;  // onEntry action aborted - state machine will transition to ERROR
+            handlePowerLevelFault(true);
+            return;  // onEntry action aborted - state machine already left RUNNING_HIGH
         }
     }
     // Set system burner on bit
     xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BURNER_ON);
     // Record start time for runtime tracking (if transitioning from non-running state)
     BurnerRuntimeTracker::recordStartTime();
+}
+
+// A refused power level change (relay rate limit, queue full, Modbus error) used to
+// emergency-stop the burner: ERROR for the recovery delay, pumps switched off
+// (2026-09-14 15:41:25). Stop gracefully instead - post-purge deactivates the burner
+// relays and escalates itself if that fails, the pumps keep following their modes -
+// and escalate only when the fault keeps repeating.
+void BurnerStateMachine::handlePowerLevelFault(bool high) {
+    static uint8_t faultCount = 0;
+    static uint32_t faultWindowStartMs = 0;
+    const bool escalate = BurnerTransitionPolicy::recordPowerFault(faultCount, faultWindowStartMs, millis());
+
+    CentralizedFailsafe::triggerFailsafe(
+        CentralizedFailsafe::FailsafeLevel::DEGRADED,
+        SystemError::RELAY_OPERATION_FAILED,
+        high ? "Failed to set power level to HIGH" : "Failed to set power level to LOW"
+    );
+
+    if (escalate) {
+        LOG_ERROR(TAG, "RUNNING_%s: power level relay failed %u times within %lu s - emergency stop",
+                  high ? "HIGH" : "LOW", static_cast<unsigned>(faultCount),
+                  static_cast<unsigned long>(BurnerTransitionPolicy::POWER_FAULT_WINDOW_MS / 1000));
+        faultCount = 0;
+        emergencyStop();
+        return;
+    }
+
+    LOG_ERROR(TAG, "RUNNING_%s: failed to set power level (%u/%u) - stopping burner via post-purge",
+              high ? "HIGH" : "LOW", static_cast<unsigned>(faultCount),
+              static_cast<unsigned>(BurnerTransitionPolicy::POWER_FAULT_MAX_COUNT));
+    stateMachine.transitionTo(BurnerSMState::POST_PURGE);
 }
 
 void BurnerStateMachine::onEnterPostPurge() {
