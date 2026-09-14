@@ -10,6 +10,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "modules/control/BurnerDemandGate.h"
+
 // Forward declaration
 class BurnerControlModule;
 
@@ -18,5 +20,14 @@ class BurnerControlModule;
  * @param parameter Pointer to BurnerControlModule instance
  */
 void BurnerControlTask(void* parameter);
+
+/**
+ * @brief Whether BoilerTempControlTask may arm the burner heat demand
+ *
+ * Granted while a heating/water request is present and BurnerControlTask's own
+ * blocks passed (sensor staleness, safety validation, return preheating, runtime
+ * limit); carries the sensor fallback power/target limits.
+ */
+BurnerDemandGate::Permission getBurnerDemandPermission();
 
 #endif // BURNER_CONTROL_TASK_H

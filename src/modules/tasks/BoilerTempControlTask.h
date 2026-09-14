@@ -5,6 +5,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "shared/Temperature.h"
+
 // Forward declaration
 class BoilerTempController;
 
@@ -38,5 +40,14 @@ TaskHandle_t getBoilerTempControlTaskHandle();
  * @return Pointer to the controller, or nullptr if not initialized
  */
 BoilerTempController* getBoilerTempController();
+
+/**
+ * @brief Latest PID decision, for BurnerControlTask's arming check (BurnerDemandGate)
+ * @param wantsHeat Output: PID wanted HALF or FULL
+ * @param target Output: boiler target the decision was made for (tenths °C)
+ * @param ageMs Output: time since the decision
+ * @return false if no decision has been made since boot
+ */
+bool getBoilerTempDecision(bool& wantsHeat, Temperature_t& target, uint32_t& ageMs);
 
 #endif // BOILER_TEMP_CONTROL_TASK_H

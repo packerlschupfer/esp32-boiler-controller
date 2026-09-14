@@ -8,6 +8,8 @@
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"  // F2: validate before arming demand
 #include "modules/control/ReturnPreheater.h"        // F2: thermal-shock mitigation
+#include "modules/control/BurnerDemandGate.h"       // Arming rules shared with BurnerControlTask
+#include "modules/tasks/BurnerControlTask.h"        // getBurnerDemandPermission()
 #include "shared/SharedResources.h"
 #include "events/SystemEventsGenerated.h"
 #include "core/SystemResourceProvider.h"
@@ -18,6 +20,7 @@
 #include "modules/tasks/MQTTTask.h"  // For MQTT publish
 #include "LoggingMacros.h"
 #include <TaskManager.h>
+#include <atomic>
 
 static const char* TAG = "BoilerTempCtrl";
 
@@ -41,12 +44,34 @@ static struct {
     uint32_t lastCycleTime = 0;
 } stats;
 
+// Latest PID decision for BurnerControlTask's arming check (BurnerDemandGate)
+static std::atomic<bool> decisionWantsHeat{false};
+static std::atomic<int16_t> decisionTarget{0};
+static std::atomic<uint32_t> decisionMs{0};  // 0 = no decision yet
+
+static void publishDecision(bool wantsHeat, Temperature_t target) {
+    decisionWantsHeat.store(wantsHeat);
+    decisionTarget.store(static_cast<int16_t>(target));
+    decisionMs.store(millis() | 1);
+}
+
 TaskHandle_t getBoilerTempControlTaskHandle() {
     return taskHandle;
 }
 
 BoilerTempController* getBoilerTempController() {
     return controller.isInitialized() ? &controller : nullptr;
+}
+
+bool getBoilerTempDecision(bool& wantsHeat, Temperature_t& target, uint32_t& ageMs) {
+    const uint32_t ms = decisionMs.load();
+    if (ms == 0) {
+        return false;
+    }
+    wantsHeat = decisionWantsHeat.load();
+    target = static_cast<Temperature_t>(decisionTarget.load());
+    ageMs = millis() - ms;
+    return true;
 }
 
 void BoilerTempControlTask(void* parameter) {
@@ -213,6 +238,11 @@ void BoilerTempControlTask(void* parameter) {
                         // Auto-tuner wants burner OFF - actively stop it
                         BurnerStateMachine::setHeatDemand(false, tuneTarget, false);
                         LOG_INFO(TAG, "Autotune: Burner OFF");
+                    } else if (!getBurnerDemandPermission().permitted) {
+                        // BurnerControlTask blocked the request (stale sensors, safety
+                        // validation, return preheating, runtime limit)
+                        BurnerStateMachine::setHeatDemand(false, tuneTarget, false);
+                        LOG_WARN(TAG, "Autotune power-on blocked - burner demand not permitted by BurnerControlTask");
                     } else {
                         // Auto-tuner wants burner ON at FULL power - still gate on
                         // Layer-1 safety validation (F2): autotune oscillations can
@@ -325,49 +355,56 @@ void BoilerTempControlTask(void* parameter) {
         // Check and update mode (switches PID gains if mode changed)
         controller.updateMode();
 
+        // BurnerControlTask decides whether arming is permitted at all; this task
+        // decides when (BurnerDemandGate). Sensor fallback limits the target.
+        const BurnerDemandGate::Permission permission = getBurnerDemandPermission();
+        targetTemp = BurnerDemandGate::cappedTarget(targetTemp, permission.maxTargetTemp);
+
         // Calculate control output
         auto output = controller.calculate(targetTemp, currentTemp);
+        const bool pidWantsHeat = (output.powerLevel != BoilerTempController::PowerLevel::OFF);
+        publishDecision(pidWantsHeat, targetTemp);
 
-        // Hold OFF level-triggered, not only on the OFF edge: BurnerControlTask
-        // also writes the state machine's demand (request start, or target moved
-        // by >1°C) and can re-arm it while this controller still wants OFF. The
-        // output then no longer changes, so without this the burner would keep
-        // running above target until some failsafe tripped.
-        if (!output.changed && output.powerLevel == BoilerTempController::PowerLevel::OFF) {
-            bool smDemand = false;
-            Temperature_t smTarget = 0;
-            if (BurnerStateMachine::getHeatDemandState(smDemand, smTarget) && smDemand) {
-                BurnerStateMachine::setHeatDemand(false, targetTemp, false);
-                LOG_INFO(TAG, "Re-asserting burner OFF - demand was re-armed while coasting (target:%.1f curr:%.1f)",
-                         tempToFloat(targetTemp),
-                         tempToFloat(currentTemp));
-            }
+        if (output.changed && !pidWantsHeat) {
+            // Above target - burner off, pump continues because PumpControlModule
+            // watches the HEATING_ON/WATER_ON bits, not the burner
+            LOG_INFO(TAG, "Coasting - burner OFF (target:%.1f curr:%.1f) - pump continues",
+                     tempToFloat(targetTemp),
+                     tempToFloat(currentTemp));
         }
 
-        // Update BurnerStateMachine if output changed
-        if (output.changed) {
-            // Convert our PowerLevel to highPower flag
-            bool highPower = (output.powerLevel == BoilerTempController::PowerLevel::FULL);
+        // Level-triggered, not only on output edges: a demand armed elsewhere while
+        // this controller wants OFF is dropped, and a demand that is missing while
+        // the PID wants heat is armed (e.g. after BurnerControlTask lifted a block).
+        bool demandArmed = false;
+        Temperature_t smTarget = 0;
+        if (!BurnerStateMachine::getHeatDemandState(demandArmed, smTarget)) {
+            // Unknown: force the desired state
+            demandArmed = !(permission.permitted && pidWantsHeat);
+        }
 
-            // When power level is OFF (temp above target):
-            // - Turn off burner via setHeatDemand(false)
-            // - Pump continues because PumpControlModule watches HEATING_ON bit
-            //   which is set by HeatingControlTask (room temp control), not by burner
-            // - Heat distributes until room reaches target or boiler temp drops
-
-            if (output.powerLevel == BoilerTempController::PowerLevel::OFF) {
-                // Above target - turn off burner, pump continues via PumpControlModule
+        switch (BurnerDemandGate::decide(permission.permitted, pidWantsHeat, output.changed, demandArmed)) {
+            case BurnerDemandGate::Action::DISARM:
                 BurnerStateMachine::setHeatDemand(false, targetTemp, false);
-                LOG_INFO(TAG, "Coasting - burner OFF (target:%.1f curr:%.1f) - pump continues",
-                         tempToFloat(targetTemp),
-                         tempToFloat(currentTemp));
-            } else {
-                // HALF or FULL - arm demand, but ONLY after the same Layer-1
-                // safety validation BurnerControlTask runs. F2 (CRITICAL): this
-                // task is a second heat-demand writer; without this gate a PID
+                if (pidWantsHeat) {
+                    LOG_INFO(TAG, "Dropping burner demand - not permitted by BurnerControlTask (target:%.1f curr:%.1f)",
+                             tempToFloat(targetTemp),
+                             tempToFloat(currentTemp));
+                } else if (!output.changed) {
+                    LOG_INFO(TAG, "Re-asserting burner OFF - demand was re-armed while coasting (target:%.1f curr:%.1f)",
+                             tempToFloat(targetTemp),
+                             tempToFloat(currentTemp));
+                }
+                break;
+
+            case BurnerDemandGate::Action::ARM:
+            case BurnerDemandGate::Action::SET_POWER: {
+                // Arm or change power only after the same Layer-1 safety validation
+                // BurnerControlTask runs. F2 (CRITICAL): without this gate a PID
                 // coast OFF->HALF/FULL re-armed demand that BurnerSafetyValidator
                 // had just blocked (thermal shock, system pressure, runtime
                 // limits), igniting into the exact condition Layer-1 rejected.
+                static bool armBlockedLogged = false;
                 BurnerSafetyValidator::SafetyConfig safetyConfig;
                 safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
                 auto vr = BurnerSafetyValidator::validateBurnerOperation(
@@ -378,8 +415,11 @@ void BoilerTempControlTask(void* parameter) {
                     // thermal-shock handling (start return preheating); leave any
                     // emergency-stop escalation to BurnerControlTask's own path so
                     // we do not double-trigger it.
-                    LOG_WARN(TAG, "PID power-on blocked by safety validation: %s",
-                             BurnerSafetyValidator::getValidationErrorMessage(vr));
+                    if (output.changed || !armBlockedLogged) {
+                        LOG_WARN(TAG, "PID power-on blocked by safety validation: %s",
+                                 BurnerSafetyValidator::getValidationErrorMessage(vr));
+                        armBlockedLogged = true;
+                    }
                     BurnerStateMachine::setHeatDemand(false, targetTemp, false);
                     if (vr == BurnerSafetyValidator::ValidationResult::THERMAL_SHOCK_RISK &&
                         ReturnPreheater::getState() == ReturnPreheater::State::IDLE) {
@@ -387,16 +427,27 @@ void BoilerTempControlTask(void* parameter) {
                         ReturnPreheater::start();
                     }
                 } else {
+                    armBlockedLogged = false;
                     // Pump control is independent (PumpControlModule watches HEATING_ON bit)
+                    const bool highPower = (output.powerLevel == BoilerTempController::PowerLevel::FULL) &&
+                                           permission.highPowerAllowed;
                     BurnerStateMachine::setHeatDemand(true, targetTemp, highPower);
 
-                    LOG_INFO(TAG, "Power: %s (target:%.1f curr:%.1f)",
+                    LOG_INFO(TAG, "%s: %s (target:%.1f curr:%.1f)",
+                             demandArmed ? "Power" : "Arming burner demand",
                              BoilerTempController::powerLevelToString(output.powerLevel),
                              tempToFloat(targetTemp),
                              tempToFloat(currentTemp));
                 }
+                break;
             }
 
+            case BurnerDemandGate::Action::NONE:
+            default:
+                break;
+        }
+
+        if (output.changed) {
             stats.powerChanges++;
         }
 

@@ -60,6 +60,18 @@ void test_bsm_step_mode_change_without_flame_stops();
 void test_bsm_step_safety_failure_during_mode_switch_errors();
 void test_bsm_step_power_level_follows_request_with_anti_flapping();
 
+// Burner demand gate (who may arm the heat demand)
+void test_gate_hot_boiler_request_does_not_arm();
+void test_gate_cold_boiler_request_arms_immediately();
+void test_gate_handover_uses_temperature_when_decision_was_for_other_target();
+void test_gate_fresh_matching_decision_wins_over_temperature();
+void test_gate_without_boiler_temperature_control_task_arms();
+void test_gate_pid_arms_demand_it_did_not_see_armed();
+void test_gate_drops_demand_rearmed_while_coasting();
+void test_gate_not_permitted_never_arms();
+void test_gate_power_update_only_on_pid_change();
+void test_gate_fallback_target_cap();
+
 // Relay command policy (no-op commands vs rate limiting)
 void test_relay_policy_noop_commands_skip_protection();
 void test_relay_policy_real_changes_are_protected();
@@ -542,6 +554,18 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bsm_step_mode_change_without_flame_stops);
     RUN_TEST(test_bsm_step_safety_failure_during_mode_switch_errors);
     RUN_TEST(test_bsm_step_power_level_follows_request_with_anti_flapping);
+
+    // Burner demand gate (who may arm the heat demand)
+    RUN_TEST(test_gate_hot_boiler_request_does_not_arm);
+    RUN_TEST(test_gate_cold_boiler_request_arms_immediately);
+    RUN_TEST(test_gate_handover_uses_temperature_when_decision_was_for_other_target);
+    RUN_TEST(test_gate_fresh_matching_decision_wins_over_temperature);
+    RUN_TEST(test_gate_without_boiler_temperature_control_task_arms);
+    RUN_TEST(test_gate_pid_arms_demand_it_did_not_see_armed);
+    RUN_TEST(test_gate_drops_demand_rearmed_while_coasting);
+    RUN_TEST(test_gate_not_permitted_never_arms);
+    RUN_TEST(test_gate_power_update_only_on_pid_change);
+    RUN_TEST(test_gate_fallback_target_cap);
 
     // Relay command policy (no-op commands vs rate limiting)
     RUN_TEST(test_relay_policy_noop_commands_skip_protection);

@@ -24,6 +24,7 @@
 #include "core/StateManager.h"
 #include "config/ProjectConfig.h"
 #include "LoggingMacros.h"
+#include "modules/tasks/BoilerTempControlTask.h"  // BurnerDemandGate: latest PID decision
 #include <TaskManager.h>
 #include <atomic>
 #include <climits>
@@ -31,6 +32,32 @@
 
 // Timer handle for state machine timeouts only
 static TimerHandle_t stateTimeoutTimer = nullptr;
+
+// BurnerDemandGate permission, read by BoilerTempControlTask (see BurnerDemandGate.h)
+static std::atomic<bool> demandPermitted{false};
+static std::atomic<bool> demandHighPowerAllowed{true};
+static std::atomic<int16_t> demandMaxTargetTemp{0};
+
+static void publishDemandPermission(bool permitted, Temperature_t maxTargetTemp, bool highPowerAllowed) {
+    // Revoke before and grant after the limits change, so a reader never sees a
+    // grant with stale limits
+    if (!permitted) {
+        demandPermitted.store(false);
+    }
+    demandMaxTargetTemp.store(static_cast<int16_t>(maxTargetTemp));
+    demandHighPowerAllowed.store(highPowerAllowed);
+    if (permitted) {
+        demandPermitted.store(true);
+    }
+}
+
+BurnerDemandGate::Permission getBurnerDemandPermission() {
+    BurnerDemandGate::Permission permission;
+    permission.permitted = demandPermitted.load();
+    permission.highPowerAllowed = demandHighPowerAllowed.load();
+    permission.maxTargetTemp = demandMaxTargetTemp.load();
+    return permission;
+}
 
 // State tracking
 static struct {
@@ -355,9 +382,21 @@ void BurnerControlTask(void* parameter) {
         // F10: CHANGE_EVENT_BITS were already cleared atomically at the wait
         // above, so a change arriving during processBurnerRequest() is preserved
         // for the next iteration rather than being wiped by a late clear here.
+        // A request that is present but not permitted (return preheating, stale
+        // sensors, failed validation, sensor fallback) is re-evaluated every 10 s:
+        // change events only fire when the request bits change, and
+        // BoilerTempControlTask may not arm until the block is lifted here.
+        static uint32_t lastBlockedRetryMs = 0;
         if (requestEvents & SystemEvents::BurnerRequest::CHANGE_EVENT_BITS) {
             LOG_DEBUG(TAG, "Processing burner request change event (events: 0x%06X)", requestEvents);
             processBurnerRequest();
+            lastBlockedRetryMs = millis();
+        } else if (hasHeatingDemand && !demandPermitted.load() &&
+                   Utils::elapsedMs(lastBlockedRetryMs) >= 10000) {
+            LOG_DEBUG(TAG, "Re-evaluating blocked burner request");
+            burnerState.lastHeatDemand = false;  // force updateBurnerState() to re-run its checks
+            processBurnerRequest();
+            lastBlockedRetryMs = millis();
         }
         (void)SRP::getTaskManager().feedWatchdog();
 
@@ -497,6 +536,7 @@ static void processBurnerRequest() {
             }
         }
 
+        publishDemandPermission(false, 0, true);
         BurnerStateMachine::setHeatDemand(false, 0);
         burnerState.lastHeatDemand = false;
 
@@ -518,6 +558,8 @@ static void processBurnerRequest() {
     
     // Check temperature sensor status
     if (!TemperatureSensorFallback::canContinueOperation()) {
+        // Keep BoilerTempControlTask from arming (and let it drop an armed demand)
+        publishDemandPermission(false, 0, true);
         return;
     }
     
@@ -662,8 +704,10 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
     // The atomic clear-and-set is done in the switch statement below
 
     // Safety validation using StateManager for staleness detection
+    // (the readings also feed the BurnerDemandGate arming check below)
+    SharedSensorReadings readings = {};
+    bool readingsValid = false;
     if (heatDemand) {
-        SharedSensorReadings readings = {};
 
         // Atomic sensor read: get readings AND staleness in single mutex acquisition
         // This prevents TOCTOU race between checking staleness and reading data
@@ -685,6 +729,7 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
                               SystemEvents::Error::SENSOR_FAILURE);
         } else {
             readings = sensorResult.readings;
+            readingsValid = true;
         }
 
         if (heatDemand) {
@@ -738,8 +783,32 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
         }
     }
     
-    // Update state machine with PID-driven power level
-    BurnerStateMachine::setHeatDemand(heatDemand, targetTemp, highPower);
+    // BurnerDemandGate: publish whether BoilerTempControlTask may arm, and arm here
+    // only when that controller would. It re-asserts OFF one cycle (~2.5 s) later,
+    // after the 2 s pre-purge, so the former unconditional ON ignited above target
+    // (2026-09-14 17:12, boiler 64.4 C vs heating target 47.0 C).
+    publishDemandPermission(heatDemand, burnerState.maxAllowedTemp, burnerState.maxPowerFactor >= 1.0f);
+    if (!heatDemand) {
+        BurnerStateMachine::setHeatDemand(false, targetTemp, highPower);
+    } else {
+        bool decisionWantsHeat = false;
+        Temperature_t decisionTarget = 0;
+        uint32_t decisionAgeMs = 0;
+        const bool decisionFresh =
+            getBoilerTempDecision(decisionWantsHeat, decisionTarget, decisionAgeMs) &&
+            decisionAgeMs <= BurnerDemandGate::DECISION_MAX_AGE_MS;
+        if (BurnerDemandGate::controlTaskMayArm(readingsValid && readings.isBoilerTempOutputValid,
+                                                readings.boilerTempOutput, targetTemp,
+                                                decisionFresh, decisionTarget, decisionWantsHeat)) {
+            BurnerStateMachine::setHeatDemand(true, targetTemp, highPower);
+        } else {
+            char boilerBuf[16], targetBuf[16];
+            formatTemp(boilerBuf, sizeof(boilerBuf), readings.boilerTempOutput);
+            formatTemp(targetBuf, sizeof(targetBuf), targetTemp);
+            LOG_INFO(TAG, "Heat demand not armed - boiler %s°C, target %s°C (BoilerTempCtrl arms when heat is needed)",
+                     boilerBuf, targetBuf);
+        }
+    }
     
     // C2: Update system state bits atomically (clear + set in critical section)
     // This prevents other tasks from seeing intermediate state with all bits cleared
