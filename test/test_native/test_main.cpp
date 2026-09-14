@@ -22,6 +22,7 @@ void test_pid_gain_conversion_rejects_invalid();
 void test_pid_scaled_gain_commands_off_above_target();
 void test_pid_scaled_gain_commands_full_below_target();
 void test_pid_adjustment_clamp_keeps_sign();
+void test_pid_output_limit_matches_power_saturation();
 
 // Autotune peak/trough tracking (lagging plant)
 void test_relay_extrema_peaks_include_post_switch_overshoot();
@@ -59,6 +60,7 @@ void test_emergency_dissipation_until_boiler_cooled();
 void test_emergency_dissipation_without_usable_output();
 void test_emergency_sensor_recovery_releases_only_stale_sensor_stop();
 void test_emergency_cause_merge_while_latched();
+void test_emergency_dissipation_continues_after_release_until_cooled();
 
 // Burner transitions (state machine scenarios through BurnerTransitions::step)
 void test_bsm_step_idle_without_demand_skips_safety_check();
@@ -87,6 +89,9 @@ void test_bsm_step_post_purge_no_restart_of_disabled_mode();
 void test_bsm_step_post_purge_restart_requires_safety();
 void test_bsm_step_ignition_failure_retries_then_locks_out();
 void test_bsm_step_ignition_retry_success_resets_counter();
+void test_bsm_step_new_start_gets_full_ignition_attempts_after_lockout();
+void test_bsm_step_no_mode_grace_survives_steps_in_same_millisecond();
+void test_bsm_step_stray_other_mode_on_bit_does_not_bounce();
 
 // Burner demand gate (who may arm the heat demand)
 void test_gate_hot_boiler_request_does_not_arm();
@@ -105,6 +110,7 @@ void test_relay_policy_noop_commands_skip_protection();
 void test_relay_policy_real_changes_are_protected();
 void test_relay_policy_emergency_bypasses_protection();
 void test_relay_policy_mode_switch_then_power_change_counts_once();
+void test_relay_policy_pump_request_resent_until_relay_follows();
 
 void test_pre_ignition_safe_conditions();
 void test_pre_ignition_high_boiler_temp();
@@ -513,6 +519,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pid_scaled_gain_commands_off_above_target);
     RUN_TEST(test_pid_scaled_gain_commands_full_below_target);
     RUN_TEST(test_pid_adjustment_clamp_keeps_sign);
+    RUN_TEST(test_pid_output_limit_matches_power_saturation);
 
     // Autotune peak/trough tracking (lagging plant)
     RUN_TEST(test_relay_extrema_peaks_include_post_switch_overshoot);
@@ -550,6 +557,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_emergency_dissipation_without_usable_output);
     RUN_TEST(test_emergency_sensor_recovery_releases_only_stale_sensor_stop);
     RUN_TEST(test_emergency_cause_merge_while_latched);
+    RUN_TEST(test_emergency_dissipation_continues_after_release_until_cooled);
 
     // Burner transitions (state machine scenarios through BurnerTransitions::step)
     RUN_TEST(test_bsm_step_idle_without_demand_skips_safety_check);
@@ -578,6 +586,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bsm_step_post_purge_restart_requires_safety);
     RUN_TEST(test_bsm_step_ignition_failure_retries_then_locks_out);
     RUN_TEST(test_bsm_step_ignition_retry_success_resets_counter);
+    RUN_TEST(test_bsm_step_new_start_gets_full_ignition_attempts_after_lockout);
+    RUN_TEST(test_bsm_step_no_mode_grace_survives_steps_in_same_millisecond);
+    RUN_TEST(test_bsm_step_stray_other_mode_on_bit_does_not_bounce);
 
     // Burner demand gate (who may arm the heat demand)
     RUN_TEST(test_gate_hot_boiler_request_does_not_arm);
@@ -596,6 +607,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_relay_policy_real_changes_are_protected);
     RUN_TEST(test_relay_policy_emergency_bypasses_protection);
     RUN_TEST(test_relay_policy_mode_switch_then_power_change_counts_once);
+    RUN_TEST(test_relay_policy_pump_request_resent_until_relay_follows);
 
     return UNITY_END();
 }

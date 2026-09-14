@@ -70,7 +70,11 @@ namespace BurnerTransitions {
     struct Memory {
         uint8_t ignitionRetries;
         bool runningModeIsWater;               // mode the burner was started/switched in
-        uint32_t noModeDemandSinceMs;          // 0 = mode request present
+        uint32_t noModeDemandSinceMs;          // valid while noModeDemand
+        // Running without an active mode request. An explicit flag: the former
+        // "nowMs | 1" sentinel made a second step in the same (even) millisecond
+        // compute now - (now + 1) = 0xFFFFFFFF and stop at once (review 2026-09-14).
+        bool noModeDemand;
     };
 
     struct Context {
@@ -139,7 +143,7 @@ namespace BurnerTransitions {
                    (env.waterOn() && env.waterRequested());
         }
 
-        inline Decision idle(const Context& c, Environment& env) {
+        inline Decision idle(const Context& c, Environment& env, Memory& m) {
             // heatDemand is latched and survives emergencyStop()/ERROR recovery. Only
             // act on it while a heating/water mode is actually requesting the burner -
             // otherwise a stale demand fires the burner with no mode active (and so no
@@ -148,8 +152,15 @@ namespace BurnerTransitions {
                 return make(BurnerSMState::IDLE, Reason::STALE_DEMAND);
             }
             if (c.heatDemand && env.safetyOk()) {
-                return env.canTurnOn() ? make(BurnerSMState::PRE_PURGE, Reason::START)
-                                       : make(BurnerSMState::IDLE, Reason::START_DELAYED);
+                if (!env.canTurnOn()) {
+                    return make(BurnerSMState::IDLE, Reason::START_DELAYED);
+                }
+                // A new start sequence gets all ignition attempts: a LOCKOUT that ended
+                // by timeout left the counter at the maximum, so the next failed start
+                // locked out after a single attempt (review 2026-09-14)
+                m.ignitionRetries = 0;
+                m.noModeDemand = false;
+                return make(BurnerSMState::PRE_PURGE, Reason::START);
             }
             return make(BurnerSMState::IDLE, Reason::NONE);
         }
@@ -237,12 +248,13 @@ namespace BurnerTransitions {
             //    period. Bypasses anti-flapping (like flame loss) - with no mode active
             //    nothing guarantees circulation.
             if (hasActiveModeDemand(env)) {
-                m.noModeDemandSinceMs = 0;
-            } else if (m.noModeDemandSinceMs == 0) {
-                m.noModeDemandSinceMs = c.nowMs | 1;  // 0 is the "request present" sentinel
+                m.noModeDemand = false;
+            } else if (!m.noModeDemand) {
+                m.noModeDemand = true;
+                m.noModeDemandSinceMs = c.nowMs;
             } else if (c.nowMs - m.noModeDemandSinceMs >= t.modeDemandLossGraceMs) {
                 d.elapsedMs = c.nowMs - m.noModeDemandSinceMs;
-                m.noModeDemandSinceMs = 0;
+                m.noModeDemand = false;
                 d.next = BurnerSMState::POST_PURGE;
                 d.reason = Reason::NO_MODE_DEMAND;
                 return d;
@@ -320,9 +332,16 @@ namespace BurnerTransitions {
 
             if (d.toWater == m.runningModeIsWater) {
                 // Demand points back to the running mode (race): resume only once its
-                // ON bit is set again, otherwise RUNNING <-> MODE_SWITCHING would bounce.
-                const bool runningOnBit = m.runningModeIsWater ? env.waterOn() : env.heatingOn();
-                switch (BurnerTransitionPolicy::onModeReverted(runningOnBit, c.timeInStateMs)) {
+                // ON bit is set again and the ON bits select the running mode, otherwise
+                // running() re-enters MODE_SWITCHING on the next tick and the two bounce.
+                // E.g. MQTT water override_on sets WATER_ON without a water request while
+                // heating runs with water priority (review 2026-09-14).
+                const bool waterOn = env.waterOn();
+                const bool heatingOn = env.heatingOn();
+                const bool runningOnBit = m.runningModeIsWater ? waterOn : heatingOn;
+                const bool onBitsSelectWater = waterOn && (!heatingOn || waterPriority);
+                const bool backInRunningMode = runningOnBit && (onBitsSelectWater == m.runningModeIsWater);
+                switch (BurnerTransitionPolicy::onModeReverted(backInRunningMode, c.timeInStateMs)) {
                     case BurnerTransitionPolicy::RevertAction::RESUME_RUNNING:
                         // Safe low power - the PID power request may not be updated yet
                         d.next = BurnerSMState::RUNNING_LOW;
@@ -352,7 +371,7 @@ namespace BurnerTransitions {
             return d;
         }
 
-        inline Decision postPurge(const Context& c, Environment& env) {
+        inline Decision postPurge(const Context& c, Environment& env, Memory& m) {
             // Post-purge only keeps the burner off; the pumps carry the heat away
             // independently. If heat demand returns meanwhile, restart under the same
             // conditions as from IDLE instead of holding off for the rest of the
@@ -371,6 +390,8 @@ namespace BurnerTransitions {
             if (!env.safetyOk() || !env.canTurnOn()) {
                 return make(BurnerSMState::POST_PURGE, Reason::NONE);
             }
+            m.ignitionRetries = 0;
+            m.noModeDemand = false;
             return make(BurnerSMState::PRE_PURGE, Reason::RESTART_FROM_POST_PURGE);
         }
 
@@ -385,7 +406,7 @@ namespace BurnerTransitions {
     inline Decision step(const Context& c, const Timing& t, Environment& env, Memory& m) {
         switch (c.state) {
             case BurnerSMState::IDLE:
-                return detail::idle(c, env);
+                return detail::idle(c, env, m);
             case BurnerSMState::PRE_PURGE:
                 return detail::prePurge(c, env);
             case BurnerSMState::IGNITION:
@@ -396,7 +417,7 @@ namespace BurnerTransitions {
             case BurnerSMState::MODE_SWITCHING:
                 return detail::modeSwitching(c, env, m);
             case BurnerSMState::POST_PURGE:
-                return detail::postPurge(c, env);
+                return detail::postPurge(c, env, m);
             default:
                 return detail::make(c.state, Reason::NONE);
         }

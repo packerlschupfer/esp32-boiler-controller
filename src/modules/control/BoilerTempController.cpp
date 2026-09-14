@@ -43,6 +43,10 @@ bool BoilerTempController::initialize() {
         // Set integral limits to prevent windup
         pidController_->setIntegralLimits(SafetyConfig::pidIntegralMin,
                                           SafetyConfig::pidIntegralMax);
+        // Output limits = where the power mapping saturates, so anti-windup stops
+        // integrating once power is at 0 or 100 %
+        pidController_->setOutputLimits(-PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT,
+                                        PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT);
         LOG_INFO(TAG, "PID controller created with integral limits [%ld, %ld]",
                  (long)SafetyConfig::pidIntegralMin, (long)SafetyConfig::pidIntegralMax);
     }
@@ -331,14 +335,10 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
     // - Each 10 tenths (1°C) of adjustment shifts output by ~10%
     // With Kp=5.0, error=10 (1°C): adjustment=50 → 5% shift
     // With Kp=5.0, error=100 (10°C): adjustment=500 → 50% shift (maxed at FULL)
-    int32_t pidPower = 50 + (pidAdjustment / 10);
+    int32_t pidPower = PIDGainFixedPoint::powerPercentFromAdjustment(pidAdjustment);  // 0..100
 
     // Calculate error for logging only
     [[maybe_unused]] Temperature_t error = tempSub(target, current);  // positive = need heat
-
-    // Clamp to 0-100 range
-    if (pidPower < 0) pidPower = 0;
-    if (pidPower > 100) pidPower = 100;
 
     uint8_t pidOutput = static_cast<uint8_t>(pidPower);
     lastPIDOutput_ = pidOutput;

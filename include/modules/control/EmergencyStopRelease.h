@@ -100,6 +100,20 @@ namespace EmergencyStopRelease {
                      : outputTenths >= DISSIPATION_RESTART_TENTHS;
     }
 
+    /**
+     * After a release (emergency_reset below 110 °C, or sensor recovery) the pumps keep
+     * dissipating until the boiler output is below 60.0 °C; without a usable reading for
+     * at most maxWithoutReadingMs. Before, both pumps stopped at once, even at 100 °C
+     * (review 2026-09-14).
+     */
+    inline bool dissipationAfterRelease(bool outputUsable, int16_t outputTenths,
+                                        uint32_t sinceReleaseMs, uint32_t maxWithoutReadingMs) {
+        if (!outputUsable) {
+            return sinceReleaseMs < maxWithoutReadingMs;
+        }
+        return outputTenths >= DISSIPATION_END_TENTHS;
+    }
+
 } // namespace EmergencyStopRelease
 
 #endif // EMERGENCY_STOP_RELEASE_H

@@ -63,3 +63,13 @@ void test_relay_policy_mode_switch_then_power_change_counts_once() {
     TEST_ASSERT_TRUE(lastAllowed);
     TEST_ASSERT_TRUE(desired);
 }
+
+void test_relay_policy_pump_request_resent_until_relay_follows() {
+    // Review 2026-09-14: a pump change refused by motor protection was never repeated
+    TEST_ASSERT_FALSE(pumpRequestResendDue(true, true, 10000, 0));    // relay follows
+    TEST_ASSERT_FALSE(pumpRequestResendDue(false, false, 10000, 0));
+    TEST_ASSERT_FALSE(pumpRequestResendDue(true, false, 1999, 0));    // too soon
+    TEST_ASSERT_TRUE(pumpRequestResendDue(true, false, 2000, 0));     // refused ON
+    TEST_ASSERT_TRUE(pumpRequestResendDue(false, true, 9000, 5000));  // failsafe forced ON
+    TEST_ASSERT_TRUE(pumpRequestResendDue(true, false, 1000, 0xFFFFFC18UL));  // across millis() wrap
+}

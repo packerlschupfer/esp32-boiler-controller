@@ -88,6 +88,17 @@ void test_emergency_cause_merge_while_latched() {
     TEST_ASSERT_TRUE(mergeCause(true, Cause::OTHER, Cause::SENSOR_STALE) == Cause::OTHER);
 }
 
+void test_emergency_dissipation_continues_after_release_until_cooled() {
+    // Review 2026-09-14: a release at up to 109.9 °C stopped both pumps at once
+    const uint32_t maxNoReading = 300000;
+    TEST_ASSERT_TRUE(dissipationAfterRelease(true, 1000, 0, maxNoReading));
+    TEST_ASSERT_TRUE(dissipationAfterRelease(true, 600, 60000, maxNoReading));
+    TEST_ASSERT_FALSE(dissipationAfterRelease(true, 599, 60000, maxNoReading));
+    // No usable reading: bounded by the pump overrun time
+    TEST_ASSERT_TRUE(dissipationAfterRelease(false, 0, 299999, maxNoReading));
+    TEST_ASSERT_FALSE(dissipationAfterRelease(false, 0, 300000, maxNoReading));
+}
+
 void test_emergency_dissipation_without_usable_output() {
     TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, false));
     TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, true));

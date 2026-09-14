@@ -14,17 +14,28 @@
 
 // setUp and tearDown are defined in test_main.cpp
 
-// Mirrors PIDControlModuleFixedPoint P term and BoilerTempController's
-// PID adjustment -> 0..100% power mapping (P only, error in tenths of °C).
+// P term as in PIDControlModuleFixedPoint (error in tenths of °C), clamped to the
+// boiler PID output limits, then the production BoilerTempController power mapping.
 static int32_t pidPowerFromP(int32_t kpFixed, int16_t errorTenths) {
     int64_t pRaw = static_cast<int64_t>(kpFixed) * errorTenths;
-    int32_t adjustment = static_cast<int32_t>(pRaw / PIDGainFixedPoint::SCALE);
-    if (adjustment > 1000) adjustment = 1000;    // OUTPUT_MAX
-    if (adjustment < -1000) adjustment = -1000;  // OUTPUT_MIN
-    int32_t power = 50 + adjustment / 10;
-    if (power < 0) power = 0;
-    if (power > 100) power = 100;
-    return power;
+    int16_t adjustment = PIDGainFixedPoint::clampToAdjustment(pRaw / PIDGainFixedPoint::SCALE,
+                                                              -PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT,
+                                                              PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT);
+    return PIDGainFixedPoint::powerPercentFromAdjustment(adjustment);
+}
+
+void test_pid_output_limit_matches_power_saturation() {
+    // Review 2026-09-14: anti-windup engaged at +/-1000 while power already saturated
+    // at +/-500, so the integral wound up with the burner at 100 %
+    using PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT;
+    using PIDGainFixedPoint::powerPercentFromAdjustment;
+    TEST_ASSERT_EQUAL_UINT8(50, powerPercentFromAdjustment(0));
+    TEST_ASSERT_EQUAL_UINT8(100, powerPercentFromAdjustment(POWER_ADJUSTMENT_LIMIT));
+    TEST_ASSERT_EQUAL_UINT8(99, powerPercentFromAdjustment(POWER_ADJUSTMENT_LIMIT - 10));
+    TEST_ASSERT_EQUAL_UINT8(0, powerPercentFromAdjustment(-POWER_ADJUSTMENT_LIMIT));
+    TEST_ASSERT_EQUAL_UINT8(1, powerPercentFromAdjustment(-POWER_ADJUSTMENT_LIMIT + 10));
+    TEST_ASSERT_EQUAL_UINT8(100, powerPercentFromAdjustment(1000));
+    TEST_ASSERT_EQUAL_UINT8(0, powerPercentFromAdjustment(-1000));
 }
 
 void test_pid_gain_conversion_scales_by_1000() {

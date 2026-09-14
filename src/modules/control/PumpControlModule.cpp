@@ -11,6 +11,9 @@
 #include "events/SystemEventsGenerated.h"
 #include "modules/control/ReturnPreheater.h"  // For yield during preheating
 #include "modules/control/EmergencyStopRelease.h"  // Emergency heat dissipation rule
+#include "shared/RelayCommandPolicy.h"             // Pump request re-send rule
+#include "shared/RelayState.h"                     // g_relayState (relay desired state)
+#include "config/RelayIndices.h"
 #include "core/StateManager.h"
 #include "shared/SharedSensorReadings.h"
 #include "LoggingMacros.h"
@@ -140,6 +143,14 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
 
     // Emergency heat dissipation (starts ON at every emergency stop onset)
     bool dissipating = true;
+    bool latchedLastCycle = false;
+    bool dissipatingAfterRelease = false;
+    uint32_t releaseTimeMs = 0;
+
+    // Relay requests are re-sent while the relay does not follow this task's state
+    uint32_t lastRelayRequestMs = 0;
+    const uint8_t pumpRelayBit = static_cast<uint8_t>(
+        RelayIndex::toPhysical(isHeatingPump ? RelayIndex::HEATING_PUMP : RelayIndex::WATER_PUMP) - 1);
 
     while (true) {
         // Feed watchdog
@@ -164,8 +175,21 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         // false) and stop the pump within one 500ms cycle, defeating the failsafe.
         // While EMERGENCY_STOP is latched the pumps run until the boiler output is below
         // 60.0 °C (again from 65.0 °C, always without a usable reading).
+        const bool latched = (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+        if (latchedLastCycle && !latched && dissipating) {
+            // Released (emergency_reset or sensor recovery) while still dissipating:
+            // continue until the boiler output has cooled
+            dissipatingAfterRelease = true;
+            releaseTimeMs = millis();
+            LOG_WARN(TAG, "Emergency stop released - heat dissipation continues until boiler output < 60.0°C");
+        }
+        if (latched) {
+            dissipatingAfterRelease = false;
+        }
+        latchedLastCycle = latched;
+
         bool emergencyDissipation = false;
-        if (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) {
+        if (latched || dissipatingAfterRelease) {
             bool outputUsable = false;
             Temperature_t output = 0;
             {
@@ -179,15 +203,26 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
             outputUsable = outputUsable &&
                            !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT);
 
-            const bool wasDissipating = dissipating;
-            dissipating = EmergencyStopRelease::dissipationPumpOn(outputUsable, output, dissipating);
-            if (wasDissipating != dissipating) {
-                LOG_WARN(TAG, "Emergency heat dissipation %s (boiler output %d.%d°C)",
-                         dissipating ? "resumed" : "done", output / 10, abs(output % 10));
+            if (latched) {
+                const bool wasDissipating = dissipating;
+                dissipating = EmergencyStopRelease::dissipationPumpOn(outputUsable, output, dissipating);
+                if (wasDissipating != dissipating) {
+                    LOG_WARN(TAG, "Emergency heat dissipation %s (boiler output %d.%d°C)",
+                             dissipating ? "resumed" : "done", output / 10, abs(output % 10));
+                }
+                emergencyDissipation = dissipating;
+            } else {
+                dissipatingAfterRelease = EmergencyStopRelease::dissipationAfterRelease(
+                    outputUsable, output, millis() - releaseTimeMs, SRP::getSystemSettings().pumpCooldownMs);
+                if (!dissipatingAfterRelease) {
+                    LOG_WARN(TAG, "Heat dissipation after release done (boiler output %d.%d°C%s)",
+                             output / 10, abs(output % 10), outputUsable ? "" : ", no usable reading");
+                }
+                emergencyDissipation = dissipatingAfterRelease;
             }
-            emergencyDissipation = dissipating;
-        } else {
-            dissipating = true;
+        }
+        if (!latched) {
+            dissipating = true;  // next onset starts dissipating
         }
 
         // Pump should be on if system is enabled AND in the appropriate mode
@@ -231,8 +266,8 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         }
 
         // F13: emergency heat-dissipation has final say - keep the pump running
-        // while the emergency-stop latch is set and the boiler is still hot,
-        // regardless of enabled state, overrun, or preheating.
+        // while the emergency-stop latch is set (or was just released) and the boiler
+        // is still hot, regardless of enabled state, overrun, or preheating.
         if (emergencyDissipation) {
             desiredState = PumpState::On;
             inOverrun = false;
@@ -276,6 +311,18 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
                 xEventGroupSetBits(relayRequestEventGroup, config->relayOffRequestBit);
                 xEventGroupClearBits(systemStateEventGroup, config->pumpOnStateBit);
             }
+            lastRelayRequestMs = millis();
+        } else if (RelayCommandPolicy::pumpRequestResendDue(desiredState == PumpState::On,
+                                                            g_relayState.getRelay(pumpRelayBit),
+                                                            millis(), lastRelayRequestMs)) {
+            // The relay did not follow: request refused by pump motor protection (the
+            // request bit is cleared regardless) or relay switched directly by the failsafe
+            xEventGroupSetBits(relayRequestEventGroup, desiredState == PumpState::On
+                                                           ? config->relayOnRequestBit
+                                                           : config->relayOffRequestBit);
+            lastRelayRequestMs = millis();
+            LOG_DEBUG(TAG, "Relay does not match pump state %s - re-sending request",
+                      desiredState == PumpState::On ? "ON" : "OFF");
         }
 
         // Debug log on state change (less frequent)

@@ -62,7 +62,7 @@ static std::atomic<uint32_t> postPurgeEntryTime{0};    // M6: Track when POST_PU
 // 1. User may have fixed the underlying issue (gas supply, sensor, etc.)
 // 2. Starting fresh after power cycle is safer than inheriting old failure state
 // 3. Repeated power cycles during ignition failures indicate electrical issues
-static BurnerTransitions::Memory transitionMemory = {0, false, 0};
+static BurnerTransitions::Memory transitionMemory = {0, false, 0, false};
 
 static const BurnerTransitions::Timing TRANSITION_TIMING = {
     SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS,
@@ -622,6 +622,19 @@ BurnerSMState BurnerStateMachine::handleErrorState() {
         return BurnerSMState::ERROR;
     }
 
+    // While EMERGENCY_STOP is latched the safety check fails anyway, and
+    // performSafetyCheck() re-ran emergencyShutdown() and logged errors on every tick
+    // (syslog flood, one HA notification per error line). Wait for the release.
+    if (xEventGroupGetBits(SRP::getSystemStateEventGroup()) & SystemEvents::SystemState::EMERGENCY_STOP) {
+        constexpr uint32_t LATCH_LOG_INTERVAL_MS = 300000;  // 5 min
+        static uint32_t lastLatchLog = 0;
+        if (lastLatchLog == 0 || now - lastLatchLog >= LATCH_LOG_INTERVAL_MS) {
+            lastLatchLog = now;
+            LOG_WARN(TAG, "Emergency stop latched - burner stays in ERROR until released (boiler/cmd/emergency_reset)");
+        }
+        return BurnerSMState::ERROR;
+    }
+
     // After delay, check if safety conditions are restored
     if (BurnerSafetyChecks::checkSafetyConditions()) {
         // Clear error bit before transitioning to IDLE
@@ -849,6 +862,8 @@ void BurnerStateMachine::onExitLockout() {
     ErrorHandler::clearErrorRateLimit(SystemError::SYSTEM_FAILSAFE_TRIGGERED);
     // Clear alarm
     RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::ALARM), false);
+    // The next start gets all ignition attempts again
+    transitionMemory.ignitionRetries = 0;
 }
 
 void BurnerStateMachine::onExitRunning() {

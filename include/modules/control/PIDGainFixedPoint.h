@@ -46,6 +46,24 @@ namespace PIDGainFixedPoint {
         return static_cast<int16_t>(output);
     }
 
+    /**
+     * @brief BoilerTempController maps the PID adjustment to burner power as
+     *        50 % + adjustment / 10, clamped to 0..100 %.
+     *
+     * Power saturates at +/-POWER_ADJUSTMENT_LIMIT, so the boiler PID output limits (and
+     * with them anti-windup) must use the same range. With the default +/-1000 the
+     * integral kept growing for minutes while power was already 100 %, and the burner
+     * held FULL several degrees above target (review 2026-09-14).
+     */
+    constexpr int16_t POWER_ADJUSTMENT_LIMIT = 500;
+
+    inline uint8_t powerPercentFromAdjustment(int32_t adjustment) {
+        int32_t power = 50 + adjustment / 10;
+        if (power < 0) power = 0;
+        if (power > 100) power = 100;
+        return static_cast<uint8_t>(power);
+    }
+
 } // namespace PIDGainFixedPoint
 
 #endif // PID_GAIN_FIXED_POINT_H

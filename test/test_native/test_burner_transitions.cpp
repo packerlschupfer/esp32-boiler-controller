@@ -283,7 +283,9 @@ void test_bsm_step_lost_mode_request_stops_after_grace() {
     sim.env.heatingReq = false;  // HEATING_ON still set, request withdrawn
     sim.run(MODE_DEMAND_LOSS_GRACE_MS);
     TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
-    sim.run(2 * TICK_MS);
+    // Exactly MODE_DEMAND_LOSS_GRACE_MS after the first step without a request (the
+    // former 'nowMs | 1' sentinel stopped 1 ms later, one tick after the grace period)
+    sim.tick();
     TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
     TEST_ASSERT_TRUE(sim.last.reason == Reason::NO_MODE_DEMAND);
 }
@@ -550,4 +552,66 @@ void test_bsm_step_ignition_retry_success_resets_counter() {
     }
     TEST_ASSERT_TRUE(isRunning());
     TEST_ASSERT_EQUAL_INT(0, sim.memory.ignitionRetries);
+}
+
+// --- Review fixes 2026-09-14 --------------------------------------------------
+
+void test_bsm_step_new_start_gets_full_ignition_attempts_after_lockout() {
+    // A LOCKOUT that ended by timeout left ignitionRetries at the maximum, so the next
+    // failed start locked out after a single attempt
+    sim = Simulator();
+    sim.tickMs = 130;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.flame = false;
+    for (int i = 0; i < 400 && sim.state != BurnerSMState::LOCKOUT; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::LOCKOUT);
+    sim.enter(BurnerSMState::IDLE);  // LOCKOUT StateMachine timeout (not simulated)
+    sim.clearVisits();
+    for (int i = 0; i < 400 && sim.state != BurnerSMState::LOCKOUT; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::LOCKOUT);
+    TEST_ASSERT_EQUAL_INT(3, sim.visitsOf(BurnerSMState::IGNITION));
+}
+
+void test_bsm_step_no_mode_grace_survives_steps_in_same_millisecond() {
+    // The grace timer stored 'nowMs | 1': a second step in the same even millisecond
+    // computed now - (now + 1) = 0xFFFFFFFF and stopped the burner at once
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;
+    sim.env.heatingReq = false;  // request briefly gone (handover)
+    const Context ctx = { BurnerSMState::RUNNING_LOW, 5000, 20000, true, false };
+    const Decision first = step(ctx, sim.timing, sim.env, sim.memory);
+    const Decision second = step(ctx, sim.timing, sim.env, sim.memory);
+    TEST_ASSERT_TRUE(first.next == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(second.next == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(second.reason != Reason::NO_MODE_DEMAND);
+}
+
+void test_bsm_step_stray_other_mode_on_bit_does_not_bounce() {
+    // MQTT water override_on sets WATER_ON without a water request while heating runs
+    // with water priority: running() switched, modeSwitching() saw the heating request
+    // and resumed, and the two alternated on every tick
+    startBurner(false, false);
+    sim.env.priority = true;
+    sim.env.waterOnBit = true;  // no water request
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_REVERT_WAIT);
+    TEST_ASSERT_EQUAL_INT(1, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::RUNNING_LOW));
+    // Stray bit cleared (HeatingControlTask refresh): resume once, no bounce
+    sim.env.waterOnBit = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_RESUME);
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_EQUAL_INT(1, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
 }
