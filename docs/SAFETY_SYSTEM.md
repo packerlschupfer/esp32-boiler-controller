@@ -83,7 +83,7 @@ Pump verification was removed (Round 18/19): SafetyInterlocks does not check the
 |----------|---------------------|-------|-----------------|
 | `BurnerSystemController::emergencyShutdown()` | OFF via `RelayControlTask::setRelayStateEmergency()` (rate limiting bypassed) | Not commanded - PumpControlModule keeps running them while HEATING_ON/WATER_ON are set | Relay failure sets `Error::RELAY` and `Error::SAFETY` bits |
 | `BurnerStateMachine::emergencyStop()` | OFF via `emergencyShutdown()` | Not commanded | Clears `BURNER_ON`, state ERROR |
-| `CentralizedFailsafe::emergencyStop()` | OFF via `emergencyShutdown()` | Both forced ON via `setRelayStateEmergency()` for heat dissipation; PumpControlModule keeps them on until the boiler output is below 60.0°C (again from 65.0°C, always without a valid, fresh reading) | Sets `EMERGENCY_STOP`, clears `BOILER_ENABLED`, logs the error |
+| `CentralizedFailsafe::emergencyStop()` | OFF via `emergencyShutdown()` | Both forced ON via `setRelayStateEmergency()` for heat dissipation; PumpControlModule keeps them on until the boiler output is below 60.0°C (again from 65.0°C, always without a valid, fresh reading), also after a release; below that it switches them off (re-sent until the relay follows) | Sets `EMERGENCY_STOP`, clears `BOILER_ENABLED`, logs the error |
 
 The burner never switches pumps off: the former `setAllRelays(false)` in `emergencyShutdown()` also stopped the pumps, and PumpControlModule only writes on its own state changes, so they stayed off with the heat exchanger still hot.
 
@@ -97,7 +97,7 @@ The burner never switches pumps off: the former `setAllRelays(false)` in `emerge
 3. `TemperatureSensorFallback::canContinueOperation()` and no `SENSOR_FAILURE` error bit, else `emergency_release_refused:sensors_unavailable`
 4. `SafetyInterlocks::checkSystemErrors()` (no SENSOR_FAILURE, MODBUS or RELAY error bit), else `emergency_release_refused:system_errors`
 
-On release: `EMERGENCY_STOP` cleared, `BOILER_ENABLED` set only if the saved `boilerEnabled` setting is true, failsafe level WARNING, `recoveryAttempts` reset; result `emergency_released`. The result is published (not retained) on `boiler/status/burner`. The burner state machine still waits out its ERROR recovery delay (`SafetyConfig::errorRecoveryMs`, default 5 min). `CentralizedFailsafe::attemptRecovery()` exists but has no caller.
+On release: `EMERGENCY_STOP` cleared, `BOILER_ENABLED` set only if the saved `boilerEnabled` setting is true, failsafe level WARNING, `recoveryAttempts` reset; result `emergency_released`. The result is published (not retained) on `boiler/status/burner`. The burner state machine still waits out its ERROR recovery delay (`SafetyConfig::errorRecoveryMs`, default 5 min). Pumps that were still dissipating keep running until the boiler output is below 60.0°C (without a usable reading at most `pumpCooldownMs`). `CentralizedFailsafe::attemptRecovery()` exists but has no caller.
 
 **Runtime-Configurable Parameters**:
 - **Post-Purge Duration**: 30-180s (default: 90s)

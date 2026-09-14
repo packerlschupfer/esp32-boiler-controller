@@ -509,6 +509,12 @@ While `EMERGENCY_STOP` is set (`CentralizedFailsafe::emergencyStop()`), both pum
 ```
 [HeatingPumpCtrl][W] Emergency heat dissipation done (boiler output 59.8°C)
 ```
+If the stop is released (`emergency_reset` or sensor recovery) while the pumps still dissipate, they keep running until the boiler output is below 60.0°C:
+```
+[HeatingPumpCtrl][W] Emergency stop released - heat dissipation continues until boiler output < 60.0°C
+[HeatingPumpCtrl][W] Heat dissipation after release done (boiler output 59.9°C)
+```
+A pump change refused by motor protection (`Pump N state change blocked by motor protection`) is re-sent every 2 s until the relay follows.
 
 ---
 

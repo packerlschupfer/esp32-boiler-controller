@@ -99,7 +99,7 @@ BurnerTransitions::Decision BurnerTransitions::step(
     const Context& c,      // state, timeInStateMs, nowMs, heatDemand, requestedHighPower
     const Timing& t,       // ignitionMinTimeMs, ignitionTimeoutMs, maxIgnitionRetries, modeDemandLossGraceMs
     Environment& env,      // inputs and the mode switch action
-    Memory& m);            // ignitionRetries, runningModeIsWater, noModeDemandSinceMs
+    Memory& m);            // ignitionRetries, runningModeIsWater, noModeDemand + noModeDemandSinceMs
 ```
 
 `Decision` carries the next state and a `Reason` (e.g. `STALE_DEMAND`, `EXPLICIT_DISABLE`, `NO_MODE_DEMAND`, `RESTART_FROM_POST_PURGE`) that `logTransitionDecision()` turns into log messages.
@@ -237,9 +237,12 @@ toWater = BurnerRequest::WATER && (!BurnerRequest::HEATING || WATER_PRIORITY)
 
 // b) Request points back to the running mode:
 //    BurnerTransitionPolicy::onModeReverted()
-    running mode's ON bit set                    -> RUNNING_LOW (safe low power)
-    ON bit not set, timeInState < 15 s           -> wait (no RUNNING <-> MODE_SWITCHING bounce)
-    ON bit still not set after 15 s              -> POST_PURGE
+    running mode's ON bit set and the ON bits    -> RUNNING_LOW (safe low power)
+    select the running mode again
+    otherwise, timeInState < 15 s                -> wait (no RUNNING <-> MODE_SWITCHING bounce,
+                                                    e.g. water override_on sets WATER_ON without
+                                                    a water request while heating runs)
+    still not back after 15 s                    -> POST_PURGE
 
 // c) Otherwise switch the relays: BurnerSystemController::switchMode()
     failure                                      -> POST_PURGE
@@ -300,15 +303,15 @@ POST_PURGE only keeps the burner off; the pumps are controlled independently by 
 - HealthMonitor records IGNITION_FAILURE
 
 // Exit:
-- LOCKOUT_TIME_MS (5 min) elapsed -> IDLE (retry counter kept)
+- LOCKOUT_TIME_MS (5 min) elapsed -> IDLE
 - resetLockout() (MQTT burner_reset command, payload "lockout" or "reset")
-                                  -> IDLE (retry counter reset)
+                                  -> IDLE
 
 // Actions on exit (onExitLockout):
-- Clear BURNER_ERROR bit, ALARM relay OFF
+- Clear BURNER_ERROR bit, ALARM relay OFF, reset the ignition retry counter
 ```
 
-Because the retry counter is kept on automatic expiry, one more failed ignition after the lockout expires locks out again.
+The retry counter is also reset at every new start (IDLE -> PRE_PURGE and the restart from POST_PURGE), so every start sequence gets all `MAX_IGNITION_RETRIES` attempts. Previously it was kept when the lockout expired, and the next failed start locked out after one attempt.
 
 #### ANY → ERROR
 ```cpp
@@ -337,7 +340,7 @@ Because the retry counter is kept on automatic expiry, one more failed ignition 
 - Every `STATUS_PUBLISH_INTERVAL_MS` (30 s) `{"state":"error","recovery_in":<seconds>}` is published to `boiler/status/burner`
 - After the delay, if `checkSafetyConditions()` passes: clear `BURNER_ERROR`, go to IDLE
 - `resetLockout()` only acts in LOCKOUT, not in ERROR
-- `checkSafetyConditions()` fails while `EMERGENCY_STOP` is set (`CentralizedFailsafe::emergencyStop()`). Release it with `boiler/cmd/emergency_reset` (payload `reset`, refused while the causes persist, see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md)); the recovery delay still applies
+- While `EMERGENCY_STOP` is set (`CentralizedFailsafe::emergencyStop()`) ERROR stays without calling `checkSafetyConditions()` (which would fail and re-run `emergencyShutdown()` with error logs every tick) and logs `Emergency stop latched - burner stays in ERROR until released` every 5 min. Release it with `boiler/cmd/emergency_reset` (payload `reset`, refused while the causes persist, see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md)); the recovery delay still applies
 - `heatDemand` is not cleared by ERROR; IDLE ignores it until an active mode request exists
 
 ### Heat Demand Arming (`BurnerDemandGate`)
@@ -474,9 +477,11 @@ heating pump only: ReturnPreheater PREHEATING            -> ReturnPreheater::sho
 EMERGENCY_STOP set                                        -> ON  (heat dissipation, overrides all) until boiler
                                                              output < 60.0°C, ON again from 65.0°C; always ON
                                                              without a valid, fresh reading
+EMERGENCY_STOP released while still dissipating           -> ON  until boiler output < 60.0°C; without a usable
+                                                             reading at most pumpCooldownMs
 ```
 
-On a change the task sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`), sets or clears `SystemState::HEATING_PUMP_ON`/`WATER_PUMP_ON` and counts pump starts in FRAM. RelayControlTask applies pump motor protection (`SafetyConfig::pumpProtectionMs`). Both pumps behave the same (the water pump also has the overrun). The pumps do not wait for the burner, and the burner does not check the pumps.
+On a change the task sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`), sets or clears `SystemState::HEATING_PUMP_ON`/`WATER_PUMP_ON` and counts pump starts in FRAM. RelayControlTask applies pump motor protection (`SafetyConfig::pumpProtectionMs`). The request bit is cleared even when protection refuses the command, so the task re-sends the request every 2 s (`RelayCommandPolicy::pumpRequestResendDue()`) while the relay's desired state (`g_relayState`) differs from its own state. This also switches off a pump that `CentralizedFailsafe::emergencyStop()` turned on directly once dissipation is not needed. Both pumps behave the same (the water pump also has the overrun). The pumps do not wait for the burner, and the burner does not check the pumps.
 
 ### Return Preheating (`ReturnPreheater`)
 
@@ -866,7 +871,7 @@ Attempt 2: PRE_PURGE → IGNITION → (no flame) → PRE_PURGE
 Attempt 3: PRE_PURGE → IGNITION → (no flame) → LOCKOUT
 
 After 5 minutes in LOCKOUT:
-LOCKOUT → IDLE (automatic, retry counter kept) OR resetLockout() (counter reset)
+LOCKOUT → IDLE (automatic) OR resetLockout(); the retry counter is reset in both cases
 ```
 
 ### Flame Loss During Operation

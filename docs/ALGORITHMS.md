@@ -126,7 +126,7 @@ Temperature_t adjustment = PIDGainFixedPoint::clampToAdjustment(P + I + D, outpu
 
 // BoilerTempController::calculateModulating(): 50% = at target, clamped to 0-100,
 // then mapped to OFF/HALF/FULL with threshold hysteresis
-int32_t pidPower = 50 + (adjustment / 10);
+int32_t pidPower = PIDGainFixedPoint::powerPercentFromAdjustment(adjustment);  // 50 + adjustment / 10
 ```
 
 ### Tuning Parameters
@@ -141,7 +141,7 @@ int32_t pidPower = 50 + (adjustment / 10);
 
 ### Anti-Windup
 - **Integral Limits**: `SafetyConfig::pidIntegralMin`/`pidIntegralMax`, default ±100000 (NVS `pid_int_min`/`pid_int_max`, allowed ±500000), set by `BoilerTempController::initialize()`. The integral accumulates error (tenths °C) × dt (ms) / 1000, so the unit is tenths-°C·s
-- **Output Limits**: PID adjustment clamped to ±1000 tenths (±100.0°C, `OUTPUT_MIN`/`OUTPUT_MAX`)
+- **Output Limits**: the boiler PID is limited to ±500 tenths (`PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT`, `setOutputLimits()` in `BoilerTempController::initialize()`), exactly where the power mapping saturates at 0/100 %. With the module default ±1000 (`OUTPUT_MIN`/`OUTPUT_MAX`) the integral kept growing while power was already 100 % and held FULL above target
 - **Prevents**: Integral accumulation during saturation
 - **Method**: Conditional integration (no accumulation while saturated) plus clamp to `integralMin`/`integralMax`
 
@@ -529,9 +529,11 @@ BOILER_ENABLED cleared                                  | OFF (no overrun)
 Heating pump only: ReturnPreheater PREHEATING          | ReturnPreheater::shouldPumpBeOn()
 EMERGENCY_STOP set                                      | ON (heat dissipation) until boiler output < 60.0°C,
                                                         | ON again from 65.0°C, always ON without a usable reading
+EMERGENCY_STOP released while still dissipating         | ON until boiler output < 60.0°C (no usable reading:
+                                                        | at most pumpCooldownMs)
 ```
 
-A change sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`); RelayControlTask switches Relay 5 / Relay 6.
+A change sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`); RelayControlTask switches Relay 5 / Relay 6. While the relay's desired state differs from the pump task's state (command refused by motor protection, or relay switched directly by the failsafe) the request is re-sent every 2 s.
 
 ### Protection
 - **Pump overrun**: after the mode ends the pump keeps running for `SystemSettings::pumpCooldownMs` (default 300000 ms = 5 min) to dissipate residual heat; both pumps
