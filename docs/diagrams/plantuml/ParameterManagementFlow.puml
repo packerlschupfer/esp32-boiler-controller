@@ -18,51 +18,23 @@ package "MQTT Topics" {
 }
 
 package "PersistentStorage Service" {
-    component [PersistentStorage\nParameter Manager] as PersistSvc {
+    rectangle "PersistentStorage\nParameter Manager" as PersistSvc {
         [handleMqttMessage\nCommand Handler] as MsgHandler
         [validateParameter\nRange & Type Check] as Validator
         [executeCallbacks\nNotify Modules] as Callbacks
         [autoSaveTimer\nEvery 5 Minutes] as AutoSave
     }
 
-    component [Parameter Registry\n32 Parameters] as ParamReg {
-        storage "Water Heater (7)" as WaterParams {
-            tempLimitLow
-            tempLimitHigh
-            hysteresis
-            priorityDelay
-            heatingRate
-            boostDuration
-            tankCapacity
-        }
+    rectangle "Parameter Registry\n32 Parameters" as ParamReg {
+        storage "Water Heater (7)\ntempLimitLow\ntempLimitHigh\nhysteresis\npriorityDelay\nheatingRate\nboostDuration\ntankCapacity" as WaterParams
 
-        storage "Heating (6)" as HeatParams {
-            targetTemp
-            hysteresis
-            nightSetback
-            outsideTempComp
-            minBoilerTemp
-            maxBoilerTemp
-        }
+        storage "Heating (6)\ntargetTemp\nhysteresis\nnightSetback\noutsideTempComp\nminBoilerTemp\nmaxBoilerTemp" as HeatParams
 
-        storage "PID Tuning (6)" as PIDParams {
-            Kp
-            Ki
-            Kd
-            outputMin
-            outputMax
-            sampleTime
-        }
+        storage "PID Tuning (6)\nKp\nKi\nKd\noutputMin\noutputMax\nsampleTime" as PIDParams
 
-        storage "Sensors (1)" as SensorParams {
-            outsideTempOffset
-        }
+        storage "Sensors (1)\noutsideTempOffset" as SensorParams
 
-        storage "Status (12)" as StatusParams {
-            Read-only
-            Current sensor values
-            System state
-        }
+        storage "Status (12)\nRead-only\nCurrent sensor values\nSystem state" as StatusParams
     }
 }
 

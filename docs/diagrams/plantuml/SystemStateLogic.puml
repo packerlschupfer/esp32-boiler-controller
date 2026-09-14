@@ -40,13 +40,13 @@ SystemIdle --> MixedMode : Both demands
 
 state HeatingMode {
     [*] --> CheckHeatingDemand
-    CheckHeatingDemand --> HeatingActive : Temp < Target - 2°C
+    CheckHeatingDemand --> HeatingActive : room < target - heating_hysteresis\n(default 0.5 °C)
     CheckHeatingDemand --> HeatingStandby : Temp OK
 
     state HeatingActive {
-        HeatingActive : Entry: Start burner & pump
-        HeatingActive : Do: PID control
-        HeatingActive : Power: 50% or 100%
+        HeatingActive : Entry: set HEATING_ON, heating burner request
+        HeatingActive : Heating pump follows HEATING_ON (PumpControlModule)
+        HeatingActive : Power HALF/FULL decided by BoilerTempControlTask
     }
 
     state HeatingStandby {
@@ -54,7 +54,7 @@ state HeatingMode {
         HeatingStandby : Do: Pump overrun (5 min)
     }
 
-    HeatingActive --> HeatingStandby : Temp > Target + 2°C
+    HeatingActive --> HeatingStandby : room >= target + heating_hysteresis
     HeatingStandby --> [*] : Overrun complete
 }
 
@@ -116,25 +116,25 @@ MixedMode --> EmergencyStop : EMERGENCY_STOP\nevent
 SystemIdle --> EmergencyStop : Safety fault
 
 state EmergencyStop {
-    [*] --> LogFault
-    LogFault --> ShutdownBurner : To FRAM
-    ShutdownBurner --> StopAll : < 100ms
-    StopAll --> SafeRelays : Burner OFF
-    SafeRelays --> NotifyMQTT : Pumps ON
-    NotifyMQTT --> WaitReset : Send alert
-    WaitReset --> [*] : Manual reset
+    [*] --> BurnerShutdown
+    BurnerShutdown --> BurnerRelaysOff : BurnerSystemController::emergencyShutdown()
+    BurnerRelaysOff --> PumpsOn : R1-R3 OFF
+    PumpsOn --> EmergencyBits : heating + water pumps ON (F13)
+    EmergencyBits --> EndWaterCharge : EMERGENCY_STOP set,\nBOILER_ENABLED cleared
+    EndWaterCharge --> LogError : WheaterControlTask ends a running charge
+    LogError --> [*] : ErrorHandler::logError
 }
 
-EmergencyStop --> SystemError : Cannot recover
-EmergencyStop --> SystemIdle : Reset successful
+EmergencyStop --> SystemIdle : EMERGENCY_STOP cleared\n(only on sensor recovery)\nand boiler re-enabled
 
 state SystemError {
-    SystemError : Entry: Log critical error
-    SystemError : Do: Disable all outputs
-    SystemError : Exit: Requires service
+    SystemError : Entry: ErrorHandler::enterFailsafeMode()
+    SystemError : Do: CRITICAL failsafe (burner shut down)
+    SystemError : Do: LED_BUILTIN blinks forever
+    SystemError : No exit in code
 }
 
-SystemError --> [*] : Power cycle
+SystemError --> [*] : reset or power cycle
 
 note right of Initialization
   8-Stage Initialization:
@@ -155,23 +155,27 @@ note right of MixedMode
   Water always has priority
   when WATER_PRIORITY_BIT set
 
-  Make-Before-Break:
-  Smooth pump transitions
-  No heating interruption
+  Heating defers while a water request
+  is active and WATER_PRIORITY is set.
+  The running burner changes mode via
+  MODE_SWITCHING (burner relays R1/R3).
 end note
 
 note bottom of EmergencyStop
-  Safety Triggers:
-  - Over-temperature > 95°C
-  - Rate of change > 5°C/min
-  - Sensor failure
-  - Watchdog timeout
-  - Manual E-STOP button
-  - MQTT emergency command
+  Safety triggers found in code:
+  - Boiler output above 115 °C (critical safety check)
+  - Safety interlock failure in IGNITION / RUNNING
+  - Temperature sensor failure while heat is demanded
+  - Burner safety check failure
+  - Maximum burner runtime exceeded
+  Not implemented: rate-of-change limit,
+  E-STOP button, MQTT emergency command
 
   Recovery:
-  Manual reset required
-  5 minute lockout minimum
+  - Burner ERROR: automatic after errorRecoveryMs
+    (default 5 min) once safety conditions pass
+  - Burner LOCKOUT: after 5 min or MQTT burner_reset
+  - EMERGENCY_STOP bit: cleared when sensors recover
 end note
 
 @enduml

@@ -39,40 +39,15 @@ package "Storage Abstraction Layer" {
 }
 
 package "Parameter Categories" {
-    storage "Water Heater\n7 params" as WaterParams {
-        tempLimitLow
-        tempLimitHigh
-        hysteresis
-        priorityDelay
-        heatingRate
-        boostDuration
-        tankCapacity
-    }
+    storage "Water Heater\n7 params\ntempLimitLow\ntempLimitHigh\nhysteresis\npriorityDelay\nheatingRate\nboostDuration\ntankCapacity" as WaterParams
 
-    storage "Heating\n6 params" as HeatParams {
-        targetTemp
-        hysteresis
-        nightSetback
-        outsideTempComp
-        minBoilerTemp
-        maxBoilerTemp
-    }
+    storage "Heating\n6 params\ntargetTemp\nhysteresis\nnightSetback\noutsideTempComp\nminBoilerTemp\nmaxBoilerTemp" as HeatParams
 
-    storage "PID Tuning\n6 params" as PIDParams {
-        Kp, Ki, Kd
-        outputMin
-        outputMax
-        sampleTime
-    }
+    storage "PID Tuning\n6 params\nKp, Ki, Kd\noutputMin\noutputMax\nsampleTime" as PIDParams
 
-    storage "Sensors\n1 param" as SensorParams {
-        outsideTempOffset
-    }
+    storage "Sensors\n1 param\noutsideTempOffset" as SensorParams
 
-    storage "Status\n12 params" as StatusParams {
-        Read-only
-        sensor values
-    }
+    storage "Status\n12 params\nRead-only\nsensor values" as StatusParams
 }
 
 package "Physical Storage Hardware" {
@@ -146,13 +121,7 @@ VacationFlag --> RTC : battery-backed
 PumpExercise --> RTC : battery-backed
 
 ' MQTT integration
-storage "MQTT Topics" as MQTT {
-    esplan/params/set/+
-    esplan/params/get/+
-    esplan/params/list
-    esplan/params/save
-    esplan/params/status/+
-}
+storage "MQTT Topics\nesplan/params/set/+\nesplan/params/get/+\nesplan/params/list\nesplan/params/save\nesplan/params/status/+" as MQTT
 
 MQTT --> MQTTMgr
 MQTTMgr ..> PersistSvc : commands

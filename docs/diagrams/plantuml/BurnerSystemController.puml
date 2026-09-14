@@ -62,6 +62,7 @@ class BurnerStateMachine
 class CentralizedFailsafe
 class BurnerControlTask
 class ErrorHandler
+class RYN4ProcessingTask
 
 ' Pumps: separate, never commanded by BurnerSystemController
 package "Pumps (PumpControlModule)" {
@@ -74,14 +75,15 @@ BurnerSystemController ..> BurnerMode
 BurnerSystemController ..> PowerLevel
 BurnerSystemController --> RelayControlTask : setRelayState R1-R3\nsetRelayStateEmergency R1-R3 off
 RelayControlTask ..> RelayIndex
+RelayControlTask --> RYN4ProcessingTask : desired relay states\n(Modbus write at next SET tick)
 
 BurnerStateMachine --> BurnerSystemController : activate / switchMode /\nsetPowerLevel / deactivate /\nemergencyShutdown
 CentralizedFailsafe --> BurnerSystemController : emergencyShutdown
 BurnerControlTask --> BurnerSystemController : deactivate on system disable
 ErrorHandler --> BurnerSystemController : emergencyShutdown (failsafe)
 
-HeatingPumpTask --> RelayIndex : R5, follows HEATING_ON
-WaterPumpTask --> RelayIndex : R6, follows WATER_ON
+HeatingPumpTask --> RelayControlTask : RelayRequest HEATING_PUMP_ON/OFF\n(R5, follows HEATING_ON)
+WaterPumpTask --> RelayControlTask : RelayRequest WATER_PUMP_ON/OFF\n(R6, follows WATER_ON)
 ReturnPreheater ..> HeatingPumpTask : cycles the heating pump\nwhile preheating
 
 note right of BurnerSystemController
@@ -102,6 +104,11 @@ note bottom of RelayControlTask
   Rate limit and pump protection apply only
   to real state changes (RelayCommandPolicy);
   unchanged relay commands pass.
+
+  Pump tasks set RelayRequest event bits;
+  processRelayRequests() turns them into
+  setRelayState() calls, which apply pump
+  motor protection (checkPumpProtection).
 end note
 
 note bottom of WaterPumpTask

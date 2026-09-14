@@ -73,7 +73,7 @@ partition "Hysteresis Logic with State Memory" {
   endif
 }
 
-note bottom
+floating note right
   **Hysteresis Benefits:**
   - Prevents rapid cycling
   - ±2°C dead band
