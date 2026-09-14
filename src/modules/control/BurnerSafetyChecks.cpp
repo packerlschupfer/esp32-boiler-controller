@@ -2,14 +2,10 @@
 #include "BurnerSafetyChecks.h"
 #include "BurnerStateMachine.h"
 #include "modules/control/BurnerSystemController.h"
-#include "modules/control/BurnerAntiFlapping.h"
 #include "modules/control/BurnerRequestManager.h"
 #include "core/SystemResourceProvider.h"
-#include "utils/Utils.h"
 #include <Arduino.h>
-#include "shared/SharedSensorReadings.h"
 #include "events/SystemEventsGenerated.h"
-#include "utils/MutexRetryHelper.h"
 #include <esp_log.h>
 #include <atomic>
 
@@ -42,71 +38,6 @@ bool BurnerSafetyChecks::checkSafetyConditions() {
     return false;  // Fail-safe: no controller = not safe
 }
 
-bool BurnerSafetyChecks::canSeamlesslySwitch(BurnerSMState currentState) {
-    // Only allow seamless mode switch when all conditions are safe:
-
-    // 1. Currently in stable RUNNING state
-    if (currentState != BurnerSMState::RUNNING_LOW && currentState != BurnerSMState::RUNNING_HIGH) {
-        return false;
-    }
-
-    // 2. Safety conditions pass
-    if (!checkSafetyConditions()) {
-        return false;
-    }
-
-    // 3. Flame detected (burner actually running)
-    if (!isFlameDetected()) {
-        return false;
-    }
-
-    // Note: We don't check heatDemand here because during mode switch,
-    // the old mode clears its demand before the new mode sets it.
-    // The MODE_SWITCHING handler will validate new mode has demand.
-
-    return true;
-}
-
-BurnerSMState BurnerSafetyChecks::checkModeSwitchTransition(
-    BurnerSMState currentState,
-    const char* currentStateName,
-    bool& runningModeIsWater
-) {
-    // Check for mode switch (water ↔ heating)
-    // When both WATER_ON and HEATING_ON are set, use WATER_PRIORITY to decide
-    EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
-    bool waterOn = (systemBits & SystemEvents::SystemState::WATER_ON) != 0;
-    bool heatingOn = (systemBits & SystemEvents::SystemState::HEATING_ON) != 0;
-    bool waterPriority = (systemBits & SystemEvents::SystemState::WATER_PRIORITY) != 0;
-
-    // Sanity check: both modes should not be ON simultaneously (indicates race condition)
-    if (waterOn && heatingOn) {
-        LOG_WARN(TAG, "Both WATER_ON and HEATING_ON set - using priority=%d as tiebreaker", waterPriority);
-    }
-
-    // Water mode if: water is on AND (heating is off OR water has priority)
-    bool currentModeIsWater = waterOn && (!heatingOn || waterPriority);
-    if (currentModeIsWater != runningModeIsWater) {
-        // Mode switch detected - attempt seamless or go to POST_PURGE
-        if (canSeamlesslySwitch(currentState)) {
-            LOG_INFO(TAG, "Seamless mode switch detected during %s (%s -> %s)",
-                     currentStateName,
-                     runningModeIsWater ? "WATER" : "HEATING",
-                     currentModeIsWater ? "WATER" : "HEATING");
-            return BurnerSMState::MODE_SWITCHING;
-        } else {
-            LOG_INFO(TAG, "Mode switch detected during %s (%s -> %s) - transitioning to POST_PURGE",
-                     currentStateName,
-                     runningModeIsWater ? "WATER" : "HEATING",
-                     currentModeIsWater ? "WATER" : "HEATING");
-            return BurnerSMState::POST_PURGE;
-        }
-    }
-
-    // No mode switch - return IDLE as sentinel
-    return BurnerSMState::IDLE;
-}
-
 bool BurnerSafetyChecks::hasActiveModeDemand() {
     EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
     EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
@@ -117,80 +48,4 @@ bool BurnerSafetyChecks::hasActiveModeDemand() {
                        (requestBits & SystemEvents::BurnerRequest::WATER);
 
     return heatingActive || waterActive;
-}
-
-BurnerSMState BurnerSafetyChecks::checkSafetyShutdown(BurnerSMState currentState, bool heatDemand) {
-    // Explicit disable of the running mode (or of the whole boiler) stops the
-    // burner now instead of waiting out the anti-flapping minimum on-time
-    // (2026-09-14: heating disable during the first 2 min kept the burner running
-    // until the no-mode guard below stopped it 10 s later). Running mode comes
-    // from BurnerSystemController, i.e. the relays actually switched.
-    {
-        EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
-        BurnerSystemController* controller = SRP::getBurnerSystemController();
-        bool runningWater = controller && controller->getCurrentMode() == BurnerMode::WATER;
-        bool boilerEnabled = (systemBits & SystemEvents::SystemState::BOILER_ENABLED) != 0;
-        if (BurnerTransitionPolicy::stopForExplicitDisable(
-                runningWater,
-                boilerEnabled,
-                (systemBits & SystemEvents::SystemState::HEATING_ENABLED) != 0,
-                (systemBits & SystemEvents::SystemState::WATER_ENABLED) != 0)) {
-            LOG_INFO(TAG, "%s disabled - stopping burner now (minimum on-time bypassed)",
-                     !boilerEnabled ? "Boiler" : (runningWater ? "Water heating" : "Space heating"));
-            return BurnerSMState::POST_PURGE;
-        }
-    }
-
-    // Stop the burner if it runs without any active heating/water mode request.
-    // Short grace period: during a water <-> heating handoff the old mode clears
-    // its bits before the new mode sets them. Bypasses anti-flapping (like flame
-    // loss) - with no mode active nothing guarantees circulation.
-    // Called only from BurnerControlTask context (state handlers) - static is safe.
-    static constexpr uint32_t MODE_DEMAND_LOSS_GRACE_MS = 10000;
-    static uint32_t noModeDemandSinceMs = 0;
-
-    if (hasActiveModeDemand()) {
-        noModeDemandSinceMs = 0;
-    } else if (noModeDemandSinceMs == 0) {
-        noModeDemandSinceMs = millis() | 1;  // 0 is the "not lost" sentinel
-    } else if (Utils::elapsedMs(noModeDemandSinceMs) >= MODE_DEMAND_LOSS_GRACE_MS) {
-        LOG_WARN(TAG, "Burner running without active heating/water mode request for %lu ms - stopping",
-                 Utils::elapsedMs(noModeDemandSinceMs));
-        noModeDemandSinceMs = 0;
-        return BurnerSMState::POST_PURGE;
-    }
-
-    // Check if we should stop burner
-    if (!heatDemand || !checkSafetyConditions()) {
-        // Check anti-flapping before turning off
-        if (BurnerAntiFlapping::canTurnOff()) {
-            return BurnerSMState::POST_PURGE;
-        } else {
-            LOG_DEBUG(TAG, "Delaying burner stop for %lu ms due to anti-flapping",
-                     BurnerAntiFlapping::getTimeUntilCanTurnOff());
-        }
-    }
-
-    // No shutdown condition - return current state
-    return currentState;
-}
-
-BurnerSMState BurnerSafetyChecks::checkFlameLoss(BurnerSMState currentState, bool heatDemand) {
-    // Round 16 Issue B: Differentiate intentional shutdown from unexpected flame loss
-    // Check if flame is lost - but distinguish between intentional and unexpected
-    if (!isFlameDetected()) {
-        if (!heatDemand) {
-            // Intentional shutdown - burner was commanded off, this is expected
-            LOG_DEBUG(TAG, "Burner off (intentional - demand ended)");
-        } else {
-            // Unexpected flame loss - demand is active but flame is gone
-            // This could indicate a real problem (even without a flame sensor)
-            LOG_WARN(TAG, "UNEXPECTED: Flame/burner off while demand still active");
-        }
-        // Both cases transition to POST_PURGE (bypasses anti-flapping for safety)
-        return BurnerSMState::POST_PURGE;
-    }
-
-    // Flame detected - no transition
-    return currentState;
 }

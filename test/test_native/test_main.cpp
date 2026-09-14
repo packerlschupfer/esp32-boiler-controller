@@ -38,6 +38,28 @@ void test_policy_heating_wanted_weather_mode();
 void test_policy_mode_switch_wait_is_bounded();
 void test_policy_mode_revert_requires_on_bit();
 
+// Burner transitions (state machine scenarios through BurnerTransitions::step)
+void test_bsm_step_idle_without_demand_skips_safety_check();
+void test_bsm_step_stale_demand_never_starts_burner();
+void test_bsm_step_heating_start_sequence();
+void test_bsm_step_start_waits_for_minimum_off_time();
+void test_bsm_step_request_withdrawn_during_pre_purge_aborts();
+void test_bsm_step_heating_disable_stops_during_min_on_time();
+void test_bsm_step_water_disable_does_not_stop_heating();
+void test_bsm_step_demand_end_respects_min_on_time();
+void test_bsm_step_lost_mode_request_stops_after_grace();
+void test_bsm_step_flame_loss_bypasses_min_on_time();
+void test_bsm_step_heating_to_water_is_seamless();
+void test_bsm_step_water_to_heating_waits_for_heating_request();
+void test_bsm_step_handover_stops_when_heating_not_wanted();
+void test_bsm_step_handover_wait_is_bounded();
+void test_bsm_step_failed_mode_switch_stops_burner();
+void test_bsm_step_revert_without_on_bit_does_not_bounce();
+void test_bsm_step_revert_with_on_bit_resumes_low_power();
+void test_bsm_step_mode_change_without_flame_stops();
+void test_bsm_step_safety_failure_during_mode_switch_errors();
+void test_bsm_step_power_level_follows_request_with_anti_flapping();
+
 // Relay command policy (no-op commands vs rate limiting)
 void test_relay_policy_noop_commands_skip_protection();
 void test_relay_policy_real_changes_are_protected();
@@ -498,6 +520,28 @@ int main(int argc, char **argv) {
     RUN_TEST(test_policy_heating_wanted_weather_mode);
     RUN_TEST(test_policy_mode_switch_wait_is_bounded);
     RUN_TEST(test_policy_mode_revert_requires_on_bit);
+
+    // Burner transitions (state machine scenarios through BurnerTransitions::step)
+    RUN_TEST(test_bsm_step_idle_without_demand_skips_safety_check);
+    RUN_TEST(test_bsm_step_stale_demand_never_starts_burner);
+    RUN_TEST(test_bsm_step_heating_start_sequence);
+    RUN_TEST(test_bsm_step_start_waits_for_minimum_off_time);
+    RUN_TEST(test_bsm_step_request_withdrawn_during_pre_purge_aborts);
+    RUN_TEST(test_bsm_step_heating_disable_stops_during_min_on_time);
+    RUN_TEST(test_bsm_step_water_disable_does_not_stop_heating);
+    RUN_TEST(test_bsm_step_demand_end_respects_min_on_time);
+    RUN_TEST(test_bsm_step_lost_mode_request_stops_after_grace);
+    RUN_TEST(test_bsm_step_flame_loss_bypasses_min_on_time);
+    RUN_TEST(test_bsm_step_heating_to_water_is_seamless);
+    RUN_TEST(test_bsm_step_water_to_heating_waits_for_heating_request);
+    RUN_TEST(test_bsm_step_handover_stops_when_heating_not_wanted);
+    RUN_TEST(test_bsm_step_handover_wait_is_bounded);
+    RUN_TEST(test_bsm_step_failed_mode_switch_stops_burner);
+    RUN_TEST(test_bsm_step_revert_without_on_bit_does_not_bounce);
+    RUN_TEST(test_bsm_step_revert_with_on_bit_resumes_low_power);
+    RUN_TEST(test_bsm_step_mode_change_without_flame_stops);
+    RUN_TEST(test_bsm_step_safety_failure_during_mode_switch_errors);
+    RUN_TEST(test_bsm_step_power_level_follows_request_with_anti_flapping);
 
     // Relay command policy (no-op commands vs rate limiting)
     RUN_TEST(test_relay_policy_noop_commands_skip_protection);

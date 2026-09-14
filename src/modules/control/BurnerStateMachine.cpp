@@ -27,6 +27,8 @@
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
 #include "utils/Utils.h"  // Round 15 Issue #1, #3: Safe elapsed time helpers
+#include "modules/control/BurnerRequestManager.h"
+#include "modules/control/BurnerTransitions.h"  // Stage B: native-testable transition logic
 #include <cmath>
 #include <atomic>  // Round 14 Issue #2
 #include <RuntimeStorage.h>
@@ -36,12 +38,6 @@
 // Static member definitions
 StateMachine<BurnerSMState> BurnerStateMachine::stateMachine("BurnerSM", BurnerSMState::IDLE);
 const char* BurnerStateMachine::TAG = "BurnerStateMachine";
-// Round 15 Issue #2 note: ignitionRetries intentionally NOT persisted to FRAM
-// Rationale: Power cycle should reset retry count because:
-// 1. User may have fixed the underlying issue (gas supply, sensor, etc.)
-// 2. Starting fresh after power cycle is safer than inheriting old failure state
-// 3. Repeated power cycles during ignition failures indicate electrical issues
-uint8_t BurnerStateMachine::ignitionRetries = 0;
 bool BurnerStateMachine::heatDemand = false;
 Temperature_t BurnerStateMachine::targetTemperature = 0;
 bool BurnerStateMachine::requestedHighPower = false;
@@ -55,9 +51,25 @@ SemaphoreHandle_t BurnerStateMachine::demandMutex = nullptr;
 // DO NOT access these variables from other tasks.
 // ============================================================================
 // Round 21: burnerStartTime moved to BurnerRuntimeTracker
-static std::atomic<bool> runningModeIsWater{false};    // Round 19 Issue #1: Track mode for switch detection
 static std::atomic<uint32_t> errorStateEntryTime{0};   // Round 19 Issue #5: Track when ERROR state was entered
 static std::atomic<uint32_t> postPurgeEntryTime{0};    // M6: Track when POST_PURGE state was entered for runtime-configurable duration
+
+// Memory of BurnerTransitions::step(): ignition retries, running mode (Round 19
+// Issue #1: mode for switch detection) and the no-mode-request timer. Same
+// single-task access as above.
+// Round 15 Issue #2 note: ignitionRetries intentionally NOT persisted to FRAM
+// Rationale: Power cycle should reset retry count because:
+// 1. User may have fixed the underlying issue (gas supply, sensor, etc.)
+// 2. Starting fresh after power cycle is safer than inheriting old failure state
+// 3. Repeated power cycles during ignition failures indicate electrical issues
+static BurnerTransitions::Memory transitionMemory = {0, false, 0};
+
+static const BurnerTransitions::Timing TRANSITION_TIMING = {
+    SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS,
+    SystemConstants::Burner::IGNITION_TIME_MS,
+    SystemConstants::Burner::MAX_IGNITION_RETRIES,
+    BurnerTransitions::MODE_DEMAND_LOSS_GRACE_MS
+};
 
 void BurnerStateMachine::initialize() {
     LOG_INFO(TAG, "Initializing burner state machine");
@@ -265,7 +277,7 @@ bool BurnerStateMachine::getHeatDemandState(bool& outDemand, Temperature_t& outT
 void BurnerStateMachine::resetLockout() {
     if (stateMachine.isInState(BurnerSMState::LOCKOUT)) {
         LOG_INFO(TAG, "Resetting lockout state");
-        ignitionRetries = 0;
+        transitionMemory.ignitionRetries = 0;
         // Clear error bit when resetting lockout
         xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BURNER_ERROR);
         ErrorHandler::clearErrorRateLimit(SystemError::SYSTEM_FAILSAFE_TRIGGERED);
@@ -275,163 +287,262 @@ void BurnerStateMachine::resetLockout() {
 
 // State Handlers Implementation
 
-BurnerSMState BurnerStateMachine::handleIdleState() {
-    // heatDemand is latched and survives emergencyStop()/ERROR recovery. Only act
-    // on it while a heating/water mode is actually requesting the burner -
-    // otherwise a stale demand fires the burner with no mode active (and so no
-    // pump), as happened on 2026-09-12/13.
-    if (heatDemand && !BurnerSafetyChecks::hasActiveModeDemand()) {
-        static uint32_t lastStaleLogMs = 0;
-        uint32_t now = millis();
-        if (lastStaleLogMs == 0 || now - lastStaleLogMs > 60000) {
-            LOG_WARN(TAG, "Ignoring stale heat demand - no active heating/water mode request");
-            lastStaleLogMs = now;
-        }
-        return BurnerSMState::IDLE;
+namespace {
+
+// Firmware inputs for BurnerTransitions::step(). Event bits are read once per
+// tick; safety check, flame, power limit, anti-flapping and settings are probed
+// only when the transition logic asks for them (performSafetyCheck() may
+// emergency-shutdown, several probes take mutexes).
+class FirmwareTransitionEnvironment : public BurnerTransitions::Environment {
+public:
+    FirmwareTransitionEnvironment(const char* tag, Temperature_t targetTemp)
+        : tag_(tag),
+          targetTemp_(targetTemp),
+          systemBits_(xEventGroupGetBits(SRP::getSystemStateEventGroup())),
+          requestBits_(BurnerRequestManager::getCurrentRequests()) {}
+
+    EventBits_t systemBits() const { return systemBits_; }
+    EventBits_t requestBits() const { return requestBits_; }
+
+    bool safetyOk() override { return BurnerSafetyChecks::checkSafetyConditions(); }
+    bool flameDetected() override { return BurnerSafetyChecks::isFlameDetected(); }
+
+    bool boilerEnabled() override { return hasSystemBit(SystemEvents::SystemState::BOILER_ENABLED); }
+    bool heatingEnabled() override { return hasSystemBit(SystemEvents::SystemState::HEATING_ENABLED); }
+    bool waterEnabled() override { return hasSystemBit(SystemEvents::SystemState::WATER_ENABLED); }
+    bool heatingOn() override { return hasSystemBit(SystemEvents::SystemState::HEATING_ON); }
+    bool waterOn() override { return hasSystemBit(SystemEvents::SystemState::WATER_ON); }
+    bool waterPriority() override { return hasSystemBit(SystemEvents::SystemState::WATER_PRIORITY); }
+    bool heatingRequested() override { return (requestBits_ & SystemEvents::BurnerRequest::HEATING) != 0; }
+    bool waterRequested() override { return (requestBits_ & SystemEvents::BurnerRequest::WATER) != 0; }
+
+    bool relaysInWaterMode() override {
+        BurnerSystemController* controller = SRP::getBurnerSystemController();
+        return controller && controller->getCurrentMode() == BurnerMode::WATER;
     }
 
-    // Check for heat demand and safety conditions
-    if (heatDemand && BurnerSafetyChecks::checkSafetyConditions()) {
-        // Check anti-flapping before turning on
-        if (BurnerAntiFlapping::canTurnOn()) {
-            return BurnerSMState::PRE_PURGE;
-        } else {
-            LOG_DEBUG(TAG, "Delaying burner start for %lu ms due to anti-flapping", 
-                     BurnerAntiFlapping::getTimeUntilCanTurnOn());
-        }
+    bool highPowerAllowed(bool requestedHighPower) override {
+        return BurnerPowerController::shouldIncreasePower(requestedHighPower);
     }
-    return BurnerSMState::IDLE;
+
+    bool heatingLikelyWanted() override {
+        // F33: snapshot settings and sensor readings UNDER their mutexes
+        bool useWeather = false;
+        bool overrideOff = true;
+        Temperature_t targetInside = 0;
+        Temperature_t outsideThreshold = 0;
+        Temperature_t overheatMargin = 0;
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) != pdTRUE) {
+            return false;
+        }
+        {
+            const SystemSettings& s = SRP::getSystemSettings();
+            useWeather = s.useWeatherCompensatedControl;
+            overrideOff = s.heatingOverrideOff;
+            targetInside = s.targetTemperatureInside;
+            outsideThreshold = s.outsideTempHeatingThreshold;
+            overheatMargin = s.roomTempOverheatMargin;
+            SRP::giveSystemSettingsMutex();
+        }
+        SharedSensorReadings readings{};
+        if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(50)) != pdTRUE) {
+            return false;
+        }
+        readings = SRP::getSensorReadings();
+        SRP::giveSensorReadingsMutex();
+        return BurnerTransitionPolicy::heatingLikelyWanted(
+            heatingEnabled(), overrideOff, useWeather,
+            readings.isOutsideTempValid, readings.outsideTemp, outsideThreshold,
+            readings.isInsideTempValid, readings.insideTemp, targetInside, overheatMargin);
+    }
+
+    bool canTurnOn() override { return BurnerAntiFlapping::canTurnOn(); }
+    bool canTurnOff() override { return BurnerAntiFlapping::canTurnOff(); }
+    bool canChangePower(bool toHigh) override {
+        return BurnerAntiFlapping::canChangePowerLevel(toHigh ? BurnerAntiFlapping::PowerLevel::POWER_HIGH
+                                                              : BurnerAntiFlapping::PowerLevel::POWER_LOW);
+    }
+
+    bool switchMode(bool toWater) override {
+        BurnerSystemController* controller = SRP::getBurnerSystemController();
+        if (!controller) {
+            LOG_ERROR(tag_, "No BurnerSystemController - aborting mode switch");
+            return false;
+        }
+        auto result = controller->switchMode(toWater ? BurnerMode::WATER : BurnerMode::HEATING, targetTemp_);
+        if (result.isError()) {
+            LOG_ERROR(tag_, "Mode switch failed: %s - falling back to shutdown", result.message().c_str());
+            return false;
+        }
+        return true;
+    }
+
+private:
+    bool hasSystemBit(EventBits_t bit) const { return (systemBits_ & bit) != 0; }
+
+    const char* tag_;
+    Temperature_t targetTemp_;
+    EventBits_t systemBits_;
+    EventBits_t requestBits_;
+};
+
+} // namespace
+
+// IDLE, PRE_PURGE, IGNITION, RUNNING_LOW/HIGH and MODE_SWITCHING decide their
+// next state in BurnerTransitions::step() (Stage B); see BurnerTransitions.h.
+BurnerSMState BurnerStateMachine::handleIdleState() {
+    return runTransitionStep();
 }
 
 BurnerSMState BurnerStateMachine::handlePrePurgeState() {
-    // Pre-purge is handled by timeout - don't force state
-    // Just check safety conditions
-    if (!BurnerSafetyChecks::checkSafetyConditions()) {
-        return BurnerSMState::ERROR;
-    }
-    // Abort the start if the mode/request went away during pre-purge - otherwise
-    // onEnterIgnition() activates the burner relays with no mode active.
-    if (!BurnerSafetyChecks::hasActiveModeDemand()) {
-        LOG_INFO(TAG, "Heating/water request withdrawn during pre-purge - aborting start");
-        return BurnerSMState::IDLE;
-    }
-    // Same if the heat demand itself was withdrawn (e.g. BoilerTempControlTask
-    // re-asserting OFF) - otherwise a brief re-arm ignites and then has to run
-    // for the anti-flapping minimum on-time.
-    if (!heatDemand) {
-        LOG_INFO(TAG, "Heat demand withdrawn during pre-purge - aborting start");
-        return BurnerSMState::IDLE;
-    }
-    // Return current state to let timeout mechanism handle transition
-    return stateMachine.getCurrentState();
+    return runTransitionStep();
 }
 
 BurnerSMState BurnerStateMachine::handleIgnitionState() {
-    // Wait minimum ignition time before checking flame
-    // Real burner ignition takes 3-5 seconds; simulated flame detection returns immediately
-    uint32_t timeInState = stateMachine.getTimeInState();
-    if (timeInState < SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS) {
-        return BurnerSMState::IGNITION;
-    }
-
-    // Check if flame is detected (after minimum time elapsed)
-    if (BurnerSafetyChecks::isFlameDetected()) {
-        ignitionRetries = 0;
-
-        // Determine which power level to use based on demand
-        if (BurnerPowerController::shouldIncreasePower(requestedHighPower)) {
-            LOG_INFO(TAG, "Ignition successful after %lu ms - transitioning to high power", timeInState);
-            return BurnerSMState::RUNNING_HIGH;
-        } else {
-            LOG_INFO(TAG, "Ignition successful after %lu ms - transitioning to low power", timeInState);
-            return BurnerSMState::RUNNING_LOW;
-        }
-    }
-
-    // If timeout occurs, retry or lockout
-    if (timeInState >= IGNITION_TIME_MS) {
-        ignitionRetries++;
-        if (ignitionRetries >= MAX_IGNITION_RETRIES) {
-            LOG_ERROR(TAG, "Max ignition retries exceeded");
-            return BurnerSMState::LOCKOUT;
-        } else {
-            LOG_WARN(TAG, "Ignition retry %d/%d", ignitionRetries, MAX_IGNITION_RETRIES);
-            return BurnerSMState::PRE_PURGE;
-        }
-    }
-
-    return BurnerSMState::IGNITION;
+    return runTransitionStep();
 }
 
-
 BurnerSMState BurnerStateMachine::handleRunningLowState() {
-    // 1. Check mode switch (water ↔ heating)
-    bool currentMode = runningModeIsWater.load();
-    BurnerSMState modeTransition = BurnerSafetyChecks::checkModeSwitchTransition(
-        BurnerSMState::RUNNING_LOW, "RUNNING_LOW", currentMode);
-    if (modeTransition != BurnerSMState::IDLE) {
-        return modeTransition;
-    }
-
-    // 2. Check safety shutdown conditions (extracted)
-    BurnerSMState shutdownCheck = BurnerSafetyChecks::checkSafetyShutdown(BurnerSMState::RUNNING_LOW, heatDemand);
-    if (shutdownCheck != BurnerSMState::RUNNING_LOW) {
-        return shutdownCheck;
-    }
-
-    // 3. Check flame loss (extracted)
-    BurnerSMState flameCheck = BurnerSafetyChecks::checkFlameLoss(BurnerSMState::RUNNING_LOW, heatDemand);
-    if (flameCheck != BurnerSMState::RUNNING_LOW) {
-        return flameCheck;
-    }
-
-    // 4. Check if we need more power (only difference from RUNNING_HIGH)
-    if (BurnerPowerController::shouldIncreasePower(requestedHighPower)) {
-        // Check anti-flapping for power level change
-        if (BurnerAntiFlapping::canChangePowerLevel(BurnerAntiFlapping::PowerLevel::POWER_HIGH)) {
-            return BurnerSMState::RUNNING_HIGH;
-        } else {
-            LOG_DEBUG(TAG, "Delaying power increase for %lu ms due to anti-flapping",
-                     BurnerAntiFlapping::getTimeUntilCanChangePower());
-        }
-    }
-
-    return BurnerSMState::RUNNING_LOW;
+    return runTransitionStep();
 }
 
 BurnerSMState BurnerStateMachine::handleRunningHighState() {
-    // 1. Check mode switch (water ↔ heating)
-    bool currentMode = runningModeIsWater.load();
-    BurnerSMState modeTransition = BurnerSafetyChecks::checkModeSwitchTransition(
-        BurnerSMState::RUNNING_HIGH, "RUNNING_HIGH", currentMode);
-    if (modeTransition != BurnerSMState::IDLE) {
-        return modeTransition;
+    return runTransitionStep();
+}
+
+BurnerSMState BurnerStateMachine::runTransitionStep() {
+    const BurnerTransitions::Context ctx = {
+        stateMachine.getCurrentState(),
+        stateMachine.getTimeInState(),
+        millis(),
+        heatDemand,
+        requestedHighPower
+    };
+    FirmwareTransitionEnvironment env(TAG, targetTemperature);
+    const BurnerTransitions::Decision decision =
+        BurnerTransitions::step(ctx, TRANSITION_TIMING, env, transitionMemory);
+    logTransitionDecision(ctx, decision, env.systemBits(), env.requestBits());
+    return decision.next;
+}
+
+void BurnerStateMachine::logTransitionDecision(const BurnerTransitions::Context& ctx,
+                                               const BurnerTransitions::Decision& d,
+                                               uint32_t systemBits, uint32_t requestBits) {
+    using BurnerTransitions::Reason;
+    const char* stateName = (ctx.state == BurnerSMState::RUNNING_HIGH) ? "RUNNING_HIGH" : "RUNNING_LOW";
+    const char* fromMode = d.fromWater ? "WATER" : "HEATING";
+    const char* toMode = d.toWater ? "WATER" : "HEATING";
+    (void)stateName;
+    (void)fromMode;
+    (void)toMode;
+    (void)systemBits;
+    (void)requestBits;
+
+    if (d.bothModesOn) {
+        LOG_WARN(TAG, "Both WATER_ON and HEATING_ON set - using priority=%d as tiebreaker",
+                 (systemBits & SystemEvents::SystemState::WATER_PRIORITY) != 0);
+    }
+    if (ctx.state == BurnerSMState::MODE_SWITCHING && d.reason != Reason::SAFETY_FAILED) {
+        LOG_INFO(TAG, "Mode switch handler: newMode=%s, burnerBits=0x%08X, WATER_REQ=%d, HEATING_REQ=%d, demand=%d",
+                 toMode, (unsigned int)requestBits,
+                 (requestBits & SystemEvents::BurnerRequest::WATER) != 0,
+                 (requestBits & SystemEvents::BurnerRequest::HEATING) != 0,
+                 d.newModeHasDemand);
+    }
+    if (d.stopDelayed) {
+        LOG_DEBUG(TAG, "Delaying burner stop for %lu ms due to anti-flapping",
+                  BurnerAntiFlapping::getTimeUntilCanTurnOff());
     }
 
-    // 2. Check safety shutdown conditions (extracted)
-    BurnerSMState shutdownCheck = BurnerSafetyChecks::checkSafetyShutdown(BurnerSMState::RUNNING_HIGH, heatDemand);
-    if (shutdownCheck != BurnerSMState::RUNNING_HIGH) {
-        return shutdownCheck;
-    }
-
-    // 3. Check flame loss (extracted)
-    BurnerSMState flameCheck = BurnerSafetyChecks::checkFlameLoss(BurnerSMState::RUNNING_HIGH, heatDemand);
-    if (flameCheck != BurnerSMState::RUNNING_HIGH) {
-        return flameCheck;
-    }
-
-    // 4. Check if we can reduce power (only difference from RUNNING_LOW)
-    if (BurnerPowerController::shouldDecreasePower(requestedHighPower)) {
-        // Check anti-flapping for power level change
-        if (BurnerAntiFlapping::canChangePowerLevel(BurnerAntiFlapping::PowerLevel::POWER_LOW)) {
-            return BurnerSMState::RUNNING_LOW;
-        } else {
-            LOG_DEBUG(TAG, "Delaying power decrease for %lu ms due to anti-flapping",
-                     BurnerAntiFlapping::getTimeUntilCanChangePower());
+    switch (d.reason) {
+        case Reason::STALE_DEMAND: {
+            static uint32_t lastStaleLogMs = 0;
+            if (lastStaleLogMs == 0 || ctx.nowMs - lastStaleLogMs > 60000) {
+                LOG_WARN(TAG, "Ignoring stale heat demand - no active heating/water mode request");
+                lastStaleLogMs = ctx.nowMs;
+            }
+            break;
         }
+        case Reason::START_DELAYED:
+            LOG_DEBUG(TAG, "Delaying burner start for %lu ms due to anti-flapping",
+                      BurnerAntiFlapping::getTimeUntilCanTurnOn());
+            break;
+        case Reason::SAFETY_FAILED:
+            if (ctx.state == BurnerSMState::MODE_SWITCHING) {
+                LOG_ERROR(TAG, "Safety interlock during mode switch - aborting to ERROR");
+            }
+            break;
+        case Reason::MODE_WITHDRAWN:
+            LOG_INFO(TAG, "Heating/water request withdrawn during pre-purge - aborting start");
+            break;
+        case Reason::DEMAND_WITHDRAWN:
+            LOG_INFO(TAG, "Heat demand withdrawn during pre-purge - aborting start");
+            break;
+        case Reason::IGNITION_OK:
+            LOG_INFO(TAG, "Ignition successful after %lu ms - transitioning to %s power", ctx.timeInStateMs,
+                     d.next == BurnerSMState::RUNNING_HIGH ? "high" : "low");
+            break;
+        case Reason::IGNITION_RETRY:
+            LOG_WARN(TAG, "Ignition retry %d/%d", transitionMemory.ignitionRetries, MAX_IGNITION_RETRIES);
+            break;
+        case Reason::IGNITION_LOCKOUT:
+            LOG_ERROR(TAG, "Max ignition retries exceeded");
+            break;
+        case Reason::SWITCH_SEAMLESS:
+            LOG_INFO(TAG, "Seamless mode switch detected during %s (%s -> %s)", stateName, fromMode, toMode);
+            break;
+        case Reason::SWITCH_NEEDS_STOP:
+            LOG_INFO(TAG, "Mode switch detected during %s (%s -> %s) - transitioning to POST_PURGE",
+                     stateName, fromMode, toMode);
+            break;
+        case Reason::EXPLICIT_DISABLE:
+            LOG_INFO(TAG, "%s disabled - stopping burner now (minimum on-time bypassed)",
+                     d.boilerDisabled ? "Boiler" : (d.fromWater ? "Water heating" : "Space heating"));
+            break;
+        case Reason::NO_MODE_DEMAND:
+            LOG_WARN(TAG, "Burner running without active heating/water mode request for %lu ms - stopping",
+                     d.elapsedMs);
+            break;
+        case Reason::FLAME_LOST:
+            if (ctx.heatDemand) {
+                LOG_WARN(TAG, "UNEXPECTED: Flame/burner off while demand still active");
+            } else {
+                LOG_DEBUG(TAG, "Burner off (intentional - demand ended)");
+            }
+            break;
+        case Reason::POWER_UP_DELAYED:
+            LOG_DEBUG(TAG, "Delaying power increase for %lu ms due to anti-flapping",
+                      BurnerAntiFlapping::getTimeUntilCanChangePower());
+            break;
+        case Reason::POWER_DOWN_DELAYED:
+            LOG_DEBUG(TAG, "Delaying power decrease for %lu ms due to anti-flapping",
+                      BurnerAntiFlapping::getTimeUntilCanChangePower());
+            break;
+        case Reason::SWITCH_WAIT_FOR_HEATING:
+            LOG_DEBUG(TAG, "Waiting for heating request (handover, %lu ms)", ctx.timeInStateMs);
+            break;
+        case Reason::SWITCH_NO_DEMAND:
+            LOG_INFO(TAG, "No request for new mode %s after %lu ms (heating wanted: %s) - stopping",
+                     toMode, ctx.timeInStateMs, d.heatingWanted ? "yes" : "no");
+            break;
+        case Reason::SWITCH_RESUME:
+            LOG_WARN(TAG, "Mode reverted during switch - resuming at low power");
+            break;
+        case Reason::SWITCH_REVERT_WAIT:
+            LOG_DEBUG(TAG, "Mode reverted but %s not set - waiting (%lu ms)",
+                      d.fromWater ? "WATER_ON" : "HEATING_ON", ctx.timeInStateMs);
+            break;
+        case Reason::SWITCH_REVERT_STOP:
+            LOG_INFO(TAG, "Mode reverted but %s still not set after %lu ms - stopping",
+                     d.fromWater ? "WATER_ON" : "HEATING_ON", ctx.timeInStateMs);
+            break;
+        case Reason::SWITCH_DONE:
+            LOG_INFO(TAG, "Mode switch complete - resuming %s operation", toMode);
+            break;
+        case Reason::SWITCH_FAILED:  // logged by FirmwareTransitionEnvironment::switchMode()
+        default:
+            break;
     }
-
-    return BurnerSMState::RUNNING_HIGH;
 }
 
 BurnerSMState BurnerStateMachine::handlePostPurgeState() {
@@ -559,7 +670,7 @@ void BurnerStateMachine::onEnterIgnition() {
     bool isWaterMode = waterOn && (!heatingOn || waterPriority);
 
     // Round 19 Issue #1: Track the mode we're starting in for switch detection
-    runningModeIsWater = isWaterMode;
+    transitionMemory.runningModeIsWater = isWaterMode;
 
     // Use the power level from setHeatDemand() - this is set by BoilerTempController
     // based on actual temperature error, not from event bits
@@ -733,149 +844,9 @@ void BurnerStateMachine::onEnterModeSwitching() {
 }
 
 BurnerSMState BurnerStateMachine::handleModeSwitchingState() {
-    LOG_INFO(TAG, ">>> handleModeSwitchingState() CALLED <<<");
-
-    // Safety check first - abort if safety interlocks active
-    if (!BurnerSafetyChecks::checkSafetyConditions()) {
-        LOG_ERROR(TAG, "Safety interlock during mode switch - aborting to ERROR");
-        return BurnerSMState::ERROR;
-    }
-
-    // Get new mode from event bits
-    // Use BurnerRequest bits for demand (these are set by HeatingControl/WaterControl when they need burner)
-    // SystemState bits may not be set yet during seamless transition
-    EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
-    EventBits_t burnerBits = xEventGroupGetBits(SRP::getBurnerRequestEventGroup());
-
-    // Check burner requests (actual demand)
-    bool waterRequested = (burnerBits & SystemEvents::BurnerRequest::WATER) != 0;
-    bool heatingRequested = (burnerBits & SystemEvents::BurnerRequest::HEATING) != 0;
-    bool waterPriority = (systemBits & SystemEvents::SystemState::WATER_PRIORITY) != 0;
-
-    // Water mode if: water requested AND (heating not requested OR water has priority)
-    bool newModeIsWater = waterRequested && (!heatingRequested || waterPriority);
-
-    // Check if new mode has heat demand (using BurnerRequest bits, not SystemState)
-    bool newModeHasDemand = newModeIsWater ? waterRequested : heatingRequested;
-
-    LOG_INFO(TAG, "Mode switch handler: newMode=%s, burnerBits=0x%08X, WATER_REQ=%d, HEATING_REQ=%d, demand=%d",
-             newModeIsWater ? "WATER" : "HEATING",
-             (unsigned int)burnerBits,
-             waterRequested,
-             heatingRequested,
-             newModeHasDemand);
-
-    if (!newModeHasDemand) {
-        // No request for the new mode yet. During a water -> heating handover
-        // HeatingControlTask (5 s cycle) may not have raised it yet, so wait - but
-        // only while heating is actually likely wanted and never longer than
-        // BurnerTransitionPolicy::MODE_SWITCH_MAX_WAIT_MS. The previous wait only
-        // checked room < targetInside (even in weather-compensated mode) and had no
-        // time limit: with heating disabled, summer override or a warm outside it
-        // kept the burner firing in water mode indefinitely, after the water pump's
-        // overrun ended with no pump at all.
-        bool heatingWanted = false;
-        if (!newModeIsWater) {
-            // F33: snapshot settings and sensor readings UNDER their mutexes
-            bool haveSettings = false;
-            bool useWeather = false;
-            bool overrideOff = true;
-            Temperature_t targetInside = 0;
-            Temperature_t outsideThreshold = 0;
-            Temperature_t overheatMargin = 0;
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
-                const SystemSettings& s = SRP::getSystemSettings();
-                useWeather = s.useWeatherCompensatedControl;
-                overrideOff = s.heatingOverrideOff;
-                targetInside = s.targetTemperatureInside;
-                outsideThreshold = s.outsideTempHeatingThreshold;
-                overheatMargin = s.roomTempOverheatMargin;
-                SRP::giveSystemSettingsMutex();
-                haveSettings = true;
-            }
-            SharedSensorReadings readings{};
-            bool haveReadings = false;
-            if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
-                readings = SRP::getSensorReadings();
-                SRP::giveSensorReadingsMutex();
-                haveReadings = true;
-            }
-            if (haveSettings && haveReadings) {
-                heatingWanted = BurnerTransitionPolicy::heatingLikelyWanted(
-                    (systemBits & SystemEvents::SystemState::HEATING_ENABLED) != 0,
-                    overrideOff, useWeather,
-                    readings.isOutsideTempValid, readings.outsideTemp, outsideThreshold,
-                    readings.isInsideTempValid, readings.insideTemp, targetInside, overheatMargin);
-            }
-        }
-
-        uint32_t timeInState = stateMachine.getTimeInState();
-        if (BurnerTransitionPolicy::onNoDemandForNewMode(newModeIsWater, heatingWanted, timeInState) ==
-            BurnerTransitionPolicy::ModeSwitchAction::WAIT) {
-            LOG_DEBUG(TAG, "Waiting for heating request (handover, %lu ms)", timeInState);
-            return BurnerSMState::MODE_SWITCHING;
-        }
-
-        LOG_INFO(TAG, "No request for new mode %s after %lu ms (heating wanted: %s) - stopping",
-                 newModeIsWater ? "WATER" : "HEATING", timeInState, heatingWanted ? "yes" : "no");
-        return BurnerSMState::POST_PURGE;
-    }
-
-    // Check if mode changed back to original (race condition)
-    if (newModeIsWater == runningModeIsWater) {
-        // Resume only if the running mode's ON bit is set again. If the ON bit was
-        // withdrawn while its request is still set (WATER_OFF_OVERRIDE clears only
-        // WATER_ON, or a handover race), resuming would bounce RUNNING_LOW <->
-        // MODE_SWITCHING every tick; wait instead, bounded by MODE_SWITCH_MAX_WAIT_MS.
-        bool runningOnBit = (systemBits & (runningModeIsWater ? SystemEvents::SystemState::WATER_ON
-                                                              : SystemEvents::SystemState::HEATING_ON)) != 0;
-        uint32_t timeInState = stateMachine.getTimeInState();
-        switch (BurnerTransitionPolicy::onModeReverted(runningOnBit, timeInState)) {
-            case BurnerTransitionPolicy::RevertAction::RESUME_RUNNING:
-                // Mode reverted during switch - return to safe low power
-                // Don't use shouldIncreasePower() as it may not be updated yet
-                LOG_WARN(TAG, "Mode reverted during switch - resuming at low power");
-                return BurnerSMState::RUNNING_LOW;
-            case BurnerTransitionPolicy::RevertAction::WAIT:
-                LOG_DEBUG(TAG, "Mode reverted but %s not set - waiting (%lu ms)",
-                          runningModeIsWater ? "WATER_ON" : "HEATING_ON", timeInState);
-                return BurnerSMState::MODE_SWITCHING;
-            case BurnerTransitionPolicy::RevertAction::STOP:
-            default:
-                LOG_INFO(TAG, "Mode reverted but %s still not set after %lu ms - stopping",
-                         runningModeIsWater ? "WATER_ON" : "HEATING_ON", timeInState);
-                return BurnerSMState::POST_PURGE;
-        }
-    }
-
-    // Execute mode switch via BurnerSystemController
-    BurnerSystemController* controller = SRP::getBurnerSystemController();
-    if (!controller) {
-        LOG_ERROR(TAG, "No BurnerSystemController - aborting mode switch");
-        return BurnerSMState::POST_PURGE;
-    }
-
-    BurnerMode newMode = newModeIsWater ? BurnerMode::WATER : BurnerMode::HEATING;
-    auto result = controller->switchMode(newMode, targetTemperature);
-
-    if (result.isError()) {
-        LOG_ERROR(TAG, "Mode switch failed: %s - falling back to shutdown",
-                 result.message().c_str());
-        return BurnerSMState::POST_PURGE;
-    }
-
-    // Update mode tracking
-    runningModeIsWater = newModeIsWater;
-
-    LOG_INFO(TAG, "Mode switch complete - resuming %s operation",
-             newModeIsWater ? "WATER" : "HEATING");
-
-    // Return to appropriate power level based on PID demand
-    if (BurnerPowerController::shouldIncreasePower(requestedHighPower)) {
-        return BurnerSMState::RUNNING_HIGH;
-    } else {
-        return BurnerSMState::RUNNING_LOW;
-    }
+    // Water <-> heating handover (bounded wait, revert handling, relay switch) is
+    // decided in BurnerTransitions::step()
+    return runTransitionStep();
 }
 
 void BurnerStateMachine::logStateTransition(BurnerSMState from, BurnerSMState to) {

@@ -3,16 +3,13 @@
 #define BURNER_SAFETY_CHECKS_H
 
 #include "utils/StateMachine.h"
-#include "modules/control/BurnerTransitionPolicy.h"
-
-// Forward declaration to avoid circular dependency
-enum class BurnerSMState;
 
 /**
- * @brief Burner safety validation and mode switch detection
+ * @brief Burner safety validation
  *
- * Extracted from BurnerStateMachine.cpp (Round 21 Refactoring).
- * Provides safety checks, flame detection, and mode switch logic.
+ * Extracted from BurnerStateMachine.cpp (Round 21 Refactoring). The mode switch
+ * and shutdown decisions moved to BurnerTransitions::step() (Stage B); these
+ * checks are its firmware inputs.
  *
  * Thread Safety:
  * - All functions are thread-safe using SRP mutex guards
@@ -59,58 +56,6 @@ public:
      * never commands or requires them.
      */
     static bool hasActiveModeDemand();
-
-    /**
-     * @brief Check if seamless mode switch is safe
-     * @return true if mode can be switched without shutdown
-     *
-     * Validates conditions for seamless water ↔ heating transition:
-     * - Currently in RUNNING_LOW or RUNNING_HIGH
-     * - Safety conditions pass
-     * - Flame detected
-     *
-     * Note: Does NOT check heatDemand because old mode clears demand
-     * before new mode sets it. MODE_SWITCHING handler validates new demand.
-     */
-    static bool canSeamlesslySwitch(BurnerSMState currentState);
-
-    /**
-     * @brief Check for mode switch and return appropriate transition state
-     * @param currentState Current burner state
-     * @param currentStateName Name of current state for logging (e.g., "RUNNING_LOW")
-     * @param runningModeIsWater Reference to current mode (updated if switch detected)
-     * @return MODE_SWITCHING if seamless, POST_PURGE if shutdown needed, IDLE if no switch
-     *
-     * Detects mode transitions (water ↔ heating) by checking system event bits.
-     * Uses WATER_PRIORITY as tiebreaker if both modes set simultaneously.
-     */
-    static BurnerSMState checkModeSwitchTransition(
-        BurnerSMState currentState,
-        const char* currentStateName,
-        bool& runningModeIsWater
-    );
-
-    /**
-     * @brief Check if burner should shut down due to safety or demand loss
-     * @param currentState Current state for sentinel return
-     * @param heatDemand Current heat demand state
-     * @return POST_PURGE if shutdown needed, currentState otherwise
-     *
-     * Checks anti-flapping before allowing shutdown.
-     * Logs delay time if anti-flapping prevents immediate stop.
-     */
-    static BurnerSMState checkSafetyShutdown(BurnerSMState currentState, bool heatDemand);
-
-    /**
-     * @brief Check for flame loss conditions
-     * @param currentState Current state for sentinel return
-     * @param heatDemand Current heat demand state
-     * @return POST_PURGE if flame lost, currentState otherwise
-     *
-     * Differentiates intentional shutdown (no demand) from unexpected flame loss.
-     * Both cases transition to POST_PURGE, bypassing anti-flapping for safety.
-     */
-    static BurnerSMState checkFlameLoss(BurnerSMState currentState, bool heatDemand);
 };
 
 #endif // BURNER_SAFETY_CHECKS_H
