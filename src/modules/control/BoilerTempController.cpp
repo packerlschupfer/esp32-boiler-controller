@@ -84,6 +84,20 @@ bool BoilerTempController::initialize() {
     config_.waterKi = settings.wHeaterKi;
     config_.waterKd = settings.wHeaterKd;
 
+    // Autotune method (0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda).
+    // Previously never read, so every reboot silently fell back to ZN_PID.
+    static const PIDAutoTuner::TuningMethod kMethods[] = {
+        PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PI,
+        PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PID,
+        PIDAutoTuner::TuningMethod::TYREUS_LUYBEN,
+        PIDAutoTuner::TuningMethod::COHEN_COON,
+        PIDAutoTuner::TuningMethod::LAMBDA_TUNING
+    };
+    if (settings.autotuneMethod >= 0 && settings.autotuneMethod <= 4) {
+        tuningMethod_ = kMethods[settings.autotuneMethod];
+    }
+    LOG_INFO(TAG, "Autotune method from settings: %ld", static_cast<long>(settings.autotuneMethod));
+
     initialized_ = true;
 
     LOG_INFO(TAG, "Initialized - Mode:%s",

@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "config/SystemConstants.h"
+#include "modules/control/RelayExtremaTracker.h"
 
 /**
  * @brief Fixed-size circular buffer for memory-bounded data collection
@@ -171,11 +172,9 @@ private:
     float startTime;             // Tuning start time
     float lastSwitchTime;        // Last relay switch time
 
-    // Peak/trough tracking during relay phases
-    float phaseMaxTemp;          // Max temp seen during current ON phase (for peaks)
-    float phaseMinTemp;          // Min temp seen during current OFF phase (for troughs)
-    float phaseMaxTime;          // Time when max was seen
-    float phaseMinTime;          // Time when min was seen
+    // Peak/trough tracking over whole relay phases (peak = max of OFF phase,
+    // trough = min of ON phase, because the boiler lags the relay)
+    RelayExtrema::Tracker extrema_;
     
     // Data collection - fixed-size circular buffers to prevent memory growth
     // Oscillation data: stores last 1000 points (~1KB at 12 bytes per point)
@@ -281,7 +280,7 @@ private:
     /**
      * @brief Perform relay feedback control
      */
-    float relayControl(float currentTemp);
+    float relayControl(float currentTemp, float currentTime);
     
     /**
      * @brief Detect peaks and troughs in oscillation

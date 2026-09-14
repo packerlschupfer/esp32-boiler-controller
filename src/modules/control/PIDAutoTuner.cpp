@@ -65,11 +65,8 @@ bool PIDAutoTuner::startTuning(float targetSetpoint, float relayAmplitude,
     lastSwitchTime = 0;
     result = TuningResult();
 
-    // Initialize phase tracking (will be set properly on first update)
-    phaseMaxTemp = -1000.0f;
-    phaseMinTemp = 1000.0f;
-    phaseMaxTime = 0;
-    phaseMinTime = 0;
+    // Reset peak/trough tracking (set properly on first sample)
+    extrema_.reset();
     
     LOG_INFO(TAG, "Starting PID auto-tuning: setpoint=%.1f, amplitude=%.1f, hysteresis=%.1f",
              setpoint, outputStep, hysteresis);
@@ -102,7 +99,7 @@ float PIDAutoTuner::update(float currentTemp, float currentTime) {
     }
     
     // Perform relay control
-    float output = relayControl(currentTemp);
+    float output = relayControl(currentTemp, currentTime);
     
     // Store data point
     oscillationData.push_back({currentTime, currentTemp, output});
@@ -182,25 +179,14 @@ const char* PIDAutoTuner::getStatusMessage() const {
     }
 }
 
-float PIDAutoTuner::relayControl(float currentTemp) {
+float PIDAutoTuner::relayControl(float currentTemp, float currentTime) {
     float error = setpoint - currentTemp;
     bool previousState = relayState;
-    float currentTime = oscillationData.empty() ? 0 : oscillationData.back().time;
 
-    // Track min/max during each phase
-    if (relayState) {
-        // Relay ON (heating) - track max for peak detection
-        if (currentTemp > phaseMaxTemp) {
-            phaseMaxTemp = currentTemp;
-            phaseMaxTime = currentTime;
-        }
-    } else {
-        // Relay OFF (cooling) - track min for trough detection
-        if (currentTemp < phaseMinTemp) {
-            phaseMinTemp = currentTemp;
-            phaseMinTime = currentTime;
-        }
-    }
+    // Track the extremes of the current relay phase (see RelayExtremaTracker:
+    // the boiler lags the relay, so the true peak lies in the OFF phase and the
+    // true trough in the ON phase)
+    extrema_.sample(currentTemp, currentTime);
 
     // Relay with hysteresis
     if (relayState) {
@@ -208,38 +194,31 @@ float PIDAutoTuner::relayControl(float currentTemp) {
         // (temp is above setpoint + hysteresis)
         if (error < -hysteresis) {
             relayState = false;
-
-            // Record the peak (max temp seen during ON phase)
-            if (phaseMaxTime > 0) {
-                peakTimes.push_back(phaseMaxTime);
-                peakValues.push_back(phaseMaxTemp);
-                LOG_INFO(TAG, "Peak recorded: %.1f°C at t=%.0fs (cycles: %u)",
-                         phaseMaxTemp, phaseMaxTime - startTime,
-                         static_cast<unsigned>(std::min(peakTimes.size(), troughTimes.size())));
-            }
-
-            // Reset min tracking for next OFF phase
-            phaseMinTemp = currentTemp;
-            phaseMinTime = currentTime;
         }
     } else {
         // Currently low, switch to high if error > hysteresis
         // (temp is below setpoint - hysteresis)
         if (error > hysteresis) {
             relayState = true;
+        }
+    }
 
-            // Record the trough (min temp seen during OFF phase)
-            if (phaseMinTime > 0) {
-                troughTimes.push_back(phaseMinTime);
-                troughValues.push_back(phaseMinTemp);
-                LOG_INFO(TAG, "Trough recorded: %.1f°C at t=%.0fs (cycles: %u)",
-                         phaseMinTemp, phaseMinTime - startTime,
-                         static_cast<unsigned>(std::min(peakTimes.size(), troughTimes.size())));
+    if (relayState != previousState) {
+        // ON phase ended -> trough (min of that ON phase)
+        // OFF phase ended -> peak (max of that OFF phase)
+        RelayExtrema::Event event = extrema_.onSwitch(relayState, currentTemp, currentTime);
+        if (event.valid) {
+            if (event.isPeak) {
+                peakTimes.push_back(event.time);
+                peakValues.push_back(event.value);
+            } else {
+                troughTimes.push_back(event.time);
+                troughValues.push_back(event.value);
             }
-
-            // Reset max tracking for next ON phase
-            phaseMaxTemp = currentTemp;
-            phaseMaxTime = currentTime;
+            LOG_INFO(TAG, "%s recorded: %.1f°C at t=%.0fs (cycles: %u)",
+                     event.isPeak ? "Peak" : "Trough",
+                     event.value, event.time - startTime,
+                     static_cast<unsigned>(std::min(peakTimes.size(), troughTimes.size())));
         }
     }
 

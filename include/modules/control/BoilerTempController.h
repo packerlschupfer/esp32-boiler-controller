@@ -258,7 +258,9 @@ private:
     PIDAutoTuner* autoTuner_ = nullptr;
     bool autoTuningActive_ = false;
     Temperature_t autoTuneSetpoint_ = 0;
-    PIDAutoTuner::TuningMethod tuningMethod_ = PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PID;
+    // Loaded from SystemSettings::autotuneMethod in initialize(). ZN-PI default:
+    // the boiler's relay period is ~9 min, which makes ZN-PID's Kd absurd (~2000).
+    PIDAutoTuner::TuningMethod tuningMethod_ = PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PI;
 
     static const char* TAG;
 

@@ -319,6 +319,18 @@ void handlePIDAutotuneCommand(const char* payload) {
         if (controller) {
             if (controller->setTuningMethod(method)) {
                 LOG_INFO(TAG_CMD, "Remote command: Set tuning method to '%s'", method);
+                // Persist so a reboot does not silently revert the method
+                static const char* const kMethodNames[] = {"zn_pi", "zn_pid", "tyreus", "cohen", "lambda"};
+                for (int32_t i = 0; i < 5; i++) {
+                    if (strcmp(method, kMethodNames[i]) == 0) {
+                        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+                            SRP::getSystemSettings().autotuneMethod = i;
+                            SRP::giveSystemSettingsMutex();
+                            PersistentStorageTask_RequestSave();
+                        }
+                        break;
+                    }
+                }
                 char response[64];
                 snprintf(response, sizeof(response), "{\"method\":\"%s\",\"status\":\"set\"}", method);
                 MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE, response, 0, true, MQTTPriority::PRIORITY_HIGH);

@@ -73,7 +73,7 @@ struct SystemSettings {
     // PID Auto-Tuning Configuration
     float autotuneRelayAmplitude = 40.0f;   // Relay output amplitude (0-100%)
     float autotuneHysteresis = 2.0f;        // Hysteresis band in °C
-    int32_t autotuneMethod = 3;             // Tuning method: 0=ZN_PI, 1=ZN_PID, 2=TL, 3=CC, 4=Lambda
+    int32_t autotuneMethod = 0;             // Tuning method: 0=ZN_PI, 1=ZN_PID, 2=TL, 3=CC, 4=Lambda (PI: relay period ~9 min makes Kd absurd)
 
     // System Enable States (persisted - survive reboot)
     // These control whether each subsystem is enabled (true) or disabled (false)
@@ -165,7 +165,7 @@ struct SystemSettings {
         bool useBoilerTempPID = true,
         float autotuneRelayAmplitude = 40.0f,
         float autotuneHysteresis = 2.0f,
-        int32_t autotuneMethod = 3)
+        int32_t autotuneMethod = 0)
         : wheaterPriorityEnabled(wheaterPriorityEnabled),
           wHeaterConfTempLimitLow(wHeaterConfTempLimitLow),
           wHeaterConfTempLimitHigh(wHeaterConfTempLimitHigh),

@@ -23,6 +23,12 @@ void test_pid_scaled_gain_commands_off_above_target();
 void test_pid_scaled_gain_commands_full_below_target();
 void test_pid_adjustment_clamp_keeps_sign();
 
+// Autotune peak/trough tracking (lagging plant)
+void test_relay_extrema_peaks_include_post_switch_overshoot();
+void test_relay_extrema_troughs_include_post_switch_undershoot();
+void test_relay_extrema_ignores_cold_start_phase();
+void test_relay_extrema_extreme_times_are_after_switch();
+
 void test_pre_ignition_safe_conditions();
 void test_pre_ignition_high_boiler_temp();
 void test_pre_ignition_high_water_temp();
@@ -462,6 +468,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pid_scaled_gain_commands_off_above_target);
     RUN_TEST(test_pid_scaled_gain_commands_full_below_target);
     RUN_TEST(test_pid_adjustment_clamp_keeps_sign);
+
+    // Autotune peak/trough tracking (lagging plant)
+    RUN_TEST(test_relay_extrema_peaks_include_post_switch_overshoot);
+    RUN_TEST(test_relay_extrema_troughs_include_post_switch_undershoot);
+    RUN_TEST(test_relay_extrema_ignores_cold_start_phase);
+    RUN_TEST(test_relay_extrema_extreme_times_are_after_switch);
 
     return UNITY_END();
 }
