@@ -280,7 +280,9 @@ namespace SystemConstants {
         namespace Autotune {
             constexpr uint8_t MIN_CYCLES = 3;              // Minimum oscillation cycles needed (3 is standard)
             constexpr uint8_t MAX_CYCLES = 10;             // Maximum cycles before timeout
-            constexpr float MAX_TUNING_TIME_SECONDS = 2400.0f;  // 40 minutes maximum tuning time
+            // 90 minutes: the boiler relay period is ~9 min (water loop), the radiator
+            // loop is slower, and MIN_CYCLES full cycles plus warm-up must fit.
+            constexpr float MAX_TUNING_TIME_SECONDS = 5400.0f;
             constexpr float DEFAULT_RELAY_AMPLITUDE = 50.0f;    // Default relay output amplitude (50% swing)
             constexpr float DEFAULT_RELAY_HYSTERESIS = 1.0f;    // Default hysteresis band (1°C)
 

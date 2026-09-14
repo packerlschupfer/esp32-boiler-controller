@@ -324,8 +324,8 @@ void PersistentStorageTask(void* pvParameters) {
     static int32_t outsideHeatingThreshold_i32 = static_cast<int32_t>(settings.outsideTempHeatingThreshold);
     static int32_t roomOverheatMargin_i32 = static_cast<int32_t>(settings.roomTempOverheatMargin);
 
-    storage->registerInt("heating/outsideThreshold", &outsideHeatingThreshold_i32, 50, 200,
-                         "Outside temp heating threshold (tenths °C, 5-20°C)");
+    storage->registerInt("heating/outsideThreshold", &outsideHeatingThreshold_i32, 50, 250,
+                         "Outside temp heating threshold (tenths °C, 5-25°C)");
     storage->registerInt("heating/roomOverheatMargin", &roomOverheatMargin_i32, 10, 50,
                          "Room overheat margin (tenths °C, 1-5°C)");
 
