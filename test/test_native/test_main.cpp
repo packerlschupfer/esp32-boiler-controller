@@ -59,6 +59,10 @@ void test_bsm_step_revert_with_on_bit_resumes_low_power();
 void test_bsm_step_mode_change_without_flame_stops();
 void test_bsm_step_safety_failure_during_mode_switch_errors();
 void test_bsm_step_power_level_follows_request_with_anti_flapping();
+void test_bsm_step_post_purge_restarts_when_demand_returns();
+void test_bsm_step_post_purge_no_restart_without_mode_request();
+void test_bsm_step_post_purge_no_restart_of_disabled_mode();
+void test_bsm_step_post_purge_restart_requires_safety();
 
 // Burner demand gate (who may arm the heat demand)
 void test_gate_hot_boiler_request_does_not_arm();
@@ -554,6 +558,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bsm_step_mode_change_without_flame_stops);
     RUN_TEST(test_bsm_step_safety_failure_during_mode_switch_errors);
     RUN_TEST(test_bsm_step_power_level_follows_request_with_anti_flapping);
+    RUN_TEST(test_bsm_step_post_purge_restarts_when_demand_returns);
+    RUN_TEST(test_bsm_step_post_purge_no_restart_without_mode_request);
+    RUN_TEST(test_bsm_step_post_purge_no_restart_of_disabled_mode);
+    RUN_TEST(test_bsm_step_post_purge_restart_requires_safety);
 
     // Burner demand gate (who may arm the heat demand)
     RUN_TEST(test_gate_hot_boiler_request_does_not_arm);

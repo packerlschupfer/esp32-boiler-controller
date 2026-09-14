@@ -453,3 +453,58 @@ void test_bsm_step_power_level_follows_request_with_anti_flapping() {
     sim.run(1000);
     TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
 }
+
+// --- Restart from post-purge ------------------------------------------------
+
+void test_bsm_step_post_purge_restarts_when_demand_returns() {
+    startBurner(false, false);
+    sim.heatDemand = false;  // PID coast
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    // Demand returns inside the minimum off-time: hold
+    sim.heatDemand = true;
+    sim.env.turnOnAllowed = false;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    // Minimum off-time over: restart without waiting out the post-purge
+    sim.env.turnOnAllowed = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::RESTART_FROM_POST_PURGE);
+}
+
+void test_bsm_step_post_purge_no_restart_without_mode_request() {
+    startBurner(false, false);
+    sim.heatDemand = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    requestHeating(false);
+    sim.heatDemand = true;  // latched demand without a mode request
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}
+
+void test_bsm_step_post_purge_no_restart_of_disabled_mode() {
+    startBurner(false, false);
+    sim.env.heatingEn = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
+    // Request and demand can still be set for a control cycle after the disable
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}
+
+void test_bsm_step_post_purge_restart_requires_safety() {
+    startBurner(false, false);
+    sim.heatDemand = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    sim.heatDemand = true;
+    sim.env.safety = false;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}

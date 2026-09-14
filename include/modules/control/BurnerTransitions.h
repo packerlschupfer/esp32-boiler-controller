@@ -11,7 +11,8 @@
  * @brief Burner state machine transition logic (Stage B, 2026-09-14).
  *
  * step() decides the next state for the demand-driven states (IDLE, PRE_PURGE,
- * IGNITION, RUNNING_LOW/HIGH, MODE_SWITCHING). Header-only and FreeRTOS-free so
+ * IGNITION, RUNNING_LOW/HIGH, MODE_SWITCHING) and the early restart from
+ * POST_PURGE. Header-only and FreeRTOS-free so
  * whole scenarios can be replayed in native tests.
  *
  * Inputs are read through Environment on demand, in the same order and under the
@@ -20,8 +21,8 @@
  * over-temperature) or take mutexes, so they must not be evaluated eagerly.
  *
  * Timeout transitions (PRE_PURGE -> IGNITION, IGNITION -> LOCKOUT) stay in the
- * StateMachine configuration; entry/exit actions and the POST_PURGE, LOCKOUT and
- * ERROR handlers stay in BurnerStateMachine.
+ * StateMachine configuration; entry/exit actions, the post-purge duration and the
+ * LOCKOUT and ERROR handlers stay in BurnerStateMachine.
  */
 namespace BurnerTransitions {
 
@@ -107,7 +108,8 @@ namespace BurnerTransitions {
         SWITCH_REVERT_WAIT,
         SWITCH_REVERT_STOP,
         SWITCH_FAILED,
-        SWITCH_DONE
+        SWITCH_DONE,
+        RESTART_FROM_POST_PURGE    // heat demand returned before the post-purge ended
     };
 
     struct Decision {
@@ -350,12 +352,35 @@ namespace BurnerTransitions {
             return d;
         }
 
+        inline Decision postPurge(const Context& c, Environment& env) {
+            // Post-purge only keeps the burner off; the pumps carry the heat away
+            // independently. If heat demand returns meanwhile, restart under the same
+            // conditions as from IDLE instead of holding off for the rest of the
+            // post-purge; the anti-flapping minimum off-time still applies.
+            if (!c.heatDemand || !hasActiveModeDemand(env)) {
+                return make(BurnerSMState::POST_PURGE, Reason::NONE);
+            }
+            // Never restart a mode that was just disabled: its request can still be
+            // set for one control cycle after the explicit-disable stop
+            const bool waterOn = env.waterOn();
+            const bool toWater = waterOn && (!env.heatingOn() || env.waterPriority());
+            if (BurnerTransitionPolicy::stopForExplicitDisable(toWater, env.boilerEnabled(),
+                                                               env.heatingEnabled(), env.waterEnabled())) {
+                return make(BurnerSMState::POST_PURGE, Reason::NONE);
+            }
+            if (!env.safetyOk() || !env.canTurnOn()) {
+                return make(BurnerSMState::POST_PURGE, Reason::NONE);
+            }
+            return make(BurnerSMState::PRE_PURGE, Reason::RESTART_FROM_POST_PURGE);
+        }
+
     } // namespace detail
 
     /**
      * @brief Decide the next state for one state machine tick.
      *
-     * States not handled here (POST_PURGE, LOCKOUT, ERROR) return themselves.
+     * States not handled here (LOCKOUT, ERROR) return themselves. POST_PURGE only
+     * decides the early restart; its completion is checked by the caller.
      */
     inline Decision step(const Context& c, const Timing& t, Environment& env, Memory& m) {
         switch (c.state) {
@@ -370,6 +395,8 @@ namespace BurnerTransitions {
                 return detail::running(c, t, env, m);
             case BurnerSMState::MODE_SWITCHING:
                 return detail::modeSwitching(c, env, m);
+            case BurnerSMState::POST_PURGE:
+                return detail::postPurge(c, env);
             default:
                 return detail::make(c.state, Reason::NONE);
         }

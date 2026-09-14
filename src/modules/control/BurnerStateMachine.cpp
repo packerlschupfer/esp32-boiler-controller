@@ -539,6 +539,9 @@ void BurnerStateMachine::logTransitionDecision(const BurnerTransitions::Context&
         case Reason::SWITCH_DONE:
             LOG_INFO(TAG, "Mode switch complete - resuming %s operation", toMode);
             break;
+        case Reason::RESTART_FROM_POST_PURGE:
+            LOG_INFO(TAG, "Heat demand returned during post-purge - restarting after %lu ms", ctx.timeInStateMs);
+            break;
         case Reason::SWITCH_FAILED:  // logged by FirmwareTransitionEnvironment::switchMode()
         default:
             break;
@@ -562,6 +565,13 @@ BurnerSMState BurnerStateMachine::handlePostPurgeState() {
         LOG_INFO(TAG, "Post-purge complete after %lu ms", timeInPostPurge);
         postPurgeEntryTime = 0;  // Reset for next post-purge
         return BurnerSMState::IDLE;
+    }
+
+    // Heat demand returned: restart without waiting out the post-purge
+    // (BurnerTransitions::step - same conditions as from IDLE, minimum off-time applies)
+    if (runTransitionStep() == BurnerSMState::PRE_PURGE) {
+        postPurgeEntryTime = 0;
+        return BurnerSMState::PRE_PURGE;
     }
 
     // Note: Round 17 Issue X fix is in StateManager - burner should NOT enter POST_PURGE
