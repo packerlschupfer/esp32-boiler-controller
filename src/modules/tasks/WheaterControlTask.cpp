@@ -1,6 +1,7 @@
 // src/modules/tasks/WheaterControlTask_EventDriven.cpp
 // Water heater control task - manages hot water heating
 #include "WheaterControlTask.h"
+#include "modules/control/WaterChargePolicy.h"  // tank limit consistency
 #include <cmath>  // Round 15 Issue #10: For std::isfinite
 
 #include "shared/SharedResources.h"
@@ -505,9 +506,26 @@ static bool checkIfWaterHeatingNeededEvent() {
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {
         SharedSensorReadings readings = SRP::getSensorReadings();
 
-        if (readings.isWaterHeaterTempTankValid &&
-            (snappedLimitHigh > 0) &&
-            (snappedLimitLow > 0)) {  // Ensure valid thresholds
+        // Parameters are range-checked one at a time, so the pair can be inverted
+        // (raising both sends low first). Pause water heating until consistent
+        // instead of toggling on every cycle.
+        const bool limitsValid = WaterChargePolicy::limitsValid(snappedLimitLow, snappedLimitHigh);
+        static bool inconsistentLimitsLogged = false;
+        if (!limitsValid && snappedLimitLow > 0 && snappedLimitHigh > 0) {
+            if (!inconsistentLimitsLogged) {
+                char lowBuf[16], highBuf[16];
+                formatTemp(lowBuf, sizeof(lowBuf), snappedLimitLow);
+                formatTemp(highBuf, sizeof(highBuf), snappedLimitHigh);
+                LOG_WARN(TAG, "Water limits inconsistent: low %s°C >= high %s°C - water heating paused",
+                         lowBuf, highBuf);
+                inconsistentLimitsLogged = true;
+            }
+        } else if (limitsValid && inconsistentLimitsLogged) {
+            LOG_INFO(TAG, "Water limits consistent again");
+            inconsistentLimitsLogged = false;
+        }
+
+        if (readings.isWaterHeaterTempTankValid && limitsValid) {  // Ensure valid thresholds
 
             Temperature_t currentTemp = readings.waterHeaterTempTank;
             Temperature_t lowLimit  = snappedLimitLow;   // Start heating below this
