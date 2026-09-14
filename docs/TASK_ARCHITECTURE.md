@@ -8,7 +8,7 @@
 
 ## Overview
 
-The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler control, sensors, communication, and monitoring. The architecture is fully **event-driven** with zero polling loops for optimal power efficiency and responsive safety systems.
+The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (table below), managing boiler control, sensors, communication, and monitoring. The architecture is fully **event-driven** with zero polling loops for optimal power efficiency and responsive safety systems.
 
 **Key Characteristics:**
 - Event-driven architecture (no polling)
@@ -25,13 +25,12 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 |------|----------|-------------|------|---------|
 | BurnerControlTask | 4 | 3584 | Any | Burner state machine, safety-critical |
 | RelayControlTask | 4 | 3584 | 1 | Physical relay control, motor protection |
-| HeatingControlTask | 3 | 3584 | Any | Space heating PID control |
-| WheaterControlTask | 3 | 3584 | Any | Water heating PID control |
+| HeatingControlTask | 3 | 3584 | Any | Space heating: heating curve target, heating request |
+| WheaterControlTask | 3 | 3584 | Any | Water heating: charge decision, water request |
 | BoilerTempControlTask | 4 | 3072 | 1 | Boiler temperature PID, heat demand, autotune |
+| MB8ARTTask | 4 | 3584 | 1 | MB8ART temperature data acquisition |
 | MB8ARTProcessingTask | 3 | 3072 | Any | Temperature sensor data processing |
-| ANDRTF3Task | 3 | 3584 | Any | Room temperature sensor |
-| SensorTask | 3 | 3584 | Any | Legacy sensor coordination |
-| PIDControlTask | 3 | 4096 | Any | Future PID expansion (skeleton) |
+| ANDRTF3Task | 3 | 3584 | Any | Room temperature sensor (only if the device is present) |
 | RYN4ProcessingTask | 3 | 2560 | Any | Relay module data processing |
 | ControlTask | 3 | 3072 | Any | Remote control command handler |
 | MQTTTask | 2 | 3584 | 1 | MQTT communication & queuing |
@@ -42,8 +41,11 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 | TimerSchedulerTask | - | 3072 | Any | Schedule management |
 | PersistentStorageTask | - | 5120 | Any | NVS parameter persistence |
 | NTPTask | - | default | Any | Time synchronization |
+| SyslogTask | 1 | 4096 | Any | Remote syslog |
 
 *Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (active development mode)*
+
+Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` and `PIDControlTask` exist in `src/modules/tasks/` but are not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task.
 
 ---
 
@@ -112,14 +114,15 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 - **Health monitoring**: Tracks relay failures and communication errors
 
 **Relay Functions**:
-1. Heating Pump (Relay 0)
-2. Water Pump (Relay 1)
-3. Burner Enable (Relay 2)
-4. Water Mode (Relay 3)
-5. Power Boost (Relay 2) - ON=full power, OFF=half power
-6. Valve Control (Relay 5)
-7. Alarm (Relay 6)
-8. Reserved (Relay 7)
+(`include/config/RelayIndices.h`, array index = relay number - 1)
+1. Burner Enable (Relay 1) - heating mode, half power
+2. Power Boost (Relay 2) - ON=full power, OFF=half power
+3. Water Mode (Relay 3) - water mode, half power
+4. Valve Control (Relay 4)
+5. Heating Pump (Relay 5)
+6. Water Pump (Relay 6)
+7. Spare (Relay 7)
+8. Alarm (Relay 8)
 
 ---
 
@@ -131,7 +134,7 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 **Core**: Not pinned
 **Watchdog**: Dynamic - max(sensorInterval * 4, WDT_HEATING_CONTROL_MS)
 
-**Purpose**: Space heating control with PID, room temperature monitoring, burner request management, water priority coordination.
+**Purpose**: Space heating control: boiler target from the heating curve (`HeatingControlModule::calculateSpaceHeatingTargetTemp()`), burner request management, water priority coordination. Runs on a 5 s process timer.
 
 **Event Groups**:
 - **System State Event Group** (checks/sets): `BOILER_ENABLED`, `HEATING_ENABLED`, `HEATING_ON`
@@ -144,10 +147,9 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 - `SensorReadingsMutex` (via MutexRetryHelper)
 
 **Control Logic**:
-- PID control for room temperature
+- Heating curve from outside temperature, shifted by the room deviation in weather-compensated mode (no PID in this task; the power level is decided by BoilerTempControlTask)
 - Integrates with TimerSchedulerTask for scheduled heating
 - Yields to water heating when priority flag set
-- Anti-windup and derivative-on-PV improvements (Round 2)
 
 ---
 
@@ -159,7 +161,7 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 **Core**: Not pinned
 **Watchdog**: 15000ms (WDT_WHEATER_CONTROL_MS)
 
-**Purpose**: Water heating control, water pump management, PID control for tank temperature, heat recovery mode.
+**Purpose**: Water heating control: tank charge decision, boiler target for the water burner request, water pump request at charge start. There is no PID in this task; the power level (PID with the `pid/waterHeater/*` gains) is decided by BoilerTempControlTask.
 
 **Event Groups**:
 - **System State Event Group** (checks/sets): `BOILER_ENABLED`, `WATER_ENABLED`, `WATER_ON`
@@ -172,7 +174,7 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 **Control Parameters** (configurable via MQTT):
 - `tempLimitLow`: Start threshold (default 45.0°C, range 30-60°C)
 - `tempLimitHigh`: Stop threshold (default 65.0°C, range 50-85°C)
-- PID gains for fine control
+- Boiler target: tank temperature + `wHeaterConfTempChargeDelta` (5-20°C, default 10°C; invalid values use 10°C), clamped to `water_heating_low_limit`..`water_heating_high_limit` (default 40-90°C); `BurnerRequestManager::setWaterRequest()` also clamps to 20-110°C
 
 **Charge Logic**:
 - Two-threshold latch in `WaterChargePolicy::nextChargeNeeded()`: start below `tempLimitLow`, stop above `tempLimitHigh`
@@ -183,7 +185,7 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 **Modes**:
 - **On-demand heating**: Activated when tank temp < tempLimitLow
 - **Scheduled heating**: Via TimerSchedulerTask integration
-- **Heat recovery**: Uses residual boiler heat after space heating
+- **After a charge**: clears WATER_ON and the water request and sets `WATER_PRIORITY_RELEASED` so space heating can resume (there is no separate heat recovery mode)
 
 ---
 
@@ -204,8 +206,8 @@ The ESP32 Boiler Controller uses **18 active FreeRTOS tasks** managing boiler co
 - **General System Event Group** (sets): `MQTT_QUEUE_PRESSURE` (throttling signal)
 
 **Queues**:
-- **High priority queue**: 20 messages (sensor data, critical alerts)
-- **Normal priority queue**: 40 messages (status updates)
+- **High priority queue**: 3 messages (`HIGH_PRIORITY_QUEUE_SIZE`, `MQTTTask.h`)
+- **Normal priority queue**: 5 messages (`NORMAL_PRIORITY_QUEUE_SIZE`)
 - **Overflow strategy**: DROP_OLDEST with logging
 - **Backpressure**: Sets `MQTT_QUEUE_PRESSURE` bit at 80% utilization
 
@@ -535,11 +537,15 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 
 ### 15. SensorTask (Legacy)
 
+**Status**: Not started (no start call in the init code, not counted)
+
 **Purpose**: Minimal task - just waits for sensor data events (actual processing in MB8ARTProcessingTask)
 
 ---
 
 ### 16. PIDControlTask (Skeleton)
+
+**Status**: Not started (`PIDControlTask::startTask()` is never called, not counted)
 
 **Purpose**: Future PID control expansion - currently just logs and delays
 
@@ -644,12 +650,13 @@ Highest priority tasks that must never be blocked:
 - **BurnerControlTask**: State machine, safety interlocks
 - **RelayControlTask**: Physical hardware control
 - **BoilerTempControlTask**: Boiler temperature PID, heat demand arming
+- **MB8ARTTask**: MB8ART data acquisition
 
 ### Priority 3 (Control Logic)
 Normal control tasks with sensor coordination:
 - HeatingControlTask, WheaterControlTask
 - MB8ARTProcessingTask, ANDRTF3Task
-- SensorTask, PIDControlTask, RYN4ProcessingTask, ControlTask
+- RYN4ProcessingTask, ControlTask
 
 ### Priority 2 (Non-Critical Communication & Pump Control)
 - **MQTTTask**: Network communication (can tolerate delays)
@@ -659,6 +666,7 @@ Normal control tasks with sensor coordination:
 
 ### Priority 1 (Lowest)
 - **OTATask**: Firmware updates (background operation)
+- **SyslogTask**: Remote syslog
 
 ---
 
@@ -667,8 +675,8 @@ Normal control tasks with sensor coordination:
 ### Core 0 (Default)
 Most tasks run here unless explicitly pinned:
 - BurnerControlTask, HeatingControlTask, WheaterControlTask
-- MB8ARTProcessingTask, ANDRTF3Task, SensorTask
-- PIDControlTask, RYN4ProcessingTask, ControlTask
+- MB8ARTProcessingTask, ANDRTF3Task
+- RYN4ProcessingTask, ControlTask
 - HeatingPumpTask, WaterPumpTask
 - TimerSchedulerTask, PersistentStorageTask, NTPTask
 - MonitoringTask (explicitly pinned to Core 0)
@@ -711,8 +719,8 @@ See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
 ### Queue Usage
 
 **MQTT Queues** (priority-based):
-- High priority: 20 messages (sensor data, critical alerts)
-- Normal priority: 40 messages (status updates)
+- High priority: 3 messages
+- Normal priority: 5 messages
 - Overflow: DROP_OLDEST with throttling
 
 **Modbus Queues** (internal):
@@ -841,7 +849,7 @@ Based on runtime profiling showing only 60-100 bytes free:
 
 **MQTTTask** waits for:
 - Network connection (Ethernet or WiFi)
-- Broker connection (192.168.20.27:1883)
+- Broker connection (`MQTT_SERVER`: 192.168.20.27:1883, set in `platformio.ini` `[base_prod]`, same as the default in `src/config/ProjectConfig.h`; the `[base_dev]` build uses 192.168.20.16)
 
 **TimerSchedulerTask** waits for:
 - RuntimeStorage initialization

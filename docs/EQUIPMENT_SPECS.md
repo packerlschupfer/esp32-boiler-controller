@@ -436,7 +436,7 @@ a safety margin for:
 |-----------|---------------|-----------|
 | `MIN_ON_TIME_MS` | 120,000 (2 min) | Protects gas valve, prevents short-cycling |
 | `MIN_OFF_TIME_MS` | 20,000 (20 sec) | Allows residual heat dissipation |
-| `POST_PURGE_TIME_MS` | 60,000 (60 sec) | Heat exchanger cooling |
+| `SafetyConfig::postPurgeMs` | 90,000 (90 sec, 30-180 s via MQTT) | Burner relays off after a stop; pumps overrun separately (5 min) |
 | `PRE_PURGE_TIME_MS` | 2,000 (2 sec) | Atmospheric burner (no forced draft) |
 | `IGNITION_TIME_MS` | 5,000 (5 sec) | Flame establishment window |
 

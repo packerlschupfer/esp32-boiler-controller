@@ -12,12 +12,12 @@ This system controls combustion equipment and must be installed by qualified pro
 
 ## Features
 
-### Safety Systems (5 Layers)
+### Safety Systems (4 Layers)
 - **BurnerSafetyValidator**: Pre-operation validation with runtime-configurable parameters
 - **SafetyInterlocks**: Continuous monitoring with configurable sensor staleness detection
 - **CentralizedFailsafe**: Coordinated emergency shutdown
 - **DELAY Watchdog**: Hardware-enforced relay auto-OFF (10s) protects against ESP32 failures
-- **Hardware Interlocks**: Physical safety sensors (future)
+- **Hardware Interlocks**: Not implemented (`checkHardwareInterlocks()` is a stub that always passes)
 - **Runtime Configuration**: Safety parameters adjustable via MQTT (sensor staleness, pump protection, post-purge duration)
 
 ### Control Systems

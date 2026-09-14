@@ -140,7 +140,8 @@ int32_t pidPower = 50 + (adjustment / 10);
 - **Output**: 0-100% (50% = at target), mapped to OFF/HALF/FULL
 
 ### Anti-Windup
-- **Integral Limits**: ±1000 tenths (±100°C equivalent)
+- **Integral Limits**: `SafetyConfig::pidIntegralMin`/`pidIntegralMax`, default ±100000 (NVS `pid_int_min`/`pid_int_max`, allowed ±500000), set by `BoilerTempController::initialize()`. The integral accumulates error (tenths °C) × dt (ms) / 1000, so the unit is tenths-°C·s
+- **Output Limits**: PID adjustment clamped to ±1000 tenths (±100.0°C, `OUTPUT_MIN`/`OUTPUT_MAX`)
 - **Prevents**: Integral accumulation during saturation
 - **Method**: Conditional integration (no accumulation while saturated) plus clamp to `integralMin`/`integralMax`
 
@@ -237,18 +238,19 @@ Manage MQTT message backlog with priority-based queue and backpressure handling.
 
 **Dual Queue System:**
 ```
-High Priority Queue (20 messages):
+High Priority Queue (3 messages, HIGH_PRIORITY_QUEUE_SIZE in MQTTTask.h):
 - Safety alerts
 - Error notifications
 - Critical state changes
 
-Normal Priority Queue (40 messages):
+Normal Priority Queue (5 messages, NORMAL_PRIORITY_QUEUE_SIZE):
 - Sensor data
 - Status updates
 - Routine telemetry
 
-Total Capacity: 60 messages
-Backpressure Threshold: 48 messages (80%)
+Total Capacity: 8 messages
+Overflow: DROP_OLDEST (both queues)
+Backpressure: MQTT_QUEUE_PRESSURE bit
 ```
 
 **Queue Selection Logic:**
@@ -496,8 +498,8 @@ On a relay switch: extrema_.onSwitch(newRelayOn, temp, time)
 The warm-up phase is ignored: a phase not started by a switch, and a switch at the very first sample (a cold boiler switches ON at once), report nothing. Samples are counted by timestamp, so `sample()` followed by `onSwitch()` for the same sample (as `PIDAutoTuner::relayControl()` does) behaves the same as `onSwitch()` alone.
 
 ### Parameters
-- **Relay Amplitude**: 50 (`BoilerTempController::startAutoTuning`)
-- **Hysteresis**: 1.0°C
+- **Relay Amplitude**: `pid/autotune/amplitude`, default 50 % (range 10-100). The relay test drives the burner OFF <-> FULL, a half-swing of 50 %; another value is used as-is in `Ku` and scales the tuned gains by amplitude / 50 (a warning with the factor is logged). Intended for burners whose output really swings by that amount.
+- **Hysteresis**: `pid/autotune/hysteresis`, default 1.0°C (range 0.5-10). A wider band gives larger oscillations and more noise tolerance; the formula does not correct for it.
 - **Setpoint**: target of the active burner request (55°C if none)
 - **Minimum Cycles**: `MIN_CYCLES` = 3 complete oscillations
 - **Timeout**: `MAX_TUNING_TIME_SECONDS` = 5400 seconds (90 minutes)
@@ -507,53 +509,33 @@ The warm-up phase is ignored: a phase not started by a switch, and a switch at t
 
 ---
 
-## 8. Pump Coordination (Demand-Based)
+## 8. Pump Control (Mode-Based)
 
 ### Purpose
-Coordinate heating and water pumps based on burner mode and heat demand.
+Run the heating and water pumps from the mode bits, independent of the burner.
 
 ### Location
-`src/modules/control/PumpCoordinator.cpp`
+`src/modules/control/PumpControlModule.cpp` (`PumpControlTask()`, started as HeatingPumpTask and WaterPumpTask)
 
 ### Algorithm
 
-**Pump Decision Matrix:**
+Each pump task recomputes its desired state every 500 ms (`PUMP_CHECK_INTERVAL_MS`); later rows override earlier ones:
 ```
-Mode       | Heating Pump | Water Pump | Notes
------------|--------------|------------|------------------
-HEATING    | ON           | OFF        | Space heating active
-WATER      | OFF          | ON         | Water heating active
-BOTH       | ON           | ON         | Simultaneous (if supported)
-OFF        | OFF          | OFF        | Burner off
-```
-
-**State Machine:**
-```cpp
-PumpState determinePumpStates(BurnerMode mode, bool hasDemand) {
-    if (!hasDemand) {
-        return {false, false};  // Both pumps OFF
-    }
-
-    switch (mode) {
-        case HEATING:
-            return {true, false};  // Heating pump ON
-
-        case WATER:
-            return {false, true};  // Water pump ON
-
-        case BOTH:
-            return {true, true};   // Both ON (if hardware supports)
-
-        default:
-            return {false, false};
-    }
-}
+Condition                                              | Pump
+-------------------------------------------------------|--------------------------------
+BOILER_ENABLED && mode bit (HEATING_ON / WATER_ON)     | ON
+BOILER_ENABLED && mode bit just cleared                | ON for pumpCooldownMs (overrun)
+BOILER_ENABLED cleared                                  | OFF (no overrun)
+Heating pump only: ReturnPreheater PREHEATING          | ReturnPreheater::shouldPumpBeOn()
+EMERGENCY_STOP set                                      | ON (heat dissipation)
 ```
 
-### Safety Interlocks
-- **No Dry Fire**: Pump must run before burner enable
-- **Circulation Delay**: 5-second pump pre-start
-- **Post-Purge**: Pump continues 30s after burner off (heat dissipation)
+A change sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`); RelayControlTask switches Relay 5 / Relay 6.
+
+### Protection
+- **Pump overrun**: after the mode ends the pump keeps running for `SystemSettings::pumpCooldownMs` (default 300000 ms = 5 min) to dissipate residual heat; both pumps
+- **Motor protection**: RelayControlTask enforces `SafetyConfig::pumpProtectionMs` (default 15 s) between real pump state changes
+- **No burner interlock**: there is no pump pre-start and the burner does not check the pumps (the pump check was removed from `BurnerSafetyValidator`); the burner requires an active mode request instead
 
 ---
 
@@ -1079,7 +1061,8 @@ Water heating uses **dual control strategy**:
 **Combined operation**:
 ```
 Temp < 50°C:  Two-threshold → Turn ON
-              PID → Modulate between HALF/FULL based on return temp
+              PID → Modulate between HALF/FULL based on boiler output temp
+                    (target = tank + charge delta)
 Temp > 60°C:  Two-threshold → Turn OFF
               PID → Disabled (not heating)
 ```

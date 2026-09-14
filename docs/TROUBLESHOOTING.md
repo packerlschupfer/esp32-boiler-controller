@@ -346,8 +346,8 @@ Stack canary watchpoint triggered (TaskName)
 
 **Solution:**
 1. Fix underlying issue (gas supply, ignition electrode, flame sensor)
-2. Reset via MQTT: `mosquitto_pub -t "boiler/cmd/system" -m "reset"`
-3. Power cycle if MQTT not available
+2. Reset via MQTT: `mosquitto_pub -t "boiler/cmd/burner_reset" -m "lockout"` (payload `lockout` or `reset`). `BurnerStateMachine::resetLockout()` acts only in LOCKOUT: it clears the retry counter, returns to IDLE and publishes `lockout_reset` on `boiler/status/burner`. Do not send `reset` to `boiler/cmd/system` - that reboots the controller.
+3. Without MQTT: LOCKOUT ends automatically after 5 min (`LOCKOUT_TIME_MS`), or power cycle
 
 ---
 

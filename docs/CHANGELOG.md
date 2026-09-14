@@ -39,6 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Water heating: `tempLimitLow >= tempLimitHigh` pauses water heating with one WARN (`WaterChargePolicy::limitsValid`); two-threshold decision in `WaterChargePolicy::nextChargeNeeded`
 - Water heating: switching it off (water or boiler disable, water OFF override) clears the charge latch; after re-enable a new charge starts only below `tempLimitLow` (heating preemption and sensor loss still resume)
 - ANDRTF3 temperature pointers no longer bound (`bindTemperaturePointers(nullptr, nullptr)`); ANDRTF3Task is the sole writer of the room temperature
+- Autotune reads `pid/autotune/amplitude` and `pid/autotune/hysteresis` (defaults 50 % / 1.0°C, were 40 % / 2.0°C and ignored); a warning shows the gain scale when the amplitude differs from the OFF/FULL swing
+- Removed unused `SystemConstants::Burner::POST_PURGE_TIME_MS`, `ERROR_RECOVERY_DELAY_MS` and the unconsumed `RelayControl::WATER_PUMP_ON/OFF` writes in WheaterControlTask
 
 ### Fixed
 - ANDRTF3 HAL: Removed ineffective retry loop (was generating 4 errors instead of 1)
@@ -58,6 +60,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - MODE_SWITCHING could wait without limit while the burner kept firing; mode revert bounced RUNNING_LOW <-> MODE_SWITCHING
 - Inverted tank limits toggled water and heating every control cycle
 - Interrupted water charge resumed after switching water heating off and on, also within one task cycle
+- Autotune ignored the `pid/autotune/amplitude` and `pid/autotune/hysteresis` settings (hard-coded 50 % / 1.0°C)
 
 ---
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The boiler controller implements a **5-layer safety architecture** designed to prevent dangerous conditions through multiple independent safety mechanisms. Each layer operates independently and can trigger emergency shutdown.
+The boiler controller implements a **4-layer safety architecture**: three software layers (BurnerSafetyValidator, SafetyInterlocks, CentralizedFailsafe) and the hardware DELAY watchdog of the RYN4 relay module. The burner state machine runs the software checks in its states (see Burner State Machine Integration). Hardware interlocks are not implemented (see below).
 
 **Design Philosophy**: Defense in depth - multiple independent safety checks ensure that failure of one layer does not compromise overall system safety.
 
@@ -16,14 +16,16 @@ The boiler controller implements a **5-layer safety architecture** designed to p
 
 **Location**: `src/modules/control/BurnerSafetyValidator.cpp`
 
-**Validation Steps** (7 critical checks):
-1. **System enabled check** - Verify boiler control is active
-2. **Pressure bounds** - 1.00-3.50 BAR operating range
-3. **Temperature limits** - Maximum 90�C over-temperature protection
-4. **Sensor validity** - All critical sensors must have valid readings
-5. **Sensor staleness** - Data must be recent (configurable timeout)
-6. **Pump interlock** - Heating or water pump must be running
-7. **Burner anti-flapping** - Minimum 2 minutes between burner cycles
+**Validation Steps** (`validateBurnerOperation()`, 7 checks in this order):
+1. **Emergency stop** - `EMERGENCY_STOP` bit must be clear
+2. **Sensor validity** - At least 2 of boiler output, boiler return and water tank valid and within sensor range; all count as invalid if the MB8ART data is older than `SafetyConfig::sensorStaleMs`
+3. **Temperature limits** - Boiler output below `maxBoilerTemp` (BurnerControlTask: 110.0°C `MAX_BOILER_TEMP_C` from `TemperatureSensorFallback::getSafeOperatingParams()`; BoilerTempControlTask: struct default 85.0°C). In water mode the tank must also be below `wHeaterConfTempSafeLimitHigh`
+4. **Runtime limits** - 1 h continuous, 4 h per day. The start time and daily runtime counters are never updated in the current code, so this check does not trigger
+5. **Pressure bounds** - 1.00-3.50 BAR; without a valid pressure reading the burner is blocked unless built with `ALLOW_NO_PRESSURE_SENSOR`
+6. **Hardware interlocks** - Stub, always passes
+7. **Thermal shock** - Boiler output more than 35.0°C above return (`ReturnPreheat::MAX_DIFFERENTIAL`) -> `THERMAL_SHOCK_RISK`
+
+Not checked here: pumps (the pump check was removed; the burner requires an active mode request instead) and anti-flapping (minimum on-time 120 s and off-time 20 s are enforced by the burner state machine, power level changes by `BurnerAntiFlapping` in BoilerTempController).
 
 **Runtime-Configurable Parameters**:
 - **Sensor Staleness Timeout**: 30-300s (default: 60s)
@@ -31,12 +33,12 @@ The boiler controller implements a **5-layer safety architecture** designed to p
   - Adjustable via MQTT: `boiler/cmd/config/sensor_stale_ms`
 
 **Fixed Safety Limits** (not configurable):
-- Maximum temperature: 90�C
+- Boiler output limit: 110.0°C (`MAX_BOILER_TEMP_C`, BurnerControlTask) / 85.0°C (BoilerTempControlTask demand arming)
 - Minimum pressure: 1.00 BAR
 - Maximum pressure: 3.50 BAR
-- Minimum burner cycle time: 120 seconds
+- Thermal shock differential: 35.0°C
 
-**Result**: Returns `SafetyCheckResult` enum indicating pass/fail and reason.
+**Result**: Returns a `ValidationResult` (`SAFE_TO_OPERATE` or the failure reason). BurnerControlTask then withdraws the heat demand; `THERMAL_SHOCK_RISK` starts return preheating, results other than `SENSOR_FAILURE`/`PUMP_FAILURE` call `BurnerStateMachine::emergencyStop()`.
 
 ---
 
@@ -46,11 +48,13 @@ The boiler controller implements a **5-layer safety architecture** designed to p
 
 **Location**: `src/modules/control/SafetyInterlocks.cpp`
 
-**Monitoring Checks**:
-1. **Sensor staleness detection** - Configurable timeout (default 60s)
-2. **Temperature bounds monitoring** - Continuous over-temp protection
-3. **Pressure monitoring** - Continuous pressure range verification
-4. **Pump state verification** - Ensure pump runs when burner active
+**Monitoring Checks** (`continuousSafetyMonitor()`, skipped while `BOILER_ENABLED` is clear):
+1. **Emergency stop** - Every call
+2. **Critical temperature** - Boiler output at or above 115.0°C (`CRITICAL_BOILER_TEMP_C`) -> `triggerEmergencyShutdown()`; every call
+3. **Sensor staleness** - Boiler output channel stale (`StateManager::isSensorStale()`) -> `triggerEmergencyShutdown()`; every call
+4. **Full check** - `performFullSafetyCheck()` every 5 s (`FULL_CHECK_INTERVAL_MS`) while HEATING_ON or WATER_ON is set: emergency stop, critical error bits (SENSOR_FAILURE, MODBUS, RELAY), at least 2 valid and fresh sensors, boiler output and return below 110.0°C, thermal shock (`SafetyConfig::thermalShockDifferentialC`), sensor and relay communication, pressure 1.00-3.50 BAR (skipped without a valid pressure reading)
+
+Pump verification was removed (Round 18/19): SafetyInterlocks does not check the pumps.
 
 **Key Difference from Layer 1**:
 - Layer 1: Pre-operation validation (gate-keeping)
@@ -91,9 +95,10 @@ The burner never switches pumps off: the former `setAllRelays(false)` in `emerge
 
 **Post-Purge Timing**:
 - **Purpose**: Keep the burner off after a stop; pumps are controlled independently by PumpControlModule. If heat demand returns during post-purge, the burner restarts via PRE_PURGE once the minimum off-time (20 s) has passed
-- **Default**: 90 seconds (tested and proven safe)
-- **Minimum**: 30 seconds (regulatory requirement)
-- **Maximum**: 180 seconds (prevents excessive cycling)
+- **Default**: 90 seconds (`SafetyConfig::Defaults::POST_PURGE_MS`)
+- **Minimum**: 30 seconds (`Limits::POST_PURGE_MIN_MS`)
+- **Maximum**: 180 seconds (`Limits::POST_PURGE_MAX_MS`)
+- Values outside 30-180 s are rejected by `SafetyConfig::setPostPurge()`; an out-of-range value loaded from NVS is replaced by the default
 
 ---
 
@@ -155,13 +160,13 @@ constexpr uint8_t DELAY_WATCHDOG_SECONDS = 10;  // Auto-OFF timer
 
 ---
 
-### Layer 5: Hardware Interlocks (Future)
+### Not Implemented: Hardware Interlocks
 
 **Purpose**: Physical safety sensors independent of software.
 
-**Status**: Planned for future implementation
+**Status**: Not implemented and not counted as a layer. `BurnerSafetyValidator::checkHardwareInterlocks()` is a stub that always returns true (no interlock inputs are wired).
 
-**Planned Features**:
+**Possible additions** (not in the code):
 - Physical flame sensor (ionization rod or UV detector)
 - Flow sensor (verify water circulation)
 - Independent pressure switch
@@ -270,7 +275,7 @@ The following checks were removed as **redundant or counterproductive**:
 **Reason**:
 - Industrial boiler can heat 10-15�C in 15 seconds (normal operation)
 - False positives prevented legitimate heating
-- Over-temperature protection (90�C) already provides thermal safety
+- Over-temperature protection (110°C limit, 115°C emergency stop) already provides thermal safety
 
 #### 2. Cross-Validation
 **Removed**: Inter-sensor agreement checking
@@ -282,7 +287,7 @@ The following checks were removed as **redundant or counterproductive**:
 #### 3. Thermal Runaway Detection
 **Removed**: Historical temperature trend analysis
 **Reason**:
-- Overlap with over-temperature protection (90�C hard limit)
+- Overlap with over-temperature protection (110°C / 115°C hard limits)
 - Memory overhead (~288 bytes for history buffers)
 - Hard limits more reliable than predictive detection
 
@@ -291,10 +296,10 @@ The following checks were removed as **redundant or counterproductive**:
 ### Retained Safety Checks
 
 **Core safety checks remain**:
-1. Over-temperature protection (90�C)
+1. Over-temperature protection (110°C limit, 115°C emergency stop)
 2. Pressure bounds (1.00-3.50 BAR)
 3. Sensor validity and staleness
-4. Pump interlock
+4. Thermal shock differential (return preheating)
 5. Burner anti-flapping (2 min minimum on-time, 20 s minimum off-time)
 
 **Result**: Streamlined safety system with reduced false positives while maintaining all critical protections.
@@ -429,10 +434,12 @@ Includes: Last safety check result, failsafe state
 
 **Error Notifications**:
 ```
-Topic: boiler/status/errors
-Trigger: Safety violations
-Format: {"error":"SAFETY_CHECK_FAILED","reason":"OVER_TEMP","timestamp":...}
+Topic: boiler/status/error
+Trigger: Rejected MQTT commands (not safety violations)
+Format: plain string: invalid_config_value, invalid_numeric_value, unknown_command
 ```
+
+Safety validation failures are not published as an MQTT message. `BurnerSafetyValidator::logSafetyEvent()` logs them, records `RELAY_SAFETY_INTERLOCK` via `ErrorHandler::logError()` and sets the `Error::SAFETY` bit.
 
 ### Command Topics
 
@@ -490,10 +497,10 @@ See [MQTT_API.md](MQTT_API.md) for complete command reference.
 ### Safety Test Scenarios
 
 **Recommended Tests**:
-1. **Over-temperature**: Simulate sensor reading >90�C � expect immediate shutdown
+1. **Over-temperature**: Simulate boiler output >=110°C -> expect burner start blocked; >=115°C during operation -> expect emergency stop (`CentralizedFailsafe::emergencyStop()`)
 2. **Sensor staleness**: Disconnect Modbus � expect shutdown after timeout
 3. **Pressure loss**: Simulate low pressure � expect burner inhibit
-4. **Pump interlock**: Stop pump manually � expect burner cutoff
+4. **Thermal shock**: Boiler output more than 35°C above return -> expect burner blocked and return preheating (heating pump cycling). There is no pump interlock: a stopped pump does not cut off the burner directly
 5. **Post-purge**: Shutdown during heating � verify burner relays stay off for `SafetyConfig::postPurgeMs` (default 90s) while pumps follow their mode
 
 ---
@@ -517,7 +524,7 @@ See [MQTT_API.md](MQTT_API.md) for complete command reference.
 
 **All changes affecting safety must**:
 1. Maintain 4-layer architecture independence
-2. Preserve hard safety limits (90�C, pressure bounds)
+2. Preserve hard safety limits (110°C / 115°C temperature, pressure bounds)
 3. Follow existing validation patterns
 4. Include safety impact analysis
 5. Test against known failure scenarios
@@ -555,7 +562,7 @@ Sensor staleness:    60 seconds
 Pump protection:     15 seconds
 Post-purge:          90 seconds
 DELAY watchdog:      10 seconds (hardware auto-OFF, renewed every 5s)
-Max temperature:     90�C
+Max boiler temp:     110.0°C (burner blocked), 115.0°C (emergency stop)
 Pressure range:      1.00-3.50 BAR
 Burner min on-time:  120 seconds (bypassed on explicit disable, lost mode request, flame loss)
 Burner min off-time: 20 seconds

@@ -290,26 +290,14 @@ mosquitto_pub -t "boiler/cmd/water" -m "disable"
 
 ### Configuration Commands
 
-**Topic Pattern**: `boiler/config/{parameter}`
+`boiler/config/+` is subscribed, but `MQTTSubscriptionManager` only logs incoming messages; no setting is changed. There are no `water_setpoint`, `room_setpoint` or `pid` config commands. Use instead:
 
-#### Set Water Temperature Setpoint
-```bash
-mosquitto_pub -t "boiler/config/water_setpoint" -m '{"value": 60}'
-```
+- **Room target**: `boiler/cmd/room_target`, plain payload in °C (15-30), confirmed on `boiler/status/heating/target`
+- **Water tank limits**: parameters `wheater/tempLimitLow` / `wheater/tempLimitHigh` (see Water Heating and PID Parameters)
+- **PID gains**: parameters `pid/spaceHeating/kp|ki|kd` and `pid/waterHeater/kp|ki|kd` (same section)
 
-#### Set Room Temperature Setpoint
 ```bash
-mosquitto_pub -t "boiler/config/room_setpoint" -m '{"value": 21}'
-```
-
-#### Set PID Parameters
-```bash
-mosquitto_pub -t "boiler/config/pid" -m '{
-  "controller": "heating",
-  "kp": 2.5,
-  "ki": 0.15,
-  "kd": 0.8
-}'
+mosquitto_pub -t "boiler/cmd/room_target" -m "21.5"
 ```
 
 ### Safety Configuration Commands
@@ -559,6 +547,8 @@ all reported temperatures. Changes take effect on the next sensor read cycle.
 | Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
 | Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
 | Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |
+| Autotune amplitude | `pid/autotune/amplitude` | 10-100 (%) | 50 | Relay output half-swing used in Ku = 4d/(pi a). The relay test drives OFF <-> FULL (50 %); another value scales the tuned gains by amplitude / 50 |
+| Autotune hysteresis | `pid/autotune/hysteresis` | 0.5-10 (°C) | 1.0 | Relay switching band around the setpoint |
 
 **Notes**:
 - Each tank limit is range-checked on its own. If `tempLimitLow >= tempLimitHigh`, water heating pauses (one WARN in the log) until the pair is consistent. When raising both limits send `tempLimitHigh` first; when lowering both send `tempLimitLow` first.
@@ -658,7 +648,7 @@ mosquitto_pub -t "errors/stats" -m ""
 
 ```bash
 # Set broker credentials
-BROKER="192.168.16.16"
+BROKER="192.168.20.27"
 USER="YOUR_MQTT_USER"
 PASS="YOUR_MQTT_PASSWORD"
 
@@ -713,7 +703,7 @@ mosquitto_sub -h $BROKER -u $USER -P $PASS \
 #!/bin/bash
 # Monitor boiler with formatted output
 
-BROKER="192.168.16.16"
+BROKER="192.168.20.27"
 USER="YOUR_MQTT_USER"
 PASS="YOUR_MQTT_PASSWORD"
 
@@ -801,22 +791,22 @@ mosquitto_pub -t "system/status" -r -n
 
 The system uses 2 priority queues for MQTT publishing:
 
-### High Priority Queue (3 slots, 392 bytes each)
+Sizes: `HIGH_PRIORITY_QUEUE_SIZE` and `NORMAL_PRIORITY_QUEUE_SIZE` in `src/modules/tasks/MQTTTask.h`; item size `sizeof(MQTTPublishRequest)` (64-byte topic, 320-byte payload).
+
+### High Priority Queue (3 slots)
 - Sensor data (real-time monitoring)
 - Critical alerts
 - Connection status
 - Error notifications
 
-### Normal Priority Queue (5 slots, 392 bytes each)
+### Normal Priority Queue (5 slots)
 - Status updates
 - Configuration responses
 - Schedule events
 - Debug information
 
-**Overflow Strategy**: DROP_LOWEST_PRIORITY
-- Scans queue to find lowest priority message
-- Drops it to make room for new message
-- Preserves sensor data over status updates
+**Overflow Strategy**: `DROP_OLDEST` (both queues, `MQTTTask::init()`)
+- When a queue is full, its oldest message is dropped to make room for the new one
 
 ---
 
@@ -903,7 +893,7 @@ Repeated errors are rate-limited:
 **File**: `src/config/ProjectConfig.h`
 
 ```cpp
-#define MQTT_SERVER "192.168.16.16"
+#define MQTT_SERVER "192.168.20.27"  // ProjectConfig.h default; platformio.ini [base_prod] sets the same, [base_dev] 192.168.20.16
 #define MQTT_PORT 1883
 #define MQTT_CLIENT_ID DEVICE_HOSTNAME  // "ESPlan-Boiler"
 #define MQTT_RECONNECT_INTERVAL_MS 5000
@@ -914,19 +904,16 @@ Repeated errors are rate-limited:
 **File**: `src/modules/tasks/MQTTTask.cpp`
 
 ```cpp
-// High priority queue
-QueueConfig highPriorityConfig = {
-    .length = 3,
-    .itemSize = sizeof(MQTTPublishRequest),  // 392 bytes
-    .overflowStrategy = OverflowStrategy::DROP_LOWEST_PRIORITY
-};
+// MQTTTask.h: HIGH_PRIORITY_QUEUE_SIZE = 3, NORMAL_PRIORITY_QUEUE_SIZE = 5
+QueueManager::QueueConfig highPriorityConfig;
+highPriorityConfig.length = HIGH_PRIORITY_QUEUE_SIZE;
+highPriorityConfig.itemSize = sizeof(MQTTPublishRequest);
+highPriorityConfig.overflowStrategy = QueueManager::OverflowStrategy::DROP_OLDEST;
 
-// Normal priority queue
-QueueConfig normalPriorityConfig = {
-    .length = 5,
-    .itemSize = sizeof(MQTTPublishRequest),
-    .overflowStrategy = OverflowStrategy::DROP_LOWEST_PRIORITY
-};
+QueueManager::QueueConfig normalPriorityConfig;
+normalPriorityConfig.length = NORMAL_PRIORITY_QUEUE_SIZE;
+normalPriorityConfig.itemSize = sizeof(MQTTPublishRequest);
+normalPriorityConfig.overflowStrategy = QueueManager::OverflowStrategy::DROP_OLDEST;
 ```
 
 ---
@@ -975,7 +962,7 @@ QueueConfig normalPriorityConfig = {
 
 ### Check Device Connection
 ```bash
-mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass \
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass \
   -t "boiler/status/online" -C 1 -W 2
 
 # Expected: {"online": true}
@@ -983,7 +970,7 @@ mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass \
 
 ### Monitor Sensor Data with jq
 ```bash
-mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass \
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass \
   -t "boiler/status/sensors" | jq '{
     boiler_out: (.t.bo / 10),
     water_tank: (.t.wt / 10),
@@ -995,7 +982,7 @@ mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass \
 ### Wait for Schedule Event
 ```bash
 # Wait for next schedule start/end
-mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass \
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass \
   -t "boiler/scheduler/event" -C 1
 
 # Timeout after 5 minutes
@@ -1033,7 +1020,7 @@ def on_message(client, userdata, msg):
 client = mqtt.Client()
 client.username_pw_set("YOUR_MQTT_USER", "YOUR_MQTT_PASSWORD")
 client.on_message = on_message
-client.connect("192.168.16.16", 1883, 60)
+client.connect("192.168.20.27", 1883, 60)
 client.subscribe("boiler/status/sensors")
 client.loop_forever()
 ```
@@ -1041,7 +1028,7 @@ client.loop_forever()
 ### Node.js (mqtt.js)
 ```javascript
 const mqtt = require('mqtt');
-const client = mqtt.connect('mqtt://192.168.16.16', {
+const client = mqtt.connect('mqtt://192.168.20.27', {
   username: 'YOUR_MQTT_USER',
   password: 'YOUR_MQTT_PASSWORD'
 });

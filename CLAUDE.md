@@ -135,13 +135,14 @@ See `docs/TASK_ARCHITECTURE.md` for complete details.
 
 Defined in `src/shared/Temperature.h` and `src/shared/Pressure.h`.
 
-### Safety System (5 Layers)
+### Safety System (4 Layers)
 
 1. **BurnerSafetyValidator**: Pre-operation validation (7 checks)
 2. **SafetyInterlocks**: Continuous monitoring during operation
 3. **CentralizedFailsafe**: Coordinated emergency shutdown
 4. **DELAY Watchdog**: Hardware-enforced relay auto-OFF (10s, renewed every 5s) - protects against ESP32 failures
-5. **Hardware Interlocks**: (Future) Physical safety sensors
+
+Hardware interlocks (flame sensor, flow sensor, pressure switch) are not implemented: `BurnerSafetyValidator::checkHardwareInterlocks()` is a stub that always passes.
 
 Runtime-configurable safety parameters via MQTT:
 - Sensor staleness timeout: 30-300s (default 60s)
@@ -294,7 +295,7 @@ Tasks with float logging need **minimum 3584 bytes** in debug modes.
 **RYN4 Hardware DELAY Commands**:
 - Command format: `0x06XX` where XX = delay in seconds (01-99 hex)
 - Example: `0x0614` = Relay ON immediately, auto-OFF after 20 seconds
-- Used for burner safety: Prevents enable signal gaps during mode transitions
+- Used as a relay watchdog (`RYN4ProcessingTask`): every relay ON command is sent as DELAY `SystemConstants::Relay::DELAY_WATCHDOG_SECONDS` (10 s) and renewed every 5 s, so the relays drop out if the ESP32 stops renewing; OFF is sent as DELAY 0 (cancels a running timer)
 - Reading relay status returns physical state (0x0001/0x0000), never command value
 
 **Verification Behavior**:

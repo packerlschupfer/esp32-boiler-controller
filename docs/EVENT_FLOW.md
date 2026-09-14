@@ -83,7 +83,7 @@ main.cpp::setup()
 ### Phase 6: Network Services Connect
 ```
 Network Connected Event
-├─ MQTT connects to broker (192.168.16.16:1883)
+├─ MQTT connects to broker (MQTT_SERVER, 192.168.20.27:1883 in the production build)
 │  ├─ Subscribes to command topics
 │  ├─ Publishes online status
 │  └─ Sets SystemState::MQTT_OPERATIONAL
@@ -119,7 +119,10 @@ WheaterControlTask
 │  └─ low >= high → no charge, one WARN "Water limits inconsistent"
 ├─ WaterChargePolicy::nextChargeNeeded(): 25.2°C < tempLimitLow → NEEDS HEATING
 ├─ Calls BurnerRequestManager::setWaterRequest()
-│  ├─ Encode 65°C in bits 16-23 (85°C burner target = 55°C + 10°C)
+│  ├─ Boiler target = tank + wHeaterConfTempChargeDelta = 25.2°C + 10°C = 35.2°C,
+│  │  clamped to water_heating_low_limit..high_limit (default 40-90°C) → 40°C
+│  │  (setWaterRequest() also clamps to 20-110°C)
+│  ├─ Encode 40°C in bits 16-23
 │  ├─ Set BurnerRequest::WATER
 │  ├─ Set BurnerRequest::POWER_HIGH
 │  └─ Set BurnerRequest::CHANGED | WATER_CHANGED
@@ -131,7 +134,7 @@ WheaterControlTask
 BurnerControlTask
 ├─ Wakes on BurnerRequest::CHANGED event
 ├─ Reads request bits via xEventGroupGetBits()
-├─ Decodes temperature: (bits >> 16) & 0xFF = 65°C
+├─ Decodes temperature: (bits >> 16) & 0xFF = 40°C
 ├─ Checks TempSensorFallback::getOperationMode()
 │  └─ Changes: NONE → WATER_HEATING
 ├─ Runs safety checks (sensor staleness, BurnerSafetyValidator)
@@ -141,8 +144,8 @@ BurnerControlTask
 │  └─ Validation passed → clears Error::SAFETY
 ├─ Publishes BurnerDemandGate permission (getBurnerDemandPermission)
 └─ BurnerDemandGate::controlTaskMayArm()
-   ├─ Boiler 25°C < target 65°C → arm now
-   │  └─ BurnerStateMachine::setHeatDemand(true, 650, highPower)
+   ├─ Boiler 25°C < target 40°C → arm now
+   │  └─ BurnerStateMachine::setHeatDemand(true, 400, highPower)
    └─ Boiler already above target → not armed; BoilerTempControlTask
       arms on a later cycle when its PID wants heat
 
@@ -154,15 +157,13 @@ BurnerStateMachine (IDLE)
 
 #### Step 4: Water Pump Starts
 ```
-WheaterPumpControlTask
-├─ Detects SystemState::WATER_ON bit
+WaterPumpTask (PumpControlModule, every 500ms)
+├─ Detects SystemState::WATER_ON bit (with BOILER_ENABLED)
 ├─ Checks current pump state: OFF
-├─ Sets RelayRequest::WATER_PUMP_ON
-└─ RelayControlTask processes
-   ├─ Calls RYN4::controlRelay(2, ON)
-   ├─ Updates SharedRelayReadings::relayWhpump = true
-   ├─ Sets SystemState::WATER_PUMP_ON
-   └─ Increments water pump start counter
+├─ Sets RelayRequest::WATER_PUMP_ON and SystemState::WATER_PUMP_ON
+├─ Increments water pump start counter
+└─ RelayControlTask switches Relay 6 (WATER_PUMP) ON
+   (WheaterControlTask already set RelayRequest::WATER_PUMP_ON at charge start)
 ```
 
 #### Step 5: Burner Ignition Sequence
@@ -174,9 +175,9 @@ BurnerStateMachine (PRE_PURGE, PRE_PURGE_TIME_MS = 2s)
 BurnerStateMachine (IGNITION state)
 ├─ Enable ignition spark (not implemented)
 ├─ Open gas valve → Set relays
-│  ├─ Relay 3 (Burner) → ON
-│  ├─ Relay 5 (Water Mode) → ON
-│  └─ Relay 4 (Power) → OFF (full power)
+│  ├─ Relay 1 (BURNER_ENABLE) → OFF
+│  ├─ Relay 3 (WATER_MODE) → ON
+│  └─ Relay 2 (POWER_BOOST) → ON (full power; OFF = half power)
 ├─ Wait BURNER_MIN_IGNITION_TIME_MS (3s), then check flame
 │  └─ Assumed TRUE (no flame sensor installed)
 ├─ IGNITION → RUNNING_HIGH (RUNNING_LOW if high power not allowed)
@@ -232,7 +233,8 @@ BurnerStateMachine (RUNNING_HIGH)
    → POST_PURGE without waiting for the minimum on-time
 
 BurnerStateMachine (POST_PURGE)
-├─ Close gas valve (relays 3,4,5 → OFF)
+├─ BurnerSystemController::deactivate(): burner relays OFF
+│  (Relay 1 BURNER_ENABLE, Relay 2 POWER_BOOST, Relay 3 WATER_MODE)
 ├─ Keep fan running (if equipped)
 ├─ Heat demand + active mode request return → PRE_PURGE
 │  (same conditions as from IDLE, minimum off-time applies)
@@ -242,13 +244,12 @@ BurnerStateMachine (POST_PURGE)
 
 #### Step 9: Water Pump Stops
 ```
-WheaterPumpControlTask
-├─ Detects SystemState::WATER_ON cleared
-├─ Sets RelayRequest::WATER_PUMP_OFF
-└─ RelayControlTask
-   ├─ RYN4::controlRelay(2, OFF)
-   ├─ Updates SharedRelayReadings
-   └─ Clears SystemState::WATER_PUMP_ON
+WaterPumpTask (PumpControlModule)
+├─ Detects SystemState::WATER_ON cleared → pump overrun
+│  (SystemSettings::pumpCooldownMs, default 5 min)
+├─ After the overrun: sets RelayRequest::WATER_PUMP_OFF,
+│  clears SystemState::WATER_PUMP_ON
+└─ RelayControlTask switches Relay 6 (WATER_PUMP) OFF
 ```
 
 **Total Cycle Time**: ~15-20 minutes (depends on water volume)
@@ -271,18 +272,19 @@ ANDRTF3Task (every 5s)
 #### Step 2: Heating Control Evaluates
 ```
 HeatingControlTask
-├─ Wakes on SensorUpdate::INSIDE event
-├─ Reads current temp: 19.5°C
-├─ Reads setpoint from SystemSettings: 21.0°C
-├─ Calculates error: 21.0 - 19.5 = 1.5°C
-├─ PID Controller runs
-│  ├─ Error = 1.5°C → positive (need heat)
-│  ├─ Output = 45.0 (scale 0-100)
-│  └─ Decision: Request burner at MODERATE power
-└─ Calls BurnerRequestManager::setHeatingRequest()
-   ├─ Encode 70°C target (boiler temp)
+├─ Wakes on its 5s process timer
+│  (or a HEATING_ON/OFF_OVERRIDE / WATER_PRIORITY_RELEASED control event)
+├─ BOILER_ENABLED + HEATING_ENABLED, checkIfSpaceHeatingNeededEvent()
+├─ Water priority check, sensors available (TemperatureSensorFallback)
+├─ HeatingControlModule::calculateSpaceHeatingTargetTemp() (no PID here)
+│  ├─ Heating curve from outside temperature
+│  └─ Weather-compensated mode: curve shifted by the room deviation
+│     (target 21.0°C - room 19.5°C) × roomTempCurveShiftFactor
+└─ Calls BurnerRequestManager::setHeatingRequest(target, false)
+   ├─ Clamp to heating_low_limit..heating_high_limit (and 20-110°C)
+   ├─ Encode target (e.g. 70°C) in bits 16-23
    ├─ Set BurnerRequest::HEATING
-   ├─ Set BurnerRequest::POWER_HIGH
+   ├─ Set BurnerRequest::POWER_LOW
    └─ Set BurnerRequest::HEATING_CHANGED | CHANGED
 ```
 
@@ -299,27 +301,32 @@ BurnerControlTask receives CHANGED event
 
 #### Step 4: Heating Pump Starts
 ```
-HeatingPumpControlTask
-├─ Detects SystemState::HEATING_ON
-├─ Waits for burner to start
-└─ After burner confirmed:
-   └─ Starts heating pump (Relay 1 → ON)
+HeatingPumpTask (PumpControlModule, every 500ms)
+├─ Detects SystemState::HEATING_ON (with BOILER_ENABLED)
+├─ Does not wait for the burner
+└─ Sets RelayRequest::HEATING_PUMP_ON → Relay 5 (HEATING_PUMP) ON
 ```
 
 #### Step 5: PID Control Loop
 ```
-HeatingControlTask (every 1000ms)
-├─ Read current boiler temp
-├─ Calculate PID output
+BoilerTempControlTask (on every SensorUpdate::BOILER_OUTPUT, ~2.5s)
+├─ Reads boiler output temp and the target of the active request
+├─ BoilerTempController::calculate() (PID, gains pid/spaceHeating/*)
 │  ├─ P term: Kp × error
-│  ├─ I term: Ki × ∫error dt
+│  ├─ I term: Ki × ∫error dt (anti-windup)
 │  ├─ D term: Kd × Δerror/Δt
-│  └─ Output = P + I + D
-├─ Translate output to power request
-│  ├─ Output > 50 → HIGH_POWER
-│  ├─ Output 20-50 → LOW_POWER
-│  └─ Output < 20 → STOP
-└─ Update burner request if changed
+│  └─ Output = 50 + adjustment/10, clamped 0-100 (50 = at target)
+├─ Maps output to power level with hysteresis
+│  ├─ OFF → HALF above 55 (FULL above 75)
+│  ├─ HALF/FULL → OFF below 35
+│  ├─ HALF → FULL above 75
+│  └─ FULL → HALF below 65
+├─ BurnerAntiFlapping may keep the previous level
+└─ BurnerDemandGate::decide(): ARM / SET_POWER / DISARM
+   └─ BurnerStateMachine::setHeatDemand()
+
+HeatingControlTask (5s process timer)
+└─ Recalculates the heating curve target and updates the heating request
 ```
 
 ---
@@ -358,23 +365,26 @@ BurnerControlTask
 │  ├─ BurnerSystemController::emergencyShutdown(): burner relays OFF
 │  │  (BURNER_ENABLE, POWER_BOOST, WATER_MODE, rate limit bypassed)
 │  └─ Set SystemState::EMERGENCY_STOP | BURNER_ERROR
-└─ Call CentralizedFailsafe::triggerEmergency()
+└─ CentralizedFailsafe::emergencyStop() is not called on this path
+   (see Step 4 for the triggers that reach it)
 ```
 
-#### Step 4: Emergency State Persistence
+#### Step 4: Coordinated Emergency Stop (other triggers)
 ```
-CentralizedFailsafe::triggerEmergency()
-├─ Log critical error
-├─ Save to FRAM via CriticalDataStorage
-│  ├─ EmergencyState.reason = PRESSURE_LOW
-│  ├─ EmergencyState.lastPressure = 35 (0.35 BAR)
-│  ├─ EmergencyState.wasHeating = true
-│  ├─ EmergencyState.timestamp = current millis
-│  └─ Calculate CRC32 and write to FRAM
-├─ Clear all burner requests
-│  └─ BurnerRequest group cleared
-└─ Notify all subsystems
-   └─ Set Error::CRITICAL_FAILURE
+CentralizedFailsafe::emergencyStop(reason)
+(reached via SafetyInterlocks::triggerEmergencyShutdown(): critical temperature
+ >= 115°C, stale sensor data during operation, burner request watchdog;
+ and via the EMERGENCY failsafe level)
+├─ Log "EMERGENCY STOP: <reason>", failsafe level EMERGENCY
+├─ BurnerSystemController::emergencyShutdown(): burner relays OFF
+├─ Relays 1-3 OFF again via setRelayState() (redundant)
+├─ Relay 5 (HEATING_PUMP) and Relay 6 (WATER_PUMP) forced ON via
+│  setRelayStateEmergency() for heat dissipation
+├─ Set SystemState::EMERGENCY_STOP
+├─ Clear SystemState::BOILER_ENABLED, notifyWheaterTaskSwitchedOff()
+└─ ErrorHandler::logError(SYSTEM_FAILSAFE_TRIGGERED, reason)
+   (the emergency state is written to FRAM by saveEmergencyState() when the
+    failsafe level first reaches CRITICAL or higher, see SAFETY_SYSTEM.md)
 ```
 
 #### Step 5: Subsystem Responses
@@ -471,7 +481,7 @@ CentralizedFailsafe::emergencyStop()   (clears BOILER_ENABLED)
 WheaterControlTask::processWaterHeatingState() (next run)
 ├─ Counter changed → clear charge latch (lastHeatingNeeded = false)
 ├─ Charge running → end it, even if water is already enabled again
-│  ├─ RelayControl::WATER_PUMP_OFF, clear WATER_ON
+│  ├─ Clear WATER_ON (water pump follows it via PumpControlModule overrun)
 │  ├─ BurnerRequestManager::clearRequest(RequestSource::WATER)
 │  ├─ Set ControlRequest::WATER_PRIORITY_RELEASED
 │  └─ Log: "Water heating switched off - ending charge"
@@ -487,49 +497,44 @@ After re-enable
 
 ## MQTT Command Processing Flow
 
-### Scenario: User Changes Water Setpoint via MQTT
+### Scenario: User Changes the Water Tank Stop Limit via MQTT
+
+`boiler/config/+` is subscribed but only logged; settings are changed through the PersistentStorage parameter topics (`boiler/params/...`).
 
 #### Step 1: MQTT Message Arrives
 ```
 MQTT Broker publishes
-└─ Topic: boiler/config/water_setpoint
-   Payload: {"value": 60}
+└─ Topic: boiler/params/set/wheater/tempLimitHigh
+   Payload: 600 (tenths of °C = 60.0°C)
 ```
 
-#### Step 2: MQTT Task Receives
+#### Step 2: Parameter Command Queued
 ```
-MQTTTask::onMessage()
-├─ Topic parsed: last segment = "water_setpoint"
-├─ JSON parsed with ArduinoJson
-│  └─ value = 60°C extracted
-├─ Validates range (40-65°C for water)
-└─ Queues parameter update request
+PersistentStorage::handleMqttCommand()
+(subscription boiler/params/#, set up by PersistentStorageTask)
+├─ Strips the prefix "boiler/params/"
+├─ "set/" → SET command for parameter wheater/tempLimitHigh
+└─ Queues the command (dropped with a warning if the queue is full)
 ```
 
 #### Step 3: Persistent Storage Task Processes
 ```
-PersistentStorageTask
-├─ Receives update request from queue
-├─ Takes SystemSettings mutex
-├─ Updates settings.waterSetpoint = 600 (Temperature_t)
-├─ Releases mutex
-├─ Saves to NVS flash
-│  └─ namespace: "boiler", key: "water_sp"
-└─ Publishes confirmation
-   Topic: boiler/config/response
-   {"result": "ok", "param": "water_setpoint"}
+PersistentStorage (queued command processing)
+├─ setJson(): range check of the registered parameter (500-850)
+├─ Updates SystemSettings::wHeaterConfTempLimitHigh = 600
+└─ Publishes the updated parameter value
+   (persist with boiler/params/save, see MQTT_API.md)
 ```
 
 #### Step 4: Water Control Responds
 ```
 WheaterControlTask
-├─ Detects SystemSettings changed (no specific event)
-├─ Next cycle re-evaluates
-├─ New setpoint: 60°C
-├─ Current tank: 45°C
-├─ Needs heating: 45°C < 60°C
-└─ Updates burner request with new target
-   └─ BurnerRequestManager updates target temp
+├─ No specific event; the next run snapshots
+│  wHeaterConfTempLimitLow / wHeaterConfTempLimitHigh
+├─ WaterChargePolicy::limitsValid(): low < high required
+└─ WaterChargePolicy::nextChargeNeeded() uses the new stop limit
+   ├─ Charge running: ends when tank > 60.0°C
+   └─ No charge: a new one still starts only below tempLimitLow
 ```
 
 ---
@@ -761,13 +766,13 @@ SystemSettings
 ### Queue-Based Communication
 ```
 MQTT Publish Requests
-├─ High Priority Queue (3 slots, 392 bytes each)
+├─ High Priority Queue (3 slots, sizeof(MQTTPublishRequest))
 │  └─ Sensor data, critical alerts
-└─ Normal Priority Queue (5 slots, 392 bytes each)
+└─ Normal Priority Queue (5 slots)
    └─ Status updates, config responses
 
 Overflow Strategy:
-└─ DROP_LOWEST_PRIORITY: Scan queue, drop lowest
+└─ DROP_OLDEST (both queues): the oldest queued message is dropped
 ```
 
 ---
@@ -1011,7 +1016,7 @@ LOG_DEBUG(TAG, "SystemState: 0x%06X", current);
 ### MQTT Event Monitoring
 ```bash
 # Watch all boiler events in real-time
-mosquitto_sub -h 192.168.16.16 -u YOUR_MQTT_USER -P pass -t "boiler/#" -v
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass -t "boiler/#" -v
 
 # Common event topics:
 boiler/status/burner          # Burner state changes

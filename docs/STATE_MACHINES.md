@@ -287,7 +287,7 @@ elapsed >= SafetyConfig::postPurgeMs (default 90 s, 30-180 s via MQTT) -> IDLE
 -> PRE_PURGE (Reason::RESTART_FROM_POST_PURGE)
 ```
 
-POST_PURGE only keeps the burner off; the pumps are controlled independently by PumpControlModule. `SystemConstants::Burner::POST_PURGE_TIME_MS` is not used for the duration.
+POST_PURGE only keeps the burner off; the pumps are controlled independently by PumpControlModule. The duration is `SafetyConfig::postPurgeMs`.
 
 #### LOCKOUT
 ```cpp
@@ -459,82 +459,53 @@ The burner (`BurnerSystemController`) only commands relays 1-3. Pumps are owned 
 
 **State Tracking**: `SharedRelayReadings` updated atomically with mutex protection
 
-## Pump Control State Machines
+## Pump Control
 
-### Heating Pump Control
-
-```
-OFF ──────────┐
-              │ Heating active
-              ▼
-     ┌───────────────┐
-     │  WAIT_START   │ (delay for burner)
-     └───────┬───────┘
-             │ Burner confirmed
-             ▼
-            ON ◄─────── (continue while heating)
-             │
-             │ Heating stopped
-             ▼
-     ┌───────────────┐
-     │  WAIT_STOP    │ (cooldown delay)
-     └───────┬───────┘
-             │ Cooldown complete
-             ▼
-            OFF
-```
-
-### Water Pump Control
+The pumps have no multi-step state machine. `PumpControlModule::PumpControlTask()` runs once per pump (HeatingPumpTask, WaterPumpTask) and keeps a logical `PumpState` (`Off`/`On`; `Error` is defined but never set). Every 500 ms (`PUMP_CHECK_INTERVAL_MS`) it recomputes the desired state; later rows override earlier ones:
 
 ```
-OFF ─────────────┐
-                 │ Water mode active
-                 ▼
-    ┌─────────────────┐
-    │  WAIT_BURNER    │
-    └────────┬────────┘
-             │ Burner ready
-             ▼
-            ON ◄────── (continue while water active)
-             │
-             │ Water mode stopped
-             ▼
-            OFF (immediate - no cooldown for water pump)
+desired = OFF
+BOILER_ENABLED && mode bit set (HEATING_ON / WATER_ON)  -> ON, overrun cancelled
+BOILER_ENABLED && mode bit cleared since last check      -> start overrun
+overrun running && elapsed < pumpCooldownMs              -> ON  (SystemSettings, default 300000 ms = 5 min)
+BOILER_ENABLED cleared                                    -> OFF (no overrun)
+heating pump only: ReturnPreheater PREHEATING            -> ReturnPreheater::shouldPumpBeOn()
+EMERGENCY_STOP set                                        -> ON  (heat dissipation, overrides all)
 ```
 
-## Temperature Control State Machine
+On a change the task sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER_PUMP_ON/OFF`), sets or clears `SystemState::HEATING_PUMP_ON`/`WATER_PUMP_ON` and counts pump starts in FRAM. RelayControlTask applies pump motor protection (`SafetyConfig::pumpProtectionMs`). Both pumps behave the same (the water pump also has the overrun). The pumps do not wait for the burner, and the burner does not check the pumps.
 
-Simplified view of PID control state:
+### Return Preheating (`ReturnPreheater`)
 
 ```
-DISABLED ────────────┐
-                     │ Enable command
-                     ▼
-    ┌───────────────────────────┐
-    │      MONITORING           │
-    │                           │
-    │  ┌─────────────────────┐ │
-    │  │   BELOW_SETPOINT    │ │
-    │  │   (request burner)  │ │
-    │  └──────────┬──────────┘ │
-    │             │ Temp rising │
-    │             ▼             │
-    │  ┌─────────────────────┐ │
-    │  │    AT_SETPOINT      │ │
-    │  │ (PID control active)│ │
-    │  └──────────┬──────────┘ │
-    │             │ Temp falling│
-    │             ▼             │
-    │  ┌─────────────────────┐ │
-    │  │   ABOVE_SETPOINT    │ │
-    │  │  (reduce/stop burner)│ │
-    │  └─────────────────────┘ │
-    │                           │
-    └───────────────────────────┘
-                     │ Disable command
-                     ▼
-                 DISABLED
+IDLE --start()--> COMPLETE      preheatEnabled false, or differential already below 25.0°C
+IDLE --start()--> PREHEATING    heating pump cycling, cycle 1
+PREHEATING -----> COMPLETE      output - return below SAFE_DIFFERENTIAL (25.0°C)
+PREHEATING -----> TIMEOUT       preheatTimeoutMs (default 600 s) or more than preheatMaxCycles (default 8)
+COMPLETE/TIMEOUT --reset()--> IDLE   BurnerControlTask, once there is no heat demand
 ```
+
+- `start()`: BurnerControlTask or BoilerTempControlTask, when `BurnerSafetyValidator` returns `THERMAL_SHOCK_RISK` (output more than 35.0°C above return)
+- `update()`: BurnerControlTask
+- Per cycle the ON time grows and the OFF time shrinks (`ReturnPreheat::CYCLE_n_ON_SEC`/`CYCLE_n_OFF_SEC`, OFF scaled by `preheatOffMultiplier`), at least `preheatPumpMinMs` (default 3 s) between pump changes
+
+## Temperature Control
+
+There is no temperature control state enum. BoilerTempControlTask waits for `SensorUpdate::BOILER_OUTPUT` (~2.5 s) and, while a burner request is active and no autotune runs, calls `BoilerTempController::calculate(target, boilerOutput)`. The only state carried between cycles is the last power level (OFF/HALF/FULL). An invalid target or boiler temperature gives OFF.
+
+**`useBoilerTempPID` true (default, `BurnerType::MODULATING`)**: PID output 0-100% (50% = at target), gains of the active mode (`pid/spaceHeating/*` or `pid/waterHeater/*`), mapped with hysteresis (`offThreshold` 35, `halfThreshold` 45, `fullThreshold` 75, `thresholdHysteresis` 10):
+
+```
+OFF  -> HALF   output > 55 (FULL if output > 75)
+HALF -> OFF    output < 35
+HALF -> FULL   output > 75
+FULL -> OFF    output < 35
+FULL -> HALF   output < 65
+```
+
+**`useBoilerTempPID` false (`BurnerType::TWO_STAGE`)**: bang-bang on error = target - current: error below `-offHysteresis` -> OFF, above `fullPowerThreshold` -> FULL, above `onHysteresis` -> HALF, otherwise the previous level.
+
+In both modes a level change is dropped when `BurnerAntiFlapping::canChangePowerLevel()` refuses it. The resulting level drives the heat demand through `BurnerDemandGate` (see Heat Demand Arming).
 
 ## State Machine Framework
 
@@ -851,7 +822,6 @@ Published every 30 s while in ERROR. `lockout_reset` is published after a `burne
 // SystemConstants::Burner
 PRE_PURGE_TIME_MS = 2000               // 2 seconds (atmospheric burner)
 IGNITION_TIME_MS = 5000                // 5 seconds per attempt
-POST_PURGE_TIME_MS = 60000             // Not used for the duration (see SafetyConfig::postPurgeMs)
 LOCKOUT_TIME_MS = 300000               // 5 minutes
 MAX_IGNITION_RETRIES = 3               // Failed attempts before lockout
 MIN_ON_TIME_MS = 120000                // 2 minutes (anti-flapping)
