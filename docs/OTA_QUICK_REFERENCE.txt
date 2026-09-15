@@ -78,6 +78,7 @@ Safety Notes:
 - On OTA start: active burner gets a graceful stop (demand cleared, post-purge),
   runtime counters saved to FRAM, OTA event logged
 - OTA requests are only handled while Ethernet is connected
-- NO automatic rollback after boot (image marked valid at startup);
-  recover by USB flash of a known-good image
+- Automatic rollback: a new OTA image is confirmed after 60 s with sensor data and network;
+  a reset before that boots the previous image, no confirmation within 10 min rolls back
+  (OtaRollbackGuard). USB-flashed images are not affected
 - NO watchdog disable and NO task suspension during the update

@@ -124,7 +124,7 @@ Consolidated troubleshooting guide.
 #### [CHANGELOG.md](CHANGELOG.md)
 Version history and release notes (the maintained changelog).
 - **[Unreleased]** - Current changes (burner state machine, emergency stop, PID, water heating, MQTT fixes)
-- **v1.0.0** - First production release (2025-12-22)
+- **v0.1.0** - First public release (tag `v0.1.0`, 2025-12-20; called 1.0.0 in older notes)
 - **Development History** - 20+ improvement rounds
 - **Library Updates** - ESP32-ANDRTF3, ESP32-RYN4, ESP32-Syslog
 - **Quality Metrics** - 9.5/10 comprehensive analysis
@@ -379,4 +379,4 @@ When adding new features:
 ---
 
 Last Updated: 2026-09-15
-Documentation Version: 1.0.0
+Documentation Version: firmware 0.1.0 plus [Unreleased] changes

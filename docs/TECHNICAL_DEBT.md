@@ -125,7 +125,7 @@ Status markers checked against the code on 2026-09-15: **Open**, **Partly done**
 #### Low Priority
 - [ ] **BurnerStateMachine Test Coverage**
   - **Status**: Partly done
-  - **Current**: 90 burner test functions: `test_burner_transitions.cpp` 32 (`BurnerTransitions::step()` scenarios incl. MODE_SWITCHING), `test_burner_state_machine.cpp` 30, `test_burner_demand_gate.cpp` 10, `test_burner_safety.cpp` 10, `test_burner_transition_policy.cpp` 8
+  - **Current**: 50 burner test functions: `test_burner_transitions.cpp` 32 (`BurnerTransitions::step()` scenarios incl. MODE_SWITCHING), `test_burner_demand_gate.cpp` 10, `test_burner_transition_policy.cpp` 8 (the simplified-model files `test_burner_state_machine.cpp` and `test_burner_safety.cpp` were removed 2026-09-15; they tested local copies, not firmware)
   - **Target**: Add concurrency tests for seamless mode switching (still open)
   - **Timeline**: Continuous improvement
 
@@ -202,7 +202,7 @@ Total RAM recovered through 20+ rounds of deep code analysis: **6.7KB+**
 | Metric | Value | Target |
 |--------|-------|--------|
 | Lines of Code | ~15,000 | Stable |
-| Test Coverage | 249 native tests (`RUN_TEST` in `test/test_native/test_main.cpp`) | Round 21 helper tests still missing |
+| Test Coverage | 209 native tests (`RUN_TEST` in `test/test_native/test_main.cpp`) | Round 21 helper tests still missing |
 | Documentation | ~180KB | Comprehensive |
 | Build Warnings | 0 | Maintained |
 | Watchdog Resets | 0 (production) | Zero tolerance |

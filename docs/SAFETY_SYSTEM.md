@@ -337,7 +337,7 @@ The following checks were removed as **redundant or counterproductive**:
 
 **Result**: Streamlined safety system with reduced false positives while maintaining all critical protections.
 
-**Rationale**: See `DESIGN_SAFETY_SIMPLIFICATION.md` for complete analysis.
+**Rationale**: See [history/DESIGN_SAFETY_SIMPLIFICATION.md](history/DESIGN_SAFETY_SIMPLIFICATION.md) for the original analysis (historical design note).
 
 ---
 

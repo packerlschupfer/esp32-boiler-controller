@@ -138,7 +138,7 @@ There is no `boiler/status/errors` notification topic. Critical errors publish a
 | `boiler/status/sensor_fallback` | Yes | On fallback mode change: `{"mode":"SHUTDOWN","mode_id":2,"previous_mode":"NORMAL","missing":["boiler_output",...],"timestamp":<ms>}` |
 | `boiler/status/sensor_fallback/recovery` | No | `{"recovered":true}` |
 | `boiler/status/sensor_mode` | Yes | `STARTUP`, `NORMAL` or `SHUTDOWN` |
-| `boiler/status/scheduler/info` | No | `{"active":true,"count":2,"activeIds":[1]}` (reply to `boiler/cmd/scheduler/status`) |
+| `boiler/status/scheduler/info` | No | `{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}` (reply to `boiler/cmd/scheduler/status`) |
 | `boiler/status/error` | No | `unknown_command`, `invalid_numeric_value`, `invalid_config_value` (control/config command errors) |
 | `boiler/status/config/warning` | Yes | JSON warning after `boiler_pid_enabled` or `syslog_enabled` (reboot required) |
 | `boiler/diagnostics/modbus/<addr>` | No | Modbus error counters per device address (hex), every 30 min |
@@ -181,8 +181,8 @@ A `priority` field is not parsed; water priority is set with `boiler/cmd/water` 
   "end_hour": 22,
   "end_minute": 0,
   "days": [1,2,3,4,5],
-  "mode": 0,               // Optional, default 0: 0=COMFORT, 1=ECO, 2=FROST
-  "target_temp": 22,       // Optional, °C 10-30 (default 21, also when a mode is given)
+  "mode": 0,               // Optional, default 0: 0=COMFORT, 1=ECO, 2=FROST (other values: invalid_mode)
+  "target_temp": 22,       // Optional, °C 10-30 (default by mode: COMFORT 21, ECO 18, FROST 10)
   "zones": 1,              // Optional, default 255
   "enabled": true
 }
@@ -195,7 +195,7 @@ A `priority` field is not parsed; water priority is set with `boiler/cmd/water` 
 {"status":"ok","id":3}
 ```
 
-**Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 512 bytes), `{"status":"error","msg":"<validation error>","id":0}` (e.g. `missing_name`, `unknown_type`, `invalid_day_number`, `invalid_temperature`), `{"success":false,"error":"max_schedules_reached"}`, `{"success":false,"error":"invalid_water_temp"}`, `{"success":false,"error":"invalid_space_temp"}`, `{"success":false,"error":"mutex_timeout"}`
+**Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 512 bytes), `{"status":"error","msg":"<validation error>","id":0}` (e.g. `missing_name`, `unknown_type`, `invalid_day_number`, `invalid_temperature`), `{"success":false,"error":"max_schedules_reached"}`, `{"success":false,"error":"invalid_water_temp"}`, `{"success":false,"error":"invalid_space_temp"}`, `{"success":false,"error":"invalid_mode"}`, `{"success":false,"error":"mutex_timeout"}`
 
 #### Remove Schedule
 **Topic**: `boiler/cmd/scheduler/remove`
@@ -240,11 +240,25 @@ Scheduler replies were published empty until 2026-09-15 (the formatter returned 
 
 **Response**: `boiler/status/scheduler/info`
 ```json
-{"active":true,"count":2,"activeIds":[1]}
+{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}
 ```
-`count` is the number of stored schedules, `activeIds` the IDs of the schedules running now.
+`count` is the number of stored schedules, `activeIds` the IDs of the schedules running now, `disabledIds` the IDs of disabled schedules.
 
-There is no enable/disable command (`boiler/cmd/scheduler/enable` and other unknown commands are ignored without a reply). To disable a schedule, remove it and add it again later.
+#### Enable/Disable Schedule
+**Topic**: `boiler/cmd/scheduler/enable`
+**Response**: `boiler/scheduler/response`
+
+```json
+{"id": 3, "enabled": false}
+```
+
+**Response**: `{"status":"ok","id":3,"enabled":false}`
+
+A disabled schedule does not start. Disabling a running schedule ends it at once like `remove` (`schedule_end` event, its water request is cleared or space heating is set to frost protection). An enabled schedule inside its time window starts on the next check (immediately). The flag is saved to FRAM and survives a reboot; `list` shows it as `enabled`. Sending the current state again replies `ok` without saving.
+
+**Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 64 bytes), `{"status":"error","msg":"not_found"}` (unknown id), `{"status":"error","msg":"<validation error>","id":0}` (`missing_id`, `invalid_id_type`, `id_out_of_range`, `missing_enabled`, `invalid_enabled_type` - `enabled` must be JSON `true`/`false`), `{"success":false,"error":"mutex_timeout"}`
+
+Other unknown scheduler commands (e.g. `update`, `disable`, `clear`) are ignored without a reply.
 
 ### Control Commands
 
@@ -667,7 +681,7 @@ mosquitto_pub -h $BROKER -u $USER -P $PASS -t "boiler/cmd/pid_autotune" -m "star
 
 **Topic Pattern**: `errors/{command}` (bare topic, no `boiler/` prefix)
 
-Only the bare `errors/<command>` topics work. `boiler/cmd/errors` reaches the same handler, but the handler takes the last topic segment (`errors`) as the command and replies `unknown_command` on `boiler/status/errors/error`.
+Both forms work: the bare `errors/<command>` topics, and `boiler/cmd/errors` with the command in the payload (`stats`, `list 20`, `list 20,2`, `critical`, `clear`, `dump`). Replies go to the same `boiler/status/errors/*` topics. (Before 2026-09-15 `boiler/cmd/errors` replied `unknown_command`.)
 
 | Topic | Reply topic |
 |-------|-------------|
@@ -872,9 +886,9 @@ More status topics (system/heating/water replies, sensor fallback, FRAM, alerts)
 | `boiler/cmd/config/preheat_pump_min_ms` | Min pump state change | Integer (1000-30000) |
 | `boiler/cmd/config/preheat_safe_diff` | Safe differential | Integer (100-300) tenths °C |
 | `boiler/config/+` | Logged only, no effect | Any |
-| `boiler/cmd/scheduler/+` | Schedule commands (`add`, `remove`, `list`, `status`) | JSON |
+| `boiler/cmd/scheduler/+` | Schedule commands (`add`, `remove`, `enable`, `list`, `status`) | JSON |
 | `boiler/params/#` | Parameter commands (PersistentStorage) | Plain value or `{"value":...}` |
-| `errors/+` | Error log commands (`list`, `clear`, `stats`, `critical`, `dump`); `boiler/cmd/errors` does not work | String |
+| `errors/+` | Error log commands (`list`, `clear`, `stats`, `critical`, `dump`); also `boiler/cmd/errors` with the command in the payload | String |
 
 ---
 
@@ -1251,6 +1265,9 @@ mosquitto_pub -t "boiler/cmd/scheduler/add" -m '{...}'
 
 # Remove schedule
 mosquitto_pub -t "boiler/cmd/scheduler/remove" -m '{"id": 3}'
+
+# Disable / enable schedule
+mosquitto_pub -t "boiler/cmd/scheduler/enable" -m '{"id": 3, "enabled": false}'
 
 # List all schedules
 mosquitto_pub -t "boiler/cmd/scheduler/list" -m '{}'

@@ -89,10 +89,16 @@ Modbus error statistics are published to `boiler/diagnostics/modbus/{address}` e
 ### 1. Dual Partition System
 - Current firmware runs from one app partition (`app0` / `app1`)
 - New firmware is written to the other partition; the device boots it after the reboot
-- **No automatic rollback after boot:** the Arduino core marks the new image valid during
-  startup, before `setup()`, and the project does not override `verifyOta()` /
-  `verifyRollbackLater()`. An image that boots but then crashes or misbehaves stays active;
-  recover by flashing a known-good image via USB
+- **Automatic rollback (since 2026-09-15):** `OtaRollbackGuard` overrides the Arduino core hook
+  `verifyRollbackLater()`, so a new OTA image starts in the pending-verify state. MonitoringTask
+  confirms it (`esp_ota_mark_app_valid_cancel_rollback()`) once it has run 60 s with a first
+  sensor read and a network connection (`OtaValidationPolicy`), log line
+  `Updated firmware confirmed after N s`
+- A reset before that (crash, watchdog, power loss) makes the bootloader start the previous image
+- Still not confirmed after 10 minutes (no sensor data or no network): the guard rolls back and
+  reboots; if there is no previous image it keeps the running one
+- OTA uploads are refused by ESP-IDF while the running image is still pending (first minute)
+- USB-flashed images have no pending state and are not affected
 
 ### 2. Network Check
 - `OTATask` passes `isNetworkConnected()` (Ethernet link) to `OTAManager`; incoming OTA
@@ -141,7 +147,8 @@ Modbus error statistics are published to `boiler/diagnostics/modbus/{address}` e
 - Consider using smaller build (release)
 
 #### Update Succeeds but Device Doesn't Boot
-- Do not rely on automatic rollback: the new image is marked valid at startup (see Safety Features)
+- A crash or reset within the first minute rolls back to the previous image automatically;
+  an image that runs but gets no sensor data or network rolls back after 10 minutes (see Safety Features)
 - Check serial console for boot errors
 - Flash a known-good image via USB (see Recovery Procedures)
 - Verify firmware compatibility
@@ -186,7 +193,8 @@ Modbus error statistics are published to `boiler/diagnostics/modbus/{address}` e
 - Monitor update success/failure
 
 ### 4. Rollback Strategy
-- There is no automatic rollback after boot; rollback means re-flashing a previous image
+- Automatic rollback covers images that crash early or never get sensor data or network;
+  a firmware that runs but controls wrongly stays active and needs a re-flash of a previous image
 - Keep previous firmware files
 - Document rollback procedures
 - Test rollback in development

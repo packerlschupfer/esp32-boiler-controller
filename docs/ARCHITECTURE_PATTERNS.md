@@ -228,7 +228,7 @@ Each extracted module should have corresponding unit tests. The Round 21 helpers
 `RelayCommandProcessor`) access SRP directly and have no native tests yet.
 
 Logic that must be tested natively is kept in header-only, SRP-free helpers instead, and all native
-tests are registered in `test/test_native/test_main.cpp` (249 `RUN_TEST` entries). Examples:
+tests are registered in `test/test_native/test_main.cpp` (209 `RUN_TEST` entries). Examples:
 
 | Header | Native test |
 |--------|-------------|

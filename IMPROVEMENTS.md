@@ -282,7 +282,7 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 
 ### M6. 6 Round 21 Helper Class Tests Still Pending
 
-**Status**: Open. No test files for these helpers in `test/test_native/`. The native suite has 249 tests, but they cover other code.
+**Status**: Open. No test files for these helpers in `test/test_native/`. The native suite has 209 tests, but they cover other code.
 
 **File**: `test/README.md`
 
