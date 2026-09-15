@@ -23,6 +23,8 @@ TaskManager taskManager(&Watchdog::getInstance());  // Singleton watchdog
 **Dependencies**: None
 **RAM Impact**: ~80 bytes (TaskManager state)
 
+Early in `setup()`, before `SystemInitializer::initializeSystem()` runs, `main.cpp` also configures the logger, creates `xGeneralSystemEventGroup` and pre-initializes the `SharedResourceManager` singleton.
+
 ---
 
 ### Stage 1: Logging System
@@ -30,9 +32,11 @@ TaskManager taskManager(&Watchdog::getInstance());  // Singleton watchdog
 **Location**: `src/init/LoggingInitializer.cpp`
 
 ```cpp
-Logger& logger = Logger::getInstance();  // Singleton
-logger.setMaxLogsPerSecond(200);
-logger.setLogLevel(LogLevel::INFO);
+// src/main.cpp setup(), before SystemInitializer:
+logger.setMaxLogsPerSecond(0);   // unlimited during boot
+// LoggingInitializer::initialize(): per-tag levels via Logger::setTagLevel()
+// src/main.cpp after initialization completes:
+Logger::getInstance().setMaxLogsPerSecond(200);
 ```
 
 **Dependencies**: None (MUST be first for all subsequent logging)
@@ -46,32 +50,27 @@ logger.setLogLevel(LogLevel::INFO);
 **Location**: `src/init/SystemInitializer.cpp`
 
 **Creates in order:**
-1. **RelayState mutex** (`initRelayState()`)
-   - Creates: `delayMutex` for hardware DELAY tracking
-   - RAM: 80 bytes
-   - **Critical**: Must exist before RelayControlTask
-
-2. **SharedResourceManager singleton**
-   - Creates: All FreeRTOS primitives (mutexes, event groups, queues)
-   - RAM: ~2KB
+1. **SharedResourceManager standard resources** (`initializeStandardResources()`)
+   - **Event Groups**: `GeneralSystem`, `SystemState`, `ControlRequests`, `Heating`, `Burner`, `BurnerRequest`, `Sensor`, `ErrorNotification`, `Relay`, `RelayStatus`, `RelayRequest`
+   - **Mutexes**: `SensorReadings`, `RelayReadings`, `SystemSettings`, `MQTT`
    - **Critical**: Required before any SRP access
 
-3. **Event Groups** (via SRP)
-   - `SystemStateEventGroup`
-   - `GeneralSystemEventGroup`
-   - `SensorEventGroup`
-   - `RelayEventGroup`
-   - `ControlRequestsEventGroup`
+2. **Device ready event group** (`deviceReadyEventGroup_`)
 
-4. **Mutexes** (via SRP)
-   - `sensorReadingsMutex`
-   - `relayReadingsMutex`
-   - `systemSettingsMutex`
-   - `modbusCoordinatorMutex`
+3. **Clear stale event bits** in the Sensor, Burner, BurnerRequest, ErrorNotification, SystemState, ControlRequests, Heating, Relay, RelayStatus and RelayRequest groups
+
+4. **StateManager::initialize()**
+   - Syncs the enable states from settings to event bits, before any task starts
+
+5. **RelayState mutex** (`initRelayState()`)
+   - Creates: `delayMutex` for hardware DELAY tracking
+   - **Critical**: Must exist before RelayControlTask
 
 **Dependencies**: Logger
 **RAM Impact**: ~2KB
 **Failure Mode**: System cannot proceed without event groups
+
+**Watchdog init (between Stage 2 and Stage 3)**: `SRP::getTaskManager().initWatchdog(30, true)` and `Watchdog::quickInit(30, true)` (30 s timeout, panic on timeout). A TaskManager watchdog init failure aborts initialization.
 
 ---
 
@@ -80,8 +79,8 @@ logger.setLogLevel(LogLevel::INFO);
 **Location**: `src/init/HardwareInitializer.cpp`
 
 **Initializes in order:**
-1. **I2C** (`Wire.begin()`)
-   - SDA: GPIO 21, SCL: GPIO 22
+1. **I2C** (`SharedI2CInitializer::ensureI2CInitialized()`)
+   - SDA: GPIO 33, SCL: GPIO 32 (`src/shared/SharedI2CInitializer.h`)
    - Speed: 100kHz
    - Devices: DS3231 RTC, FRAM (optional)
 
@@ -92,10 +91,9 @@ logger.setLogLevel(LogLevel::INFO);
    - Modbus RTU: RX=36, TX=4, 9600 baud
    - Serial console: 921600 baud
 
-4. **Ethernet** (LAN8720A PHY)
-   - MDC: GPIO 23, MDIO: GPIO 18, CLK: GPIO 17
-   - Static IP configuration
-   - Non-blocking initialization
+4. **Timezone**: `setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3")`
+
+Ethernet is not started here; see Stage 5.
 
 **Dependencies**: Logger, SharedResources
 **RAM Impact**: ~1KB (driver buffers)
@@ -109,19 +107,23 @@ logger.setLogLevel(LogLevel::INFO);
 
 **Initializes in order:**
 1. **MB8ART** (Temperature Sensors)
-   - Address: 0x01
+   - Address: 0x03 (`MB8ART_ADDRESS`)
    - 8 channels (5 active)
-   - Poll interval: 2000ms
+   - Read interval: 2500ms (`MB8ART_SENSOR_READ_INTERVAL_MS`)
+   - Starts the `MB8ARTProc` and `MB8ART` tasks (core 1)
 
 2. **RYN4** (Relay Controller)
-   - Address: 0x02
+   - Address: 0x02 (`RYN4_ADDRESS`)
    - 8 relays with hardware DELAY support
    - Poll interval: 1000ms (SET), 2000ms (READ)
+   - Starts the `RYN4Proc` task (core 1)
 
 3. **ANDRTF3** (Room Temperature)
-   - Address: 0x03
+   - Address: 0x04 (`ANDRTF3_ADDRESS`)
    - Single channel
-   - Poll interval: 5000ms
+   - Read interval: 5000ms (`ANDRTF3_SENSOR_READ_INTERVAL_MS`)
+
+A short-lived background Modbus verification task (plain `xTaskCreate`) is also started here.
 
 **Dependencies**: UART initialized, Logger, SharedResources
 **RAM Impact**: ~3KB (device buffers, Modbus library)
@@ -134,23 +136,15 @@ logger.setLogLevel(LogLevel::INFO);
 **Location**: `src/init/NetworkInitializer.cpp`
 
 **Initializes (non-blocking):**
-1. **Ethernet** (LAN8720A)
+1. **Ethernet** (LAN8720A PHY, `EthernetManager::initializeAsync()`)
+   - MDC: GPIO 23, MDIO: GPIO 18, clock: GPIO 17 output
    - Static IP: 192.168.20.40
-   - Waits up to 10 seconds for link
+   - Does not wait for link (`ETH_CONNECTION_TIMEOUT_MS` = 15000 is used only by the blocking `initializeBlocking()` variant)
 
-2. **MQTT** (via MQTTManager)
-   - Broker: 192.168.20.27:1883
-   - Client ID: "esplan-{hostname}"
-   - Auto-reconnect enabled
+2. **NetworkMonitor task** (plain `xTaskCreate`, 2048 bytes, priority 1)
+   - Logs when the network connects
 
-3. **NTP** (via NTPClient)
-   - Pool: pool.ntp.org
-   - Timezone: Europe/Vienna
-   - Syncs RTC if DS3231 available
-
-4. **OTA** (ArduinoOTA)
-   - Port: 3232
-   - Password protected
+MQTT, NTP and OTA are not started here. They run as tasks created later (MQTTTask and OTATask in Stage 7, NTPTask in `main.cpp` after initialization). MQTT connects to `MQTT_SERVER`:1883 with client ID `esplan-<DEVICE_HOSTNAME>`.
 
 **Dependencies**: Ethernet PHY, Logger, SharedResources
 **RAM Impact**: ~4KB (network stack, MQTT buffers)
@@ -163,25 +157,29 @@ logger.setLogLevel(LogLevel::INFO);
 **Location**: `src/init/SystemInitializer.cpp`
 
 **Creates in order:**
-1. **TemperatureSensorFallback**
+1. **CentralizedFailsafe**
+   - Emergency shutdown coordinator
+
+2. **TemperatureSensorFallback**
    - Sensor validation and fallback logic
 
-2. **HeatingControlModule**
+3. **FailOpenMonitor**
+
+4. **BurnerRequestManager**
+
+5. **HeatingControlModule**
    - Space heating control with weather compensation
 
-3. **WheaterControlModule** (Water heating)
+6. **WheaterControlModule** (Water heating)
    - Tank heating with scheduling
 
-4. **PIDControlModule**
+7. **PIDControlModule**
    - PID temperature control
 
-5. **BurnerSystemController**
+8. **BurnerSystemController**
    - Integrates all control logic
    - 8-state burner FSM
    - 4-layer safety system
-
-6. **CentralizedFailsafe**
-   - Emergency shutdown coordinator
 
 **Dependencies**: Sensors initialized, Logger, SharedResources, SRP
 **RAM Impact**: ~3KB (control state, PID coefficients)
@@ -189,33 +187,40 @@ logger.setLogLevel(LogLevel::INFO);
 
 ---
 
+### Stage 6b: MQTT
+**Function**: `initializeMQTT()` (`InitStage::MQTT`, skipped only if `USE_EVENT_DRIVEN_MQTT` is defined)
+**Location**: `src/init/SystemInitializer.cpp`
+
+With `ENABLE_MQTT`, it only obtains the `MQTTManager` singleton. Configuration and the connection are handled by MQTTTask. Failure sets `DEGRADED_MODE` but does not stop initialization.
+
+---
+
 ### Stage 7: FreeRTOS Tasks
 **Function**: `initializeTasks()`
 **Location**: `src/init/TaskInitializer.cpp`
 
-**Tasks created in priority order** (high to low):
+Priorities, stack sizes and cores of all tasks: see the [Task Summary in TASK_ARCHITECTURE.md](TASK_ARCHITECTURE.md#task-summary).
 
-| Priority | Task | Stack (DEBUG_SELECTIVE) | Purpose |
-|----------|------|-------------------------|---------|
-| 4 | **BurnerControlTask** | 4096 bytes | Safety-critical burner FSM |
-| 4 | **RelayControlTask** | 4096 bytes | Physical relay control |
-| 3 | **HeatingControlTask** | 3584 bytes | Space heating control |
-| 3 | **WheaterControlTask** | 3584 bytes | Water heating control |
-| 3 | **ControlTask** | 3584 bytes | General control coordination |
-| 3 | **SensorTask** (ANDRTF3) | 3584 bytes | Room temperature |
-| 3 | **MB8ARTTask** | 3072 bytes | Temperature sensor array |
-| 3 | **RYN4Task** | 2560 bytes | Relay status polling |
-| 2 | **MQTTTask** | 3584 bytes | MQTT communication |
-| 2 | **MonitoringTask** | 3584 bytes | Health monitoring |
-| 2 | **TimerSchedulerTask** | 3072 bytes | Schedule management |
-| 2 | **HeatingPumpTask** | 3072 bytes | Heating circulation pump |
-| 2 | **WaterPumpTask** | 3072 bytes | Hot water loading pump |
-| 1 | **OTATask** | 3072 bytes | Firmware updates |
-| 1 | **NTPTask** | 2048 bytes | Time synchronization |
+**Creation order** (`TaskInitializer::initializeTasks()`):
+1. RelayControl
+2. OTATask
+3. ANDRTF3 (only if the device is present)
+4. ControlTask
+5. HeatingControl
+6. WheaterControl
+7. BurnerControl
+8. BoilerTempCtrl
+9. MQTTTask (with `ENABLE_MQTT`)
+10. PersistentStorage
+11. SyslogTask
+12. HeatingPump, WaterPump
+13. Monitoring (with `ENABLE_MONITORING_TASK`)
+
+MB8ART, MB8ARTProc and RYN4Proc already run from Stage 4. After `initializeSystem()` returns, `src/main.cpp` starts TimerSched and then NTPTask.
 
 **Dependencies**: ALL previous stages complete
-**RAM Impact**: ~54KB (total task stacks)
-**Failure Mode**: Task creation failure is fatal
+**RAM Impact**: 65,536 bytes of configured task stacks (DEBUG_SELECTIVE, 19 tasks)
+**Failure Mode**: Task creation failures are logged; the system continues in degraded mode (a missing BurnerControl, RelayControl, MB8ART or MB8ARTProc task is logged as CRITICAL)
 
 ---
 
@@ -237,10 +242,10 @@ logger.setLogLevel(LogLevel::INFO);
 
 ## 🔒 Thread-Safety During Initialization
 
-**Initialization is SINGLE-THREADED** until tasks are created:
+**Initialization is single-threaded only up to Stage 3**:
 - Main thread runs `setup()` → `SystemInitializer::initializeSystem()`
-- No mutexes needed until Stage 7
-- After task creation, all access via SRP + mutexes
+- From Stage 4 on, other tasks already run: MB8ART, MB8ARTProc, RYN4Proc and the background Modbus verification task (Stage 4), and NetworkMonitor (Stage 5)
+- Shared data those tasks touch must be accessed through SRP + mutexes from Stage 4 on
 
 ---
 
@@ -248,7 +253,7 @@ logger.setLogLevel(LogLevel::INFO);
 
 ### DEBUG_SELECTIVE Mode (Default)
 ```
-Total task stacks: ~54KB
+Total task stacks: 65,536 bytes (19 tasks)
 Heap available:    ~280KB
 Stack margins:     448-2568 bytes free (runtime measured)
 Critical tasks:    +512 bytes safety margin (H3 optimization)
@@ -256,7 +261,7 @@ Critical tasks:    +512 bytes safety margin (H3 optimization)
 
 ### RELEASE Mode (Production)
 ```
-Total task stacks: ~30KB (aggressive optimization)
+Total task stacks: 36,096 bytes (19 tasks, aggressive optimization)
 Heap available:    ~297KB
 Stack margins:     Minimal but verified safe
 ```

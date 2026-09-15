@@ -103,7 +103,7 @@ const char* SafetyInterlocks::getFailureReason() const {
 
 ## 🔍 Static Buffer Inventory
 
-### 1. SafetyInterlocks.cpp:71
+### 1. SafetyInterlocks::InterlockStatus::getFailureReason() (src/modules/control/SafetyInterlocks.cpp)
 ```cpp
 static char buffer[192];  // Failure reason formatting
 ```
@@ -116,26 +116,21 @@ static char buffer[192];  // Failure reason formatting
 
 ---
 
-### 2. MQTTTask.cpp:206, 210
+### 2. MQTTTask::initializeMQTT() (src/modules/tasks/MQTTTask.cpp)
 ```cpp
 static char mqtt_uri[128];
 static char client_id[64];
 ```
 
 **Usage**: MQTTConfig stores pointers (library requirement)
-**Thread-safety**: ✅ Initialized once in MQTTTask::initialize()
+**Thread-safety**: ✅ Initialized once in MQTTTask::initializeMQTT()
 **Mutex**: ❌ Not needed (init only)
 **Rationale**: **REQUIRED** - MQTTConfig doesn't copy strings
 **Alternative**: None - library design requires persistent buffers
 
-**Code comment:**
-```cpp
-// NOTE: These MUST be static because MQTTConfig stores pointers, not copies
-```
-
 ---
 
-### 3. QueueManager.cpp:451, 471, 474
+### 3. QueueManager::publishMetrics() (src/core/QueueManager.cpp)
 ```cpp
 static char buffer[256];     // Metrics JSON
 static char queueBuffer[128]; // Queue metrics
@@ -161,12 +156,12 @@ void QueueManager::publishMetrics() {
 
 ---
 
-### 4. RuntimeDiagnostics.cpp:398
+### 4. RuntimeDiagnostics::decodeEventBits() (src/diagnostics/RuntimeDiagnostics.cpp)
 ```cpp
-static char buffer[80];  // Formatting helper
+static char buffer[80];  // Event bit list formatting
 ```
 
-**Usage**: Internal formatting functions
+**Usage**: Formats set event bits as a list (the result is returned as `std::string`)
 **Thread-safety**: ✅ Called from MQTT task only
 **Mutex**: ❌ Not needed
 **Rationale**: Diagnostic formatting, single-threaded
@@ -174,20 +169,20 @@ static char buffer[80];  // Formatting helper
 
 ---
 
-### 5. TemperatureSensorFallback.cpp:403
+### 5. TemperatureSensorFallback::getMissingSensorMessage() (src/modules/control/TemperatureSensorFallback.cpp)
 ```cpp
 static char message[128];  // Sensor error messages
 ```
 
-**Usage**: Error logging from Sensor task
-**Thread-safety**: ✅ Called from Sensor task only
+**Usage**: SHUTDOWN error log in `TemperatureSensorFallback::updateSensorStatus()` (the only caller)
+**Thread-safety**: ✅ Single caller, message used immediately for logging
 **Mutex**: ❌ Not needed
 **Rationale**: Sensor validation messages, single-threaded
-**Alternative cost**: +128B on Sensor stack
+**Alternative cost**: +128B on the calling task's stack (the legacy `SensorTask` is not started)
 
 ---
 
-### 6. StringUtils.h:143 (TempBuffer pool)
+### 6. TempBuffer pool (class `TempBuffer` in src/utils/StringUtils.h)
 ```cpp
 class TempBuffer {
     static char buffers[POOL_SIZE][BUFFER_SIZE];  // 4 × 128B = 512B
@@ -268,20 +263,23 @@ namespace MemoryPools {
 - Pre-allocated pools prevent fragmentation during runtime
 - Small RAM cost (3% of available heap) for significant stability improvement
 
+**Current use**: The four Round 21 pools are defined in `src/utils/MemoryPool.cpp` but are not used anywhere yet. `MemoryPool::lazyInit()` mallocs the blocks on first `allocate()`, so an unused pool takes no heap. In use today: `logBufferPool` and `jsonBufferPool` (MQTTPublisher), `getString()` / `getLogBuffer()` (MQTTCommandHandlers).
+
 **Usage Pattern**:
 ```cpp
-// Allocate from pool
-auto buf = MemoryPools::diagnosticBufferPool.allocate();
+// Raw pool access: the caller must deallocate
+auto* buf = MemoryPools::logBufferPool.allocate();
 if (!buf) {
     LOG_ERROR(TAG, "Pool exhausted");
     return;
 }
-
-// Use buffer
 snprintf(buf->data, sizeof(buf->data), "Diagnostic message");
 publish(buf->data);
+MemoryPools::logBufferPool.deallocate(buf);
 
-// Automatic deallocation when buf goes out of scope (RAII)
+// RAII access: returned to the pool automatically when it goes out of scope
+// (include/utils/PooledString.h: getString() 128B, getLogBuffer() 256B, getTempBuffer() 64B)
+auto str = MemoryPools::getString();
 ```
 
 **Pool Exhaustion Handling**:

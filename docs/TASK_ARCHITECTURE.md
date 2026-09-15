@@ -45,7 +45,7 @@ The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (ta
 
 *Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Fixed in all modes: HeatingPump/WaterPump 2048, BoilerTempCtrl 3072, NTPTask 4096, SyslogTask 4096 (literals in the start calls). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
 
-Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task.
+Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task. `MQTTDiagnostics::initialize()` ("MQTTDiagnostics" task) and `TaskDependencyManager` ("TaskHealthMonitor" task) also contain `xTaskCreate` calls, but nothing calls them, so those tasks are not started.
 
 ---
 
@@ -91,7 +91,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Priority**: 4 (Highest)
 **Stack**: 2560 (DEBUG_FULL) | 4096 (DEBUG_SELECTIVE) | 1536 (RELEASE)
 **Core**: 1 (pinned)
-**Watchdog**: 15000ms (WDT_RELAY_CONTROL_MS)
+**Watchdog**: 10000ms (WDT_RELAY_CONTROL_MS, critical)
 
 **Purpose**: Controls 8 physical relays via RYN4 Modbus module, enforces pump motor protection, provides rate limiting, and monitors relay health.
 
@@ -159,7 +159,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Priority**: 3
 **Stack**: 3072 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 2048 (RELEASE)
 **Core**: Not pinned
-**Watchdog**: 15000ms (WDT_WHEATER_CONTROL_MS)
+**Watchdog**: 20000ms (WDT_WHEATER_CONTROL_MS, non-critical)
 
 **Purpose**: Water heating control: tank charge decision, boiler target for the water burner request, water pump request at charge start. There is no PID in this task; the power level (PID with the `pid/waterHeater/*` gains) is decided by BoilerTempControlTask.
 
@@ -235,7 +235,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Priority**: 2
 **Stack**: 4096 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 3584 (RELEASE)
 **Core**: 0 (pinned)
-**Watchdog**: Dynamic based on LOG_MODE
+**Watchdog**: 30000ms (WDT_MONITORING_MS, non-critical)
 
 **Purpose**: System health monitoring, task stack analysis, error log dumping, periodic diagnostics.
 
@@ -249,7 +249,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 
 **Monitoring Intervals**:
 - **Health check**: 5s (basic heap, tasks, connectivity)
-- **Detailed diagnostics**: 10 minutes (stack HWM, error logs)
+- **Detailed diagnostics**: 30 minutes (`DETAILED_MONITOR_INTERVAL_MS`; stack HWM, error logs)
 - **MQTT health publish**: 60s (via MQTTTask)
 
 **Diagnostics**:
@@ -267,7 +267,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Priority**: 3
 **Stack**: 3072 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1536 (RELEASE)
 **Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
-**Watchdog**: 15000ms (WDT_SENSOR_PROCESSING_MS)
+**Watchdog**: 30000ms (WDT_SENSOR_PROCESSING_MS, non-critical)
 
 **Purpose**: Process Modbus packets from MB8ART 8-channel temperature sensor, update SharedSensorReadings.
 
@@ -351,7 +351,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 - **Water heating**: Timed tank heating sessions
 - **Space heating**: Room temperature schedule (future)
 
-**Limits**: MAX_SCHEDULES = 16 (enforced in Round 2)
+**Limits**: MAX_SCHEDULES = 20 (`SchedulerContext.h`, `RuntimeStorageSchedules.h`)
 
 ---
 
@@ -412,11 +412,10 @@ boiler/params/save                           - Save all to NVS
 **Mutexes**:
 - `ntpMutex`
 
-**NTP Servers** (priority order):
+**NTP Servers** (priority order, IP addresses only, no DNS):
 1. 192.168.20.1 (local gateway)
-2. pool.ntp.org
-3. time.google.com
-4. time.cloudflare.com
+2. 216.239.35.0 (time.google.com)
+3. 162.159.200.1 (time.cloudflare.com)
 
 **Sync Intervals**:
 - Initial sync: On network ready
@@ -552,7 +551,7 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 **Priority**: 3
 **Stack**: 1536 (DEBUG_FULL) | 2560 (DEBUG_SELECTIVE) | 768 (RELEASE)
 **Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
-**Watchdog**: WDT_SENSOR_PROCESSING_MS (15s)
+**Watchdog**: WDT_SENSOR_PROCESSING_MS (30s, non-critical)
 
 **Architecture**: Coordinated Modbus operations with relay verification
 
@@ -710,12 +709,12 @@ Benefits:
 | Relay Event Group | RelayControl, Wheater | Relay requests |
 | Task-Specific Groups | MQTT, NTP, OTA, Monitoring, Storage, Scheduler | Internal events |
 
-See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
+See [EVENT_SYSTEM.md](EVENT_SYSTEM.md) for complete event bit definitions.
 
 ### Queue Usage
 
 **MQTT Queues** (priority-based):
-- High priority: 3 messages
+- High priority: 5 messages
 - Normal priority: 5 messages
 - Overflow: DROP_OLDEST with throttling
 
@@ -734,7 +733,8 @@ See [EVENT_GROUPS.md](EVENT_GROUPS.md) for complete event bit definitions.
 
 **Critical Tasks** (system reset on timeout):
 - BurnerControlTask (15s)
-- RelayControlTask (15s)
+- RelayControlTask (10s)
+- HeatingPumpTask, WaterPumpTask (10s)
 
 **Non-Critical Tasks** (logged only):
 - All others with appropriate timeouts
@@ -928,7 +928,7 @@ All tasks register cleanup handlers via `TaskCleanupHandler`:
 
 **Stack Analysis**:
 ```cpp
-MonitoringTask logs task status every 10 minutes
+MonitoringTask logs task status every 30 minutes
 Check log for "Stack HWM" values
 ```
 
@@ -984,11 +984,11 @@ Check CPU utilization per task
 ## References
 
 - [STATE_MACHINES.md](STATE_MACHINES.md) - Burner and heating state machines
-- [EVENT_GROUPS.md](EVENT_GROUPS.md) - Complete event bit reference
+- [EVENT_SYSTEM.md](EVENT_SYSTEM.md) - Complete event bit reference
 - [MUTEX_HIERARCHY.md](MUTEX_HIERARCHY.md) - Deadlock prevention
 - [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md) - Safety layer documentation
 - [MQTT_API.md](MQTT_API.md) - Complete MQTT topic reference
-- [DEEP_CODE_ANALYSIS_HISTORY.md](DEEP_CODE_ANALYSIS_HISTORY.md) - Analysis rounds 1-21
+- [CHANGELOG.md](CHANGELOG.md) - Change log and development history (improvement rounds)
 
 ---
 
