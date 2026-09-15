@@ -715,9 +715,10 @@ void PersistentStorageTask(void* pvParameters) {
         // Process MQTT command queue - this is required for commands like save, get, set to work
         storage->processCommandQueue();
 
-        // Handle save request - now only from MQTT commands
+        // Handle save request (parameter change callbacks, boiler/params/save, StateManager
+        // enable/priority/override changes)
         if (bits & STORAGE_SAVE_REQUEST_BIT) {
-            LOG_INFO(TAG, "Manual save requested via MQTT");
+            LOG_INFO(TAG, "Parameter save requested");
             storage->saveAll();
             
             // Update temperature shadows if needed

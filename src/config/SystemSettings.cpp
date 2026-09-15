@@ -15,8 +15,8 @@ SystemSettings getDefaultSystemSettings() {
         tempFromFloat(5.0f),   // wHeaterConfTempSafeLimitLow
         1.0f,   // waterHeatingRate (°C per minute)
         tempFromFloat(18.0f),  // targetTemperatureInside
-        20.0f,  // heating_curve_shift (kept as float)
-        2.0f,   // heating_curve_coeff (kept as float)
+        0.0f,   // heating_curve_shift (kept as float) - was 20.0 with the 10x too weak curve
+        1.4f,   // heating_curve_coeff (kept as float) - was 2.0
         tempFromFloat(0.5f),   // heating_hysteresis (0.5°C)
         tempFromFloat(38.0f),  // burner_low_limit - safe for oil burners (gas can go lower)
         tempFromFloat(110.0f), // burner_high_limit

@@ -147,8 +147,8 @@ struct SystemSettings {
         Temperature_t wHeaterConfTempSafeLimitLow = tempFromFloat(5.0f),
         float waterHeatingRate = 1.0f,
         Temperature_t targetTemperatureInside = tempFromFloat(18.0f),
-        float heating_curve_shift = 20.0f,
-        float heating_curve_coeff = 2.0f,
+        float heating_curve_shift = 0.0f,   // 2026-09-15: was 20.0 with the 10x too weak curve
+        float heating_curve_coeff = 1.4f,   // was 2.0
         Temperature_t heating_hysteresis = tempFromFloat(0.5f),
         Temperature_t burner_low_limit = tempFromFloat(38.0f),   // Global burner minimum
         Temperature_t burner_high_limit = tempFromFloat(110.0f), // Global burner maximum

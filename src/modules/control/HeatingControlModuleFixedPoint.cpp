@@ -1,5 +1,6 @@
 // src/modules/control/HeatingControlModuleFixedPoint.cpp
 #include "modules/control/HeatingControlModuleFixedPoint.h"
+#include "modules/control/HeatingCurve.h"
 #include "config/SystemConstants.h"
 #include "LoggingMacros.h"
 #include <algorithm>
@@ -14,51 +15,13 @@ Temperature_t HeatingControlModuleFixedPoint::calculateHeatingCurveTarget(
     Temperature_t lowerLimit,
     Temperature_t upperLimit) {
     
-    // Calculate temperature difference using function from Temperature.h
-    Temperature_t tempDiff = tempSub(outsideTemp, insideTemp);
-    
-    // Original formula (with floats):
-    // target = inside + shift - coeff * diff * (1.4347 + 0.021 * diff + 0.000248 * diff^2)
-    
-    // Fixed-point implementation:
-    // We'll use different scales for different parts to maintain precision
-    
-    // First, calculate the polynomial part: (1.4347 + 0.021 * diff + 0.000248 * diff^2)
-    // Scale factors: 1.4347 -> 14347 (x10000)
-    //                0.021 -> 210 (x10000)  
-    //                0.000248 -> 248 (x1000000)
-    
-    int32_t diff = static_cast<int32_t>(tempDiff); // in 0.1°C units
-    
-    // Calculate diff^2
-    int32_t diffSquared = (diff * diff) / 10; // Scale back to avoid overflow
-    
-    // Polynomial calculation (scaled by 10000)
-    int32_t polynomial = SystemConstants::FixedPoint::HEATING_CURVE_COEFF_1;
-    polynomial += (SystemConstants::FixedPoint::HEATING_CURVE_COEFF_2 * diff) / 10;
-    polynomial += (SystemConstants::FixedPoint::HEATING_CURVE_COEFF_3 * diffSquared) / 1000;
-    
-    // Now calculate: coeff * diff * polynomial
-    // coeff is scaled by 100, diff is in 0.1°C units, polynomial is scaled by 10000
-    int64_t adjustment = static_cast<int64_t>(curveCoeff) * diff * polynomial;
-    
-    // Scale back: adjustment / (100 * 10 * 10000) = adjustment / 10000000
-    adjustment = adjustment / SystemConstants::FixedPoint::ADJUSTMENT_SCALE;
-    
-    // Calculate final target temperature
-    Temperature_t target = insideTemp;
-    target = tempAdd(target, curveShift);
-    target = tempSub(target, static_cast<Temperature_t>(adjustment));
-    
-    // Apply limits
-    if (target < lowerLimit) {
-        target = lowerLimit;
-    } else if (target > upperLimit) {
-        target = upperLimit;
-    }
-    
-    LOG_DEBUG(TAG, "Heating curve: inside=%d, outside=%d, diff=%d, target=%d (0.1°C units)",
-              insideTemp, outsideTemp, tempDiff, target);
+    // target = inside + shift - coeff * diff * (1.4347 + 0.021 * diff + 0.000248 * diff^2),
+    // in HeatingCurve.h (native-tested; the old inline version was 10x too weak)
+    const Temperature_t target = HeatingCurve::target(insideTemp, outsideTemp, curveCoeff,
+                                                      curveShift, lowerLimit, upperLimit);
+
+    LOG_DEBUG(TAG, "Heating curve: inside=%d, outside=%d, coeff=%d, shift=%d, target=%d (0.1°C units)",
+              insideTemp, outsideTemp, curveCoeff, curveShift, target);
     
     return target;
 }

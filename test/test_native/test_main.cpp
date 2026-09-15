@@ -24,6 +24,11 @@ void test_pid_scaled_gain_commands_full_below_target();
 void test_pid_adjustment_clamp_keeps_sign();
 void test_pid_output_limit_matches_power_saturation();
 
+// Heating curve (weather-compensated heating target)
+void test_heating_curve_matches_reference_formula();
+void test_heating_curve_outside_part_not_ten_times_too_small();
+void test_heating_curve_clamps_to_limits();
+
 // Autotune peak/trough tracking (lagging plant)
 void test_relay_extrema_peaks_include_post_switch_overshoot();
 void test_relay_extrema_troughs_include_post_switch_undershoot();
@@ -524,6 +529,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pid_scaled_gain_commands_full_below_target);
     RUN_TEST(test_pid_adjustment_clamp_keeps_sign);
     RUN_TEST(test_pid_output_limit_matches_power_saturation);
+
+    // Heating curve (weather-compensated heating target)
+    RUN_TEST(test_heating_curve_matches_reference_formula);
+    RUN_TEST(test_heating_curve_outside_part_not_ten_times_too_small);
+    RUN_TEST(test_heating_curve_clamps_to_limits);
 
     // Autotune peak/trough tracking (lagging plant)
     RUN_TEST(test_relay_extrema_peaks_include_post_switch_overshoot);

@@ -739,15 +739,8 @@ namespace SystemConstants {
     // Fixed-Point Math Constants
     // ===========================
     namespace FixedPoint {
-        // Heating curve polynomial coefficients (scaled values)
-        constexpr int32_t HEATING_CURVE_COEFF_1 = 14347;    // 1.4347 * 10000
-        constexpr int32_t HEATING_CURVE_COEFF_2 = 210;      // 0.021 * 10000
-        constexpr int32_t HEATING_CURVE_COEFF_3 = 248;      // 0.000248 * 1000000
-
-        // Scaling factors
-        constexpr int32_t POLYNOMIAL_SCALE = 10000;
-        constexpr int32_t COEFF3_SCALE = 1000000;
-        constexpr int32_t ADJUSTMENT_SCALE = 10000000;
+        // Heating curve coefficients and scale moved to include/modules/control/HeatingCurve.h
+        // (2026-09-15: ADJUSTMENT_SCALE 10^7 made the curve 10x too weak, correct is 10^6)
     }
 
     // ===========================
