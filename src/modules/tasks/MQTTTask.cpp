@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include "utils/ErrorHandler.h"
 #include "utils/ErrorLogFRAM.h"
+#include "utils/ErrorContextSnapshot.h"
 #include <esp_log.h>
 #include "core/SystemResourceProvider.h"
 #include "MQTTTopics.h"
@@ -438,6 +439,9 @@ void MQTTTask::taskFunction(void* parameter) {
             
             // Process publish queue
             processPublishQueue();
+
+            // Critical error snapshot recorded by ErrorHandler::logError()
+            ErrorContextCapture::publishPending();
             
             // Check if more queue processing needed
             if (highPriorityQueue_ && highPriorityQueue_->getMessagesWaiting() > 0) {

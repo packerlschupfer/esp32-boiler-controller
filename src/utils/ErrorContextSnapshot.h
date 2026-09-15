@@ -67,36 +67,38 @@ struct ErrorContextSnapshot {
 };
 
 /**
- * @brief Captures and publishes error context snapshots
+ * @brief Captures error context snapshots on critical errors and publishes them
+ *
+ * Wired in 2026-09-15 (was never called): ErrorHandler::logError() calls
+ * recordCriticalError(), which fills a static slot in the calling task (no stack copy, no
+ * heap, rate-limited); MQTTTask calls publishPending(), which formats compact JSON
+ * (ErrorContextFormat.h, fits the 320-byte payload) and publishes boiler/error/context.
  */
 class ErrorContextCapture {
 public:
     /**
-     * @brief Capture complete system snapshot at error time
-     * @param errorCode Error code that occurred
-     * @param component Component tag where error occurred
-     * @param description Human-readable error description
-     * @return Complete snapshot of system state
+     * @brief Record a snapshot if the error is critical (any task context)
+     *
+     * At most one snapshot per MIN_INTERVAL_MS; a snapshot not yet published is kept.
      */
-    static ErrorContextSnapshot captureSnapshot(
-        SystemError errorCode,
-        const char* component,
-        const char* description
-    );
+    static void recordCriticalError(SystemError errorCode, const char* component, const char* description);
 
     /**
-     * @brief Publish error context to MQTT for remote monitoring
-     * @param snapshot System snapshot to publish
+     * @brief Publish a recorded snapshot (MQTT task only)
      */
-    static void publishErrorContext(const ErrorContextSnapshot& snapshot);
+    static void publishPending();
 
-private:
     /**
      * @brief Check if this error type is critical (requires snapshot)
-     * @param error Error code to check
-     * @return True if critical error requiring snapshot
      */
     static bool isCriticalError(SystemError error);
+
+    static constexpr uint32_t MIN_INTERVAL_MS = 30000;
+
+private:
+    // Fill the snapshot in place (no by-value copy on the calling task's stack)
+    static void captureInto(ErrorContextSnapshot& snapshot, SystemError errorCode,
+                            const char* component, const char* description);
 };
 
 #endif // ERROR_CONTEXT_SNAPSHOT_H

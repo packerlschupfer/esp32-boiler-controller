@@ -1,6 +1,7 @@
 // src/utils/ErrorHandler.cpp
 #include "ErrorHandler.h"
 #include "ErrorLogFRAM.h"
+#include "ErrorContextSnapshot.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/BurnerSystemController.h"
 #include "freertos/FreeRTOS.h"
@@ -149,6 +150,10 @@ bool ErrorHandler::attemptMemoryRecovery() {
 }
 
 void ErrorHandler::logError(const char* tag, SystemError error, const char* context) {
+    // Critical errors: system snapshot for boiler/error/context (own 30 s rate limit,
+    // published later by the MQTT task)
+    ErrorContextCapture::recordCriticalError(error, tag, context);
+
     // Rate limiting for repetitive errors (uses file-scope rateLimits array)
 
     // Find or create rate limit entry for this error

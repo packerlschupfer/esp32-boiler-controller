@@ -7,10 +7,25 @@
 #include "events/SystemEventsGenerated.h"  // C5: SystemState bit constants
 #include "shared/SharedSensorReadings.h"
 #include "shared/RelayState.h"
-#include <ArduinoJson.h>
+#include "utils/ErrorContextFormat.h"
+#include <Arduino.h>
+#include <atomic>
+#include <cstring>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 
 static const char* TAG = "ErrorContext";
+
+namespace {
+    // Single snapshot slot: EMPTY -> WRITING (erroring task) -> READY -> PUBLISHING (MQTT task) -> EMPTY
+    enum SlotState : uint8_t { SLOT_EMPTY, SLOT_WRITING, SLOT_READY, SLOT_PUBLISHING };
+
+    ErrorContextSnapshot s_snapshot = {};
+    std::atomic<uint8_t> s_slotState{SLOT_EMPTY};
+    std::atomic<uint32_t> s_lastRecordMs{0};
+    std::atomic<bool> s_hasRecorded{false};
+    char s_payload[sizeof(MQTTPublishRequest::payload)];
+}
 
 bool ErrorContextCapture::isCriticalError(SystemError error) {
     return (error == SystemError::SYSTEM_FAILSAFE_TRIGGERED ||
@@ -21,12 +36,32 @@ bool ErrorContextCapture::isCriticalError(SystemError error) {
             error == SystemError::EMERGENCY_STOP);
 }
 
-ErrorContextSnapshot ErrorContextCapture::captureSnapshot(
-    SystemError errorCode,
-    const char* component,
-    const char* description
-) {
-    ErrorContextSnapshot snapshot = {};
+void ErrorContextCapture::recordCriticalError(SystemError errorCode, const char* component,
+                                              const char* description) {
+    if (!isCriticalError(errorCode)) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (s_hasRecorded.load() && (now - s_lastRecordMs.load()) < MIN_INTERVAL_MS) {
+        return;
+    }
+
+    // Claim the slot; if a snapshot is still being written or not yet published, keep it
+    uint8_t expected = SLOT_EMPTY;
+    if (!s_slotState.compare_exchange_strong(expected, SLOT_WRITING)) {
+        return;
+    }
+
+    captureInto(s_snapshot, errorCode, component, description);
+    s_lastRecordMs.store(now);
+    s_hasRecorded.store(true);
+    s_slotState.store(SLOT_READY);
+}
+
+void ErrorContextCapture::captureInto(ErrorContextSnapshot& snapshot, SystemError errorCode,
+                                      const char* component, const char* description) {
+    memset(&snapshot, 0, sizeof(snapshot));
 
     // Error identification
     snapshot.errorCode = errorCode;
@@ -56,8 +91,8 @@ ErrorContextSnapshot ErrorContextCapture::captureSnapshot(
     snapshot.sensorEventBits = sensorEG ? xEventGroupGetBits(sensorEG) : 0;
     snapshot.relayEventBits = relayEG ? xEventGroupGetBits(relayEG) : 0;
 
-    // Sensor snapshot (with mutex protection)
-    if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(10))) {
+    // Sensor snapshot (short mutex wait; a caller already holding the mutex gets sensorsValid=false)
+    if (SRP::getSensorReadingsMutex() != nullptr && SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(10))) {
         const auto& readings = SRP::getSensorReadings();
         snapshot.boilerTempOutput = readings.boilerTempOutput;
         snapshot.boilerTempReturn = readings.boilerTempReturn;
@@ -79,64 +114,42 @@ ErrorContextSnapshot ErrorContextCapture::captureSnapshot(
     snapshot.burnerActive = (snapshot.systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) != 0;
     snapshot.heatingActive = (snapshot.systemStateBits & SystemEvents::SystemState::HEATING_ON) != 0;
     snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WATER_ON) != 0;
-
-    return snapshot;
 }
 
-void ErrorContextCapture::publishErrorContext(const ErrorContextSnapshot& snapshot) {
-    JsonDocument doc;
-
-    // Error info
-    doc["error_code"] = static_cast<int>(snapshot.errorCode);
-    doc["component"] = snapshot.component;
-    doc["description"] = snapshot.description;
-    doc["timestamp"] = snapshot.timestamp;
-
-    // Task context
-    JsonObject task = doc["task"].to<JsonObject>();
-    task["name"] = snapshot.taskName;
-    task["priority"] = snapshot.taskPriority;
-
-    // Memory
-    JsonObject mem = doc["memory"].to<JsonObject>();
-    mem["free"] = snapshot.freeHeap;
-    mem["min_free"] = snapshot.minFreeHeap;
-    mem["largest_block"] = snapshot.largestFreeBlock;
-
-    // System state bits
-    JsonObject state = doc["system_state"].to<JsonObject>();
-    state["burner_active"] = snapshot.burnerActive;
-    state["heating_on"] = snapshot.heatingActive;
-    state["water_on"] = snapshot.waterActive;
-    state["state_bits"] = snapshot.systemStateBits;
-
-    // Sensors
-    if (snapshot.sensorsValid) {
-        JsonObject sensors = doc["sensors"].to<JsonObject>();
-        sensors["boiler_output"] = tempToFloat(snapshot.boilerTempOutput);
-        sensors["boiler_return"] = tempToFloat(snapshot.boilerTempReturn);
-        sensors["water_tank"] = tempToFloat(snapshot.waterHeaterTempTank);
-        sensors["pressure"] = snapshot.systemPressure / 100.0f;
-    } else {
-        doc["sensors"] = "unavailable";
+void ErrorContextCapture::publishPending() {
+    uint8_t expected = SLOT_READY;
+    if (!s_slotState.compare_exchange_strong(expected, SLOT_PUBLISHING)) {
+        return;
     }
 
-    // Relays
-    JsonObject relays = doc["relays"].to<JsonObject>();
-    relays["desired"] = snapshot.relayDesiredState;
-    relays["actual"] = snapshot.relayActualState;
-    relays["mismatch_mask"] = snapshot.relayMismatchMask;
+    const ErrorContextSnapshot& snapshot = s_snapshot;
+    ErrorContextFormat::Fields fields = {};
+    fields.errorCode = static_cast<int32_t>(snapshot.errorCode);
+    fields.component = snapshot.component;
+    fields.description = snapshot.description;
+    fields.timestampMs = snapshot.timestamp;
+    fields.taskName = snapshot.taskName;
+    fields.taskPriority = snapshot.taskPriority;
+    fields.freeHeap = snapshot.freeHeap;
+    fields.minFreeHeap = snapshot.minFreeHeap;
+    fields.largestFreeBlock = snapshot.largestFreeBlock;
+    fields.systemStateBits = snapshot.systemStateBits;
+    fields.burnerRequestBits = snapshot.burnerRequestBits;
+    fields.sensorsValid = snapshot.sensorsValid;
+    fields.boilerOutput = snapshot.boilerTempOutput;
+    fields.boilerReturn = snapshot.boilerTempReturn;
+    fields.waterTank = snapshot.waterHeaterTempTank;
+    fields.pressure = snapshot.systemPressure;
+    fields.relayDesired = snapshot.relayDesiredState;
+    fields.relayActual = snapshot.relayActualState;
 
-    char payload[768];
-    size_t len = serializeJson(doc, payload, sizeof(payload));
-
-    if (len < sizeof(payload)) {
-        MQTTTask::publish(MQTT_ERROR_CONTEXT, payload, 0, true,
-                         MQTTPriority::PRIORITY_CRITICAL);
-
+    if (ErrorContextFormat::format(s_payload, sizeof(s_payload), fields) > 0) {
+        MQTTTask::publish(MQTT_ERROR_CONTEXT, s_payload, 0, true, MQTTPriority::PRIORITY_CRITICAL);
         LOG_INFO(TAG, "Published error context: %s in %s (heap: %lu bytes)",
-                 snapshot.component, snapshot.taskName, snapshot.freeHeap);
+                 snapshot.component, snapshot.taskName, static_cast<unsigned long>(snapshot.freeHeap));
     } else {
-        LOG_ERROR(TAG, "Error context too large: %zu bytes", len);
+        LOG_ERROR(TAG, "Error context does not fit %u bytes", static_cast<unsigned>(sizeof(s_payload)));
     }
+
+    s_slotState.store(SLOT_EMPTY);
 }
