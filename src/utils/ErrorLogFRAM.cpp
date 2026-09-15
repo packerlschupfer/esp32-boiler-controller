@@ -244,17 +244,14 @@ size_t ErrorLogFRAM::getCriticalErrors(ErrorEntry* buffer, size_t maxCount) {
     return count;
 }
 
-bool ErrorLogFRAM::exportToJson(char* buffer, size_t bufferSize, size_t maxErrors) {
+bool ErrorLogFRAM::exportToJson(char* buffer, size_t bufferSize, size_t maxErrors, size_t offset) {
     if (!initialized_ || !buffer || bufferSize == 0) {
         return false;
     }
-    
+
     // Create JSON document
     JsonDocument doc;  // ArduinoJson v7
     JsonArray errors = doc["errors"].to<JsonArray>();
-
-    // Get error count
-    size_t exportCount = min(errorCount, maxErrors);
 
     // Add stats
     JsonObject stats = doc["stats"].to<JsonObject>();
@@ -263,8 +260,16 @@ bool ErrorLogFRAM::exportToJson(char* buffer, size_t bufferSize, size_t maxError
     stats["oldest"] = cachedStats_.oldestErrorTime;
     stats["latest"] = cachedStats_.lastErrorTime;
 
-    // Add recent errors
-    for (size_t i = 0; i < exportCount; i++) {
+    // Paging: "from" = offset (0 = most recent), "stored" = entries in the log,
+    // "n" = entries included
+    doc["from"] = offset;
+    doc["stored"] = errorCount;
+    doc["n"] = 0;
+
+    // Add errors while the JSON still fits the buffer (was all-or-nothing: a 128-byte buffer
+    // failed with export_failed as soon as the log held entries, 2026-09-15)
+    size_t shown = 0;
+    for (size_t i = offset; i < errorCount && shown < maxErrors; i++) {
         ErrorEntry entry;
         if (getError(i, entry)) {
             JsonObject errorObj = errors.add<JsonObject>();
@@ -275,9 +280,16 @@ bool ErrorLogFRAM::exportToJson(char* buffer, size_t bufferSize, size_t maxError
             if (strlen(entry.context) > 0) {
                 errorObj["ctx"] = entry.context;
             }
+            doc["n"] = shown + 1;
+            if (measureJson(doc) >= bufferSize) {
+                errors.remove(errors.size() - 1);
+                doc["n"] = shown;
+                break;
+            }
+            shown++;
         }
     }
-    
+
     // Serialize to buffer
     size_t written = serializeJson(doc, buffer, bufferSize);
     

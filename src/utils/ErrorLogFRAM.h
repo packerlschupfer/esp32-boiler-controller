@@ -94,7 +94,7 @@ public:
     /**
      * @brief Export errors as JSON string
      */
-    static bool exportToJson(char* buffer, size_t bufferSize, size_t maxErrors = 10);
+    static bool exportToJson(char* buffer, size_t bufferSize, size_t maxErrors = 10, size_t offset = 0);
     
 private:
     static rtstorage::RuntimeStorage* storage_;

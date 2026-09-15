@@ -500,6 +500,26 @@ void handleFRAMCommand(const char* payload) {
     }
 }
 
+// Reply buffer for errors/list and errors/critical, sized to the MQTT publish payload (the
+// 128-byte pool string did not hold one log entry). MQTT command callbacks run in one task.
+static char s_errorReply[sizeof(MQTTPublishRequest::payload)];
+
+// boiler/cmd/config values that are registered parameters go through the parameter storage
+// so they are saved (writing SystemSettings only was lost on reboot, 2026-09-15)
+static bool setStoredParameter(const char* name, const char* value) {
+    if (!PersistentStorageTask_SetParameter(name, value)) {
+        LOG_ERROR(TAG_CMD, "Parameter storage not available");
+        return false;
+    }
+    return true;
+}
+
+static bool setStoredParameter(const char* name, long value) {
+    char valueBuf[12];
+    snprintf(valueBuf, sizeof(valueBuf), "%ld", value);
+    return setStoredParameter(name, valueBuf);
+}
+
 void handleErrorCommand(const char* topic, const char* payload) {
     // Validate inputs
     if (!topic) {
@@ -516,26 +536,31 @@ void handleErrorCommand(const char* topic, const char* payload) {
 
     // Handle error log commands
     if (strcmp(command, "list") == 0) {
-        // Get error count from payload (default 10)
+        // Payload "N" or "N,offset": up to N entries (default 10, max 50) starting at offset
+        // (0 = most recent). The reply holds as many as fit the MQTT payload ("n" = included),
+        // request the rest with a larger offset.
         int count = 10;
+        int offset = 0;
         if (payload && strlen(payload) > 0) {
             char* endptr = nullptr;
             long parsed = strtol(payload, &endptr, 10);
-            if (endptr != payload && *endptr == '\0' && parsed > 0 && parsed <= 50) {
-                count = static_cast<int>(parsed);
+            if (endptr != payload && parsed > 0 && parsed <= 50) {
+                if (*endptr == '\0') {
+                    count = static_cast<int>(parsed);
+                } else if (*endptr == ',') {
+                    char* offsetEnd = nullptr;
+                    long parsedOffset = strtol(endptr + 1, &offsetEnd, 10);
+                    if (offsetEnd != endptr + 1 && *offsetEnd == '\0' && parsedOffset >= 0 && parsedOffset < 50) {
+                        count = static_cast<int>(parsed);
+                        offset = static_cast<int>(parsedOffset);
+                    }
+                }
             }
         }
 
-        // Export errors as JSON
-        auto buffer = MemoryPools::getString();
-        if (!buffer) {
-            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for error list");
-            return;
-        }
-
-        if (ErrorLogFRAM::exportToJson(buffer.data(), buffer.size(), count)) {
-            MQTTTask::publish(MQTT_STATUS_ERRORS_LIST, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-            LOG_INFO(TAG_CMD, "Published error list with %d entries", count);
+        if (ErrorLogFRAM::exportToJson(s_errorReply, sizeof(s_errorReply), count, offset)) {
+            MQTTTask::publish(MQTT_STATUS_ERRORS_LIST, s_errorReply, 0, false, MQTTPriority::PRIORITY_LOW);
+            LOG_INFO(TAG_CMD, "Published error list (max %d from %d)", count, offset);
         } else {
             MQTTTask::publish(MQTT_STATUS_ERRORS_ERROR, "export_failed", 0, false, MQTTPriority::PRIORITY_HIGH);
         }
@@ -569,8 +594,11 @@ void handleErrorCommand(const char* topic, const char* payload) {
         ErrorLogFRAM::ErrorEntry criticalErrors[5];
         size_t errCount = ErrorLogFRAM::getCriticalErrors(criticalErrors, 5);
 
+        // As many entries as fit the MQTT payload ("n" = number included); the 128-byte
+        // pool string cut the JSON off without a check
         JsonDocument doc;  // ArduinoJson v7
         JsonArray errors = doc["critical"].to<JsonArray>();
+        size_t shown = 0;
 
         for (size_t i = 0; i < errCount; i++) {
             JsonObject error = errors.add<JsonObject>();
@@ -580,17 +608,18 @@ void handleErrorCommand(const char* topic, const char* payload) {
             if (criticalErrors[i].context[0] != '\0') {
                 error["ctx"] = criticalErrors[i].context;
             }
+            doc["n"] = shown + 1;
+            if (measureJson(doc) >= sizeof(s_errorReply)) {
+                errors.remove(errors.size() - 1);
+                break;
+            }
+            shown++;
         }
+        doc["n"] = shown;
 
-        auto buffer = MemoryPools::getString();
-        if (!buffer) {
-            LOG_ERROR(TAG_CMD, "Failed to allocate buffer for critical errors");
-            return;
-        }
-
-        serializeJson(doc, buffer.data(), buffer.size());
-        MQTTTask::publish(MQTT_STATUS_ERRORS_CRITICAL, buffer.c_str(), 0, false, MQTTPriority::PRIORITY_LOW);
-        LOG_INFO(TAG_CMD, "Published %zu critical errors", errCount);
+        serializeJson(doc, s_errorReply, sizeof(s_errorReply));
+        MQTTTask::publish(MQTT_STATUS_ERRORS_CRITICAL, s_errorReply, 0, false, MQTTPriority::PRIORITY_LOW);
+        LOG_INFO(TAG_CMD, "Published %zu of %zu critical errors", shown, errCount);
     }
     else if (strcmp(command, "dump") == 0) {
         // Trigger critical alert in monitoring task which will dump error log
@@ -661,6 +690,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     uint32_t value = static_cast<uint32_t>(parsed);
     bool success = false;
     bool syslogSettingChanged = false;  // Track syslog settings for PersistentStorage save
+    bool storedAsParameter = false;     // Saved by the parameter storage, not SafetyConfig
 
     if (strstr(topic, "pump_protection_ms") != nullptr) {
         success = SafetyConfig::setPumpProtection(value);
@@ -675,62 +705,46 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     // H1 fix: All SystemSettings writes are now mutex-protected (same pattern as handleHeatingCommand)
     else if (strstr(topic, "preheat_enabled") != nullptr) {
         bool newVal = (value != 0);
-        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-            SRP::getSystemSettings().preheatEnabled = newVal;
-            SRP::giveSystemSettingsMutex();
-        } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+        if (!setStoredParameter("preheat/enabled", newVal ? "true" : "false")) return;
         success = true;
+        storedAsParameter = true;
         LOG_INFO(TAG_CMD, "Preheat enabled: %s", newVal ? "true" : "false");
     } else if (strstr(topic, "preheat_off_multiplier") != nullptr) {
         if (value >= 1 && value <= 10) {
-            auto newVal = static_cast<uint8_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().preheatOffMultiplier = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!setStoredParameter("preheat/offMultiplier", static_cast<long>(value))) return;
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat OFF multiplier: %u", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Preheat OFF multiplier: %lu", value);
         }
     } else if (strstr(topic, "preheat_max_cycles") != nullptr) {
         if (value >= 1 && value <= 20) {
-            auto newVal = static_cast<uint8_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().preheatMaxCycles = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!setStoredParameter("preheat/maxCycles", static_cast<long>(value))) return;
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat max cycles: %u", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Preheat max cycles: %lu", value);
         }
     } else if (strstr(topic, "preheat_timeout_ms") != nullptr) {
         if (value >= SystemConstants::Safety::ConfigValidation::PREHEAT_TIMEOUT_MIN_MS &&
             value <= SystemConstants::Safety::ConfigValidation::PREHEAT_TIMEOUT_MAX_MS) {
-            uint32_t newVal = value;
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().preheatTimeoutMs = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!setStoredParameter("preheat/timeoutMs", static_cast<long>(value))) return;
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat timeout: %lu ms", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Preheat timeout: %lu ms", value);
         }
     } else if (strstr(topic, "preheat_pump_min_ms") != nullptr) {
         if (value >= SystemConstants::Safety::ConfigValidation::PREHEAT_PUMP_MIN_MS_MIN &&
             value <= SystemConstants::Safety::ConfigValidation::PREHEAT_PUMP_MIN_MS_MAX) {
-            auto newVal = static_cast<uint16_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().preheatPumpMinMs = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!setStoredParameter("preheat/pumpMinMs", static_cast<long>(value))) return;
             success = true;
-            LOG_INFO(TAG_CMD, "Preheat pump min change: %u ms", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Preheat pump min change: %lu ms", value);
         }
     } else if (strstr(topic, "preheat_safe_diff") != nullptr) {
         if (value >= 100 && value <= 300) {  // 10-30°C in tenths
             auto newVal = static_cast<Temperature_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().preheatSafeDiff = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!setStoredParameter("preheat/safeDiff", static_cast<long>(value))) return;
             success = true;
+            storedAsParameter = true;
             char tempBuf[16];
             formatTemp(tempBuf, sizeof(tempBuf), newVal);
             LOG_INFO(TAG_CMD, "Preheat safe differential: %s°C", tempBuf);
@@ -740,11 +754,9 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     else if (strstr(topic, "pump_cooldown_ms") != nullptr) {
         if (value >= 60000 && value <= 900000) {  // 1-15 minutes
             uint32_t newVal = value;
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().pumpCooldownMs = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!setStoredParameter("pump/cooldownMs", static_cast<long>(value))) return;
             success = true;
+            storedAsParameter = true;
             LOG_INFO(TAG_CMD, "Pump cooldown time: %lu ms (%.1f min)",
                      newVal, newVal / 60000.0f);
         }
@@ -752,11 +764,9 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     // Weather-compensated heating control
     else if (strstr(topic, "weather_control_enabled") != nullptr) {
         bool newVal = (value != 0);
-        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-            SRP::getSystemSettings().useWeatherCompensatedControl = newVal;
-            SRP::giveSystemSettingsMutex();
-        } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+        if (!setStoredParameter("heating/weatherControl", newVal ? "true" : "false")) return;
         success = true;
+        storedAsParameter = true;
         LOG_INFO(TAG_CMD, "Weather-compensated control: %s", newVal ? "ENABLED" : "DISABLED");
     } else if (strstr(topic, "outside_heating_threshold") != nullptr) {
         // Same range and storage path as boiler/params/set/heating/outsideThreshold. Writing
@@ -794,11 +804,11 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         // Accept value as float * 10 (e.g., 20 = 2.0)
         float factor = static_cast<float>(value) / 10.0f;
         if (factor >= 1.0f && factor <= 4.0f) {
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().roomTempCurveShiftFactor = factor;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            char factorBuf[12];
+            snprintf(factorBuf, sizeof(factorBuf), "%.1f", factor);
+            if (!setStoredParameter("heating/roomCurveShiftFactor", factorBuf)) return;
             success = true;
+            storedAsParameter = true;
             LOG_INFO(TAG_CMD, "Room curve shift factor: %.1f", factor);
         }
     }
@@ -809,10 +819,12 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
             SystemSettings& settings = SRP::getSystemSettings();
             oldValue = settings.useBoilerTempPID;
-            settings.useBoilerTempPID = newVal;
             SRP::giveSystemSettingsMutex();
         } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+        // Saved so it can take effect at the reboot it requires (was lost on reboot)
+        if (!setStoredParameter("boiler/pidEnabled", newVal ? "true" : "false")) return;
         success = true;
+        storedAsParameter = true;
         LOG_WARN(TAG_CMD, "Boiler PID mode: %s -> %s (REQUIRES REBOOT TO TAKE EFFECT!)",
                 oldValue ? "ENABLED" : "DISABLED",
                 newVal ? "ENABLED" : "DISABLED");
@@ -906,7 +918,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
             // Syslog settings use PersistentStorage, not SafetyConfig
             PersistentStorageTask_RequestSave();
             LOG_INFO(TAG_CMD, "Syslog config saved via PersistentStorage");
-        } else {
+        } else if (!storedAsParameter) {
             // Safety settings use SafetyConfig
             SafetyConfig::saveToNVS();
         }

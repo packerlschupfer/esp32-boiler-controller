@@ -43,4 +43,12 @@ void PersistentStorageTask_RequestLoad();
  */
 bool PersistentStorageTask_SetParameter(const char* name, const char* payload);
 
+/**
+ * @brief True once the saved parameters are loaded and applied to SystemSettings
+ *
+ * For settings read only once at task start (boiler PID mode): the storage task loads
+ * them ~150 ms after the control tasks start.
+ */
+bool PersistentStorageTask_ParametersLoaded();
+
 #endif // PERSISTENT_STORAGE_TASK_H

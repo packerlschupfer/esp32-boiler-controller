@@ -92,6 +92,20 @@ void BoilerTempControlTask(void* parameter) {
         cachedHandles.initialized = true;
     }
 
+    // initialize() reads the burner type (boiler/pidEnabled) once: wait for the saved
+    // parameters, which were loaded ~150 ms after this point, so a saved PID mode was
+    // ignored (2026-09-15). Bounded well below the task watchdog.
+    static constexpr uint32_t PARAMETER_LOAD_WAIT_MS = 3000;
+    uint32_t waitedMs = 0;
+    while (!PersistentStorageTask_ParametersLoaded() && waitedMs < PARAMETER_LOAD_WAIT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        waitedMs += 50;
+    }
+    if (!PersistentStorageTask_ParametersLoaded()) {
+        LOG_WARN(TAG, "Parameters not loaded after %lu ms - using defaults for the burner type",
+                 static_cast<unsigned long>(waitedMs));
+    }
+
     // Initialize the controller
     if (!controller.initialize()) {
         LOG_ERROR(TAG, "Failed to initialize BoilerTempController");

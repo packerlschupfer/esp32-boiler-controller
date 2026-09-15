@@ -34,6 +34,24 @@ static int32_t syslog_port = 514;
 static int32_t syslog_facility = 16;  // LOCAL0
 static int32_t syslog_minLevel = 2;   // ESP_LOG_WARN
 
+// Preheating and pump overrun shadows (boiler/cmd/config/preheat_*, pump_cooldown_ms).
+// These were written to SystemSettings only and lost on reboot (2026-09-15)
+static int32_t preheatOffMultiplier_i32 = 5;
+static int32_t preheatMaxCycles_i32 = 8;
+static int32_t preheatTimeoutMs_i32 = 600000;
+static int32_t preheatPumpMinMs_i32 = 3000;
+static int32_t preheatSafeDiff_i32 = 250;
+static int32_t pumpCooldownMs_i32 = 300000;
+
+static void applyPreheatPumpShadows(SystemSettings& settings) {
+    settings.preheatOffMultiplier = static_cast<uint8_t>(preheatOffMultiplier_i32);
+    settings.preheatMaxCycles = static_cast<uint8_t>(preheatMaxCycles_i32);
+    settings.preheatTimeoutMs = static_cast<uint32_t>(preheatTimeoutMs_i32);
+    settings.preheatPumpMinMs = static_cast<uint16_t>(preheatPumpMinMs_i32);
+    settings.preheatSafeDiff = static_cast<Temperature_t>(preheatSafeDiff_i32);
+    settings.pumpCooldownMs = static_cast<uint32_t>(pumpCooldownMs_i32);
+}
+
 // Constants - use centralized values
 static const char* TAG = "PersistentStorageTask";
 namespace StorageConstants = SystemConstants::Tasks::Storage;
@@ -53,6 +71,9 @@ static uint32_t lastChangeTime = 0;
 
 // Storage instance for PersistentStorageTask_SetParameter() (called from the MQTT task)
 static std::atomic<PersistentStorage*> storageInstance{nullptr};
+
+// Set once the saved parameters are loaded and applied to SystemSettings
+static std::atomic<bool> parametersLoaded{false};
 
 // Task function
 void PersistentStorageTask(void* pvParameters) {
@@ -137,6 +158,14 @@ void PersistentStorageTask(void* pvParameters) {
     syslog_port = settings.syslogPort;
     syslog_facility = settings.syslogFacility;
     syslog_minLevel = settings.syslogMinLevel;
+
+    // Initialize preheating / pump overrun shadows from current settings
+    preheatOffMultiplier_i32 = settings.preheatOffMultiplier;
+    preheatMaxCycles_i32 = settings.preheatMaxCycles;
+    preheatTimeoutMs_i32 = static_cast<int32_t>(settings.preheatTimeoutMs);
+    preheatPumpMinMs_i32 = settings.preheatPumpMinMs;
+    preheatSafeDiff_i32 = settings.preheatSafeDiff;
+    pumpCooldownMs_i32 = static_cast<int32_t>(settings.pumpCooldownMs);
 
     // CRITICAL: Shadows must be initialized BEFORE registerTemperature()
     // If NVS parameter doesn't exist, PersistentStorage uses current shadow value
@@ -359,6 +388,41 @@ void PersistentStorageTask(void* pvParameters) {
     storage->registerFloat("heating/roomCurveShiftFactor", &settings.roomTempCurveShiftFactor,
                           1.0f, 4.0f, "Room temp curve shift factor (1.0-4.0)");
 
+    // Preheating, pump overrun and boiler PID mode (set via boiler/cmd/config/*)
+    storage->registerBool("preheat/enabled", &settings.preheatEnabled, "Return preheating enabled");
+    storage->registerInt("preheat/offMultiplier", &preheatOffMultiplier_i32, 1, 10,
+                         "Preheat OFF duration = ON duration x this");
+    storage->registerInt("preheat/maxCycles", &preheatMaxCycles_i32, 1, 20, "Preheat max pump cycles");
+    storage->registerInt("preheat/timeoutMs", &preheatTimeoutMs_i32,
+                         static_cast<int32_t>(SystemConstants::Safety::ConfigValidation::PREHEAT_TIMEOUT_MIN_MS),
+                         static_cast<int32_t>(SystemConstants::Safety::ConfigValidation::PREHEAT_TIMEOUT_MAX_MS),
+                         "Preheat timeout (ms)");
+    storage->registerInt("preheat/pumpMinMs", &preheatPumpMinMs_i32,
+                         static_cast<int32_t>(SystemConstants::Safety::ConfigValidation::PREHEAT_PUMP_MIN_MS_MIN),
+                         static_cast<int32_t>(SystemConstants::Safety::ConfigValidation::PREHEAT_PUMP_MIN_MS_MAX),
+                         "Preheat min time between pump changes (ms)");
+    storage->registerInt("preheat/safeDiff", &preheatSafeDiff_i32, 100, 300,
+                         "Preheat exit differential (tenths °C)");
+    storage->registerInt("pump/cooldownMs", &pumpCooldownMs_i32, 60000, 900000,
+                         "Pump overrun after burner off (ms)");
+    storage->registerBool("boiler/pidEnabled", &settings.useBoilerTempPID,
+                          "Boiler temperature PID mode (reboot required)");
+
+    auto preheatPumpCallback = [](const std::string& name, const void*) {
+        applyPreheatPumpShadows(SRP::getSystemSettings());
+        LOG_INFO(TAG, "Parameter %s changed", name.c_str());
+        parametersChanged = true;
+        lastChangeTime = millis();
+        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
+        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
+    };
+    storage->setOnChange("preheat/offMultiplier", preheatPumpCallback);
+    storage->setOnChange("preheat/maxCycles", preheatPumpCallback);
+    storage->setOnChange("preheat/timeoutMs", preheatPumpCallback);
+    storage->setOnChange("preheat/pumpMinMs", preheatPumpCallback);
+    storage->setOnChange("preheat/safeDiff", preheatPumpCallback);
+    storage->setOnChange("pump/cooldownMs", preheatPumpCallback);
+
     // Sensor compensation offsets (MB8ART channels) - int32_t shadows, values in tenths of °C
     // MQTT: Send integer value e.g., -14 for -1.4°C offset, 5 for +0.5°C offset
     storage->registerInt("sensor/offset/boilerOutput", &temperatureShadows.boilerOutputOffset,
@@ -462,6 +526,8 @@ void PersistentStorageTask(void* pvParameters) {
     // Weather-compensated heating control
     storage->setOnChange("heating/weatherControl", boolParamCallback);
     storage->setOnChange("heating/roomCurveShiftFactor", floatParamCallback);
+    storage->setOnChange("preheat/enabled", boolParamCallback);
+    storage->setOnChange("boiler/pidEnabled", boolParamCallback);
     // Note: outsideThreshold and roomOverheatMargin callbacks set inline during registration
     // Sensor offsets - use sensorOffsetCallback to sync int32_t shadows to Temperature_t
     storage->setOnChange("sensor/offset/boilerOutput", sensorOffsetCallback);
@@ -537,6 +603,9 @@ void PersistentStorageTask(void* pvParameters) {
     settings.outsideTempHeatingThreshold = static_cast<Temperature_t>(outsideHeatingThreshold_i32);
     settings.roomTempOverheatMargin = static_cast<Temperature_t>(roomOverheatMargin_i32);
 
+    // Apply loaded preheating / pump overrun shadows (onChange does not fire on load)
+    applyPreheatPumpShadows(settings);
+
     // BUG FIX: Apply loaded wheater tank limits to SystemSettings.
     // setOnChange callbacks fire only on MQTT-triggered changes, NOT on initial NVS load.
     // Without this explicit sync, settings.wHeaterConfTempLimitHigh stays at the struct
@@ -561,6 +630,8 @@ void PersistentStorageTask(void* pvParameters) {
              burner_low_i32, burner_high_i32, heating_low_i32, heating_high_i32, water_low_i32, water_high_i32);
     LOG_INFO(TAG, "Wheater tank limits after load: low=%d high=%d safeHigh=%d safeLow=%d",
              tankLow_i32, tankHigh_i32, tankSafeHigh_i32, tankSafeLow_i32);
+
+    parametersLoaded.store(true);
 
     // Load safety configuration from NVS (separate namespace)
     SafetyConfig::loadFromNVS();
@@ -767,4 +838,8 @@ bool PersistentStorageTask_SetParameter(const char* name, const char* payload) {
     }
     // Same queued path as an MQTT boiler/params/set/<name> message
     return storage->handleMqttCommand(std::string("boiler/params/set/") + name, payload);
+}
+
+bool PersistentStorageTask_ParametersLoaded() {
+    return parametersLoaded.load();
 }
