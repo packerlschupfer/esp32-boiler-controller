@@ -531,7 +531,7 @@ WheaterOn  --handover to heating (water request gone, heating request present),
 
 ## Temperature Control
 
-There is no temperature control state enum. BoilerTempControlTask waits for `SensorUpdate::BOILER_OUTPUT` (~2.5 s) and, while a burner request is active and no autotune runs, calls `BoilerTempController::calculate(target, boilerOutput)`. The only state carried between cycles is the last power level (OFF/HALF/FULL). An invalid target or boiler temperature gives OFF.
+There is no temperature control state enum. BoilerTempControlTask waits for `SensorUpdate::BOILER_OUTPUT` with a 5 s timeout (the bit is never set, so it runs every 5 s) and, while a burner request is active and no autotune runs, calls `BoilerTempController::calculate(target, boilerOutput)`. The only state carried between cycles is the last power level (OFF/HALF/FULL). An invalid target or boiler temperature gives OFF.
 
 **`useBoilerTempPID` true (default, `BurnerType::MODULATING`)**: PID output 0-100% (50% = at target), gains of the active mode (`pid/spaceHeating/*` or `pid/waterHeater/*`), mapped with hysteresis (`offThreshold` 35, `halfThreshold` 45, `fullThreshold` 75, `thresholdHysteresis` 10):
 

@@ -179,9 +179,9 @@ uint8_t targetTemp = (bits >> 16) & 0xFF;  // Extract temperature
 
 Combinations: `ALL_TEMPS` (bits 0-7), `CRITICAL_TEMPS` (`BOILER_OUTPUT | EXHAUST`).
 
-**Who sets the per-channel bits**: the MB8ART library, using `SensorHardware::CONFIGS` (`include/config/SensorHardwareConfig.h`, index = channel from `SensorIndices.h`): CH0 `BOILER_OUTPUT`, CH1 `BOILER_RETURN`, CH2 `WATER_TANK`, CH3 `OUTSIDE`, CH6 `WATER_RETURN`, CH7 `HEATING_RETURN` with their `*_ERROR` bits; CH4 (pressure) and CH5 have no library bits, `PRESSURE` / `PRESSURE_ERROR` come from MB8ARTTasks after conversion. `INSIDE` / `INSIDE_ERROR` come from ANDRTF3Task, `DATA_AVAILABLE` / `DATA_ERROR` / `FIRST_READ_COMPLETE` from MB8ARTTasks. Before 2026-09-15 the library ignored the table and used interleaved bits (update 2n, error 2n+1), which overlapped these names (see CHANGELOG).
+**Who sets bits in this group** (checked 2026-09-15): MB8ARTTasks sets `DATA_AVAILABLE`, `DATA_ERROR`, `FIRST_READ_COMPLETE`, `PRESSURE` and `PRESSURE_ERROR`; ANDRTF3Task sets `INSIDE` and `INSIDE_ERROR`. The per-channel bits `BOILER_OUTPUT` ... `OUTSIDE` and their `*_ERROR` bits are **never set here**: the MB8ART library keeps its channel update/error bits in its own event group (`MB8ART::getSensorEventGroup()`, bits from `SensorHardware::CONFIGS`), which MB8ARTTasks polls with `hasAnyUpdatePending()`.
 
-**Consumers**: BoilerTempControlTask waits on `BOILER_OUTPUT` (clear-on-exit), BurnerControlTask polls `BOILER_RETURN | WATER_TANK` and also updates on its 1 s timer, SafetyInterlocks reads `DATA_AVAILABLE`, MonitoringTask and OtaRollbackGuard read `FIRST_READ_COMPLETE`.
+**Consumers**: BoilerTempControlTask waits on `BOILER_OUTPUT` with a 5 s timeout, so it runs on the timeout; BurnerControlTask polls `BOILER_OUTPUT | BOILER_RETURN | WATER_TANK`, which never fires (its state machine update runs on the 1 s timer, the sensor check in `processTemperatureUpdate()` does not run); SafetyInterlocks reads `DATA_AVAILABLE` (set after the first read, never cleared); MonitoringTask and OtaRollbackGuard read `FIRST_READ_COMPLETE`.
 
 **Usage Example**:
 ```cpp

@@ -15,10 +15,11 @@ namespace SensorHardware {
      *
      * To change sensor assignments, modify SensorIndices.h ONLY.
      */
-    // Array index = MB8ART channel. The library sets these bits in xSensorEventGroup; until
-    // 2026-09-15 it ignored this table and used its own interleaved bits (update 2n, error
-    // 2n+1), so only BOILER_OUTPUT matched its channel (e.g. "WATER_TANK" was the return
-    // update, DATA_AVAILABLE was cleared on every request). 0 = no event for the channel.
+    // Array index = MB8ART channel. The library sets these bits in its own sensor event group
+    // (MB8ART::getSensorEventGroup(), polled by MB8ARTTasks via hasAnyUpdatePending()), not in
+    // SRP's sensor event group. Until ESP32-MB8ART 1af4113 it ignored this table and used
+    // interleaved bits (update 2n, error 2n+1); the labels here were shifted from SensorIndices
+    // (2026-09-15). 0 = no event for the channel.
     constexpr std::array<mb8art::SensorHardwareConfig, 8> CONFIGS = {{
         // CH0 - boiler output
         {SensorIndex::BOILER_OUTPUT, SystemEvents::SensorUpdate::BOILER_OUTPUT,

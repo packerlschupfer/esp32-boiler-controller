@@ -197,14 +197,14 @@ RUNNING_HIGH state
 │  ├─ Check safety (pressure, temp)
 │  ├─ Check demand still present
 │  └─ Feed watchdog
-├─ BoilerTempControlTask on every SensorUpdate::BOILER_OUTPUT (~2.5s)
+├─ BoilerTempControlTask every 5s (its wait on SensorUpdate::BOILER_OUTPUT times out; the bit is never set)
 │  ├─ PID power level OFF/HALF/FULL for the request target
 │  ├─ Publishes its decision (getBoilerTempDecision)
 │  └─ BurnerDemandGate::decide(): ARM / SET_POWER / DISARM every cycle
 ├─ MB8ARTTask reads temperatures every 2.5s
 │  ├─ Boiler output temp increasing
 │  ├─ Water tank temp rising
-│  └─ Sets SensorUpdate::BOILER_OUTPUT event
+│  └─ Sets SensorUpdate::DATA_AVAILABLE (per-channel bits stay in the MB8ART library's own event group)
 ├─ WheaterControlTask monitors progress
 │  └─ Tank: 25.2°C → 35.5°C → 45.8°C → ...
 └─ MQTTTask publishes sensors every 10s
@@ -312,7 +312,7 @@ HeatingPumpTask (PumpControlModule, every 500ms)
 
 #### Step 5: PID Control Loop
 ```
-BoilerTempControlTask (on every SensorUpdate::BOILER_OUTPUT, ~2.5s)
+BoilerTempControlTask (every 5s: waits on SensorUpdate::BOILER_OUTPUT, which is never set, and runs on the timeout)
 ├─ Reads boiler output temp and the target of the active request
 ├─ BoilerTempController::calculate() (PID, gains pid/spaceHeating/*)
 │  ├─ P term: Kp × error
@@ -572,23 +572,22 @@ MB8ARTTask (every 2.5 seconds)
 │  ├─ .systemPressure = 152
 │  └─ .lastUpdateTimestamp = millis()
 ├─ Releases mutex
-└─ Sets event bits for each sensor
-   ├─ SensorUpdate::BOILER_OUTPUT
-   ├─ SensorUpdate::WATER_TANK
-   └─ SensorUpdate::PRESSURE
+└─ Sets SensorUpdate::DATA_AVAILABLE (FIRST_READ_COMPLETE once, PRESSURE after conversion)
+   (the MB8ART library sets its per-channel update/error bits in its own event group, not here)
 ```
 
 #### Event Propagation
 ```
 Sensor Events Trigger Multiple Tasks:
 
-SensorUpdate::BOILER_OUTPUT
+SensorUpdate::BOILER_OUTPUT (never set in this group, see EVENT_SYSTEM.md)
 ├─ BoilerTempControlTask
-│  └─ Waits on it (timeout 2x sensor read interval), runs the PID cycle
-│     and BurnerDemandGate (see Burner Demand Arming Flow)
+│  └─ Waits on it with a 5 s timeout (2x sensor read interval) and runs the PID cycle
+│     and BurnerDemandGate on the timeout (see Burner Demand Arming Flow)
 └─ BurnerControlTask
-   └─ Checks BOILER_OUTPUT | BOILER_RETURN | WATER_TANK on each loop pass
-      without waiting → BurnerStateMachine::update() and sensor fallback check
+   └─ Polls BOILER_OUTPUT | BOILER_RETURN | WATER_TANK on each loop pass; this never
+      fires, so its sensor fallback check does not run there.
+      BurnerStateMachine::update() runs on the 1 s STATE_TIMEOUT
 
 HeatingControlTask and WheaterControlTask do not use sensor events; they run
 on their process timers and read SharedSensorReadings.
@@ -822,7 +821,7 @@ If heat demand and an active mode request return during post-purge, POST_PURGE �
 ```
 Time    Task              Event
 0s      MB8ARTTask        Read sensors → Update SharedSensorReadings
-0s      MB8ARTTask        Set SensorUpdate::BOILER_OUTPUT
+0s      MB8ARTTask        Set SensorUpdate::DATA_AVAILABLE
 0-2.5s  (Other tasks process sensor data)
 2.5s    MB8ARTTask        Next sensor read cycle
 5s      ANDRTF3Task       Read room temp → Update SharedSensorReadings
@@ -855,7 +854,7 @@ Task B (Responder)
 ```
 Publisher (Sensor Task)
 ├─ Updates shared data (mutex protected)
-├─ Sets event bit: SensorUpdate::BOILER_OUTPUT
+├─ Sets event bit (e.g. SensorUpdate::INSIDE from ANDRTF3Task)
 └─ Releases mutex
 
 Subscriber 1 (Control Task)
