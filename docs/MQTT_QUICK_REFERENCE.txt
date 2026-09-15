@@ -10,9 +10,19 @@ Connection:
 Control Commands (topic boiler/cmd/<command>):
   boiler/cmd/system      on|off|reboot|nvs_erase               # Master boiler switch (also enable/disable/1/0)
   boiler/cmd/heating     on|off|override_on|override_off|normal
-  boiler/cmd/water       on|off|override_on|override_off|normal|priority_on|priority_off
+  boiler/cmd/water       on|off|override_on|override_off|normal|priority_on|priority_off  (alias boiler/cmd/wheater)
   boiler/cmd/room_target 21.5                                  # Room target in °C (15.0-30.0)
   boiler/cmd/pid_autotune start|stop|status|params|method:<name>
+  boiler/cmd/fram        status|counters|runtime|reset_counters|format_confirm|save_pid
+  boiler/cmd/fram_errors stats|clear
+  Unknown commands: unknown_command on boiler/status/error
+
+Scheduler (JSON, replies on boiler/scheduler/response):
+  boiler/cmd/scheduler/add     {"type":"water_heating","name":"..","start_hour":6,...,"days":[1,2,3,4,5]}
+  boiler/cmd/scheduler/remove  {"id":3}
+  boiler/cmd/scheduler/list    {}
+  boiler/cmd/scheduler/status  (any)    # reply on boiler/status/scheduler/info
+  Days: 0=Sun, 1=Mon ... 6=Sat (7 rejected). No enable/disable command: remove and re-add.
 
 Safety:
   boiler/cmd/burner_reset    lockout|reset   # Leave burner LOCKOUT (no effect in ERROR)
@@ -25,6 +35,9 @@ Safety Configuration:
   boiler/cmd/config/sensor_stale_ms    30000-300000
   boiler/cmd/config/pump_protection_ms 5000-60000
   boiler/cmd/config/post_purge_ms      30000-180000
+  boiler/cmd/config/thermal_shock_c    100-600 (tenths °C)
+  Also: preheat_*, pump_cooldown_ms, weather_control_enabled, outside_heating_threshold,
+        room_overheat_margin, room_curve_shift_factor, boiler_pid_enabled, syslog_* (see MQTT_API.md)
 
 Temperature Settings (payload in tenths of °C):
   boiler/params/set/heating/targetTemp       215   # Room target (100-300)
@@ -33,6 +46,10 @@ Temperature Settings (payload in tenths of °C):
   boiler/params/set/wheater/tempLimitHigh    650   # Water stop (500-850)
   Keep tempLimitLow < tempLimitHigh: when raising both send High first, when lowering send Low first.
 
+Heating Curve (float):
+  boiler/params/set/heating/curveCoeff       1.4   # Slope (0.5-4.0, default 1.4)
+  boiler/params/set/heating/curveShift       0     # Shift in °C (-20-40, default 0)
+
 Parameter Management:
   boiler/params/set/<name>  <value>   # Change a parameter
   boiler/params/get/<name>  (empty)   # Publish to boiler/params/status/<name>
@@ -40,13 +57,20 @@ Parameter Management:
   boiler/params/list        (empty)   # Names to boiler/params/list/response
   boiler/params/save        (empty)   # Save to NVS
 
-Error Log:
-  errors/list      20       # Last N errors (1-50, empty = 10)
+Error Log (bare topics only; boiler/cmd/errors does NOT work, it replies unknown_command):
+  errors/list      20       # Last N errors (1-50, empty = 10); "N,offset" pages on, reply "n" = entries that fit
+  preheat_*, pump_cooldown_ms, weather_control_enabled, room_curve_shift_factor, boiler_pid_enabled
+  are saved as parameters (preheat/*, pump/cooldownMs, heating/..., boiler/pidEnabled)
   errors/stats | errors/critical | errors/clear | errors/dump
 
 Status Topics:
-  boiler/status/sensors          # Temperatures (tenths °C), pressure, relay bits, every 10 s
+  boiler/status/sensors          # Temperatures (tenths °C, incl. bt burner target), pressure, relay/state bits, sf, every 10 s
+  boiler/status/health           # Heap, uptime, tasks, every 60 s
   boiler/status/burner           # ERROR status, reset command results
+  boiler/status/system|heating|water|water/priority  # Command replies (retained)
+  boiler/status/heating/target   # Room target °C (retained)
+  boiler/status/sensor_mode      # STARTUP|NORMAL|SHUTDOWN (retained)
+  boiler/error/context           # Critical error snapshot (retained, max every 30 s)
   boiler/status/device/firmware  # Firmware version
   boiler/status/online           # Online / LWT
 
