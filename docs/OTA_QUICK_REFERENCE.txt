@@ -28,12 +28,14 @@ mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD -t "boile
 mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD -t "boiler/status/device/firmware" -t "boiler/status/online" -v
 
 Note: OTA has no MQTT command and publishes no MQTT progress/status
-(OTATask::initWithMQTT() is never called); no diagnostics/... topics exist.
+(OTATask::initWithMQTT() is never called).
+Modbus error stats: boiler/diagnostics/modbus/{address} (every 30 min).
 
 Memory Requirements:
 -------------------
 - Minimum free heap: 100KB
 - Firmware size: ~1.2MB (release)
+- App partitions: app0/app1, 4MB each (16MB flash, hardware/partitions_16MB.csv)
 - Update duration: 30-60 seconds
 
 Troubleshooting:
@@ -57,17 +59,25 @@ Troubleshooting:
 Recovery:
 ---------
 If OTA fails, connect via USB:
-pio run -e esp32dev_usb_release -t upload --upload-port /dev/ttyACM0
+pio run -e prod_release -t upload --upload-port /dev/ttyACM0
+(not esp32dev_usb_release: it lacks credentials.build_flags, so no MQTT
+credentials and the default OTA password)
 
 Build Environments:
 ------------------
 esp32dev_ota_release       - Production (smallest)
 esp32dev_ota_debug_selective - Some debug output
 esp32dev_ota_debug_full    - Full debug (largest)
+prod_ota                   - Release, [base_prod] flags, 192.168.20.40
+prod_ota_debug_selective   - Debug selective, [base_prod] flags, 192.168.20.40
+dev_ota                    - Release, [base_dev] flags, 192.168.20.41
 
 Safety Notes:
 ------------
 - Device auto-reboots after successful update
-- Rollback occurs if new firmware fails to boot
-- Critical tasks suspended during update
-- Watchdog disabled during transfer
+- On OTA start: active burner gets a graceful stop (demand cleared, post-purge),
+  runtime counters saved to FRAM, OTA event logged
+- OTA requests are only handled while Ethernet is connected
+- NO automatic rollback after boot (image marked valid at startup);
+  recover by USB flash of a known-good image
+- NO watchdog disable and NO task suspension during the update

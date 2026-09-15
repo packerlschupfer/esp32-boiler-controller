@@ -21,12 +21,15 @@ The ESPlan Boiler Controller supports Over-The-Air firmware updates via Ethernet
 ```
 
 ### PlatformIO Configuration
-Three OTA environments are available (`upload_protocol = espota`):
+OTA environments (`upload_protocol = espota`):
 - `esp32dev_ota_release` - Production firmware (smallest size)
 - `esp32dev_ota_debug_selective` - Selective debug logging
 - `esp32dev_ota_debug_full` - Full debug logging (largest)
+- `prod_ota` - Release build with `[base_prod]` flags (device 192.168.20.40)
+- `prod_ota_debug_selective` - Selective debug build with `[base_prod]` flags (device 192.168.20.40)
+- `dev_ota` - Release build with `[base_dev]` flags (`upload_port = 192.168.20.41`)
 
-Each has `upload_port = 192.168.20.40` (device IP, `ETH_STATIC_IP` default in `src/config/ProjectConfig.h` and platformio.ini `[base_prod]`) and `upload_flags = --host_ip=192.168.20.16 --auth=${credentials.ota_password}`. Adjust `--host_ip` to your computer. The upload password comes from `ota_password` in `credentials.ini` and must equal `-DOTA_PASSWORD` there (the password built into the running image).
+The `esp32dev_ota_*` and `prod_ota*` envs have `upload_port = 192.168.20.40` (device IP, `ETH_STATIC_IP` default in `src/config/ProjectConfig.h` and platformio.ini `[base_prod]`) and `upload_flags = --host_ip=192.168.20.16 --auth=${credentials.ota_password}`. Adjust `--host_ip` to your computer. The upload password comes from `ota_password` in `credentials.ini` and must equal `-DOTA_PASSWORD` there (the password built into the running image).
 
 ## Update Methods
 
@@ -63,8 +66,9 @@ python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py \
 
 ### Memory Requirements
 - Minimum free heap: 100 KB during update
-- OTA partition size: 1.5 MB (configured in partitions)
-- Update requires 2x firmware size temporarily
+- Flash: 16 MB (`board_build.flash_size = 16MB`)
+- OTA app partitions: `app0` and `app1`, 4 MB (0x400000) each (`hardware/partitions_16MB.csv`)
+- The new image is written to the inactive app partition
 
 ### Memory Monitoring
 Free heap is published with the system health status on `boiler/status/health` (not retained):
@@ -77,23 +81,33 @@ mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD \
 {"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_hwm":1084}}
 ```
 
-There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initialized.
+Modbus error statistics are published to `boiler/diagnostics/modbus/{address}` every 30 minutes
+(see `MODBUS_ERROR_TRACKING_INTEGRATION.md`).
 
 ## Safety Features
 
 ### 1. Dual Partition System
-- Current firmware runs from one partition
-- New firmware uploads to alternate partition
-- Automatic rollback on boot failure
+- Current firmware runs from one app partition (`app0` / `app1`)
+- New firmware is written to the other partition; the device boots it after the reboot
+- **No automatic rollback after boot:** the Arduino core marks the new image valid during
+  startup, before `setup()`, and the project does not override `verifyOta()` /
+  `verifyRollbackLater()`. An image that boots but then crashes or misbehaves stays active;
+  recover by flashing a known-good image via USB
 
-### 2. Pre-Update Checks
-- Verify sufficient free memory
-- Check network connectivity
-- Ensure no critical operations in progress
+### 2. Network Check
+- `OTATask` passes `isNetworkConnected()` (Ethernet link) to `OTAManager`; incoming OTA
+  requests are only handled while the network is ready
+- There is no free-memory check and no check for running operations before the transfer starts
 
-### 3. Update Process Safety
-- Watchdog disabled during update
-- Non-critical tasks may be suspended
+### 3. On Update Start (`OTATask::onOTAStart`, `src/modules/tasks/OTATask_callbacks.cpp`)
+- If the burner is not IDLE, all burner requests are cleared and heat demand is set to false,
+  so the burner state machine performs a graceful stop (post-purge) during the transfer
+  instead of being cut by the relay DELAY watchdog at reboot
+- Runtime counters are saved to FRAM and an OTA-start event is written to the FRAM safety log
+
+### 4. Not Implemented
+- No watchdog disable during the update
+- No task suspension during the update (the resume calls in the callbacks are commented out)
 
 ## Testing OTA Updates
 
@@ -127,9 +141,9 @@ There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initializ
 - Consider using smaller build (release)
 
 #### Update Succeeds but Device Doesn't Boot
-- Automatic rollback should occur
-- Device reverts to previous firmware
+- Do not rely on automatic rollback: the new image is marked valid at startup (see Safety Features)
 - Check serial console for boot errors
+- Flash a known-good image via USB (see Recovery Procedures)
 - Verify firmware compatibility
 
 ### Recovery Procedures
@@ -138,8 +152,11 @@ There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initializ
 1. Connect via USB/Serial
 2. Upload firmware directly:
    ```bash
-   pio run -e esp32dev_usb_release -t upload
+   pio run -e prod_release -t upload
    ```
+   Do not use `esp32dev_usb_release` for recovery: it does not include
+   `${credentials.build_flags}`, so the image has no MQTT credentials and uses the
+   `ProjectConfig.h` default OTA password.
 3. Check serial output for errors
 4. Verify partition table correct
 
@@ -169,7 +186,7 @@ There are no `diagnostics/...` MQTT topics: `MQTTDiagnostics` is never initializ
 - Monitor update success/failure
 
 ### 4. Rollback Strategy
-- Know how to force rollback
+- There is no automatic rollback after boot; rollback means re-flashing a previous image
 - Keep previous firmware files
 - Document rollback procedures
 - Test rollback in development

@@ -1,188 +1,58 @@
-# Modbus Error Tracking Integration Guide
+# Modbus Error Tracking Integration
 
 ## Overview
 
-Modbus error tracking is now implemented in the **ESP32-ModbusDevice library** (commit a3eb56e). This provides reusable error diagnostics for all Modbus-based device libraries.
+Modbus error tracking is implemented in the **ESP32-ModbusDevice library** (`ModbusErrorTracker`)
+and is integrated in all three device libraries and in the main project.
 
 **Architecture:**
-- **ESP32-ModbusDevice**: Core tracking logic (error categorization, statistics)
-- **Device Libraries** (MB8ART, RYN4, ANDRTF3): Record errors/successes after operations
-- **Main Project**: Queries stats and publishes to MQTT
+- **ESP32-ModbusDevice**: Core tracking logic (`modbus::ModbusErrorTracker`, error categorization, statistics)
+- **Device Libraries** (MB8ART, RYN4, ANDRTF3): Record errors/successes after Modbus operations
+- **Main Project**: Queries stats and publishes them to MQTT (`src/modules/tasks/MonitoringTask.cpp`)
 
 ---
 
-## What's Already Done
+## Current Integration
 
-✅ **In ESP32-ModbusDevice library:**
-- `ModbusErrorTracker` class with thread-safe statistics
-- Error categorization: CRC_ERROR, TIMEOUT, INVALID_DATA, DEVICE_ERROR, OTHER
-- Per-device counters (up to 8 devices)
-- Query API for error rates, counts, timestamps
+**ESP32-ModbusDevice library:**
+- `modbus::ModbusErrorTracker` static class, counters are `std::atomic`
+- Error categories (`ModbusErrorTracker::ErrorCategory`): `CRC_ERROR`, `TIMEOUT`, `INVALID_DATA`, `DEVICE_ERROR`, `OTHER`
+- Per-device counters, up to `MODBUS_ERROR_TRACKER_MAX_DEVICES` (default 8)
+- No `init()` needed (static initialization)
 
-✅ **In main project (esp32-boiler-controller):**
-- MQTT publishing function in `MonitoringTask.cpp`
-- Publishes stats every 5 minutes to `boiler/diagnostics/modbus/{address}`
-- JSON format with error breakdown and rates
+**Device libraries** (call sites of `recordError()` / `recordSuccess()`):
 
-❌ **What's NOT done:**
-- Device libraries don't call tracking functions yet
-- Stats will show zeros until libraries are updated
+| Library | Where tracking is called |
+|---------|--------------------------|
+| ESP32-MB8ART | `MB8ART.cpp`, `MB8ARTModbus.cpp`, `MB8ARTConfig.cpp` |
+| ESP32-RYN4 | `RYN4_TRACK_*` macros (`RYN4Logging.h`) used in `RYN4Control.cpp`, `RYN4Modbus.cpp`, `RYN4State.cpp`, `RYN4Config.cpp`, `RYN4AdvancedConfig.cpp` |
+| ESP32-ANDRTF3 | `ANDRTF3.cpp` |
 
----
-
-## Integration Steps for Device Libraries
-
-### Step 1: Update ESP32-MB8ART
-
-**File:** `/home/mrnice/Documents/PlatformIO/git/ESP32-MB8ART/src/MB8ART.cpp`
-
-**Add tracking after Modbus operations:**
-
-```cpp
-#include <ModbusErrorTracker.h>
-
-// Example: After reading temperature
-Temperature_t MB8ART::readTemperature(uint8_t channel) {
-    auto result = modbusDevice_->readInputRegisters(baseAddress_ + channel, 1);
-
-    if (result.isError()) {
-        // Record error with categorization
-        auto category = ModbusErrorTracker::categorizeError(result.error());
-        ModbusErrorTracker::recordError(address_, category);
-
-        // Existing error handling...
-        return INVALID_TEMPERATURE;
-    }
-
-    // Record success
-    ModbusErrorTracker::recordSuccess(address_);
-
-    // Existing success handling...
-    return convertToTemperature(result.value());
-}
-```
-
-**Integration points:**
-- `readTemperature()` - After each channel read
-- `readAllChannels()` - After batch operation
-- Any other Modbus read operations
-
----
-
-### Step 2: Update ESP32-RYN4
-
-**File:** `/home/mrnice/Documents/PlatformIO/git/ESP32-RYN4/src/RYN4.cpp`
-
-```cpp
-#include <ModbusErrorTracker.h>
-
-// Example: After setting relay state
-bool RYN4::setRelay(uint8_t relay, bool state) {
-    auto result = modbusDevice_->writeSingleCoil(relay, state);
-
-    if (result.isError()) {
-        auto category = ModbusErrorTracker::categorizeError(result.error());
-        ModbusErrorTracker::recordError(address_, category);
-        return false;
-    }
-
-    ModbusErrorTracker::recordSuccess(address_);
-    return true;
-}
-
-// Example: After reading relay states
-uint8_t RYN4::readRelayStates() {
-    auto result = modbusDevice_->readCoils(0, 8);
-
-    if (result.isError()) {
-        auto category = ModbusErrorTracker::categorizeError(result.error());
-        ModbusErrorTracker::recordError(address_, category);
-        return 0;
-    }
-
-    ModbusErrorTracker::recordSuccess(address_);
-    return result.value();
-}
-```
-
-**Integration points:**
-- `setRelay()` / `setMultipleRelays()` - After write operations
-- `readRelayStates()` - After read operations
-- DELAY command operations
-
----
-
-### Step 3: Update ESP32-ANDRTF3
-
-**File:** `/home/mrnice/Documents/PlatformIO/git/ESP32-ANDRTF3/src/ANDRTF3.cpp`
-
-```cpp
-#include <ModbusErrorTracker.h>
-
-// Example: After reading temperature
-Temperature_t ANDRTF3::readTemperature() {
-    auto result = modbusDevice_->readInputRegisters(TEMP_REGISTER, 1);
-
-    if (result.isError()) {
-        auto category = ModbusErrorTracker::categorizeError(result.error());
-        ModbusErrorTracker::recordError(address_, category);
-        return INVALID_TEMPERATURE;
-    }
-
-    ModbusErrorTracker::recordSuccess(address_);
-    return convertToTemperature(result.value());
-}
-```
-
-**Integration points:**
-- `readTemperature()` - After temperature read
-- `readHumidity()` - If supported
-- Any other sensor reads
+**Main project:**
+- `publishModbusErrorStats()` in `src/modules/tasks/MonitoringTask.cpp`
+- Called from the detailed monitoring report, timer `DETAILED_MONITOR_INTERVAL_MS` = 1800000 ms
+  (**every 30 minutes**, `src/config/SystemConstants.h`)
+- One message per device to `boiler/diagnostics/modbus/{address}`
+  (`MQTT_DIAGNOSTICS_MODBUS_PREFIX` in `include/MQTTTopics.h`)
+- Address is formatted as two hex digits (`%02X`), QoS 0, not retained, low priority
 
 ---
 
 ## Device Addresses
 
-Make sure you use the correct Modbus addresses:
+From `src/config/ProjectConfig.h`:
 
-| Device | Address | Purpose |
-|--------|---------|---------|
-| MB8ART | 0x01 | 8-channel temperature sensors |
-| RYN4 | 0x02 | 8-channel relay module |
-| ANDRTF3 | 0x03 | Room temperature sensor |
+| Device | Address | Topic | Purpose |
+|--------|---------|-------|---------|
+| RYN4 | 0x02 | `boiler/diagnostics/modbus/02` | 8-channel relay module |
+| MB8ART | 0x03 | `boiler/diagnostics/modbus/03` | 8-channel temperature sensors |
+| ANDRTF3 | 0x04 | `boiler/diagnostics/modbus/04` | Room temperature sensor |
+
+Stats are published in the order MB8ART, RYN4, ANDRTF3.
 
 ---
 
-## After Library Integration
-
-### 1. Rebuild Libraries
-
-```bash
-cd /home/mrnice/Documents/PlatformIO/git/ESP32-MB8ART
-pio run
-
-cd /home/mrnice/Documents/PlatformIO/git/ESP32-RYN4
-pio run
-
-cd /home/mrnice/Documents/PlatformIO/git/ESP32-ANDRTF3
-pio run
-```
-
-### 2. Clean and Rebuild Main Project
-
-```bash
-cd /home/mrnice/Documents/PlatformIO/Projects/esp32-boiler-controller
-rm -rf .pio
-pio run -e esp32dev_usb_debug_selective
-```
-
-### 3. Upload and Monitor
-
-```bash
-pio run -e esp32dev_usb_debug_selective -t upload --upload-port /dev/ttyACM0
-```
-
-### 4. Monitor MQTT Topics
+## Monitor MQTT Topics
 
 ```bash
 # Subscribe to diagnostics
@@ -191,11 +61,13 @@ mosquitto_sub -h BROKER_IP -u USER -P PASS -t "boiler/diagnostics/modbus/#" -v
 
 ---
 
-## Expected MQTT Output (Every 5 Minutes)
+## MQTT Output (Every 30 Minutes)
+
+Example values:
 
 ```json
-boiler/diagnostics/modbus/01 {
-  "address": 1,
+boiler/diagnostics/modbus/03 {
+  "address": 3,
   "crc_errors": 12,
   "timeouts": 0,
   "invalid_data": 0,
@@ -220,8 +92,8 @@ boiler/diagnostics/modbus/02 {
   "last_error_ms_ago": 42100
 }
 
-boiler/diagnostics/modbus/03 {
-  "address": 3,
+boiler/diagnostics/modbus/04 {
+  "address": 4,
   "crc_errors": 0,
   "timeouts": 0,
   "invalid_data": 0,
@@ -233,6 +105,12 @@ boiler/diagnostics/modbus/03 {
 }
 ```
 
+**Field notes:**
+- `address` is decimal in the payload; the topic suffix is hex
+- `error_rate_pct` = total errors / (total errors + successes) x 100
+- `last_error_ms_ago` is omitted when the device has had no error since boot (or since reset)
+- Counters are in RAM and start from zero after each reboot
+
 ---
 
 ## Interpretation of Results
@@ -240,7 +118,7 @@ boiler/diagnostics/modbus/03 {
 ### Healthy Device Example
 ```json
 {
-  "address": 1,
+  "address": 3,
   "crc_errors": 2,      // Few CRC errors (EMI is minimal)
   "timeouts": 0,        // No timeouts (device responsive)
   "error_rate_pct": 0.13
@@ -251,7 +129,7 @@ boiler/diagnostics/modbus/03 {
 ### Bus Noise Problem
 ```json
 {
-  "address": 1,
+  "address": 3,
   "crc_errors": 127,    // Many CRC errors (EMI/noise)
   "timeouts": 3,        // Few timeouts
   "error_rate_pct": 5.2
@@ -274,28 +152,16 @@ boiler/diagnostics/modbus/03 {
 
 ## Important Notes
 
-### No Retry Logic Added
+### Diagnostic Only
 
-The error tracking is **diagnostic only** - it does NOT change retry behavior:
+The error tracker only counts results - it does not change communication behavior:
 
-- ✅ Tracks errors by category
-- ✅ Publishes statistics to MQTT
-- ❌ Does NOT add automatic retries
-- ❌ Does NOT change ModbusCoordinator tick schedule
+- Tracks errors by category
+- Stats are published to MQTT by the main project
+- Does NOT add retries
+- Does NOT change the ModbusCoordinator schedule
 
-Your fixed tick schedule remains intact!
-
-### Why No Retries?
-
-With your fixed tick schedule:
-```
-Tick 0: READ MB8ART, READ ANDRTF3, READ RYN4
-Tick 1: WRITE RYN4
-Tick 2: READ MB8ART, READ ANDRTF3, READ RYN4
-Tick 3: WRITE RYN4
-```
-
-Adding automatic retry would break the schedule. The tracker just helps you understand:
+It helps answer:
 - "Is this CRC error (bus noise) or timeout (device failure)?"
 - "Which device has the most problems?"
 - "Error rate trending over time"
@@ -304,47 +170,49 @@ Adding automatic retry would break the schedule. The tracker just helps you unde
 
 ## API Reference (ESP32-ModbusDevice)
 
-### Recording Errors/Successes
+### Recording Errors/Successes (device libraries)
 
 ```cpp
+#include <ModbusErrorTracker.h>
+
 // After Modbus operation
 if (result.isError()) {
-    auto category = ModbusErrorTracker::categorizeError(result.error());
-    ModbusErrorTracker::recordError(deviceAddress, category);
+    auto category = modbus::ModbusErrorTracker::categorizeError(result.error());
+    modbus::ModbusErrorTracker::recordError(deviceAddress, category);
 } else {
-    ModbusErrorTracker::recordSuccess(deviceAddress);
+    modbus::ModbusErrorTracker::recordSuccess(deviceAddress);
 }
 ```
 
-### Querying Statistics (Main Project)
+### Querying Statistics (main project)
 
 ```cpp
-uint32_t crc = ModbusErrorTracker::getCrcErrors(address);
-uint32_t timeouts = ModbusErrorTracker::getTimeouts(address);
-uint32_t invalidData = ModbusErrorTracker::getInvalidDataErrors(address);
-uint32_t deviceErrors = ModbusErrorTracker::getDeviceErrors(address);
-uint32_t otherErrors = ModbusErrorTracker::getOtherErrors(address);
-uint32_t successCount = ModbusErrorTracker::getSuccessCount(address);
-uint32_t totalErrors = ModbusErrorTracker::getTotalErrors(address);
-float errorRate = ModbusErrorTracker::getErrorRate(address);  // Percentage
-uint32_t lastErrorTime = ModbusErrorTracker::getLastErrorTime(address);
+uint32_t crc = modbus::ModbusErrorTracker::getCrcErrors(address);
+uint32_t timeouts = modbus::ModbusErrorTracker::getTimeouts(address);
+uint32_t invalidData = modbus::ModbusErrorTracker::getInvalidDataErrors(address);
+uint32_t deviceErrors = modbus::ModbusErrorTracker::getDeviceErrors(address);
+uint32_t otherErrors = modbus::ModbusErrorTracker::getOtherErrors(address);
+uint32_t successCount = modbus::ModbusErrorTracker::getSuccessCount(address);
+uint32_t totalErrors = modbus::ModbusErrorTracker::getTotalErrors(address);
+float errorRate = modbus::ModbusErrorTracker::getErrorRate(address);  // Percentage
+uint32_t lastErrorTime = modbus::ModbusErrorTracker::getLastErrorTime(address);  // millis(), 0 = none
+uint8_t tracked = modbus::ModbusErrorTracker::getTrackedDeviceCount();
+bool known = modbus::ModbusErrorTracker::isDeviceTracked(address);
+const char* name = modbus::ModbusErrorTracker::categoryToString(category);
 ```
 
 ### Resetting Statistics
 
 ```cpp
-ModbusErrorTracker::resetDevice(address);
+modbus::ModbusErrorTracker::resetDevice(address);
+modbus::ModbusErrorTracker::resetAll();
 ```
+
+No MQTT command resets the counters; they reset on reboot.
 
 ---
 
 ## Troubleshooting
-
-### MQTT Shows All Zeros
-
-**Problem:** Device libraries haven't integrated tracking calls yet
-
-**Solution:** Follow integration steps above for each library
 
 ### MQTT Messages Not Published
 
@@ -353,32 +221,17 @@ ModbusErrorTracker::resetDevice(address);
 mosquitto_sub -h BROKER_IP -u USER -P PASS -t "boiler/status/health" -v
 ```
 
-**Check 2:** Check serial logs for "Modbus stats" debug messages
+**Check 2:** Wait up to 30 minutes after boot for the first detailed report
+
+**Check 3:** In debug builds, check serial logs for "Modbus stats 0x.." debug messages
+
+### A Device Shows Only Zeros
+
+- The device has not been polled yet, or it is not on the bus at the configured address
+- Verify the address table above against the device configuration
 
 ---
 
-## Summary
-
-**Current State:**
-- Framework ✅ Implemented in ESP32-ModbusDevice (commit a3eb56e)
-- Main project ✅ Publishing enabled (will show zeros until library integration)
-- Device libraries ❌ Not integrated yet (requires modifications)
-
-**Next Steps:**
-1. Add `ModbusErrorTracker::recordError()` and `recordSuccess()` calls to device libraries
-2. Rebuild libraries: `cd ~/Documents/PlatformIO/git/ESP32-{MB8ART,RYN4,ANDRTF3} && pio run`
-3. Clean main project: `rm -rf .pio`
-4. Build and upload main project
-5. Monitor MQTT topic `boiler/diagnostics/modbus/#`
-
-**Benefits:**
-- Distinguish bus noise (CRC) from device failures (timeout)
-- Track error trends over time
-- Identify problematic devices
-- Remote diagnostics without serial access
-
----
-
-**Document Version**: 2.0.0
-**Last Updated**: 2026-01-01
-**Status**: Main project ready, device libraries pending
+**Document Version**: 3.0.0
+**Last Updated**: 2026-09-15
+**Status**: Implemented in ESP32-ModbusDevice, all device libraries and main project

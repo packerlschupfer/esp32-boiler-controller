@@ -401,10 +401,16 @@ Standard 3-speed circulator pump for hot water tank charging circuit.
 | `wHeaterConfTempSafeLimitHigh` | 80°C | Tank: 85°C | ✓ Conservative (5°C margin) |
 | `wHeaterConfTempLimitHigh` | 65°C | Tank: 85°C | ✓ Normal setpoint |
 | `wHeaterConfTempLimitLow` | 45°C | - | ✓ Reheat threshold |
-| `MAX_BOILER_TEMP_C` | 90°C | Boiler: 90°C adj | ✓ Matches thermostat |
-| `CRITICAL_BOILER_TEMP_C` | 95°C | Boiler: 120°C abs | ✓ Safe margin |
+| `MAX_BOILER_TEMP_C` | 110°C | Boiler: 90°C adj, 120°C abs | Operational ceiling, 20°C above the 90°C thermostat setting |
+| `CRITICAL_BOILER_TEMP_C` | 115°C | Boiler: 120°C abs | Safety interlock threshold, 5°C below the documented absolute max |
 | `WaterHeating::MAX_TARGET_TEMP` | 85°C | Tank: 85°C | ✓ Matches tank max |
 | `WaterHeating::MIN_TARGET_TEMP` | 30°C | - | ✓ Reasonable minimum |
+
+**Note:** `MAX_BOILER_TEMP_C` (110°C, hard ceiling in `BurnerRequestManager`) and
+`CRITICAL_BOILER_TEMP_C` (115°C, checked in `SafetyInterlocks`) are in
+`src/config/SystemConstants.h`. They sit above the 90°C thermostat setting, so the software
+does not by itself hold the boiler at 90°C. The 5°C margin to 120°C should be rechecked
+against the boiler's rated maximum.
 
 **Note:** The `wHeaterConfTempSafeLimitHigh` of 80°C provides a 5°C safety margin
 before the tank's absolute maximum of 85°C. This allows for:
@@ -471,7 +477,7 @@ though Stage 2 exceeds the "maximum possible" of 36 kW. This is acceptable becau
 
 1. **Operating pressure > 3.5 bar**: Indicates expansion vessel issue
 2. **Tank temperature > 80°C**: Approaching limit, reduce heating
-3. **Boiler output > 90°C**: Thermostat should limit, safety backup
+3. **Boiler output > 90°C**: Boiler thermostat should limit; software ceiling is 110°C, safety interlock at 115°C
 
 ### Missing Physical Sensors
 
@@ -493,3 +499,4 @@ for fully autonomous operation.
 | 2025-12-13 | Added boiler type and minimum flow temperature section |
 | 2025-12-14 | Corrected: VK 42/4-2 is low-temperature boiler (35°C min), not cast iron (55°C). Updated burner_low_limit default to 38°C. Added RYN4 DELAY command hardware behavior documentation |
 | 2025-12-15 | Added Wilo Yonos PICO 25/1-4 heating pump and HST 25/4 hot water tank loading pump specifications |
+| 2026-09-15 | Corrected `MAX_BOILER_TEMP_C` (110°C) and `CRITICAL_BOILER_TEMP_C` (115°C) to match code; margin note |

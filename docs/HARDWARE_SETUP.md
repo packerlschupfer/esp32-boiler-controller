@@ -25,11 +25,11 @@ This document provides complete hardware wiring and configuration instructions f
 
 | Component | Model | Quantity | Purpose |
 |-----------|-------|----------|---------|
-| ESP32 | DevKitC or compatible | 1 | Main controller |
+| ESP32 | DevKitC-type board with 16MB flash | 1 | Main controller (build uses `board_build.flash_size = 16MB` and `hardware/partitions_16MB.csv`) |
 | Ethernet PHY | LAN8720A module | 1 | Network connectivity |
 | Relay Module | RYN4 8-channel | 1 | Burner and pump control |
-| Temperature Sensor | MB8ART 8-channel | 1 | Boiler/tank temperatures |
-| RS485 Transceiver | MAX485 or similar | 1 | Modbus communication |
+| Temperature Sensor | MB8ART 8-channel | 1 | Boiler/tank temperatures, pressure input |
+| RS485 Transceiver | Auto-direction RS485 module | 1 | Modbus communication (firmware drives no DE/RE pin) |
 
 ### Optional Components
 
@@ -37,8 +37,8 @@ This document provides complete hardware wiring and configuration instructions f
 |-----------|-------|----------|---------|
 | Room Temp Sensor | ANDRTF3 | 1 | Inside temperature |
 | RTC Module | DS3231 | 1 | Scheduling (NTP fallback) |
-| FRAM Module | MB85RC256V | 1 | Enhanced error logging |
-| Pressure Sensor | 4-20mA (0-6 BAR) | 1 | System pressure monitoring |
+| FRAM Module | MB85RC256V | 1 | Runtime counters, PID state, error/safety log (I2C 0x50, 32768 bytes) |
+| Pressure Sensor | 4-20mA (0-5 BAR) | 1 | System pressure monitoring (MB8ART CH4) |
 
 ---
 
@@ -52,12 +52,12 @@ ESP32 DevKitC Pin Map
 
                     +------------------+
               EN  -|                  |- GPIO23 (ETH_MDC)
-        GPIO36/VP -|   RS485_RX (36)  |- GPIO22 (I2C_SCL)
-        GPIO39/VN -|                  |- GPIO21 (I2C_SDA)
+        GPIO36/VP -|   RS485_RX (36)  |- GPIO22
+        GPIO39/VN -|                  |- GPIO21
           GPIO34  -|                  |- GPIO19
           GPIO35  -|                  |- GPIO18 (ETH_MDIO)
-          GPIO32  -|                  |- GPIO5
-          GPIO33  -|                  |- GPIO17 (ETH_CLK)
+(I2C_SCL) GPIO32  -|                  |- GPIO5
+(I2C_SDA) GPIO33  -|                  |- GPIO17 (ETH_CLK)
         GPIO25    -|                  |- GPIO16
         GPIO26    -|                  |- GPIO4  (RS485_TX)
         GPIO27    -|                  |- GPIO2  (LED_BUILTIN)
@@ -73,15 +73,15 @@ ESP32 DevKitC Pin Map
 | GPIO | Function | Direction | Notes |
 |------|----------|-----------|-------|
 | **RS485/Modbus** ||||
-| 36 | RS485_RX | Input | RX from MAX485 RO pin |
-| 4 | RS485_TX | Output | TX to MAX485 DI pin |
+| 36 | RS485_RX | Input | RX from RS485 module RO/RX pin |
+| 4 | RS485_TX | Output | TX to RS485 module DI/TX pin |
 | **Ethernet (LAN8720A)** ||||
 | 23 | ETH_MDC | Output | Management Data Clock |
 | 18 | ETH_MDIO | Bidirectional | Management Data I/O |
 | 17 | ETH_CLK | Output | 50MHz clock output |
 | **I2C (Optional)** ||||
-| 21 | I2C_SDA | Bidirectional | DS3231, FRAM |
-| 22 | I2C_SCL | Output | DS3231, FRAM |
+| 33 | I2C_SDA | Bidirectional | DS3231, FRAM (`src/shared/SharedI2CInitializer.h`) |
+| 32 | I2C_SCL | Output | DS3231, FRAM (`src/shared/SharedI2CInitializer.h`) |
 | **Status** ||||
 | 2 | LED_BUILTIN | Output | Status LED |
 
@@ -89,42 +89,40 @@ ESP32 DevKitC Pin Map
 
 ## RS485 Modbus Bus Wiring
 
-### MAX485 Transceiver Wiring
+### RS485 Transceiver Wiring
 
 ```
-     ESP32                   MAX485                    Modbus Bus
-    +------+                +--------+
-    |      |                |        |
-    |  36  |<-------RO-----|        |                  +-------+
+     ESP32                 RS485 module                Modbus Bus
+    +------+              (auto-direction)
+    |      |                +--------+
+    |  36  |<-------RX-----|        |                  +-------+
     |      |                |        |---A--------+----| Device|
-    |   4  |------->DI-----|        |             |    +-------+
+    |   4  |------->TX-----|        |             |    +-------+
     |      |                |        |---B--------+    +-------+
     |  GND |--------GND----|        |             +----| Device|
     |      |                |        |                  +-------+
     | 3.3V |--------VCC----|        |
-    |      |                |        |
-    |  GND |-------->RE----|        |       Termination: 120Ω between A and B
-    |  3.3V|-------->DE----|        |       at each end of the bus
-    +------+                +--------+
+    +------+                +--------+       Termination: 120Ω between A and B
+                                             at each end of the bus
 ```
 
-**MAX485 Pin Connections:**
+**RS485 Module Connections:**
 
-| MAX485 Pin | Connection | Notes |
+| Module Pin | Connection | Notes |
 |------------|------------|-------|
-| RO | ESP32 GPIO36 | Receiver Output |
-| DI | ESP32 GPIO4 | Driver Input |
-| RE | GND | Always receive enabled |
-| DE | VCC (3.3V) | Always transmit enabled |
+| RX / RO | ESP32 GPIO36 | Receiver output to ESP32 (`RS485_RX_PIN`) |
+| TX / DI | ESP32 GPIO4 | Driver input from ESP32 (`RS485_TX_PIN`) |
 | A | Bus A (Data+) | Connect to all devices |
 | B | Bus B (Data-) | Connect to all devices |
 | VCC | 3.3V | Power supply |
 | GND | GND | Common ground |
 
 **Important Notes:**
-- RE tied to GND and DE tied to VCC enables "always receive/transmit" mode
-- This works because ESP32 software controls TX timing
-- For long cable runs (>50m), use proper RS485 transceiver with TX enable control
+- The firmware drives no DE/RE direction pin: the UART is opened as
+  `Serial1.begin(MODBUS_BAUD_RATE, SERIAL_8E1, RS485_RX_PIN, RS485_TX_PIN)`
+  (`src/init/HardwareInitializer.cpp`) with only RX and TX
+- A transceiver module with automatic direction control is therefore required;
+  a bare MAX485 with DE tied high would drive the bus permanently and block device replies
 - Add 120Ω termination resistor at each end of the bus
 
 ### Modbus Device Addresses
@@ -143,7 +141,7 @@ ESP32 DevKitC Pin Map
     +------------------------+|+------------------------+
     |                         |                         |
 +-------+              +-------+               +-------+
-| MAX485|              |  RYN4 |               | MB8ART|
+| RS485 |              |  RYN4 |               | MB8ART|
 |ESP32  |              | Addr:2|               | Addr:3|
 +-------+              +-------+               +-------+
     |                         |                         |
@@ -200,16 +198,24 @@ ESP32 DevKitC Pin Map
 
 ### RYN4 8-Channel Relay Assignment
 
-| Relay | Physical | Function | Control |
-|-------|----------|----------|---------|
-| 0 | CH1 | Burner Enable | Safety-critical |
-| 1 | CH2 | Power Boost | Stage 2 (42kW) |
-| 2 | CH3 | Heating Pump | Wilo Yonos PICO |
-| 3 | CH4 | Water Pump | HST 25/4 |
-| 4 | CH5 | Reserved | - |
-| 5 | CH6 | Reserved | - |
-| 6 | CH7 | Reserved | - |
-| 7 | CH8 | Reserved | - |
+Source of truth: `include/config/RelayIndices.h`. "Index" is the 0-based array index
+used in code (`RelayIndex::*`); "Physical" is the 1-based RYN4 relay/channel number
+(physical = index + 1).
+
+| Index (0-based) | Physical (1-based) | Constant | Function |
+|-----------------|--------------------|----------|----------|
+| 0 | CH1 | `BURNER_ENABLE` | Burner enable, heating mode (half power) - safety-critical |
+| 1 | CH2 | `POWER_BOOST` | Boost to full power (ON = full, OFF = half) |
+| 2 | CH3 | `WATER_MODE` | Water heating mode (half power) |
+| 3 | CH4 | `VALVE` | Valve control |
+| 4 | CH5 | `HEATING_PUMP` | Heating circulation pump (Wilo Yonos PICO) |
+| 5 | CH6 | `WATER_PUMP` | Water heating circulation pump (HST 25/4) |
+| 6 | CH7 | `SPARE_7` | Spare |
+| 7 | CH8 | `ALARM` | Alarm/buzzer |
+
+Note: the compact MQTT relay byte (`r`, `src/modules/mqtt/MQTTPublisher.cpp`) uses its own
+bit order, not the physical order: 0x01 burner, 0x02 heating pump, 0x04 water pump,
+0x08 power boost, 0x10 water mode.
 
 ### RYN4 Wiring
 
@@ -217,14 +223,17 @@ ESP32 DevKitC Pin Map
     RYN4 Module                          Load Connections
    +------------+                       +-----------------+
    |            |                       |                 |
-   |  RS485 A   |-------- Bus A --------|  From MAX485    |
+   |  RS485 A   |-------- Bus A --------|  From RS485 mod |
    |  RS485 B   |-------- Bus B --------|                 |
    |  GND       |-------- GND ----------|                 |
    |            |                       +-----------------+
-   |  CH1 NO/C  |-------- Burner Enable Signal
+   |  CH1 NO/C  |-------- Burner Enable (heating mode)
    |  CH2 NO/C  |-------- Power Boost Solenoid
-   |  CH3 NO/C  |-------- Heating Pump (230V)
-   |  CH4 NO/C  |-------- Water Pump (230V)
+   |  CH3 NO/C  |-------- Water Mode
+   |  CH4 NO/C  |-------- Valve
+   |  CH5 NO/C  |-------- Heating Pump (230V)
+   |  CH6 NO/C  |-------- Water Pump (230V)
+   |  CH8 NO/C  |-------- Alarm/Buzzer
    |            |
    |  12V/24V   |-------- Power Supply
    |  GND       |-------- Power GND
@@ -237,9 +246,10 @@ The RYN4 implements a hardware DELAY command (0x06XX) that:
 - Turns relay ON immediately
 - Auto-OFF after XX seconds if no renewal
 
-**Used for burner safety:**
-- DELAY 10 command sent every 5 seconds
-- If ESP32 fails, relay auto-OFF in 10 seconds
+**Used for all energized relays** (`src/modules/tasks/RYN4ProcessingTask.cpp`):
+- Every relay that should be ON gets DELAY 10; relays that should be OFF get DELAY 0
+- DELAY 10 is renewed every 5 seconds (half of `DELAY_WATCHDOG_SECONDS`)
+- If ESP32 fails, every energized relay (burner, pumps, ...) auto-OFFs within 10 seconds
 - Hardware protection against software failures
 
 ```
@@ -264,7 +274,12 @@ ON ─────┴────────────| OFF ────┴�
 | CH1 | Boiler Return | PT1000 | Thermal shock detection |
 | CH2 | Water Tank | PT1000 | Tank temperature |
 | CH3 | Outside | PT1000 | Weather compensation |
-| CH4-7 | Disabled | - | Not connected |
+| CH4 | System Pressure | 4-20mA | 4mA = 0 BAR, 20mA = 5 BAR; <3.5mA = disconnected |
+| CH5-7 | Disabled | - | Optional (`ENABLE_SENSOR_*`), deactivated in hardware |
+
+Active channels: `MB8ART_ACTIVE_CHANNELS 5` (CH0-4) in `src/config/ProjectConfig.h`;
+channel indices in `include/config/SensorIndices.h`; pressure scaling in
+`SystemConstants::Hardware::PressureSensor`.
 
 ### PT1000 Sensor Wiring (2-Wire)
 
@@ -343,10 +358,10 @@ ON ─────┴────────────| OFF ────┴�
     │  │    GPIO23 ─── ETH_MDC                                              │  │
     │  │                                                                     │  │
     │  │    GPIO36 ─── RS485_RX ──┐                                         │  │
-    │  │    GPIO4  ─── RS485_TX ──┼──► MAX485                               │  │
+    │  │    GPIO4  ─── RS485_TX ──┼──► RS485 module                         │  │
     │  │                          │                                         │  │
-    │  │    GPIO21 ─── I2C_SDA ───┼──► DS3231 / FRAM (Optional)            │  │
-    │  │    GPIO22 ─── I2C_SCL ───┘                                         │  │
+    │  │    GPIO33 ─── I2C_SDA ───┼──► DS3231 / FRAM (Optional)            │  │
+    │  │    GPIO32 ─── I2C_SCL ───┘                                         │  │
     │  │                                                                     │  │
     │  └─────────────────────────────────────────────────────────────────────┘  │
     │                                                                           │
@@ -382,7 +397,7 @@ ON ─────┴────────────| OFF ────┴�
 |-----------|---------|---------|-------|
 | ESP32 | 5V (USB) or 3.3V | 500mA | USB recommended |
 | LAN8720A | 3.3V | 50mA | From ESP32 regulator |
-| MAX485 | 3.3V | 5mA | From ESP32 regulator |
+| RS485 module | 3.3V | see module | From ESP32 regulator |
 | RYN4 | 12V or 24V | 200mA | Separate supply |
 | MB8ART | 12V or 24V | 100mA | Shared with RYN4 OK |
 | ANDRTF3 | 12V or 24V | 50mA | Shared with RYN4 OK |
@@ -402,7 +417,7 @@ ON ─────┴────────────| OFF ────┴�
             ┌──────┴──────┐          ┌──────┴──────┐
             │   ESP32     │          │  RYN4       │
             │   LAN8720A  │          │  MB8ART     │
-            │   MAX485    │          │  ANDRTF3    │
+            │ RS485 module│          │  ANDRTF3    │
             └─────────────┘          └─────────────┘
 ```
 
@@ -482,4 +497,4 @@ After powering on:
 
 ---
 
-*Last Updated: 2025-12-22*
+*Last Updated: 2026-09-15*
