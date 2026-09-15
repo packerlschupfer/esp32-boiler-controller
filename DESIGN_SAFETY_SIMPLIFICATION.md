@@ -1,5 +1,16 @@
 # Safety System Simplification Design
 
+> **Status: Implemented (historical design note).** The code is the reference, not this document.
+> Current implementation: `include/config/SafetyConfig.h` and `src/config/SafetyConfig.cpp`
+> (`loadFromNVS()`, `saveToNVS()`, setters). The `boiler/cmd/config/*` handler is in
+> `src/modules/mqtt/MQTTCommandHandlers.cpp`, not `MQTTTask.cpp`. Rate-of-change, cross-validation
+> and thermal-runaway code has been removed.
+> Differences from this note:
+> - SafetyConfig also holds `thermalShockDifferentialC` (`boiler/cmd/config/thermal_shock_c`), `errorRecoveryMs` and the PID integral limits.
+> - `PumpCoordinator.cpp` does not exist.
+> - The software over-temperature limit is 110°C (`SystemConstants::Temperature::MAX_BOILER_TEMP_C`), not 90°C.
+> - The testing checklist below is not maintained.
+
 ## Overview
 
 Simplify the safety system by removing redundant/counterproductive checks and making essential parameters configurable via MQTT.

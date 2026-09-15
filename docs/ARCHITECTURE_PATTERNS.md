@@ -70,8 +70,8 @@ public:
     // Run safety validation
     static bool checkSafetyConditions();
 
-    // Check if seamless mode switch is safe
-    static bool canSeamlesslySwitch(BurnerSMState currentState);
+    // HEATING_ON + heating request or WATER_ON + water request active
+    static bool hasActiveModeDemand();
 };
 ```
 
@@ -223,29 +223,22 @@ void RelayControlTask::processRelayRequests() {
 
 ### Testing Extracted Modules
 
-Each extracted module should have corresponding unit tests:
+Each extracted module should have corresponding unit tests. The Round 21 helpers
+(`BurnerSafetyChecks`, `BurnerPowerController`, `BurnerRuntimeTracker`, `RelayVerificationManager`,
+`RelayCommandProcessor`) access SRP directly and have no native tests yet.
 
-```cpp
-// test/test_native/test_burner_safety_checks.cpp
-#include <unity.h>
-#include "modules/control/BurnerSafetyChecks.h"
+Logic that must be tested natively is kept in header-only, SRP-free helpers instead, and all native
+tests are registered in `test/test_native/test_main.cpp` (249 `RUN_TEST` entries). Examples:
 
-void test_safety_conditions_pass() {
-    // Mock sensor data
-    // ...
+| Header | Native test |
+|--------|-------------|
+| `include/modules/control/BurnerTransitions.h` (`BurnerTransitions::step()`) | `test_burner_transitions.cpp` |
+| `RelayCommandPolicy` | `test_relay_command_policy.cpp` |
+| `EmergencyStopRelease.h` | `test_emergency_stop_release.cpp` |
+| `HeatingCurve.h` | `test_heating_curve.cpp` |
 
-    bool result = BurnerSafetyChecks::checkSafetyConditions();
-    TEST_ASSERT_TRUE(result);
-}
-
-void test_80c_safety_limit() {
-    // Set temperature to 81°C
-    // ...
-
-    bool canIncrease = BurnerSafetyChecks::shouldIncreasePower();
-    TEST_ASSERT_FALSE(canIncrease);  // Should block high power
-}
-```
+To test a new helper: add the `test_*.cpp` file under `test/test_native/`, then register its tests in
+`test_main.cpp`.
 
 ### Naming Conventions
 
@@ -255,7 +248,7 @@ Follow these naming patterns for extracted modules:
 |------|---------|---------|
 | Safety logic | `*SafetyChecks` | `BurnerSafetyChecks` |
 | Control logic | `*Controller` | `BurnerPowerController` |
-| Tracking/monitoring | `*Tracker`, `*Monitor` | `BurnerRuntimeTracker`, `RelayHealthMonitor` |
+| Tracking/monitoring | `*Tracker`, `*Monitor` | `BurnerRuntimeTracker`, `FailOpenMonitor` |
 | Processing | `*Processor`, `*Manager` | `RelayCommandProcessor`, `RelayVerificationManager` |
 
 ## Thread Safety Guidelines
@@ -266,7 +259,7 @@ All shared data structures must be protected by mutexes:
 
 ```cpp
 // Taking mutex with timeout
-if (SRP::takeSensorReadingsMutex(TaskTimeouts::MUTEX_WAIT)) {
+if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS))) {
     // Access shared data
     auto& readings = SRP::getSensorReadings();
     readings.boilerTempOutput = temperature;
@@ -283,13 +276,16 @@ if (SRP::takeSensorReadingsMutex(TaskTimeouts::MUTEX_WAIT)) {
 Event groups are inherently thread-safe but follow these patterns:
 
 ```cpp
-// Use batch operations from EventUtils
-EventUtils::clearAllSensorUpdateBits(eventGroup);
+// Clear several bits at once (SRP wrappers in src/core/SystemResourceProvider.h)
+SRP::clearSensorEventBits(SystemEvents::SensorUpdate::BOILER_OUTPUT |
+                          SystemEvents::SensorUpdate::BOILER_RETURN);
 
 // Wait with timeout
-EventBits_t bits = EventUtils::waitForAnySensorUpdate(
-    eventGroup,
-    TaskTimeouts::SENSOR_WAIT
+EventBits_t bits = SRP::waitSensorEventBits(
+    SystemEvents::SensorUpdate::BOILER_OUTPUT | SystemEvents::SensorUpdate::BOILER_RETURN,
+    pdTRUE,   // clear on exit
+    pdFALSE,  // wait for any bit
+    pdMS_TO_TICKS(2000)
 );
 ```
 
@@ -370,8 +366,11 @@ Events are organized by functional area:
 - System events (GeneralSystemEventGroup)
 - System state (SystemStateEventGroup)
 - Sensor updates (SensorEventGroup)
-- Relay updates (RelayEventGroup)
+- Relay updates (RelayEventGroup, RelayStatusEventGroup)
 - Control requests (ControlRequestsEventGroup)
+- Burner (BurnerEventGroup, BurnerRequestEventGroup), heating (HeatingEventGroup), errors (ErrorNotificationEventGroup)
+
+Each group has a `SRP::get...EventGroup()` accessor in `src/core/SystemResourceProvider.h`; bit definitions are in `include/events/SystemEventsGenerated.h`.
 
 ### Event Patterns
 
@@ -379,25 +378,25 @@ Events are organized by functional area:
 // Producer pattern
 void onSensorUpdate() {
     // Update shared data
-    if (SRP::takeSensorReadingsMutex(TaskTimeouts::MUTEX_WAIT)) {
-        SRP::getSensorReadings().temperature = newValue;
+    if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS))) {
+        SRP::getSensorReadings().boilerTempOutput = newValue;
         SRP::giveSensorReadingsMutex();
     }
     
     // Signal update
-    SRP::setSensorEventBits(TEMPERATURE_UPDATE_BIT);
+    SRP::setSensorEventBits(SystemEvents::SensorUpdate::BOILER_OUTPUT);
 }
 
 // Consumer pattern
 void waitForSensorData() {
     EventBits_t bits = SRP::waitSensorEventBits(
-        TEMPERATURE_UPDATE_BIT,
+        SystemEvents::SensorUpdate::BOILER_OUTPUT,
         pdTRUE,  // Clear on exit
         pdFALSE, // Wait for any bit
-        TaskTimeouts::SENSOR_WAIT
+        pdMS_TO_TICKS(2000)
     );
     
-    if (bits & TEMPERATURE_UPDATE_BIT) {
+    if (bits & SystemEvents::SensorUpdate::BOILER_OUTPUT) {
         processSensorData();
     }
 }
@@ -421,10 +420,10 @@ Result<float> readTemperature() {
     return Result<float>(temp);
 }
 
-// Usage
+// Usage (Result<T>, SystemError and ErrorHandler in src/utils/ErrorHandler.h)
 auto result = readTemperature();
 if (result.isError()) {
-    ErrorHandler::handleError(result.error());
+    ErrorHandler::logError(TAG, result.error());
 } else {
     float temp = result.value();
 }
@@ -432,52 +431,67 @@ if (result.isError()) {
 
 ## Task Design Patterns
 
-### Base Task Pattern
+### Task Function Pattern
 
-All tasks should inherit from BaseTask:
+There is no task base class. Tasks are plain FreeRTOS functions started through TaskManager (see
+`src/init/TaskInitializer.cpp`). They register with the watchdog, then block on event bits and feed the
+watchdog every cycle (pattern of `src/modules/tasks/ControlTask.cpp`):
 
 ```cpp
-class MyTask : public BaseTask {
-public:
-    MyTask() : BaseTask("MyTask", 4096, 5, 1) {}
-    
-protected:
-    void taskFunction() override {
-        // Initialize
-        initialize();
-        
-        // Main loop
-        while (!shouldStop()) {
-            // Feed watchdog
-            SRP::getTaskManager().feedWatchdog();
-            
-            // Do work
-            processData();
-            
-            // Wait for next cycle
-            vTaskDelay(TaskTimeouts::EVENT_WAIT);
+void ControlTask(void* parameter) {
+    const char* TAG = "ControlTask";
+
+    TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::enabled(
+        false,  // not critical
+        SystemConstants::System::WDT_CONTROL_TASK_MS
+    );
+    if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("ControlTask", wdtConfig)) {
+        LOG_ERROR(TAG, "Failed to register with watchdog");
+    }
+
+    while (1) {
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        EventBits_t bits = SRP::waitControlRequestsEventBits(
+            SystemEvents::ControlRequest::BOILER_ENABLE | SystemEvents::ControlRequest::BOILER_DISABLE,
+            pdTRUE,   // clear on exit
+            pdFALSE,  // wait for any bit
+            pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS)
+        );
+
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        if (bits & SystemEvents::ControlRequest::BOILER_ENABLE) {
+            StateManager::setBoilerEnabled(true);
         }
     }
-};
+}
+
+// Start (TaskInitializer.cpp)
+SRP::getTaskManager().startTask(
+    PersistentStorageTask,               // task function
+    "PersistentStorage",                 // name
+    STACK_SIZE_PERSISTENT_STORAGE_TASK,  // stack (ProjectConfig.h, per log mode)
+    nullptr,                             // parameter
+    PRIORITY_CONTROL_TASK - 1,           // priority
+    storageWdtConfig);                   // TaskManager::WatchdogConfig
 ```
 
-### Singleton Task Pattern
+### Static Task Class Pattern
 
-For tasks that should have only one instance:
+For tasks that have only one instance, a class with static members only (cannot be instantiated):
 
 ```cpp
-class MQTTTask : public BaseTask {
+class MQTTTask {
 public:
     static bool init();
     static bool start();
     static void stop();
     static bool isRunning();
-    
+    static bool publish(const char* topic, const char* payload, int qos = 0, bool retain = false, /* ... */);
+
 private:
-    static MQTTTask* instance_;
-    static SemaphoreHandle_t mutex_;
-    
-    MQTTTask();  // Private constructor
+    MQTTTask() = delete;  // Prevent instantiation
 };
 ```
 
@@ -505,18 +519,23 @@ void handleReconnection() {
 
 ## Common Timeout Constants
 
-Use standardized timeouts from TaskTimeouts namespace:
+Use the millisecond constants from `SystemConstants::Timing` (`src/config/SystemConstants.h`) and convert them with `pdMS_TO_TICKS()` (many call sites still use literals such as `pdMS_TO_TICKS(100)`):
 
 ```cpp
-namespace TaskTimeouts {
-    constexpr TickType_t MUTEX_WAIT = pdMS_TO_TICKS(100);
-    constexpr TickType_t EVENT_WAIT = pdMS_TO_TICKS(1000);
-    constexpr TickType_t SENSOR_WAIT = pdMS_TO_TICKS(2000);
-    constexpr TickType_t NETWORK_WAIT = pdMS_TO_TICKS(5000);
-    constexpr TickType_t MODBUS_WAIT = pdMS_TO_TICKS(500);
-    constexpr TickType_t MQTT_WAIT = pdMS_TO_TICKS(10000);
+namespace SystemConstants {
+    namespace Timing {
+        constexpr uint32_t MUTEX_SHORT_TIMEOUT_MS = 50;
+        constexpr uint32_t MUTEX_DEFAULT_TIMEOUT_MS = 100;
+        constexpr uint32_t MUTEX_LONG_TIMEOUT_MS = 1000;
+        constexpr uint32_t TASK_NOTIFICATION_TIMEOUT_MS = 3000;  // watchdog task notifications
+        // ...
+    }
 }
+
+SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS));
 ```
+
+There is no `TaskTimeouts` namespace. `SRPExtensions::Timeouts` in `src/core/SystemResourceProviderExtensions.h` is not included by any source file; do not use it.
 
 ## Best Practices Summary
 

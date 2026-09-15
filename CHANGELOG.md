@@ -1,5 +1,9 @@
 # Changelog
 
+> **Note:** The maintained changelog is [docs/CHANGELOG.md](docs/CHANGELOG.md). It lists every change since
+> this release (see its [Unreleased] section). This file only records the initial public release and
+> is not updated. Counts below have been corrected to match the current code.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -16,7 +20,7 @@ First public release on GitHub after extensive private development and field tes
 ### Features
 
 #### Safety Systems
-- Multi-layered safety architecture (4 layers: BurnerSafetyValidator, SafetyInterlocks, CentralizedFailsafe, Hardware)
+- Multi-layered safety architecture (4 layers: BurnerSafetyValidator, SafetyInterlocks, CentralizedFailsafe, RYN4 hardware DELAY watchdog; hardware interlocks are not implemented)
 - **Runtime-configurable safety parameters** via MQTT (SafetyConfig module)
   - Sensor staleness timeout: 30-300s (default 60s)
   - Pump motor protection: 5-60s (default 15s)
@@ -29,8 +33,8 @@ First public release on GitHub after extensive private development and field tes
 - Hard limits: 90°C over-temp, pump interlock, sensor validity checks
 
 #### Control Systems
-- Event-driven FreeRTOS architecture (16 tasks, zero polling loops)
-- Burner state machine (8 states: IDLE, PRE_PURGE, IGNITION, RUNNING_LOW/HIGH, POST_PURGE, LOCKOUT, ERROR)
+- Event-driven FreeRTOS architecture (19 tasks, zero polling loops)
+- Burner state machine (9 states: IDLE, PRE_PURGE, IGNITION, RUNNING_LOW/HIGH, MODE_SWITCHING, POST_PURGE, LOCKOUT, ERROR)
 - PID control for space and water heating with anti-windup
 - Fixed-point arithmetic (Temperature_t, Pressure_t) for deterministic control
 - Mode switching with priority handling (water can preempt heating)
@@ -69,6 +73,7 @@ All custom libraries published separately under GPL-3 license:
 - ESP32-NTPClient, ESP32-PersistentStorage, ESP32-RuntimeStorage
 - ESP32-MQTTManager, ESP32-IDeviceInstance, ESP32-ModbusDevice
 - ESP32-MB8ART, ESP32-RYN4, ESP32-ANDRTF3, ESP32-DS3231Controller
+- ESP32-Syslog (plus forks of ESP32-MQTTClient and esp32ModbusRTU)
 
 ### Notes
 - Previous internal versions (v1.x-v2.x) not publicly released

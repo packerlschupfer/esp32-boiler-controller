@@ -133,7 +133,7 @@ See `docs/TASK_ARCHITECTURE.md` for complete details.
 
 - **Pressure_t**: `int16_t` in hundredths of BAR (±327.67 BAR, 0.01 BAR precision)
 
-Defined in `src/shared/Temperature.h` and `src/shared/Pressure.h`.
+Defined in `include/shared/Temperature.h` and `include/shared/Pressure.h`.
 
 ### Safety System (4 Layers)
 
@@ -163,7 +163,7 @@ See `docs/SAFETY_SYSTEM.md` for complete architecture.
 ### Core System
 - `src/core/SystemResourceProvider.h` - Central resource access (SRP pattern)
 - `src/core/SharedResourceManager.h` - Resource lifecycle management
-- `src/core/QueueManager.h` - Priority-based MQTT message queuing
+- `include/core/QueueManager.h` - Priority-based MQTT message queuing
 - `src/init/SystemInitializer.cpp` - Complete system initialization sequence
 
 ### Control Systems
@@ -183,10 +183,10 @@ See `docs/SAFETY_SYSTEM.md` for complete architecture.
 - `src/modules/tasks/MQTTTask.cpp` - MQTT communication with priority queues
 
 ### Shared Types
-- `src/shared/Temperature.h` - Fixed-point temperature type
-- `src/shared/Pressure.h` - Fixed-point pressure type
+- `include/shared/Temperature.h` - Fixed-point temperature type
+- `include/shared/Pressure.h` - Fixed-point pressure type
 - `src/shared/RelayState.h` - Relay state with DELAY tracking (requires `initRelayState()`)
-- `include/bits/BurnerRequestBits.h` - Event-driven burner request system
+- `include/modules/control/BurnerRequestManager.h` - Event-driven burner request system (bits in `include/events/SystemEventsGenerated.h`)
 
 ### Utilities
 - `src/utils/CriticalDataStorage.h` - FRAM-based emergency state persistence
@@ -204,14 +204,14 @@ See `docs/SAFETY_SYSTEM.md` for complete architecture.
 
 ## Library Ecosystem
 
-This project uses **18 custom ESP32 libraries** (all published on GitHub under packerlschupfer):
+This project uses **19 custom ESP32 libraries** plus 2 forked third-party libraries (ESP32-MQTTClient, esp32ModbusRTU), all pulled from GitHub under packerlschupfer (21 URLs in `platformio.ini` lib_deps):
 
 **Foundation**: LibraryCommon, Logger, MutexGuard, SemaphoreGuard
-**Core**: Watchdog, TaskManager, EthernetManager, OTAManager, NTPClient, PersistentStorage, RuntimeStorage
+**Core**: Watchdog, TaskManager, EthernetManager, OTAManager, NTPClient, PersistentStorage, RuntimeStorage, Syslog
 **Framework**: MQTTManager, IDeviceInstance, ModbusDevice
 **Hardware**: MB8ART, RYN4, ANDRTF3, DS3231Controller
 
-Library development uses `git+file://` paths in platformio.ini. For production, use GitHub URLs.
+`platformio.ini` uses GitHub URLs (no `git+file://` paths).
 
 After library changes: **Always run `rm -rf .pio && pio run`**
 
@@ -222,7 +222,7 @@ After library changes: **Always run `rm -rf .pio && pio run`**
 **Always** protect shared data with mutexes:
 
 ```cpp
-if (SRP::takeSensorReadingsMutex(TaskTimeouts::MUTEX_WAIT)) {
+if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS))) {  // 100 ms
     auto& readings = SRP::getSensorReadings();
     readings.temperature = newValue;
     SRP::giveSensorReadingsMutex();
@@ -245,7 +245,7 @@ Result<float> readSensor() {
 
 auto result = readSensor();
 if (result.isError()) {
-    ErrorHandler::handleError(result.error());
+    ErrorHandler::logError(TAG, result.error());
 } else {
     float value = result.value();
 }
@@ -256,10 +256,11 @@ if (result.isError()) {
 All long-running tasks must feed watchdog:
 
 ```cpp
-while (!shouldStop()) {
-    SRP::getTaskManager().feedWatchdog();
+while (true) {
+    (void)SRP::getTaskManager().feedWatchdog();
+    EventBits_t bits = SRP::waitControlRequestsEventBits(MASK, pdTRUE, pdFALSE,
+        pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS));  // pattern of ControlTask.cpp
     // Do work...
-    vTaskDelay(TaskTimeouts::EVENT_WAIT);
 }
 ```
 
@@ -333,12 +334,12 @@ Three build configurations in `platformio.ini`:
 1. **DEBUG_SELECTIVE** (default): Strategic logging, optimized performance
    - Flag: `-DLOG_MODE_DEBUG_SELECTIVE`
    - Use: Active development
-   - Stack: Optimized (e.g., BurnerControl: 3584 bytes)
+   - Stack: Optimized (e.g., BurnerControl: 4096 bytes)
 
 2. **DEBUG_FULL**: Maximum verbosity for troubleshooting
    - Flag: `-DLOG_MODE_DEBUG_FULL`
    - Use: Deep debugging only
-   - Stack: Largest (e.g., BurnerControl: 2560 bytes + more heap)
+   - Stack: Largest (e.g., BurnerControl: 4096 bytes + more heap)
 
 3. **RELEASE**: Production-optimized, minimal logging
    - Flag: `-DLOG_MODE_RELEASE`
@@ -450,8 +451,9 @@ pio test -e native_test
 # Embedded tests (requires ESP32)
 pio test -e esp32_test --upload-port /dev/ttyACM0
 
-# Run specific test with verbose output
-pio test -e native_test -v --filter test_temperature_conversion
+# Verbose output (all native tests run from test/test_native/test_main.cpp;
+# --filter matches test directories, so single test files cannot be selected)
+pio test -e native_test -v --filter test_native
 ```
 
 Test categories:
@@ -517,14 +519,14 @@ while True:
 
 ## Slash Commands
 
-Custom development workflows in `.claude/commands/`:
+Custom development workflows:
 
-- `/check-project-status` - Quick status check
-- `/platformio-workflow` - Complete PlatformIO workflow
-- `/quick-fix` - Common PlatformIO issue fixes
-- `/commit-library-changes` - Library commit workflow
-- `/analyze-main-project` - Architecture analysis
-- `/iterate-main-project` - Continue improvements
+- `/check-project-status` - Quick status check (user-global, `~/.claude/commands/`)
+- `/platformio-workflow` - Complete PlatformIO workflow (user-global, `~/.claude/commands/`)
+- `/quick-fix` - Common PlatformIO issue fixes (user-global, `~/.claude/commands/`)
+- `/commit-library-changes` - Library commit workflow (user-global, `~/.claude/commands/`)
+- `/analyze-main-project` - Architecture analysis (project, `.claude/commands/`)
+- `/iterate-main-project` - Continue improvements (project, `.claude/commands/`)
 
 ## Important Notes
 
@@ -580,7 +582,7 @@ See `docs/ARCHITECTURE_PATTERNS.md` for the module extraction pattern details.
 - **Memory strategy**: `docs/MEMORY_OPTIMIZATION.md` - ESP32 static buffer rationale and memory pool documentation
 - **Task architecture**: `docs/TASK_ARCHITECTURE.md` - All 19 FreeRTOS tasks
 - **Architecture patterns**: `docs/ARCHITECTURE_PATTERNS.md` - SRP pattern, module extraction, thread safety
-- **Algorithms**: `docs/ALGORITHMS.md` - 13 control algorithms including Modbus scheduling
+- **Algorithms**: `docs/ALGORITHMS.md` - 14 control algorithms including Modbus scheduling
 - **Library repositories**: https://github.com/packerlschupfer
 - **Issue tracker**: GitHub Issues
 - **Claude development notes**: `.claude/` directory (session summaries, task logs)

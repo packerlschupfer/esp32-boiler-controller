@@ -7,11 +7,20 @@ Codebase: esp32-boiler-controller (branch: work, after Round 21)
 
 Three independent static analysis passes identified 5 critical bugs, 7 high-severity issues, and 12 medium/low items across the ESP32 boiler controller codebase. The most urgent findings are a wrong MQTT topic prefix causing dead messages in two safety-related code paths, an NVS parameter sync bug causing room setpoint loss on reboot, and a gap in the DEGRADED failsafe level that silently drops subsystem shutdown callbacks. Additionally, 6KB of dead memory pools and two never-called safety infrastructure modules (FailOpenMonitor, ErrorContextCapture) represent wasted RAM and false confidence in error reporting.
 
+**Status (checked against the code on 2026-09-15)**: each item below has a status line with evidence.
+- Done (9): C1, C2, C3, C5, H1, H2, H4, M1, M4
+- Partly done (5): C4, H3, H6, L1, L2
+- Open (10): H5, H7, M2, M3, M5, M6, M7, L3, L4, L5
+
+Line numbers in the problem descriptions are from 2026-02 and may have moved.
+
 ---
 
 ## Critical — Fix Before Next Deployment
 
 ### C1. Wrong MQTT Topic "status/boiler/burner" in Two Locations
+
+**Status**: Done. No `"status/boiler/burner"` string is left; both sites publish `MQTT_STATUS_BURNER` (`BurnerStateMachine.cpp:619`, `MQTTCommandHandlers.cpp:975`).
 
 **Files**:
 - `src/modules/control/BurnerStateMachine.cpp:464`
@@ -24,6 +33,8 @@ Three independent static analysis passes identified 5 critical bugs, 7 high-seve
 ---
 
 ### C2. targetTemp_i32 and hysteresis_i32 Not Synced After loadAll()
+
+**Status**: Done. Synced after `loadAll()` at `PersistentStorageTask.cpp:555-556`.
 
 **File**: `src/modules/tasks/PersistentStorageTask.cpp:194-267` (registration) and `508-528` (post-load sync block)
 
@@ -39,6 +50,8 @@ Also add zero-value default restoration (same pattern as lines 510-515) if `load
 ---
 
 ### C3. CentralizedFailsafe DEGRADED Level Doesn't Execute Subsystem Callbacks
+
+**Status**: Done. The callback filter is `level >= FailsafeLevel::DEGRADED` (`CentralizedFailsafe.cpp:182`).
 
 **File**: `src/modules/control/CentralizedFailsafe.cpp:153-196`
 
@@ -58,6 +71,11 @@ Or add `defaultBurnerFailsafe(level)` to the DEGRADED case in the switch block, 
 
 ### C4. FailOpenMonitor and ErrorContextCapture Never Called — 6KB Dead Memory Pools
 
+**Status**: Partly done.
+- ErrorContextCapture is wired in: `ErrorHandler.cpp:155` calls `recordCriticalError()`, and `MQTTTask.cpp:444` calls `publishPending()`, which publishes `boiler/error/context`.
+- FailOpenMonitor: only `initialize()` is called (`SystemInitializer.cpp:499`); `recordFailOpen()` and `publishDegradedStatus()` have no callers.
+- The 4 pools (`MemoryPool.cpp:14-17`) still have no users.
+
 **Files**:
 - `src/utils/FailOpenMonitor.cpp:37` — `recordFailOpen()` has zero call sites
 - `src/utils/FailOpenMonitor.cpp:86` — `publishDegradedStatus()` has zero call sites
@@ -73,6 +91,8 @@ Or add `defaultBurnerFailsafe(level)` to the DEGRADED case in the switch block, 
 ---
 
 ### C5. ErrorContextCapture Uses Hardcoded Bit Positions Instead of SystemEvents Constants
+
+**Status**: Done. Uses `SystemEvents::SystemState::BOILER_ENABLED/HEATING_ON/WATER_ON` (`ErrorContextCapture.cpp:114-116`).
 
 **File**: `src/utils/ErrorContextCapture.cpp:77-79`
 
@@ -104,6 +124,8 @@ snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WA
 
 ### H1. ~15 SystemSettings Writes in MQTTCommandHandlers Without Mutex
 
+**Status**: Done. The writes are wrapped in `SRP::takeSystemSettingsMutex()` (`MQTTCommandHandlers.cpp:678-844`).
+
 **File**: `src/modules/mqtt/MQTTCommandHandlers.cpp:680-847`
 
 **Problem**: Multiple `SRP::getSystemSettings()` writes happen without taking the system settings mutex. Affected parameters: `preheatEnabled` (line 682), `preheatOffMultiplier` (688), `preheatMaxCycles` (695), `preheatTimeoutMs` (703), `preheatPumpMinMs` (711), `preheatSafeDiff` (718), `pumpCooldownMs` (729), `useWeatherCompensatedControl` (739), `outsideTempHeatingThreshold` (746), `roomTempOverheatMargin` (755), `roomTempCurveShiftFactor` (766), `useBoilerTempPID` (775), plus syslog settings (789-847). By contrast, `handleHeatingCommand()` (line 217) and `handleRoomTargetCommand()` (line 247) correctly acquire the mutex via `SRP::takeSystemSettingsMutex()`. This inconsistency creates data races — the MQTT task can write while control tasks read.
@@ -113,6 +135,8 @@ snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WA
 ---
 
 ### H2. WheaterControlTask and HeatingControlTask Read SystemSettings Without Mutex
+
+**Status**: Done. Settings are snapshotted under the settings mutex ("H2 fix" at `HeatingControlTask.cpp:247,318,350` and `WheaterControlTask.cpp:338,467,517`).
 
 **Files**:
 - `src/modules/tasks/WheaterControlTask.cpp:310, 424, 470`
@@ -126,6 +150,8 @@ snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WA
 
 ### H3. ModbusErrorTracker Not Integrated in Device Task Files
 
+**Status**: Partly done. There are no `ModbusErrorTracker::record*` calls in `src/`, but the ESP32-MB8ART and ESP32-ANDRTF3 libraries record errors themselves (`MB8ART.cpp`, `ANDRTF3.cpp` in `.pio/libdeps`). ESP32-RYN4 does not.
+
 **File**: `src/modules/tasks/MonitoringTask.cpp:729-745` (reads tracker), but `MB8ARTTasks.cpp`, `src/modules/tasks/RYN4Task.cpp`, `src/modules/tasks/ANDRTF3Task.cpp` (do not feed tracker)
 
 **Problem**: MonitoringTask queries `ModbusErrorTracker` for per-device stats (CRC errors, timeouts, etc.) and publishes them via MQTT. However, the actual device task files that perform Modbus I/O never call `ModbusErrorTracker::recordSuccess()` or `ModbusErrorTracker::recordError()`. All published Modbus stats are zeros. This is documented as "pending" in `docs/MODBUS_ERROR_TRACKING_INTEGRATION.md`.
@@ -136,6 +162,8 @@ snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WA
 
 ### H4. MQTTTask Started at Wrong Priority (3 Instead of 2)
 
+**Status**: Done. Started with `PRIORITY_MQTT_TASK` (`MQTTTask.cpp:564`).
+
 **File**: `src/modules/tasks/MQTTTask.cpp:560`
 
 **Problem**: MQTTTask is created with `PRIORITY_CONTROL_TASK` (value 3) instead of `PRIORITY_MQTT_TASK` (value 2, defined at `src/config/ProjectConfig.h:281`). MQTT communication is not safety-critical and should not compete with control tasks at priority 3. This can cause priority inversion where MQTT processing delays sensor or heating control.
@@ -145,6 +173,8 @@ snapshot.waterActive = (snapshot.systemStateBits & SystemEvents::SystemState::WA
 ---
 
 ### H5. No SHA Pinning for 18 Libraries in platformio.ini
+
+**Status**: Open. The 21 packerlschupfer lib_deps URLs are still unpinned (e.g. `platformio.ini:62`).
 
 **File**: `platformio.ini:57-95` (and `507-535` for test env)
 
@@ -162,6 +192,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 
 ### H6. handleStatusCommand() and boiler/config/+ Are Stubs
 
+**Status**: Partly done. The subscription is now `boiler/cmd/config/+` with real handlers (`MQTTSubscriptionManager.cpp:160`), but `handleStatusCommand()` still only logs (`MQTTCommandHandlers.cpp:352-357`).
+
 **Files**:
 - `src/modules/mqtt/MQTTCommandHandlers.cpp:370-373` — `handleStatusCommand()` logs but publishes nothing
 - `src/modules/mqtt/MQTTSubscriptionManager.cpp:178-181` — `boiler/config/+` subscription callback only logs the message
@@ -173,6 +205,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 ---
 
 ### H7. FailOpenMonitor::publishDegradedStatus() Never Called From Task Loop
+
+**Status**: Open. Still no caller outside `FailOpenMonitor.cpp`.
 
 **File**: `src/utils/FailOpenMonitor.cpp:86`
 
@@ -186,6 +220,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 
 ### M1. DEBUG_FULL BurnerControlTask Stack Inverted (2560 < DEBUG_SELECTIVE 4096)
 
+**Status**: Done. DEBUG_FULL `STACK_SIZE_BURNER_CONTROL_TASK` is 4096 (`ProjectConfig.h:214`).
+
 **File**: `src/config/ProjectConfig.h:215, 238`
 
 **Problem**: DEBUG_FULL mode defines `STACK_SIZE_BURNER_CONTROL_TASK` as 2560 bytes (line 215), while DEBUG_SELECTIVE defines it as 4096 bytes (line 238). DEBUG_FULL enables more logging output, which requires more stack for format strings and variadic arguments. The values appear to be swapped or the DEBUG_FULL value was not updated after the Round 21 refactoring that increased DEBUG_SELECTIVE.
@@ -195,6 +231,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 ---
 
 ### M2. RELEASE PersistentStorageTask Stack 1536 Bytes (DEBUG Uses 5120)
+
+**Status**: Open. Still 1536 (`ProjectConfig.h:256`).
 
 **File**: `src/config/ProjectConfig.h:259`
 
@@ -206,6 +244,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 
 ### M3. useWeatherCompensatedControl=true Default Risks Disabling Heating Without Outside Sensor
 
+**Status**: Open. The default is still `true` (`SystemSettingsStruct.h:126`), and an invalid outside temperature still disables heating ("outside temp invalid - heating disabled", `HeatingControlTask.cpp:593`).
+
 **File**: `src/config/SystemSettingsStruct.h:126`
 
 **Problem**: `useWeatherCompensatedControl` defaults to `true`. In `HeatingControlModule.cpp:38`, if this flag is true and the outside temperature sensor is invalid/disconnected, the weather compensation logic returns `heatingNeeded = false`, effectively disabling space heating. Deployments without a functioning outside temperature sensor will have heating silently disabled.
@@ -215,6 +255,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 ---
 
 ### M4. BurnerRuntimeTracker.burnerStartTime Downgraded From std::atomic to Plain static
+
+**Status**: Done. Declared as `static std::atomic<uint32_t> burnerStartTime` (`BurnerRuntimeTracker.h:52`).
 
 **Files**:
 - `src/modules/control/BurnerRuntimeTracker.h:51` — declared as `static uint32_t`
@@ -228,6 +270,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 
 ### M5. Init Functions Called Fire-and-Forget
 
+**Status**: Open. Return values are still ignored (`SystemInitializer.cpp:263, 495, 499, 505`).
+
 **File**: `src/init/SystemInitializer.cpp:263, 495, 499, 505`
 
 **Problem**: `StateManager::initialize()` (line 263), `TemperatureSensorFallback::initialize()` (line 495), `FailOpenMonitor::initialize()` (line 499), and `BurnerRequestManager::initialize()` (line 505) return values that are not checked. If any of these fail (e.g., mutex creation failure), the system proceeds with uninitialized subsystems. By contrast, `burnerSystemController_->initialize()` at line 548 correctly checks its return value.
@@ -237,6 +281,8 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 ---
 
 ### M6. 6 Round 21 Helper Class Tests Still Pending
+
+**Status**: Open. No test files for these helpers in `test/test_native/`. The native suite has 249 tests, but they cover other code.
 
 **File**: `test/README.md`
 
@@ -253,6 +299,8 @@ Mock SRP dependencies using the existing test patterns.
 
 ### M7. boiler/status/burner Not Published by MQTTPublisher
 
+**Status**: Open. `MQTT_STATUS_BURNER` is published only on state transitions (`BurnerStateMachine.cpp:619`) and as command replies (`MQTTCommandHandlers.cpp:975, 986`); there is no periodic publish.
+
 **File**: `src/modules/mqtt/MQTTPublisher.cpp`
 
 **Problem**: The topic `boiler/status/burner` is referenced in documentation and manually published in two locations (BurnerStateMachine.cpp and MQTTCommandHandlers.cpp — both with the wrong prefix, see C1), but MQTTPublisher.cpp does not publish burner state as part of its periodic status cycle. There is no regular burner state publication — only event-driven publishes from BurnerStateMachine state transitions.
@@ -265,6 +313,8 @@ Mock SRP dependencies using the existing test patterns.
 
 ### L1. MQTT_API.md Stale — Phantom Topics, Wrong Command Names
 
+**Status**: Partly done. MQTT_API.md now documents `boiler/error/context` (`MQTT_API.md:834`) and states that `diagnostics/tasks` and `diagnostics/memory` are not published (`MQTT_API.md:1017`); `boiler/cmd/system` is used consistently. A full ground-truth topic audit has not been re-checked here.
+
 **Files**: `docs/MQTT_API.md`, `CLAUDE.md`
 
 **Problem**: MQTT_API.md documents `boiler/status/diagnostics/tasks` and `boiler/status/diagnostics/memory` as "implemented" but neither is published by MQTTPublisher.cpp. CLAUDE.md documents the system command topic as `boiler/cmd/system`, while MQTT_API.md may reference `boiler/cmd/boiler`. Several undocumented topics exist: `boiler/error/context`, `boiler/alert/degraded_operation`, `boiler/diagnostics/modbus/#`, FRAM topics.
@@ -274,6 +324,8 @@ Mock SRP dependencies using the existing test patterns.
 ---
 
 ### L2. Water Heating PID Gains Not Autotuned
+
+**Status**: Partly done. The autotune command exists (`boiler/cmd/pid_autotune`, `MQTTCommandHandlers.cpp:955`); whether tuned water-circuit gains are in place was not re-checked.
 
 **File**: `src/modules/tasks/PersistentStorageTask.cpp` (PID registration), `src/modules/control/PIDControlModule.cpp`
 
@@ -285,6 +337,8 @@ Mock SRP dependencies using the existing test patterns.
 
 ### L3. Hardcoded Topic Strings Bypass MQTTTopics.h Macros
 
+**Status**: Open. The local defines are still at `MQTTSubscriptionManager.cpp:10-14`.
+
 **Files**: `src/modules/mqtt/MQTTPublisher.cpp`, `src/modules/mqtt/MQTTSubscriptionManager.cpp:10-14`
 
 **Problem**: MQTTSubscriptionManager.cpp defines local `#define` macros (lines 10-14) instead of including `MQTTTopics.h`, with a comment citing "macro conflicts" as the reason. MQTTPublisher.cpp also uses some hardcoded strings. The macro conflict is undocumented and unresolved.
@@ -294,6 +348,8 @@ Mock SRP dependencies using the existing test patterns.
 ---
 
 ### L4. FailOpenMonitor Threshold Check Uses == Instead of >=
+
+**Status**: Open. Still `==` (`FailOpenMonitor.cpp:49`).
 
 **File**: `src/utils/FailOpenMonitor.cpp:49`
 
@@ -311,6 +367,8 @@ if (s.consecutiveFailOpens >= CONSECUTIVE_ALERT_THRESHOLD && !s.mqttAlertSent)
 ---
 
 ### L5. logSensorStatus/logRelayStatus Rate Limiting Too Aggressive
+
+**Status**: Open (no change found; the rate limiter was not re-checked in detail).
 
 **File**: `src/modules/tasks/MonitoringTask.cpp:477-482, 526-531`
 

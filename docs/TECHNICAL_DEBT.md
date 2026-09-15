@@ -4,11 +4,11 @@ This document tracks completed architectural changes and pending improvements fo
 
 ## Completed Removals
 
-### ErrorLogFRAM.cpp (Removed January 2026)
+### ErrorLogFRAM.cpp.disabled (Removed January 2026)
 - **Reason**: Replaced by RuntimeStorage library
 - **File**: `src/utils/ErrorLogFRAM.cpp.disabled` (228 lines)
 - **Status**: ✅ Deleted
-- **Migration**: All error logging now handled by `ESP32-RuntimeStorage` library with enhanced features
+- **Migration**: FRAM error logging uses the `ESP32-RuntimeStorage` library. Only the disabled copy was deleted: `src/utils/ErrorLogFRAM.cpp/.h` still exists as the wrapper over `rtstorage::RuntimeStorage` and is in use (`MonitoringTask.cpp:555`)
 
 ### BLE Integration (Removed Round 15)
 - **Reason**: Replaced with MB8ART channel 7 for inside temperature
@@ -57,6 +57,7 @@ This document tracks completed architectural changes and pending improvements fo
   - Separate BLE event group
   - Dedicated OTA event group (merged into General)
   - Watchdog event group (merged into General)
+- **Current state (2026-09-15)**: event groups were added again since then. `src/core/SystemResourceProvider.h` exposes 11 event group getters (e.g. Burner, BurnerRequest, Heating, ControlRequests, RelayStatus, ErrorNotification besides the four above); see `docs/EVENT_SYSTEM.md`
 
 ### Dead Code Cleanup (Round 21 - January 2026)
 - **Files Deleted**:
@@ -69,15 +70,19 @@ This document tracks completed architectural changes and pending improvements fo
 
 ## Pending TODOs
 
+Status markers checked against the code on 2026-09-15: **Open**, **Partly done**, **Done**.
+
 ### Production Safety Checklist
 
 #### Critical (Required for Unattended Operation)
 - [ ] **Remove `ALLOW_NO_PRESSURE_SENSOR` flag** (`ProjectConfig.h:80`)
+  - **Status**: Open (flag still defined at `src/config/ProjectConfig.h:80`)
   - **Risk**: Currently allows burner operation without pressure monitoring
   - **Action**: Install 4-20mA pressure transducer, remove flag
   - **Timeline**: Before unattended deployment
 
-- [ ] **Integrate flame sensor hardware** (`BurnerStateMachine.cpp:750`)
+- [ ] **Integrate flame sensor hardware** (`BurnerSafetyChecks::isFlameDetected()`, `src/modules/control/BurnerSafetyChecks.h:29`)
+  - **Status**: Open
   - **Current**: Uses relay state as proxy for flame detection
   - **Risk**: Cannot detect flame loss during burner operation
   - **Action**: Install ionization rod or UV flame sensor
@@ -85,6 +90,7 @@ This document tracks completed architectural changes and pending improvements fo
   - **Implementation**: Update `isFlameDetected()` to read GPIO pin
 
 - [ ] **Install flow sensor** (Not yet implemented)
+  - **Status**: Open (`BurnerSafetyValidator::checkHardwareInterlocks()` is still a stub)
   - **Current**: Uses temperature differential as proxy
   - **Risk**: Cannot detect circulation pump failure
   - **Action**: Install flow switch in heating circuit
@@ -92,34 +98,39 @@ This document tracks completed architectural changes and pending improvements fo
 
 #### High Priority
 - [ ] **OTA partition verification** (Mentioned in OTA logs)
+  - **Status**: Open (no verification record found)
   - **Issue**: Verify sufficient flash partition size for OTA updates
   - **Action**: Test OTA with full firmware size
   - **Timeline**: Before production deployment
 
 - [ ] **Complete runtime stack profiling** (In progress)
-  - **Status**: Selective mode profiled (Dec 2025), Release mode pending
+  - **Status**: Partly done. Selective mode profiled (Dec 2025), Release mode pending (e.g. RELEASE `STACK_SIZE_PERSISTENT_STORAGE_TASK` 1536 unprofiled, `ProjectConfig.h:256`)
   - **Action**: 24-hour stress test in RELEASE mode
   - **Timeline**: Before production optimization
 
 #### Medium Priority
 - [ ] **MQTT QoS Configuration Review**
+  - **Status**: Open (e.g. burner status still published with QoS 0, `BurnerStateMachine.cpp:619`)
   - **Current**: Most messages use QoS 0 (fire-and-forget)
   - **Recommendation**: Safety events should use QoS 1 (at-least-once)
   - **Action**: Review and categorize message priorities
   - **Timeline**: Next round of improvements
 
 - [ ] **Parameter Validation Hardening**
+  - **Status**: Open (not re-audited)
   - **Issue**: Some MQTT parameter setters accept wide ranges
   - **Action**: Add strict range validation based on equipment specs
   - **Timeline**: Before exposing MQTT to external networks
 
 #### Low Priority
 - [ ] **BurnerStateMachine Test Coverage**
-  - **Current**: 6 tests (power level, mode-switch, failsafe)
-  - **Target**: Add concurrency tests for seamless mode switching
+  - **Status**: Partly done
+  - **Current**: 90 burner test functions: `test_burner_transitions.cpp` 32 (`BurnerTransitions::step()` scenarios incl. MODE_SWITCHING), `test_burner_state_machine.cpp` 30, `test_burner_demand_gate.cpp` 10, `test_burner_safety.cpp` 10, `test_burner_transition_policy.cpp` 8
+  - **Target**: Add concurrency tests for seamless mode switching (still open)
   - **Timeline**: Continuous improvement
 
 - [ ] **Modbus Retry Logic Optimization**
+  - **Status**: Open
   - **Current**: Fixed retry counts and timeouts
   - **Opportunity**: Adaptive retry based on failure patterns
   - **Timeline**: Performance optimization phase
@@ -146,7 +157,7 @@ This document tracks completed architectural changes and pending improvements fo
 
 **Trade-off**: More complex initialization order (see `docs/INITIALIZATION_ORDER.md`)
 
-### Why 18 Tasks Instead of Fewer Modules?
+### Why 19 Tasks Instead of Fewer Modules?
 **Decision**: One task per responsibility (Burner, Relay, Sensor, MQTT, etc.)
 **Rationale**:
 - Each task has dedicated priority for safety-critical operations
@@ -157,7 +168,7 @@ This document tracks completed architectural changes and pending improvements fo
 **Trade-off**: Higher RAM usage (~24KB task stacks), but justified by safety requirements
 
 ### Why Custom Libraries Instead of Monorepo?
-**Decision**: 18 ESP32 libraries published to GitHub
+**Decision**: 19 custom ESP32 libraries (plus 2 forks) published to GitHub
 **Rationale**:
 - Reusable across multiple ESP32 projects
 - Version-controlled dependencies via PlatformIO
@@ -191,7 +202,7 @@ Total RAM recovered through 20+ rounds of deep code analysis: **6.7KB+**
 | Metric | Value | Target |
 |--------|-------|--------|
 | Lines of Code | ~15,000 | Stable |
-| Test Coverage | 174 tests | Add 20+ in R21 |
+| Test Coverage | 249 native tests (`RUN_TEST` in `test/test_native/test_main.cpp`) | Round 21 helper tests still missing |
 | Documentation | ~180KB | Comprehensive |
 | Build Warnings | 0 | Maintained |
 | Watchdog Resets | 0 (production) | Zero tolerance |
@@ -206,5 +217,5 @@ Total RAM recovered through 20+ rounds of deep code analysis: **6.7KB+**
 
 ---
 
-**Last Updated**: January 2026 (Round 21)
+**Last Updated**: January 2026 (Round 21); status markers, test count and event group note updated 2026-09-15
 **Maintainer**: Claude Code Analysis

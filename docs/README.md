@@ -36,7 +36,7 @@ ESP32 memory optimization strategy.
 
 #### [TASK_ARCHITECTURE.md](TASK_ARCHITECTURE.md) ⭐
 Complete FreeRTOS task reference.
-- **18 Active Tasks** with priorities, stack sizes, and purposes
+- **19 Active Tasks** with priorities, stack sizes, and purposes
 - **Event-driven architecture** patterns
 - **Watchdog configuration** for safety-critical tasks
 - **Core affinity** for time-critical operations
@@ -89,8 +89,7 @@ Complete MQTT API documentation.
 
 #### [OTA_UPDATE_GUIDE.md](OTA_UPDATE_GUIDE.md)
 Firmware update procedures.
-- Over-the-air update process
-- MQTT-triggered updates
+- Over-the-air update process (espota upload; there is no MQTT trigger, `OTATask::initWithMQTT()` has no caller)
 - Safety during updates
 - Recovery procedures
 
@@ -123,7 +122,8 @@ Consolidated troubleshooting guide.
 **Essential** for production support and debugging.
 
 #### [CHANGELOG.md](CHANGELOG.md)
-Version history and release notes.
+Version history and release notes (the maintained changelog).
+- **[Unreleased]** - Current changes (burner state machine, emergency stop, PID, water heating, MQTT fixes)
 - **v1.0.0** - First production release (2025-12-22)
 - **Development History** - 20+ improvement rounds
 - **Library Updates** - ESP32-ANDRTF3, ESP32-RYN4, ESP32-Syslog
@@ -133,16 +133,16 @@ Version history and release notes.
 
 ### Planning & Future Work
 
-#### [IMPROVEMENT_OPPORTUNITIES.md](IMPROVEMENT_OPPORTUNITIES.md)
-Comprehensive analysis of remaining improvements.
-- **Priority Classification** (Critical/High/Medium/Low)
-- **Immediate Recommendations** (top 3 items)
-- **Technical Debt Analysis** (~5% of codebase)
-- **Hardware Integration** (flame sensor, interlocks)
-- **Future Enhancements** (trending, efficiency metrics)
+#### [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md)
+Completed removals and pending TODOs with status.
+- **Production Safety Checklist** (pressure sensor, flame sensor, flow sensor)
+- **Architectural Decisions** (fixed-point, event-driven, task split)
 - **Code Quality Metrics**
 
-**Use this** to plan future development work.
+#### [../IMPROVEMENTS.md](../IMPROVEMENTS.md)
+Round 22 static analysis findings (Critical/High/Medium/Low) with Done / Partly done / Open status.
+
+**Use these** to plan future development work.
 
 ---
 
@@ -158,27 +158,16 @@ docs/
 ├── EVENT_SYSTEM.md ⭐                   # Event reference
 ├── STATE_MACHINES.md ⭐                 # State machine guide (9 states)
 ├── EVENT_FLOW.md ⭐                     # Flow scenarios
-├── ALGORITHMS.md ⭐                     # 13 control algorithms
+├── ALGORITHMS.md ⭐                     # 14 control algorithms
 ├── MQTT_API.md ⭐                       # API reference
-├── SAFETY_SYSTEM.md                     # 5-layer safety
+├── SAFETY_SYSTEM.md                     # 4-layer safety
 ├── MUTEX_HIERARCHY.md                   # Deadlock prevention
 ├── EQUIPMENT_SPECS.md                   # Hardware specifications
 ├── HARDWARE_SETUP.md ⭐                # Wiring and configuration (NEW)
 ├── OTA_UPDATE_GUIDE.md                  # Firmware updates
 ├── TROUBLESHOOTING.md ⭐               # Consolidated troubleshooting (NEW)
 ├── CHANGELOG.md                         # Version history (NEW)
-├── IMPROVEMENT_OPPORTUNITIES.md         # Future work
-└── archive/
-    ├── legacy/                          # Old migration docs
-    │   ├── HotWaterSchedulerTask.*      # Obsolete code
-    │   ├── mqtt_*.md (13 files)         # Old MQTT docs
-    │   ├── ANDRTF3_*.md (7 files)       # Integration notes
-    │   ├── *event_driven*.md (10 files) # Migration docs
-    │   ├── *watchdog*.md (5 files)      # Watchdog migration
-    │   └── *session*.md (various)       # Work session logs
-    └── optimization_guide.md            # Old optimization docs
-        memory_optimization_report.md
-        *Optimizer.h (5 headers)
+└── TECHNICAL_DEBT.md                    # Completed removals, pending TODOs
 ```
 
 ---
@@ -230,7 +219,7 @@ mosquitto_pub -t "boiler/cmd/scheduler/add" -m '{
 **Additional References**:
 - [EVENT_FLOW.md](EVENT_FLOW.md) - Understand system behavior
 - [CHANGELOG.md](CHANGELOG.md) - Version history and known fixes
-- [IMPROVEMENT_OPPORTUNITIES.md](IMPROVEMENT_OPPORTUNITIES.md) - Known issues/TODOs
+- [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) and [../IMPROVEMENTS.md](../IMPROVEMENTS.md) - Known issues/TODOs
 - [MQTT_API.md](MQTT_API.md) - API-specific troubleshooting
 
 ---
@@ -332,21 +321,6 @@ Multiple redundant safety checks before burner ignition:
 
 ---
 
-## Archive Contents
-
-The `archive/legacy/` directory contains:
-- **Migration Guides** (completed migrations)
-- **Session Logs** (development history)
-- **Old APIs** (replaced implementations)
-- **Test Results** (historical)
-- **Obsolete Code** (HotWaterSchedulerTask, optimizers)
-
-**Purpose**: Preserve git history and rationale for changes
-
-**Not Needed For**: Current development (use core docs above)
-
----
-
 ## Documentation Standards
 
 ### File Naming
@@ -363,8 +337,7 @@ The `archive/legacy/` directory contains:
 
 ### Maintenance
 - Update CLAUDE.md for project-wide changes
-- Add entries to IMPROVEMENT_OPPORTUNITIES.md for TODOs
-- Archive completed migration guides
+- Add entries to TECHNICAL_DEBT.md for TODOs
 - Keep core docs (7 files) up to date
 
 ---
@@ -375,7 +348,7 @@ The `archive/legacy/` directory contains:
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - Comprehensive guide covering all common issues
 
 ### Quick Questions
-Check [../CLAUDE.md](../CLAUDE.md) - "Key Lessons" section
+Check [../CLAUDE.md](../CLAUDE.md) - "Common Issues and Solutions" section
 
 ### MQTT Issues
 See [MQTT_API.md](MQTT_API.md) - API reference and examples
@@ -390,7 +363,7 @@ Check `src/config/ProjectConfig.h` comments and [TROUBLESHOOTING.md](TROUBLESHOO
 See [CHANGELOG.md](CHANGELOG.md) - Release notes and development history
 
 ### Future Improvements
-See [IMPROVEMENT_OPPORTUNITIES.md](IMPROVEMENT_OPPORTUNITIES.md)
+See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) and [../IMPROVEMENTS.md](../IMPROVEMENTS.md)
 
 ---
 
@@ -401,9 +374,9 @@ When adding new features:
 2. Add MQTT API changes to MQTT_API.md
 3. Document new events in EVENT_SYSTEM.md
 4. Add state changes to STATE_MACHINES.md
-5. Update IMPROVEMENT_OPPORTUNITIES.md (remove completed items)
+5. Update TECHNICAL_DEBT.md / IMPROVEMENTS.md (mark completed items)
 
 ---
 
-Last Updated: 2025-12-22
+Last Updated: 2026-09-15
 Documentation Version: 1.0.0

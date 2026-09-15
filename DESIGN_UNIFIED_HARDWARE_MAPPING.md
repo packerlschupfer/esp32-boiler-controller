@@ -1,5 +1,16 @@
 # Unified Hardware Mapping Design
 
+> **Status: Implemented (historical design note, 2025-12-05).** The code is the reference, not this
+> document. Current headers: `include/config/RelayIndices.h`, `include/config/SensorIndices.h`,
+> `include/config/RelayHardwareConfig.h`, `include/config/SensorHardwareConfig.h`, and bindings in
+> `src/shared/RelayBindings.h/.cpp` and `src/shared/SensorBindings.h/.cpp`.
+> The index values in this document are out of date: relays are now BURNER_ENABLE=0, POWER_BOOST=1,
+> WATER_MODE=2, VALVE=3, HEATING_PUMP=4, WATER_PUMP=5, SPARE_7=6, ALARM=7 (there is no HALF_POWER), and
+> the MB8ART channels are BOILER_OUTPUT=0, BOILER_RETURN=1, WATER_TANK=2, OUTSIDE=3, PRESSURE_CHANNEL=4,
+> WATER_TANK_TOP=5, WATER_RETURN=6, HEATING_RETURN=7. The adapter files listed under "File Structure
+> After Refactoring" (`RelayConfigAdapter.cpp`, `SensorConfigAdapter.cpp`) were not created; the
+> libraries were updated instead (Design Decisions, item 3).
+
 ## ✅ IMPLEMENTATION STATUS: COMPLETE
 
 **Date Completed**: 2025-12-05

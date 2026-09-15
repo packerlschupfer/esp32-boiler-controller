@@ -97,11 +97,15 @@ pio device monitor -b 921600
 
 3. **Credentials** (`credentials.ini`):
    ```ini
-   [env]
+   [credentials]
    build_flags =
        -DMQTT_USERNAME=\"your_mqtt_user\"
        -DMQTT_PASSWORD=\"your_mqtt_password\"
        -DOTA_PASSWORD=\"your_ota_password\"
+
+   ; OTA upload auth for the espota envs (--auth=${credentials.ota_password}),
+   ; must equal OTA_PASSWORD above
+   ota_password = your_ota_password
    ```
 
 4. **Build Mode** (`platformio.ini`):
@@ -198,7 +202,7 @@ See [docs/STATE_MACHINES.md](docs/STATE_MACHINES.md) for complete state diagrams
 - Stack tuning based on runtime profiling
 - Event-driven architecture (zero polling loops)
 
-See [docs/DEEP_CODE_ANALYSIS_HISTORY.md](docs/DEEP_CODE_ANALYSIS_HISTORY.md) for complete analysis.
+See [docs/MEMORY_OPTIMIZATION.md](docs/MEMORY_OPTIMIZATION.md) and the development history in [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 ## Production Status
 
@@ -223,7 +227,7 @@ Comprehensive technical documentation (~180KB):
 - [TASK_ARCHITECTURE.md](docs/TASK_ARCHITECTURE.md) - All 19 FreeRTOS tasks (28KB)
 - [INITIALIZATION_ORDER.md](docs/INITIALIZATION_ORDER.md) - 7-stage startup sequence (9.5KB)
 - [MEMORY_OPTIMIZATION.md](docs/MEMORY_OPTIMIZATION.md) - ESP32 memory strategy (12KB)
-- [ALGORITHMS.md](docs/ALGORITHMS.md) - 13 control algorithms (24KB)
+- [ALGORITHMS.md](docs/ALGORITHMS.md) - 14 control algorithms
 - [STATE_MACHINES.md](docs/STATE_MACHINES.md) - Burner state machine details (20KB)
 - [MQTT_API.md](docs/MQTT_API.md) - Complete MQTT reference (22KB)
 - [SAFETY_SYSTEM.md](docs/SAFETY_SYSTEM.md) - 4-layer safety architecture
@@ -292,7 +296,7 @@ esp32-boiler-controller/
 │   ├── testing/          # Test and monitoring scripts
 │   └── ...               # MQTT test scripts, parameter init
 ├── tools/                 # Development tools
-│   ├── analysis/         # Code analysis reports (20 rounds)
+│   ├── generate_events.py # Event bit code generator (event_config.yaml)
 │   └── monitoring/       # System monitoring utilities
 ├── test/                  # Unit and integration tests
 ├── homeassistant/         # Home Assistant integration

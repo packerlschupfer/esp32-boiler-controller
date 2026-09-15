@@ -1,5 +1,12 @@
 # Relay Mapping Refactoring Task
 
+> **Status: Obsolete (historical task description, 2025).** Superseded by
+> [DESIGN_UNIFIED_HARDWARE_MAPPING.md](DESIGN_UNIFIED_HARDWARE_MAPPING.md). The `RelayChannel`
+> namespace and `include/relay/RelayIndices.h` proposed below were never created, and
+> `RelayConfigurations.cpp` has been removed. The relay assignments now live in
+> `include/config/RelayIndices.h` (namespace `RelayIndex`) and `include/config/RelayHardwareConfig.h`,
+> with runtime bindings in `src/shared/RelayBindings.h/.cpp`. The channel numbers below are out of date.
+
 ## Problem Statement
 
 Currently, relay channel numbers are hardcoded throughout the codebase in multiple locations:
