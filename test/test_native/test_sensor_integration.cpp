@@ -13,7 +13,10 @@
 #include "mocks/MockSharedSensorReadings.h"
 #include "mocks/MockTemperatureSensorFallback.h"
 
-// Mock MB8ART sensor readings
+// Mock MB8ART sensor readings. Anonymous namespace: mocks/MockMB8ART.h defines another
+// MockMB8ART with a different layout, and the shared inline constructor corrupted the heap
+// once the linker picked the other definition (2026-09-15).
+namespace {
 class MockMB8ART {
 private:
     Temperature_t channels[8];
@@ -53,6 +56,7 @@ public:
         return connected && !simulateTimeout;
     }
 };
+}  // namespace
 
 // Test variables
 static MockMB8ART* mockSensor = nullptr;

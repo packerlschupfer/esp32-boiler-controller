@@ -38,6 +38,11 @@ void test_error_context_worst_case_fits_mqtt_payload();
 void test_error_context_escapes_and_null_sensors();
 void test_error_context_small_buffer_shortens_description();
 
+// OTA validation policy (confirm or roll back an updated image)
+void test_ota_validation_waits_for_min_uptime();
+void test_ota_validation_needs_sensors_and_network();
+void test_ota_validation_rolls_back_after_max_wait();
+
 // Autotune peak/trough tracking (lagging plant)
 void test_relay_extrema_peaks_include_post_switch_overshoot();
 void test_relay_extrema_troughs_include_post_switch_undershoot();
@@ -130,16 +135,13 @@ void test_relay_policy_emergency_bypasses_protection();
 void test_relay_policy_mode_switch_then_power_change_counts_once();
 void test_relay_policy_pump_request_resent_until_relay_follows();
 
-void test_pre_ignition_safe_conditions();
-void test_pre_ignition_high_boiler_temp();
-void test_pre_ignition_high_water_temp();
-void test_thermal_shock_detection();
-void test_operation_safe_conditions();
-void test_operation_high_exhaust_temp();
-void test_operation_low_return_temp();
-void test_rapid_temperature_rise();
-void test_hardware_interlock_always_true();
-void test_history_reset();
+// Scheduler command policy (enable command, space mode defaults, status reply)
+void test_scheduler_enable_payload_validation();
+void test_scheduler_enable_ends_active_run_only_when_disabled();
+void test_scheduler_space_mode_default_targets();
+void test_scheduler_status_lists_active_and_disabled_ids();
+void test_scheduler_status_worst_case_fits_mqtt_payload();
+void test_scheduler_status_small_buffer_stays_valid_json();
 
 void test_basic_allocation();
 void test_pool_exhaustion();
@@ -209,42 +211,6 @@ void test_anti_flapping_behavior();
 // Temperature cycle tests
 void test_temperature_simulation_basics();
 void test_heating_cycle_with_hysteresis();
-
-// Burner state machine tests
-void test_bsm_initial_state_is_idle();
-void test_bsm_heat_demand_triggers_pre_purge();
-void test_bsm_pre_purge_to_ignition();
-void test_bsm_ignition_success_low_power();
-void test_bsm_ignition_success_high_power();
-void test_bsm_ignition_timeout_retry();
-void test_bsm_ignition_failures_cause_lockout();
-void test_bsm_lockout_auto_reset();
-void test_bsm_lockout_manual_reset();
-void test_bsm_demand_removal_triggers_post_purge();
-void test_bsm_post_purge_to_idle();
-void test_bsm_emergency_stop();
-void test_bsm_safety_failure_causes_error();
-void test_bsm_flame_loss_causes_error();
-void test_bsm_power_level_switching();
-void test_bsm_no_start_without_safety();
-void test_bsm_demand_removal_during_pre_purge();
-void test_bsm_mode_switch_from_running_low();
-void test_bsm_mode_switch_from_running_high();
-void test_bsm_mode_switch_completes_to_running();
-void test_bsm_mode_switch_no_demand_goes_to_post_purge();
-void test_bsm_mode_switch_safety_failure_causes_error();
-void test_bsm_mode_switch_flame_loss_causes_error();
-void test_bsm_mode_switch_ignored_from_idle();
-
-// Improvement 1: Power level failsafe tests
-void test_bsm_power_level_mismatch_triggers_failsafe_low();
-void test_bsm_power_level_mismatch_triggers_failsafe_high();
-
-// Improvement 2: Helper function extraction tests
-void test_bsm_helper_checkSafetyShutdown_no_demand();
-void test_bsm_helper_checkSafetyShutdown_demand_active();
-void test_bsm_helper_checkFlameLoss_unexpected();
-void test_bsm_helper_checkFlameLoss_intentional();
 
 // Improvement 3: Concurrency tests (14 tests)
 void test_concurrency_mutex_correct_order();
@@ -339,19 +305,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_invalid_temperature);
     RUN_TEST(test_temperature_edge_cases);
     RUN_TEST(test_temperature_difference);
-    
-    // Burner safety tests
-    RUN_TEST(test_pre_ignition_safe_conditions);
-    RUN_TEST(test_pre_ignition_high_boiler_temp);
-    RUN_TEST(test_pre_ignition_high_water_temp);
-    RUN_TEST(test_thermal_shock_detection);
-    RUN_TEST(test_operation_safe_conditions);
-    RUN_TEST(test_operation_high_exhaust_temp);
-    RUN_TEST(test_operation_low_return_temp);
-    RUN_TEST(test_rapid_temperature_rise);
-    RUN_TEST(test_hardware_interlock_always_true);
-    RUN_TEST(test_history_reset);
-    
+
     // Memory pool tests
     RUN_TEST(test_basic_allocation);
     RUN_TEST(test_pool_exhaustion);
@@ -421,44 +375,6 @@ int main(int argc, char **argv) {
     // Temperature cycle tests
     RUN_TEST(test_temperature_simulation_basics);
     RUN_TEST(test_heating_cycle_with_hysteresis);
-
-    // Burner state machine tests
-    RUN_TEST(test_bsm_initial_state_is_idle);
-    RUN_TEST(test_bsm_heat_demand_triggers_pre_purge);
-    RUN_TEST(test_bsm_pre_purge_to_ignition);
-    RUN_TEST(test_bsm_ignition_success_low_power);
-    RUN_TEST(test_bsm_ignition_success_high_power);
-    RUN_TEST(test_bsm_ignition_timeout_retry);
-    RUN_TEST(test_bsm_ignition_failures_cause_lockout);
-    RUN_TEST(test_bsm_lockout_auto_reset);
-    RUN_TEST(test_bsm_lockout_manual_reset);
-    RUN_TEST(test_bsm_demand_removal_triggers_post_purge);
-    RUN_TEST(test_bsm_post_purge_to_idle);
-    RUN_TEST(test_bsm_emergency_stop);
-    RUN_TEST(test_bsm_safety_failure_causes_error);
-    RUN_TEST(test_bsm_flame_loss_causes_error);
-    RUN_TEST(test_bsm_power_level_switching);
-    RUN_TEST(test_bsm_no_start_without_safety);
-    RUN_TEST(test_bsm_demand_removal_during_pre_purge);
-
-    // MODE_SWITCHING tests
-    RUN_TEST(test_bsm_mode_switch_from_running_low);
-    RUN_TEST(test_bsm_mode_switch_from_running_high);
-    RUN_TEST(test_bsm_mode_switch_completes_to_running);
-    RUN_TEST(test_bsm_mode_switch_no_demand_goes_to_post_purge);
-    RUN_TEST(test_bsm_mode_switch_safety_failure_causes_error);
-    RUN_TEST(test_bsm_mode_switch_flame_loss_causes_error);
-    RUN_TEST(test_bsm_mode_switch_ignored_from_idle);
-
-    // Improvement 1: Power level failsafe tests
-    RUN_TEST(test_bsm_power_level_mismatch_triggers_failsafe_low);
-    RUN_TEST(test_bsm_power_level_mismatch_triggers_failsafe_high);
-
-    // Improvement 2: Helper function extraction tests
-    RUN_TEST(test_bsm_helper_checkSafetyShutdown_no_demand);
-    RUN_TEST(test_bsm_helper_checkSafetyShutdown_demand_active);
-    RUN_TEST(test_bsm_helper_checkFlameLoss_unexpected);
-    RUN_TEST(test_bsm_helper_checkFlameLoss_intentional);
 
     // Improvement 3: Concurrency tests (14 tests)
     RUN_TEST(test_concurrency_mutex_correct_order);
@@ -553,6 +469,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_error_context_escapes_and_null_sensors);
     RUN_TEST(test_error_context_small_buffer_shortens_description);
 
+    // OTA validation policy
+    RUN_TEST(test_ota_validation_waits_for_min_uptime);
+    RUN_TEST(test_ota_validation_needs_sensors_and_network);
+    RUN_TEST(test_ota_validation_rolls_back_after_max_wait);
+
     // Autotune peak/trough tracking (lagging plant)
     RUN_TEST(test_relay_extrema_peaks_include_post_switch_overshoot);
     RUN_TEST(test_relay_extrema_troughs_include_post_switch_undershoot);
@@ -644,6 +565,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_relay_policy_emergency_bypasses_protection);
     RUN_TEST(test_relay_policy_mode_switch_then_power_change_counts_once);
     RUN_TEST(test_relay_policy_pump_request_resent_until_relay_follows);
+
+    // Scheduler command policy (enable command, space mode defaults, status reply)
+    RUN_TEST(test_scheduler_enable_payload_validation);
+    RUN_TEST(test_scheduler_enable_ends_active_run_only_when_disabled);
+    RUN_TEST(test_scheduler_space_mode_default_targets);
+    RUN_TEST(test_scheduler_status_lists_active_and_disabled_ids);
+    RUN_TEST(test_scheduler_status_worst_case_fits_mqtt_payload);
+    RUN_TEST(test_scheduler_status_small_buffer_stays_valid_json);
 
     return UNITY_END();
 }

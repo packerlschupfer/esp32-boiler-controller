@@ -26,8 +26,10 @@ void test_float_to_temperature_conversion() {
     // Test zero
     TEST_ASSERT_EQUAL_INT16(0, tempFromFloat(0.0f));
     
-    // Test rounding - 23.45 * 10 = 234.5, which rounds to 234 (not 235)
-    TEST_ASSERT_EQUAL_INT16(234, tempFromFloat(23.45f));  // 234.5 rounds down
+    // Test rounding - tempFromFloat() rounds half away from zero (23.45f * 10 = 234.50 -> 235).
+    // Until 2026-09-15 a truncating tempFromFloat() in test_burner_safety.cpp won the inline
+    // ODR choice for the whole test binary, so this test asserted truncation.
+    TEST_ASSERT_EQUAL_INT16(235, tempFromFloat(23.45f));
     TEST_ASSERT_EQUAL_INT16(234, tempFromFloat(23.44f));  // Should round to 23.4
 }
 
@@ -114,9 +116,9 @@ void test_temperature_formatting() {
     formatTemp(buffer, sizeof(buffer), tempFromFloat(0.0f));
     TEST_ASSERT_EQUAL_STRING("0.0", buffer);
     
-    // Test rounding display - 99.99 * 10 = 999.9, which is 999 as int16_t = 99.9°C
+    // Test rounding display - 99.99 * 10 = 999.9, rounded to 1000 = 100.0°C
     formatTemp(buffer, sizeof(buffer), tempFromFloat(99.99f));
-    TEST_ASSERT_EQUAL_STRING("99.9", buffer);
+    TEST_ASSERT_EQUAL_STRING("100.0", buffer);
 }
 
 // Test invalid temperature detection

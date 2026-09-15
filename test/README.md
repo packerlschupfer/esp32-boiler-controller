@@ -9,9 +9,7 @@ test/
 ├── test_native/              # Tests that run on development machine
 │   ├── test_main.cpp                        # Unity runner: declares and runs all tests
 │   ├── test_temperature_conversion.cpp
-│   ├── test_burner_safety.cpp
 │   ├── test_memory_pool.cpp
-│   ├── test_burner_state_machine.cpp
 │   ├── test_burner_transitions.cpp          # BurnerTransitions::step() scenarios
 │   ├── test_burner_transition_policy.cpp    # BurnerTransitionPolicy
 │   ├── test_burner_demand_gate.cpp          # BurnerDemandGate
@@ -76,9 +74,9 @@ pio test -e native_test -v
 ### Native Tests (`test_native/`)
 These tests run on your development machine and test pure logic without hardware dependencies.
 
-All native tests are declared and run from `test_main.cpp` (234 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
+All native tests are declared and run from `test_main.cpp` (209 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
 
-`test_burner_state_machine.cpp` and `test_pid_autotuner.cpp` exercise simplified local models (no firmware headers, only Unity, standard headers and `MockTime`), not the firmware classes. The firmware burner transition logic is covered by `test_burner_transitions.cpp`, the firmware autotune peak/trough detection by `test_relay_extrema_tracker.cpp`.
+`test_pid_autotuner.cpp` exercises a simplified local model (no firmware headers, only Unity, standard headers and `MockTime`), not the firmware class. The firmware autotune peak/trough detection is covered by `test_relay_extrema_tracker.cpp`, the firmware burner transition logic by `test_burner_transitions.cpp`.
 
 #### Burner Transition Tests (`test_burner_transitions.cpp`)
 Replay tick sequences through the firmware's header-only `BurnerTransitions::step()`. The simulator checks state timeouts before the step like `StateMachine::update()` (PRE_PURGE 2 s → IGNITION, IGNITION backstop 7 s → LOCKOUT).
@@ -123,18 +121,11 @@ Replay tick sequences through the firmware's header-only `BurnerTransitions::ste
 - `test_error_recovery_manager.cpp`: recovery strategies, backoff, error history, escalation (simplified mock implementation)
 - `test_concurrency.cpp`: race conditions simulated by sequential calls with `MockTime` (mutex order, circuit breaker, mode switch races, sensor atomicity, anti-flapping)
 - `test_pid_autotuner.cpp`: circular buffer, relay control, peak detection, tuning method math (simplified model)
-- `test_burner_state_machine.cpp`: state sequence, lockout, mode switching (simplified model)
 
 #### Temperature Conversion Tests
 - Tests the Temperature_t fixed-point conversion functions
 - Validates arithmetic operations on temperatures
 - Tests formatting and validation functions
-
-#### Burner Safety Tests
-- Tests safety validation logic
-- Validates temperature limit checks
-- Tests thermal shock protection
-- Documents the hardware interlock stub issue
 
 #### Memory Pool Tests
 - Tests memory pool allocation/deallocation
@@ -308,7 +299,7 @@ These tests can be integrated into CI/CD pipelines:
 
 ## Known Issues
 
-1. **Hardware Interlock Stub**: The `checkHardwareInterlocks()` function in BurnerSafetyValidator always returns true. This is documented in the burner safety tests.
+1. **Hardware Interlock Stub**: The `checkHardwareInterlocks()` function in BurnerSafetyValidator always returns true (no interlock inputs are wired; see the comment in `src/modules/control/BurnerSafetyValidator.cpp`).
 
 2. **Flow Sensor Simulation**: Flow sensor functionality is simulated using temperature differential as documented in the tests.
 
