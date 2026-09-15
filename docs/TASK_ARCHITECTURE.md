@@ -62,7 +62,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Purpose**: Manages the burner state machine, enforces safety interlocks, coordinates heating/water demand, and handles emergency shutdown.
 
 **Event Groups**:
-- **Sensor Event Group** (waits): `FIRST_READ_COMPLETE`, `DATA_AVAILABLE` at startup; polls `BOILER_OUTPUT`, `BOILER_RETURN`, `WATER_TANK` (never set, see EVENT_SYSTEM.md)
+- **Sensor Event Group** (waits): `FIRST_READ_COMPLETE`, `DATA_AVAILABLE` at startup; polls `BOILER_RETURN`, `WATER_TANK` and the `BOILER_OUTPUT/BOILER_RETURN/WATER_TANK_ERROR` bits each loop (one wake-up per MB8ART read)
 - **Burner Event Group** (sets/waits): `STATE_TIMEOUT`, `FLAME_STATE_CHANGED`, `PRESSURE_CHANGED`, `FLOW_CHANGED`, `SAFETY_EVENT`
 - **Burner Request Event Group** (waits): `HEATING`, `WATER`, `CHANGE_EVENT_BITS`, `TEMPERATURE_MASK`
 - **System State Event Group** (sets): `BURNER_OFF`, `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH`, `BURNER_ERROR`

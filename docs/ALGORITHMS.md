@@ -323,6 +323,8 @@ SHUTDOWN → NORMAL    1 valid check
 ```
 `canContinueOperation()` returns true only in NORMAL. `getSafeOperatingParams()` gives 110.0°C / 100 % in NORMAL and 0 in STARTUP and SHUTDOWN.
 
+BurnerControlTask evaluates it after every MB8ART read. The heating and water tasks drop their requests as soon as it fails; the burner emergency stop (ERROR for `errorRecoveryMs`) follows only when it stays false for 10 s while heat demand persists (`SensorFailureConfirm.h`), so a single bad reading does not lock the burner out.
+
 **Entering SHUTDOWN:** ERROR `SHUTDOWN: Missing sensors: Boiler Return, Room Temperature (required for space heating)` (example), sets `SENSOR_FAILURE` and `SENSOR_DEGRADED`, publishes retained `boiler/status/sensor_fallback` (JSON with `mode` and `missing`) and `boiler/status/sensor_mode`.
 
 **SHUTDOWN → NORMAL:** clears both bits, calls `CentralizedFailsafe::releaseAfterSensorRecovery()` (releases `EMERGENCY_STOP` only if stale sensor data caused it) and publishes `boiler/status/sensor_fallback/recovery`.
