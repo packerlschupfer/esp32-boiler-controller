@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Autotune method persisted: loaded from settings at init, `method:<name>` command saves it
 - Native tests: `test_pid_gain_fixed_point.cpp`, `test_relay_extrema_tracker.cpp`, `test_burner_transition_policy.cpp`, `test_burner_transitions.cpp`, `test_burner_demand_gate.cpp`, `test_relay_command_policy.cpp`, `test_stage_c_policies.cpp`
 - MQTT command `boiler/cmd/emergency_reset` (payload `reset`): `CentralizedFailsafe::clearEmergencyStop()` releases a latched emergency stop once the boiler output/return are below 110°C, the sensors are available and no SENSOR_FAILURE/MODBUS/RELAY error bit is set; restores `BOILER_ENABLED` from the saved setting; result on `boiler/status/burner` (`emergency_released`, `emergency_not_active`, `emergency_release_refused:<reason>`). Rules in `EmergencyStopRelease.h`, native test `test_emergency_stop_release.cpp`
+- Removed native tests `test_burner_state_machine.cpp` (30) and `test_burner_safety.cpp` (10): they tested local copies of the logic with behaviour the firmware lacks (flame-loss ERROR, exhaust/min-return/rise-rate checks); real burner logic stays covered by `test_burner_transitions.cpp`, `test_burner_transition_policy.cpp` and `test_stage_c_policies.cpp` (native suite now 209 `RUN_TEST`)
+- MQTT command `boiler/cmd/scheduler/enable` (`{"id":N,"enabled":true|false}`): sets the stored schedule's enabled flag (FRAM format unchanged), ends a running schedule when disabled, replies `{"status":"ok","id":N,"enabled":..}` / `not_found` / validation errors on `boiler/scheduler/response`; `boiler/status/scheduler/info` adds `disabledIds`; space heating schedules without `target_temp` use the mode default (COMFORT 21, ECO 18, FROST 10 instead of always 21), invalid `mode` is rejected (`invalid_mode`). Rules in `SchedulerCommandPolicy.h`, native test `test_scheduler_command_policy.cpp`
 
 ### Changed
 - CLAUDE.md: Corrected "8-state" to "9-state" burner FSM
@@ -47,6 +49,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Removed unused code: `ErrorRecoveryManager` (never constructed) and its native test, `PIDControlTask` (never started), `CentralizedFailsafe::monitorSystemHealth()` (no caller)
 
 ### Fixed
+- MB8ART sensor event bits: the library ignored `SensorHardware::CONFIGS` and set its own interleaved bits (update 2n, error 2n+1), so only `BOILER_OUTPUT` matched its channel. The boiler output error set `BOILER_RETURN`, the return update set `WATER_TANK`, a channel 3 error looked like `INSIDE`, and the library cleared `DATA_AVAILABLE` on every request, so the periodic full safety check could report a communication failure while heating or water mode ran. ESP32-MB8ART now uses the configured bits (`updateBitFor()` / `errorBitFor()`), the table follows `SensorIndices` (index = channel, checked at compile time), and MB8ARTTasks clears `DATA_AVAILABLE` on stale data or coordinator failure
+- BurnerControlTask never saw `SensorUpdate::BOILER_OUTPUT` (BoilerTempControlTask consumes it with clear-on-exit); it is no longer in the temperature trigger, and the sensor failure check (`canContinueOperation()`) also runs on the 1 s state timer instead of depending on return/tank update bits
+- OTA: new images were marked valid before `setup()`, so the bootloader rollback never applied. `OtaRollbackGuard` confirms an updated image after 60 s with sensor data and network (`OtaValidationPolicy`, native-tested); a reset before that boots the previous image, and no confirmation within 10 minutes rolls back
+- `boiler/cmd/errors` replied `unknown_command`; it now takes the command in the payload (`stats`, `list 20`, `list 20,2`)
+- MQTT init and subscribe waited forever for the MQTT mutex; bounded to 1 s
+- Version history: the section called 1.0.0 (2025-12-22) is the 0.1.0 release (tag `v0.1.0`, 2025-12-20)
+- Design notes `DESIGN_SAFETY_SIMPLIFICATION.md`, `DESIGN_UNIFIED_HARDWARE_MAPPING.md` and `REFACTOR_RELAY_MAPPING.md` moved to `docs/history/`
 - ANDRTF3 HAL: Removed ineffective retry loop (was generating 4 errors instead of 1)
 - TempSensorFallback: Changed mode transition log from WARN to INFO (no longer sent to syslog)
 - Burner fired on a stale heat demand with no mode active (pump off) after an emergency stop and ERROR recovery
@@ -83,7 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A stop from MODE_SWITCHING did not record OFF in BurnerAntiFlapping, so the restart from POST_PURGE skipped the 20 s minimum off-time
 - Disabling water during a charge took the mode-switch path and could keep the burner firing up to 15 s; explicit disable is now checked first, also in MODE_SWITCHING
 - Autotune method was read before NVS was loaded (lost after reboot) and `pid/autotune/method` via `boiler/params` was not applied; `startAutoTuning()` now reads the saved setting
-- Documentation audited against the code (2026-09-15): corrected relay wiring, I2C pins and Modbus addresses (HARDWARE_SETUP, INITIALIZATION_ORDER), event bit tables and flows (EVENT_SYSTEM, EVENT_FLOW, generated/events.md), validation results that stop the burner (SAFETY_SYSTEM, STATE_MACHINES), scheduler day numbering and undocumented topics (MQTT_API), removed descriptions of checks that do not exist (ALGORITHMS), real log lines (TROUBLESHOOTING), OTA safety and recovery (OTA guides), task, mutex and memory tables, diagrams, CLAUDE.md paths and snippets; design notes marked implemented/obsolete. `tools/event_config.yaml` is out of sync with the header: do not regenerate the events header until it is fixed
+- Documentation audited against the code (2026-09-15): corrected relay wiring, I2C pins and Modbus addresses (HARDWARE_SETUP, INITIALIZATION_ORDER), event bit tables and flows (EVENT_SYSTEM, EVENT_FLOW, generated/events.md), validation results that stop the burner (SAFETY_SYSTEM, STATE_MACHINES), scheduler day numbering and undocumented topics (MQTT_API), removed descriptions of checks that do not exist (ALGORITHMS), real log lines (TROUBLESHOOTING), OTA safety and recovery (OTA guides), task, mutex and memory tables, diagrams, CLAUDE.md paths and snippets; design notes marked implemented/obsolete
+- `tools/event_config.yaml` now matches `include/events/SystemEventsGenerated.h` (regeneration verified byte-identical apart from the timestamp line): BurnerRequest change bits 5-7, one `Error` group, quoted HeatingEvent names; the generator gained optional `comment`, `next_free_bit` and `migration_macro_order` keys, and `docs/generated/events.md` is generated again
 - `errors/list` answered `export_failed` as soon as the error log held entries (128-byte buffer) and `errors/critical` was cut off without a check. Both now use a buffer the size of the MQTT payload and include as many entries as fit (`n`); `errors/list` accepts `N,offset` to page through the log
 - Preheat settings (`boiler/cmd/config/preheat_*`), `pump_cooldown_ms` and `boiler_pid_enabled` were never saved and were lost on reboot, so `boiler_pid_enabled` (which needs a reboot) could not take effect. They are now registered parameters (`preheat/*`, `pump/cooldownMs`, `boiler/pidEnabled`). `weather_control_enabled` and `room_curve_shift_factor` also go through the parameter storage now and are saved immediately. BoilerTempControlTask now waits (at most 3 s) for the saved parameters before it reads the PID mode; it started about 150 ms before they were loaded
 - Emergency stops raised directly (critical temperature, stale sensors, request watchdog) left no FRAM emergency record; they now save one, like a failsafe escalation to CRITICAL
@@ -100,7 +110,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.0.0] - 2025-12-22
+## [0.1.0] - 2025-12-20
 
 ### Initial Production Release
 
@@ -189,7 +199,7 @@ The codebase includes evidence of 20+ rounds of iterative improvement, documente
 
 ## Versioning Notes
 
-This project uses semantic versioning starting from v1.0.0:
+This project uses semantic versioning starting from v0.1.0 (git tag `v0.1.0`, `PROJECT_VERSION`; older notes call this release 1.0.0):
 - **MAJOR**: Breaking changes to MQTT API or safety behavior
 - **MINOR**: New features, non-breaking enhancements
 - **PATCH**: Bug fixes, documentation updates
@@ -198,7 +208,7 @@ Prior development history is preserved in code comments and git history.
 
 ---
 
-## Quality Metrics (v1.0.0)
+## Quality Metrics (v0.1.0)
 
 From comprehensive 20-run analysis:
 
