@@ -42,6 +42,9 @@ TaskHandle_t MQTTTask::taskHandle_ = nullptr;
 bool MQTTTask::isRunning_ = false;
 MQTTManager* MQTTTask::mqttManager_ = nullptr;
 SemaphoreHandle_t MQTTTask::mqttMutex_ = nullptr;
+
+// Guards MQTT init and subscribe; both waited forever before (2026-09-15)
+static constexpr unsigned MQTT_MUTEX_TIMEOUT_MS = 1000;
 std::shared_ptr<QueueManager::ManagedQueue> MQTTTask::highPriorityQueue_ = nullptr;
 std::shared_ptr<QueueManager::ManagedQueue> MQTTTask::normalPriorityQueue_ = nullptr;
 uint32_t MQTTTask::lastReconnectAttempt_ = 0;
@@ -140,7 +143,11 @@ void MQTTTask::initializeMQTT() {
     LOG_INFO(TAG, "=== MQTT INITIALIZATION STARTING ===");
     LOG_INFO(TAG, "Initializing MQTT with event-driven API...");
     
-    SemaphoreGuard guard(mqttMutex_);
+    // Bounded wait (was infinite); init continues without the lock rather than hanging
+    SemaphoreGuard guard(mqttMutex_, pdMS_TO_TICKS(MQTT_MUTEX_TIMEOUT_MS));
+    if (!guard.hasLock()) {
+        LOG_ERROR(TAG, "MQTT mutex not acquired within %u ms - initializing anyway", MQTT_MUTEX_TIMEOUT_MS);
+    }
 
     if (mqttManager_ == nullptr) {
         mqttManager_ = &MQTTManager::getInstance();
@@ -710,9 +717,13 @@ bool MQTTTask::subscribe(const char* topic, std::function<void(const char*)> cal
         return false;
     }
     
-    SemaphoreGuard guard(mqttMutex_);
-    
-    auto result = mqttManager_->subscribe(topic, 
+    SemaphoreGuard guard(mqttMutex_, pdMS_TO_TICKS(MQTT_MUTEX_TIMEOUT_MS));
+    if (!guard.hasLock()) {
+        LOG_ERROR(TAG, "MQTT mutex not acquired within %u ms - subscribe to %s skipped", MQTT_MUTEX_TIMEOUT_MS, topic);
+        return false;
+    }
+
+    auto result = mqttManager_->subscribe(topic,
         [callback](const String& payload) {
             if (callback) {
                 callback(payload.c_str());

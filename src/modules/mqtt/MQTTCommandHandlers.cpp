@@ -534,6 +534,22 @@ void handleErrorCommand(const char* topic, const char* payload) {
     if (!lastSlash) return;
     const char* command = lastSlash + 1;
 
+    // boiler/cmd/errors routes here too, with the command in the payload ("stats",
+    // "list 20", "list 20,2"); it replied unknown_command because the last topic
+    // segment is "errors" (2026-09-15)
+    char routedCommand[16];
+    if (strcmp(command, "errors") == 0) {
+        const char* text = payload ? payload : "";
+        size_t len = strcspn(text, " ");
+        if (len >= sizeof(routedCommand)) {
+            len = sizeof(routedCommand) - 1;
+        }
+        memcpy(routedCommand, text, len);
+        routedCommand[len] = '\0';
+        command = routedCommand;
+        payload = (text[len] == ' ') ? text + len + 1 : "";
+    }
+
     // Handle error log commands
     if (strcmp(command, "list") == 0) {
         // Payload "N" or "N,offset": up to N entries (default 10, max 50) starting at offset
