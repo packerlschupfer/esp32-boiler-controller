@@ -12,14 +12,14 @@ void TimerSchedulerTask(void* parameter);
 namespace TimerScheduler {
     /**
      * Process MQTT command for scheduler
-     * @param command The command (add, remove, list, etc.)
+     * @param command The command (add, remove, enable, list, status)
      * @param payload The JSON payload
      */
     void processMQTTCommand(const String& command, const String& payload);
     
     /**
      * Get scheduler status as JSON
-     * @param out Caller buffer (at least 48 bytes)
+     * @param out Caller buffer (at least 80 bytes, 320 lists all IDs)
      * @param size Size of out
      * @return out, or a constant error JSON if the buffer is too small
      */

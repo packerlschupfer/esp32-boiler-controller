@@ -3,6 +3,7 @@
 
 #include <ArduinoJson.h>
 #include "TimerSchedule.h"
+#include "SchedulerCommandPolicy.h"
 #include <cstdio>
 #include <map>
 #include <vector>
@@ -23,6 +24,15 @@ public:
     static const char* formatStatusResponse(char* out, size_t size, bool success, uint8_t id = 0) {
         if (out == nullptr || size == 0) return PreformattedResponses::ERROR_BUFFER;
         snprintf(out, size, "{\"status\":\"%s\",\"id\":%d}", success ? "ok" : "error", id);
+        return out;
+    }
+
+    /**
+     * @brief Format the reply to boiler/cmd/scheduler/enable
+     */
+    static const char* formatEnableResponse(char* out, size_t size, uint8_t id, bool enabled) {
+        if (out == nullptr || size == 0) return PreformattedResponses::ERROR_BUFFER;
+        snprintf(out, size, "{\"status\":\"ok\",\"id\":%d,\"enabled\":%s}", id, enabled ? "true" : "false");
         return out;
     }
 
@@ -84,30 +94,26 @@ public:
         const std::map<uint8_t, bool>& activeSchedules,
         bool anyActive) {
 
-        if (out == nullptr || size < 48) return PreformattedResponses::ERROR_BUFFER;
+        uint8_t activeIds[SchedulerCommandPolicy::MAX_STATUS_IDS];
+        uint8_t disabledIds[SchedulerCommandPolicy::MAX_STATUS_IDS];
+        size_t activeCount = 0;
+        size_t disabledCount = 0;
 
-        int written = snprintf(out, size, "{\"active\":%s,\"count\":%u,\"activeIds\":[",
-                               anyActive ? "true" : "false", static_cast<unsigned>(schedules.size()));
-        if (written < 0 || static_cast<size_t>(written) >= size) {
-            return PreformattedResponses::ERROR_BUFFER;
-        }
-        size_t len = static_cast<size_t>(written);
-
-        bool first = true;
         for (const auto& entry : activeSchedules) {
             if (!entry.second) continue;
-            // Keep room for "]}" and the terminator
-            int w = snprintf(out + len, size - len, "%s%u", first ? "" : ",", static_cast<unsigned>(entry.first));
-            if (w < 0 || static_cast<size_t>(w) + 3 > size - len) {
-                out[len] = '\0';
-                break;
-            }
-            len += static_cast<size_t>(w);
-            first = false;
+            if (activeCount >= SchedulerCommandPolicy::MAX_STATUS_IDS) break;
+            activeIds[activeCount++] = entry.first;
+        }
+        for (const auto& schedule : schedules) {
+            if (schedule.enabled) continue;
+            if (disabledCount >= SchedulerCommandPolicy::MAX_STATUS_IDS) break;
+            disabledIds[disabledCount++] = schedule.id;
         }
 
-        snprintf(out + len, size - len, "]}");
-        return out;
+        const char* json = SchedulerCommandPolicy::formatStatus(
+            out, size, anyActive, static_cast<unsigned>(schedules.size()),
+            activeIds, activeCount, disabledIds, disabledCount);
+        return json ? json : PreformattedResponses::ERROR_BUFFER;
     }
 
     /**

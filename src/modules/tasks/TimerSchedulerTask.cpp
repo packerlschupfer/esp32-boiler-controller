@@ -22,6 +22,7 @@
 #include "RuntimeStorageSchedules.h"
 #include "modules/scheduler/SchedulerResponseFormatter.h"
 #include "modules/scheduler/SchedulerContext.h"
+#include "modules/scheduler/SchedulerCommandPolicy.h"
 #include "utils/MQTTValidator.h"
 #include "modules/tasks/NTPTask.h"  // For NTP RTC callback
 #include "utils/ResourceGuard.h"  // For TaskCleanupHandler
@@ -627,8 +628,25 @@ void processMQTTCommand(const String& command, const String& payload) {
             // Reserved bytes default to 0
             memset(schedule.actionData.waterHeating.reserved, 0,
                    sizeof(schedule.actionData.waterHeating.reserved));
+            // "priority" is not parsed: waterHeating.priority is only logged at start and not
+            // stored in FRAM; water priority is the global WATER_PRIORITY state (boiler/cmd/water)
         } else if (schedule.type == ScheduleType::SPACE_HEATING) {
-            int targetTemp = doc["target_temp"] | 21;
+            // Mode first: without target_temp the schedule uses the mode's default temperature
+            if (!doc["mode"].isNull() && !doc["mode"].is<int>()) {
+                LOG_ERROR(TAG, "Invalid space heating mode type");
+                MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+                    "{\"success\":false,\"error\":\"invalid_mode\"}");
+                return;
+            }
+            int mode = doc["mode"] | 0;
+            if (!SchedulerCommandPolicy::spaceModeValid(mode)) {
+                LOG_ERROR(TAG, "Invalid space heating mode: %d (must be 0-2)", mode);
+                MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+                    "{\"success\":false,\"error\":\"invalid_mode\"}");
+                return;
+            }
+            int targetTemp = doc["target_temp"] |
+                SchedulerCommandPolicy::spaceDefaultTargetC(static_cast<uint8_t>(mode));
             // Validate space heating target using centralized constants
             constexpr int spaceMinTemp = SystemConstants::Temperature::SpaceHeating::MIN_TARGET_TEMP / 10;  // 10°C
             constexpr int spaceMaxTemp = SystemConstants::Temperature::SpaceHeating::MAX_TARGET_TEMP / 10;  // 30°C
@@ -752,6 +770,88 @@ void processMQTTCommand(const String& command, const String& payload) {
             // Trigger save
             xEventGroupSetBits(schedulerEventGroup, SchedulerEvents::SCHEDULER_EVENT_SAVE_SCHEDULES);
         }
+    } else if (command == "enable") {
+        // Payload {"id":N,"enabled":true|false}
+        constexpr size_t MAX_ENABLE_JSON_SIZE = 64;
+        if (payload.length() > MAX_ENABLE_JSON_SIZE) {
+            LOG_ERROR(TAG, "Enable JSON too large: %d bytes (max %d)", payload.length(), MAX_ENABLE_JSON_SIZE);
+            const char* response = SchedulerResponseFormatter::PreformattedResponses::ERROR_PARSE;
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+            return;
+        }
+
+        JsonDocument doc;  // ArduinoJson v7
+        DeserializationError error = deserializeJson(doc, payload);
+        if (error) {
+            LOG_ERROR(TAG, "Failed to parse enable command: %s", error.c_str());
+            const char* response = SchedulerResponseFormatter::PreformattedResponses::ERROR_PARSE;
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+            return;
+        }
+
+        SchedulerCommandPolicy::EnablePayload request;
+        request.hasId = !doc["id"].isNull();
+        request.idIsInt = doc["id"].is<int>();
+        request.id = doc["id"].as<long>();
+        request.hasEnabled = !doc["enabled"].isNull();
+        request.enabledIsBool = doc["enabled"].is<bool>();
+
+        const char* invalid = SchedulerCommandPolicy::validateEnable(request);
+        if (invalid) {
+            LOG_ERROR(TAG, "Invalid schedule enable command: %s", invalid);
+            const char* response = SchedulerResponseFormatter::formatErrorResponse(
+                s_replyBuffer, sizeof(s_replyBuffer), invalid);
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+            return;
+        }
+
+        uint8_t id = static_cast<uint8_t>(request.id);
+        bool enable = doc["enabled"].as<bool>();
+        bool found = false;
+        bool changed = false;
+
+        if (schedulesMutex == nullptr || xSemaphoreTake(schedulesMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            LOG_ERROR(TAG, "Failed to acquire schedules mutex for enable");
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+                "{\"success\":false,\"error\":\"mutex_timeout\"}");
+            return;
+        }
+
+        // Find schedule and apply (mutex held)
+        for (auto& schedule : timerSchedules) {
+            if (schedule.id != id) continue;
+
+            auto activeIt = activeSchedules.find(id);
+            bool active = (activeIt != activeSchedules.end()) && activeIt->second;
+            auto decision = SchedulerCommandPolicy::decideEnable(schedule.enabled, enable, active);
+
+            schedule.enabled = enable;
+            if (decision.endActiveRun) {
+                // End the running schedule like remove does (releases its heating/water request)
+                deactivateSchedule(schedule);
+            }
+            if (decision.changed) {
+                LOG_INFO(TAG, "Schedule %d '%s' %s", id, schedule.name.c_str(),
+                         enable ? "enabled" : "disabled");
+                schedulesModified = true;
+            }
+            changed = decision.changed;
+            found = true;
+            break;
+        }
+
+        xSemaphoreGive(schedulesMutex);
+
+        const char* response = found ?
+            SchedulerResponseFormatter::formatEnableResponse(s_replyBuffer, sizeof(s_replyBuffer), id, enable) :
+            SchedulerResponseFormatter::PreformattedResponses::ERROR_NOT_FOUND;
+        MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+
+        if (changed) {
+            // Save; an enabled schedule inside its time window starts on this check
+            xEventGroupSetBits(schedulerEventGroup, SchedulerEvents::SCHEDULER_EVENT_CHECK_SCHEDULE |
+                                                   SchedulerEvents::SCHEDULER_EVENT_SAVE_SCHEDULES);
+        }
     } else if (command == "list") {
         // Round 14 Issue #5: Acquire mutex for thread-safe access
         if (schedulesMutex == nullptr || xSemaphoreTake(schedulesMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -769,13 +869,21 @@ void processMQTTCommand(const String& command, const String& payload) {
         LOG_INFO(TAG, "Publishing list response: %s", response);
         MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
     } else if (command == "status") {
-        publishSchedulerStatus();
+        // Reply buffer instead of publishSchedulerStatus()'s 128-byte stack buffer: room for
+        // all active and disabled IDs, and less MQTT task stack
+        MQTTTask::publish(MQTT_STATUS_SCHEDULER_INFO, getStatusJSON(s_replyBuffer, sizeof(s_replyBuffer)));
     }
 }
 
 const char* getStatusJSON(char* out, size_t size) {
-    return SchedulerResponseFormatter::formatScheduleStatus(
+    // The scheduler task inserts into activeSchedules while checking schedules
+    if (schedulesMutex == nullptr || xSemaphoreTake(schedulesMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return "{\"success\":false,\"error\":\"mutex_timeout\"}";
+    }
+    const char* json = SchedulerResponseFormatter::formatScheduleStatus(
         out, size, timerSchedules, activeSchedules, isAnyScheduleActive());
+    xSemaphoreGive(schedulesMutex);
+    return json;
 }
 
 bool isAnyScheduleActive() {
