@@ -275,6 +275,8 @@ mosquitto_pub -t "boiler/cmd/system" -m "disable"
 
 Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`.
 
+Enable/disable of the boiler, heating and water, water `priority_on`/`priority_off` and the heating/water OFF overrides are saved to NVS immediately and survive a reboot (before 2026-09-15 they stayed in RAM until some other parameter save).
+
 #### Enable/Disable Heating
 ```bash
 mosquitto_pub -t "boiler/cmd/heating" -m "enable"
