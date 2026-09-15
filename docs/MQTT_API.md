@@ -188,20 +188,10 @@ ESPlan-Boiler
 
 **Response**:
 ```json
-{
-  "result": "ok",
-  "id": 3,
-  "message": "Schedule added successfully"
-}
+{"status":"ok","id":3}
 ```
 
-**Error Response**:
-```json
-{
-  "result": "error",
-  "message": "Maximum schedules reached (10 per type)"
-}
-```
+**Error Responses**: `{"status":"error","msg":"parse_error"}`, `{"status":"error","msg":"<validation error>","id":0}`, `{"success":false,"error":"max_schedules_reached"}`
 
 #### Remove Schedule
 **Topic**: `boiler/cmd/scheduler/remove`
@@ -212,46 +202,33 @@ ESPlan-Boiler
 }
 ```
 
-**Response**:
-```json
-{"result": "ok", "message": "Schedule removed"}
-```
+**Response**: `{"status":"ok","id":3}`, or `{"status":"error","msg":"not_found"}`
 
 #### List Schedules
 **Topic**: `boiler/cmd/scheduler/list`
 **Payload**: Empty `{}` or any value
 
-**Response**: `boiler/scheduler/response`
+**Response**: `boiler/scheduler/response` (lists as many schedules as fit into the 320-byte MQTT payload, usually 2-3; `count` is the number listed, `total` the number stored)
 ```json
 {
-  "count": 2,
   "schedules": [
     {
       "id": 0,
-      "type": "water_heating",
       "name": "Morning Shower",
-      "start": "06:30",
-      "end": "08:00",
-      "days": [1,2,3,4,5],
-      "target_temp": 55,
-      "priority": true,
       "enabled": true,
-      "active": false
-    },
-    {
-      "id": 1,
-      "type": "space_heating",
-      "name": "Evening Comfort",
-      "start": "18:00",
-      "end": "22:00",
-      "days": [1,2,3,4,5],
-      "mode": 0,
-      "enabled": true,
-      "active": true
+      "type": "water",
+      "days": 31,
+      "start": 1566,
+      "end": 2048
     }
-  ]
+  ],
+  "count": 1,
+  "total": 1
 }
 ```
+`type` is `water` or `space`, `days` is the day bitmask, `start`/`end` are `hour * 256 + minute` (1566 = 06:30). With no schedules: `{"schedules":[],"count":0,"total":0}`.
+
+Scheduler replies were published empty until 2026-09-15 (the formatter returned a pointer into an already released buffer).
 
 #### Enable/Disable Schedule
 **Topic**: `boiler/cmd/scheduler/enable`
