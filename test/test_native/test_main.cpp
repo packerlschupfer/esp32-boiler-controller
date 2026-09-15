@@ -29,6 +29,10 @@ void test_heating_curve_matches_reference_formula();
 void test_heating_curve_outside_part_not_ten_times_too_small();
 void test_heating_curve_clamps_to_limits();
 
+// Space heating policy (weather mode outside threshold hysteresis)
+void test_space_heating_outside_threshold_start_and_stop_limits();
+void test_space_heating_outside_noise_does_not_toggle();
+
 // Autotune peak/trough tracking (lagging plant)
 void test_relay_extrema_peaks_include_post_switch_overshoot();
 void test_relay_extrema_troughs_include_post_switch_undershoot();
@@ -534,6 +538,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_heating_curve_matches_reference_formula);
     RUN_TEST(test_heating_curve_outside_part_not_ten_times_too_small);
     RUN_TEST(test_heating_curve_clamps_to_limits);
+
+    // Space heating policy (weather mode outside threshold hysteresis)
+    RUN_TEST(test_space_heating_outside_threshold_start_and_stop_limits);
+    RUN_TEST(test_space_heating_outside_noise_does_not_toggle);
 
     // Autotune peak/trough tracking (lagging plant)
     RUN_TEST(test_relay_extrema_peaks_include_post_switch_overshoot);

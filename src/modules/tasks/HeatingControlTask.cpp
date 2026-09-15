@@ -10,6 +10,7 @@
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"
 #include "modules/control/TemperatureSensorFallback.h"
+#include "modules/control/SpaceHeatingPolicy.h"
 #include "utils/ResourceGuard.h"
 #include "utils/MutexRetryHelper.h"
 #include "LoggingMacros.h"
@@ -545,8 +546,11 @@ static bool checkIfSpaceHeatingNeededEvent() {
                 Temperature_t outsideTemp = readings.outsideTemp;
                 Temperature_t threshold = ss.outsideThreshold;  // H2: from snapshot
 
-                // Outside cold enough for heating?
-                bool outsideCold = outsideTemp < threshold;
+                // Outside cold enough for heating? Start below the threshold, stop only at
+                // threshold + 1.0 °C (without hysteresis, readings around the threshold
+                // toggled heating every cycle)
+                bool outsideCold = SpaceHeatingPolicy::outsideColdForHeating(outsideTemp, threshold,
+                                                                             currentlyHeating);
 
                 // Room overheat protection (Begrenzung) WITH HYSTERESIS
                 // Stop at: target + margin, Restart at: target + margin - hysteresis
@@ -572,8 +576,9 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     if (!outsideCold && currentlyHeating) {
                         char outBuf[16], threshBuf[16];
                         formatTemp(outBuf, sizeof(outBuf), outsideTemp);
-                        formatTemp(threshBuf, sizeof(threshBuf), threshold);
-                        LOG_INFO(TAG, "Heating not needed: outside %s°C >= threshold %s°C",
+                        formatTemp(threshBuf, sizeof(threshBuf),
+                                   tempAdd(threshold, SpaceHeatingPolicy::OUTSIDE_THRESHOLD_HYSTERESIS));
+                        LOG_INFO(TAG, "Heating not needed: outside %s°C >= stop limit %s°C (threshold + hysteresis)",
                                 outBuf, threshBuf);
                     } else if (roomOverheated && currentlyHeating) {
                         char roomBuf[16], limitBuf[16];
