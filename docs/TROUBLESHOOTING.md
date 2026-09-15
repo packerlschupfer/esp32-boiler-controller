@@ -127,10 +127,7 @@ while True:
 
 ### CRC errors / bus collisions
 
-**Symptom:**
-```
-[ModbusRTU][E] CRC error
-```
+**Symptom:** Intermittent failed or invalid Modbus reads from several devices (sensor values briefly invalid, relay verification retries).
 
 **Common causes:**
 1. External Modbus tool running (mbpoll, modbus-cli)
@@ -148,7 +145,8 @@ while True:
 
 **Symptom:**
 ```
-[MB8ART][E] Timeout waiting for response
+[MB8ART][W] Timeout waiting for sensor data (attempt N/M, mask: 0x....)
+[MB8ART][E] Module marked OFFLINE after N consecutive timeouts
 ```
 
 **Checklist:**
@@ -163,7 +161,7 @@ while True:
 
 **Symptom:**
 ```
-[ModbusDevice][W] Bus mutex timeout
+[ModbusD][W] Bus mutex timeout after N ms
 ```
 
 **Cause:** Another device holding the bus too long.
@@ -180,12 +178,11 @@ while True:
 ### Subscription failures
 
 **Symptom:** Commands not received, no sensor data published.
-
-**Solution:** Wait 2+ seconds after connection before subscribing:
-```cpp
-// In MQTTTask, delay is already implemented
-vTaskDelay(pdMS_TO_TICKS(2000));
 ```
+[MQTTSubMgr][E] Failed to subscribe to boiler/cmd/+, error: N
+```
+
+**Solution:** Subscriptions are set up again on every (re)connect (`MQTTTask` calls `setupSubscriptions()` when the connection is up) and failed subscriptions are retried (`Scheduled subscription retry in N ms`). If the error persists, check broker ACLs for the controller's MQTT user and the broker log.
 
 ---
 
@@ -193,13 +190,15 @@ vTaskDelay(pdMS_TO_TICKS(2000));
 
 **Symptom:**
 ```
-[QueueManager][W] Queue full, dropping LOW priority message
+[MQTT][W] MQTT queue overflow - dropped H:N N:N messages
+[MQTT][W] Queue pressure HIGH (util: N%) - throttling non-critical messages
+[MQTT][W] Backpressure active: throttled N messages
 ```
 
 **Solution:**
-- Normal under heavy load (backpressure working correctly)
+- Normal under short bursts (backpressure working correctly); the two queues hold only 5 messages each
 - If frequent, check MQTT broker connectivity
-- CRITICAL messages bypass queue and are never dropped
+- LOW priority messages are throttled from 50 % queue utilization, MEDIUM from 80 %; HIGH and CRITICAL are never throttled. While the queue is under pressure CRITICAL messages are published directly, bypassing the queue
 
 ---
 
@@ -221,8 +220,9 @@ vTaskDelay(pdMS_TO_TICKS(2000));
 
 **Symptom:**
 ```
-[ANDRTF3][E] ERROR: Received 0x0000 - sensor error or communication fault!
+[ANDRTF3][E] ERROR: Persistent 0x0000 (2 consecutive) - sensor fault confirmed
 ```
+The first 0x0000 (or 0xFFFF) reading is only logged at DEBUG level; the ERROR appears from the second consecutive one.
 
 **Cause:** Intermittent RS485 communication issue (hardware/electrical).
 
@@ -238,10 +238,7 @@ vTaskDelay(pdMS_TO_TICKS(2000));
 
 ### MB8ART channel shows error
 
-**Symptom:**
-```
-[MB8ART][E] Channel X: Modbus error code 0x7530
-```
+**Symptom:** One MB8ART temperature (boiler output/return, tank, outside) stays invalid in `boiler/status/sensors` while the other channels read normally.
 
 **Cause:** Sensor disconnected or faulty.
 
@@ -254,14 +251,11 @@ vTaskDelay(pdMS_TO_TICKS(2000));
 
 ### Temperature out of range
 
-**Symptom:**
-```
-[SensorTask][W] Temperature out of range: -32768
-```
+**Symptom:** A temperature shows as invalid (N/A) or implausible, and the sensor fallback may switch to SHUTDOWN (`boiler/status/sensor_mode`).
 
-**Cause:** Invalid reading (sensor disconnected or shorted).
+**Cause:** Invalid reading (sensor disconnected or shorted). The sensor fallback treats values outside -50.0 to 150.0°C as invalid.
 
-**Solution:** Check physical sensor connection. Value -32768 (0x8000) typically indicates no response.
+**Solution:** Check physical sensor connection. -32768 (`TEMP_INVALID`) is the internal marker for a missing or invalid reading.
 
 ---
 
@@ -271,18 +265,19 @@ vTaskDelay(pdMS_TO_TICKS(2000));
 
 **Symptom:**
 ```
-[RYN4Proc][E] Relay verification FAILED! Sent: 0x01, Actual: 0x00
+[RYN4Processing][E] Relay verification FAILED after 2 attempts! Sent: 0x01, Actual: 0x00
+[RYN4Processing][E]   Relay 1: sent=ON, actual=OFF
 ```
 
 **Causes:**
-1. DELAY timer still active (expected, not an error)
-2. Relay hardware failure
-3. Modbus communication error
+1. Relay hardware failure
+2. Modbus communication error
+
+An active DELAY timer does not cause this error: only DELAY relays commanded OFF (coasting down) are excluded, logged at DEBUG as `Relay verification deferred (DELAY coast-down)`.
 
 **Solution:**
-- First occurrence: System auto-retries on next tick
-- Persistent: Check relay module power and wiring
-- Check for DELAY mask in logs (deferred verification is normal)
+- First mismatch: logged at DEBUG (`Relay verification pending (attempt 1/2)`), the write is retried on the next SET tick
+- Persistent: Check relay module power and wiring. A persistent mismatch on BURNER_ENABLE escalates to an emergency shutdown
 
 ---
 
@@ -326,7 +321,7 @@ Stack canary watchpoint triggered (TaskName)
 
 **Symptom:**
 ```
-[MemoryManager][E] Allocation failed: 1024 bytes
+[HealthMonitor][E] Critical memory level: N bytes free
 ```
 
 **Solution:**
@@ -386,13 +381,15 @@ This path sets `EMERGENCY_STOP` and clears `BOILER_ENABLED`. Other burner faults
 
 **Symptom:**
 ```
-[SafetyInterlocks][E] Interlock check failed: OVER_TEMP
+[SafetyInterlocks][E] Boiler output temp X°C exceeds limit Y°C
+[SafetyInterlocks][W] System pressure X.XX BAR out of range (A.AA - B.BB BAR)
+[SafetyInterlocks][W] Boiler sensor data is stale - last update N ms ago (threshold: N ms)
 ```
 
 **Solution:** Address the specific interlock failure:
-- **OVER_TEMP:** Wait for boiler to cool, check thermostat
-- **UNDER_PRESSURE:** Check expansion vessel, system pressure
-- **SENSOR_STALE:** Check sensor connections, Modbus communication
+- **Temperature limit:** Wait for boiler to cool, check thermostat
+- **Pressure out of range:** Check expansion vessel, system pressure
+- **Stale sensor data:** Check sensor connections, Modbus communication
 
 ---
 
@@ -402,7 +399,8 @@ This path sets `EMERGENCY_STOP` and clears `BOILER_ENABLED`. Other burner faults
 
 **Symptom:**
 ```
-[EthernetManager][E] Failed to initialize Ethernet
+[SystemInitializer][E] Network initialization failed: <reason> - operating in degraded mode
+[HealthMonitor][W] Ethernet link DOWN - notifying tasks
 ```
 
 **Checklist:**
@@ -428,8 +426,9 @@ This path sets `EMERGENCY_STOP` and clears `BOILER_ENABLED`. Other burner faults
 
 **Symptom:**
 ```
-[OTA][E] Upload failed
+[OTAMgr][E] Error[N]: Auth Failed
 ```
+(or `Begin Failed`, `Connect Failed`, `Receive Failed`, `End Failed`)
 
 **Checklist:**
 1. Verify device is reachable (ping)
@@ -559,7 +558,7 @@ mosquitto_sub -h BROKER -u USER -P PASS -t "boiler/status/health"
 mosquitto_pub -h BROKER -u USER -P PASS -t "boiler/params/get/all" -m ""
 
 # View error log
-mosquitto_pub -h BROKER -u USER -P PASS -t "boiler/errors/list" -m "20"
+mosquitto_pub -h BROKER -u USER -P PASS -t "errors/list" -m "20"
 ```
 
 ### Serial Diagnostics
@@ -584,4 +583,4 @@ pio device monitor -b 921600 | grep -E '\[(MB8ART|RYN4|ANDRTF3)\]'
 
 ---
 
-*Last updated: 2026-09-14*
+*Last updated: 2026-09-15*

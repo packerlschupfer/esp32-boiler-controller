@@ -2,81 +2,7 @@
 
 This document describes the key algorithms used in the ESP32 Boiler Controller for safety monitoring, temperature control, and system coordination.
 
----
-
-## 1. Rate-of-Change Detection (Thermal Runaway Prevention)
-
-### Purpose
-Detects rapid temperature increases that could indicate thermal runaway, loss of circulation, or sensor malfunction.
-
-### Location
-`src/modules/control/BurnerSafetyValidator.cpp:295`
-
-### Algorithm
-
-**Formula:**
-```
-Rate = (T_current - T_past) × 60000 / Δt_ms
-
-Where:
-- T_current = Most recent temperature (tenths of °C)
-- T_past = Temperature from timeSpan ago
-- Δt_ms = Actual time elapsed in milliseconds
-- 60000 = Conversion factor (ms to minutes)
-- Result = Temperature change in tenths of °C per minute
-```
-
-**Implementation:**
-```cpp
-Temperature_t calculateRateOfChange(
-    const std::vector<Temperature_t>& history,
-    uint32_t timeSpanMs) {
-
-    // Find entry from timeSpanMs ago
-    for (size_t i = timestamps.size() - 1; i > 0; i--) {
-        if (now - timestamps[i] >= timeSpanMs) {
-            startIdx = i;
-            break;
-        }
-    }
-
-    // Calculate: (newest - oldest) / time
-    Temperature_t tempChange = history[0] - history[startIdx];
-    uint32_t timeMs = now - timestamps[startIdx];
-
-    // Rate per minute (avoid overflow with int32_t)
-    int32_t rate = (tempChange * 60000) / timeMs;
-    return static_cast<Temperature_t>(rate);
-}
-```
-
-### Parameters
-- **Time Window**: 60 seconds (60000 ms)
-- **History Buffer**: 120 seconds maximum (circular buffer)
-- **Sample Interval**: ~2.5 seconds (MB8ART sensor read rate)
-- **Max Samples**: ~48 samples in buffer
-
-### Thresholds
-- **Normal Rate Limit**: Configurable via `maxTempRateOfChange` (typically 100 = 10.0°C/min)
-- **Runaway Detection**: Combined with absolute temperature check:
-  - Temperature > 800°C (8000 tenths) AND rate > 50 (5.0°C/min)
-
-### Example
-```
-Current temp: 245 (24.5°C)
-Past temp (60s ago): 220 (22.0°C)
-Actual time: 60000 ms
-
-Rate = (245 - 220) × 60000 / 60000
-     = 25 × 1
-     = 25 tenths/min
-     = 2.5°C/min ✓ SAFE
-```
-
-### Edge Cases
-- **Insufficient History**: Returns 0 if < 2 samples
-- **Clock Rollover**: Uses 32-bit unsigned arithmetic (safe for ~49 days uptime)
-- **Negative Rates**: Cooling is allowed (only excessive heating is flagged)
+**Not implemented:** the firmware has no temperature rate-of-change (thermal runaway) check, no sensor cross-validation and no temperature history buffer; sections 1, 5 and 6 were removed for that reason.
 
 ---
 
@@ -232,209 +158,38 @@ t=35s:   Pump ON  → allowed (15s elapsed)
 Manage MQTT message backlog with priority-based queue and backpressure handling.
 
 ### Location
-`src/modules/tasks/MQTTTask.cpp:150-280`
+`src/modules/tasks/MQTTTask.cpp` (`publish()`, `processPublishQueue()`, `getQueueUtilization()`, `isUnderPressure()`, `shouldThrottle()`), `src/modules/tasks/MQTTTask.h`
 
 ### Algorithm
 
 **Dual Queue System:**
 ```
-High Priority Queue (5 messages, HIGH_PRIORITY_QUEUE_SIZE in MQTTTask.h):
-- Safety alerts
-- Error notifications
-- Critical state changes
+High priority queue:   5 messages (HIGH_PRIORITY_QUEUE_SIZE)   - PRIORITY_CRITICAL, PRIORITY_HIGH
+Normal priority queue: 5 messages (NORMAL_PRIORITY_QUEUE_SIZE) - PRIORITY_MEDIUM, PRIORITY_LOW
 
-Normal Priority Queue (5 messages, NORMAL_PRIORITY_QUEUE_SIZE):
-- Sensor data
-- Status updates
-- Routine telemetry
-
-Total Capacity: 8 messages
-Overflow: DROP_OLDEST (both queues)
-Backpressure: MQTT_QUEUE_PRESSURE bit
+Total capacity: 10 messages
+Overflow strategy: QueueManager DROP_OLDEST (both queues)
 ```
 
-**Queue Selection Logic:**
-```cpp
-bool enqueueMessage(const char* topic, const char* payload,
-                   bool highPriority) {
+A message that cannot be queued is counted as dropped; the count is logged at most once per `QUEUE_DROP_LOG_INTERVAL_MS`: `MQTT queue overflow - dropped H:<n> N:<n> messages`.
 
-    // Check total utilization
-    int totalUsed = highQueue.size() + normalQueue.size();
-
-    if (totalUsed >= 48) {
-        // Set backpressure flag (stops non-critical publishes)
-        setBackpressureFlag();
-    }
-
-    if (highPriority) {
-        if (highQueue.size() < 20) {
-            highQueue.push(message);
-            return true;
-        } else {
-            // High queue full - drop message
-            return false;
-        }
-    } else {
-        if (normalQueue.size() < 40) {
-            normalQueue.push(message);
-            return true;
-        } else {
-            // Normal queue full - drop oldest
-            normalQueue.pop();  // Make space
-            normalQueue.push(message);
-            return true;  // Dropped old, added new
-        }
-    }
-}
+**Utilization** (`getQueueUtilization()`):
+```
+util = 0.6 × high queue fill % + 0.4 × normal queue fill %
 ```
 
-**Publishing Priority:**
+**Publishing Order** (`processPublishQueue()`):
 ```
-1. Always process high priority queue first
-2. Process normal queue only if high queue empty
-3. Publish rate: Max 10 msg/second (100ms between publishes)
+1. High priority queue first, up to MAX_ITEMS_PER_ITERATION per run (5 ms yield every 4 messages)
+2. Normal priority queue with the remaining capacity of that run
+3. On CONNECTION_FAILED the message is dropped and processing stops
 ```
 
 ### Backpressure Handling
-- **Trigger**: 80% capacity (48/60 messages)
-- **Action**: Set `MQTT_QUEUE_PRESSURE` event bit
-- **Effect**: Tasks reduce publish frequency
-- **Recovery**: Flag cleared when < 70% (42/60 messages)
-
-### Drop Strategy
-- **High Priority**: NEVER drop (queue full = reject)
-- **Normal Priority**: Drop OLDEST message (FIFO eviction)
-- **Rationale**: Recent data more valuable than old data
-
-### Example Scenario
-```
-State: 45 messages queued (75% - no backpressure yet)
-→ Add 5 high priority alerts: Total 50 (83%)
-→ Backpressure triggered
-→ Sensor tasks reduce publish rate
-→ Process 10 messages: Total 40 (67%)
-→ Backpressure cleared
-```
-
----
-
-## 5. Sensor Cross-Validation
-
-### Purpose
-Validate temperature readings by comparing redundant sensors, detect sensor failures.
-
-### Location
-`src/modules/control/BurnerSafetyValidator.cpp:120`
-
-### Algorithm
-
-**Redundant Sensor Pairs:**
-```
-Boiler Output ←→ Boiler Return (should be within tolerance)
-Water Tank ←→ Water Output (should be close)
-```
-
-**Validation Formula:**
-```
-difference = |sensor1 - sensor2|
-
-IF difference > tolerance:
-    FAIL (sensor disagreement)
-ELSE:
-    PASS (sensors agree)
-```
-
-**Implementation:**
-```cpp
-bool validateCrossSensors(Temperature_t sensor1, Temperature_t sensor2,
-                         bool valid1, bool valid2,
-                         Temperature_t tolerance) {
-    // Both must be valid
-    if (!valid1 || !valid2) {
-        return false;
-    }
-
-    // Calculate absolute difference
-    Temperature_t diff = tempAbs(tempSub(sensor1, sensor2));
-
-    // Check tolerance
-    if (diff > tolerance) {
-        LOG_ERROR(TAG, "Sensor cross-validation failed: diff=%d.%d°C > tolerance=%d.%d°C",
-                 diff / 10, diff % 10,
-                 tolerance / 10, tolerance % 10);
-        return false;
-    }
-
-    return true;
-}
-```
-
-### Parameters
-- **Tolerance**: Typically 50 (5.0°C)
-- **Applied To**: Boiler output vs return, water tank vs output
-- **Sample Rate**: Every safety check (~2.5 seconds)
-
-### Example
-```
-Boiler Output: 650 (65.0°C)
-Boiler Return: 620 (62.0°C)
-Difference: 30 (3.0°C)
-Tolerance: 50 (5.0°C)
-Result: PASS ✓
-
-Boiler Output: 650 (65.0°C)
-Boiler Return: 580 (58.0°C)
-Difference: 70 (7.0°C)
-Tolerance: 50 (5.0°C)
-Result: FAIL ✗ (possible sensor fault)
-```
-
----
-
-## 6. Temperature History Buffer (Circular)
-
-### Purpose
-Maintain sliding window of temperature readings for rate-of-change analysis.
-
-### Location
-`src/modules/control/BurnerSafetyValidator.cpp:368`
-
-### Algorithm
-
-**Circular Buffer Structure:**
-```
-temperatureHistory: std::vector<Temperature_t> (max 48 samples)
-temperatureTimestamps: std::vector<uint32_t> (max 48 timestamps)
-
-Newest ← [T₀, T₁, T₂, ..., T₄₇] → Oldest
-         [t₀, t₁, t₂, ..., t₄₇]
-```
-
-**Insert Operation:**
-```cpp
-void updateTemperatureHistory(Temperature_t temp) {
-    // Insert at front (newest)
-    temperatureHistory.insert(temperatureHistory.begin(), temp);
-    temperatureTimestamps.insert(temperatureTimestamps.begin(), millis());
-
-    // Trim if exceeded max size
-    const size_t MAX_HISTORY_SIZE = 48;
-    if (temperatureHistory.size() > MAX_HISTORY_SIZE) {
-        temperatureHistory.pop_back();  // Remove oldest
-        temperatureTimestamps.pop_back();
-    }
-}
-```
-
-### Time Window
-- **Max Duration**: 120 seconds (48 samples × 2.5s interval)
-- **Used For**: 60-second rate-of-change calculation
-- **Overhead**: Only stores up to 1-minute worth for actual calculation
-
-### Memory Usage
-- **Temperature History**: 48 × 2 bytes = 96 bytes
-- **Timestamp History**: 48 × 4 bytes = 192 bytes
-- **Total**: 288 bytes per validator instance
+- **Pressure on**: util >= 80 % sets `MQTT_QUEUE_PRESSURE` (`Queue pressure HIGH (util: N%) - throttling non-critical messages`)
+- **Pressure off**: util < 30 % (50 % - 20 % hysteresis) clears the bit (`Queue pressure released (util: N%)`)
+- **Throttling** (`shouldThrottle()`, message not queued): PRIORITY_LOW at util >= 50 %, PRIORITY_MEDIUM at util >= 80 %; HIGH and CRITICAL are never throttled (`Backpressure active: throttled N messages`, every 10 s)
+- **CRITICAL bypass**: while under pressure, PRIORITY_CRITICAL is published directly; if that fails it falls back to the high priority queue
 
 ---
 
@@ -453,7 +208,7 @@ Automatically determine optimal PID gains using system response analysis.
 **Steps:**
 1. **Oscillation Induction**: Relay control around the setpoint with hysteresis; BoilerTempControlTask drives the burner OFF or FULL
 2. **Record Peaks/Troughs**: Extremes over whole relay phases (`RelayExtrema::Tracker`, see below)
-3. **Ultimate Gain and Period**: `Ku = 4 × d / (π × a)` (d = relay amplitude, a = oscillation amplitude), `Tu` = average period
+3. **Ultimate Gain and Period**: `Ku = 4 × d / (π × a)` (d = relay amplitude, a = (mean peak - mean trough) / 2), `Tu` = mean of the peak-to-peak and trough-to-trough periods (lowest and highest 20 % dropped when there are more than 5 periods)
 4. **Calculate PID Gains** with the configured method (`pid/autotune/method`):
 
 | Method | Kp | Ki | Kd |
@@ -466,23 +221,21 @@ Automatically determine optimal PID gains using system response analysis.
 
 Results are limited to Kp 0.1-100, Ki 0-10, Kd 0-10. The method is loaded from `SystemSettings::autotuneMethod` at init (default 0 = ZN_PI) and the MQTT command `method:<name>` persists it.
 
-**Implementation Phases:**
+**Tuner States** (`PIDAutoTuner::TuningState`):
 ```
-Phase 1: IDLE → START
-  - Initialize state
-  - Start relay feedback
+IDLE → RELAY_TEST (startTuning)
 
-Phase 2: RELAY_TEST
-  - Toggle output at setpoint crossing
-  - Record peaks and periods
+RELAY_TEST
+  - Relay ON when temp < setpoint - hysteresis, OFF when temp > setpoint + hysteresis
+  - Record peaks and troughs on relay switches
+  - Timeout → FAILED; stopTuning() → IDLE
 
-Phase 3: CALCULATION
-  - Analyze oscillation
-  - Compute Ku and Tu
-  - Calculate PID gains
+ANALYZING (once min(peaks, troughs) >= MIN_CYCLES)
+  - Compute Tu, a and Ku
+  - Apply the tuning method
 
-Phase 4: COMPLETE
-  - Return calculated gains
+COMPLETE  - gains valid
+FAILED    - fewer than 2 peaks or troughs, period or amplitude <= 0, or timeout
 ```
 
 ### Peak/Trough Detection (Lagging Plant)
@@ -545,97 +298,75 @@ A change sets the relay request bit (`RelayRequest::HEATING_PUMP_ON/OFF`, `WATER
 ## 9. Sensor Fallback Strategy
 
 ### Purpose
-Maintain operation when sensors fail using redundant readings.
+Stop burner operation when a sensor required for the active operation is missing. There is no substitute value: no estimate from another sensor and no last known good reading.
 
 ### Location
-`src/modules/control/TemperatureSensorFallback.cpp`
+`src/modules/control/TemperatureSensorFallback.cpp`, `include/modules/control/TemperatureSensorFallback.h`
 
-### Algorithm
+### Required Sensors (`hasRequiredSensors()`)
 
-**Fallback Priority:**
+| Operation mode | Required (valid and fresh) |
+|----------------|----------------------------|
+| NONE | boiler output |
+| SPACE_HEATING | boiler output, boiler return, room |
+| WATER_HEATING | boiler output, water tank |
+| BOTH | boiler output, boiler return, room, water tank |
+
+A reading is valid when its valid flag is set, it is not `TEMP_INVALID`/`TEMP_UNKNOWN` and it lies within -50.0 to 150.0°C. Freshness is checked per source against `SafetyConfig::sensorStaleMs` (default 60 s): MB8ART values (boiler output/return, tank, outside) use `lastBoilerTempUpdateTimestamp`, the ANDRTF3 room sensor uses `lastUpdateTimestamp`.
+
+### Modes (`updateSensorStatus()`)
 ```
-Primary Sensor Failed → Use Backup Sensor → Use Last Known Good
-
-Example (Boiler Output):
-1. Primary: Boiler Output sensor
-2. Backup: Boiler Return sensor + offset
-3. Fallback: Last known good value (max 60s old)
-4. Critical Fail: Shutdown if > 60s stale
+STARTUP  → NORMAL    1 valid check   (VALID_COUNT_TO_ENTER_NORMAL)
+STARTUP  → SHUTDOWN  1 invalid check (INVALID_COUNT_TO_SHUTDOWN), only after STARTUP_PERIOD_MS (5 s)
+NORMAL   → SHUTDOWN  1 invalid check
+SHUTDOWN → NORMAL    1 valid check
 ```
+`canContinueOperation()` returns true only in NORMAL. `getSafeOperatingParams()` gives 110.0°C / 100 % in NORMAL and 0 in STARTUP and SHUTDOWN.
 
-**Implementation:**
-```cpp
-Temperature_t getBoilerTemp() {
-    if (readings.isBoilerTempOutputValid) {
-        return readings.boilerTempOutput;  // Primary
-    }
+**Entering SHUTDOWN:** ERROR `SHUTDOWN: Missing sensors: Boiler Return, Room Temperature (required for space heating)` (example), sets `SENSOR_FAILURE` and `SENSOR_DEGRADED`, publishes retained `boiler/status/sensor_fallback` (JSON with `mode` and `missing`) and `boiler/status/sensor_mode`.
 
-    if (readings.isBoilerTempReturnValid) {
-        // Estimate output from return + typical differential
-        return readings.boilerTempReturn + TYPICAL_DIFFERENTIAL;
-    }
-
-    if (lastKnownGood.age_ms < 60000) {
-        return lastKnownGood.value;  // Stale but recent
-    }
-
-    triggerSensorFailure();  // Critical - shutdown
-    return 0;
-}
-```
-
-### Sensor Pairs
-- **Boiler**: Output ↔ Return (±10°C typical differential)
-- **Water**: Tank ↔ Output (±5°C typical)
-- **Heating**: Return ↔ Boiler Return (±15°C typical)
+**SHUTDOWN → NORMAL:** clears both bits, calls `CentralizedFailsafe::releaseAfterSensorRecovery()` (releases `EMERGENCY_STOP` only if stale sensor data caused it) and publishes `boiler/status/sensor_fallback/recovery`.
 
 ---
 
-## 10. Mutex Retry with Exponential Backoff
+## 10. Mutex Retry with Escalation
 
 ### Purpose
-Resilient mutex acquisition with retry logic to prevent deadlock and handle contention.
+Resilient mutex acquisition with retries and escalation of persistent contention.
 
 ### Location
-`src/utils/MutexRetryHelper.cpp`
+`src/utils/MutexRetryHelper.cpp`, `src/utils/MutexRetryHelper.h`
 
 ### Algorithm
 
-**Retry Strategy:**
+**Retry Strategy** (defaults of `RetryConfig()`):
 ```
-Attempt 1: Wait 100ms
-Attempt 2: Wait 200ms
-Attempt 3: Wait 400ms
-Max: 3 attempts total
+Per attempt: xSemaphoreTake(mutex, timeout), timeout = MUTEX_DEFAULT_TIMEOUT_MS (100 ms)
+maxRetries = 3        → up to 4 attempts
+retryDelayTicks = 10 ms fixed delay between attempts (no backoff)
+escalationThreshold = 5 consecutive failed acquisitions
 
-Total max wait: 700ms
+Worst case with defaults: 4 × 100 ms + 3 × 10 ms = 430 ms
 ```
 
-**Implementation:**
+**Implementation** (`MutexRetryHelper::acquire()`, simplified):
 ```cpp
-MutexGuard acquireGuard(SemaphoreHandle_t mutex,
-                       const char* context,
-                       TickType_t timeout) {
-    const int MAX_RETRIES = 3;
-    TickType_t waitTime = pdMS_TO_TICKS(100);
-
-    for (int i = 0; i < MAX_RETRIES; i++) {
-        MutexGuard guard(mutex, waitTime);
-
-        if (guard.hasLock()) {
-            return guard;  // Success
-        }
-
-        LOG_WARN(TAG, "Mutex retry %d/%d for %s",
-                 i+1, MAX_RETRIES, context);
-
-        waitTime *= 2;  // Exponential backoff
+for (uint8_t attempt = 0; attempt <= config.maxRetries; attempt++) {
+    if (xSemaphoreTake(mutex, timeout) == pdTRUE) {
+        // reset this mutex's consecutive failure count
+        return acquired;
     }
-
-    LOG_ERROR(TAG, "Mutex acquisition failed for %s after %d retries",
-             context, MAX_RETRIES);
-    return MutexGuard();  // Failed (no lock)
+    if (attempt < config.maxRetries) {
+        vTaskDelay(config.retryDelayTicks);
+        if (config.logFailures && attempt > 0) {
+            LOG_WARN(TAG, "Mutex '%s' retry %d/%d", name, attempt + 1, config.maxRetries);
+        }
+    }
 }
+LOG_WARN(TAG, "Mutex '%s' acquisition FAILED after %d attempts", name, attemptsUsed);
+// consecutiveFailures++; at escalationThreshold (once until the next success):
+//   LOG_ERROR "MUTEX CONTENTION: '%s' - %d consecutive failures, escalating to HealthMonitor"
+//   set MUTEX_CONTENTION bit, HealthMonitor CONTROL error MUTEX_TIMEOUT
 ```
 
 ### Usage
@@ -654,7 +385,7 @@ if (guard) {
 
 ### Benefits
 - **Resilience**: Handles transient contention
-- **Backoff**: Reduces lock thrashing
+- **Escalation**: Persistent contention reaches HealthMonitor
 - **Logging**: Tracks retry attempts for debugging
 - **RAII**: Automatic unlock on scope exit
 
@@ -666,62 +397,56 @@ if (guard) {
 Provide safe temperature operations using integer arithmetic (no float).
 
 ### Location
-`src/shared/Temperature.h`
+`include/shared/Temperature.h` (constants in `include/config/TemperatureConstants.h`)
 
 ### Operations
 
-**Addition:**
+**Addition / Subtraction** (saturating, invalid propagates):
 ```cpp
 Temperature_t tempAdd(Temperature_t a, Temperature_t b) {
-    return a + b;  // Simple addition
+    if (a == TEMP_INVALID || b == TEMP_INVALID) return TEMP_INVALID;
+    int32_t result = static_cast<int32_t>(a) + static_cast<int32_t>(b);
+    if (result > 32767) return 32767;
+    if (result < -32768) return -32768;
+    return static_cast<Temperature_t>(result);
 }
-```
-
-**Subtraction:**
-```cpp
-Temperature_t tempSub(Temperature_t a, Temperature_t b) {
-    return a - b;  // Handles negative results
-}
+// tempSub: same with a - b
 ```
 
 **Absolute Value:**
 ```cpp
 Temperature_t tempAbs(Temperature_t t) {
-    return (t < 0) ? -t : t;
+    if (t == TEMP_INVALID) return TEMP_INVALID;
+    if (t == -32768) return 32767;  // abs(INT16_MIN) does not fit
+    return t < 0 ? -t : t;
 }
 ```
 
 **Conversion from Float:**
 ```cpp
-Temperature_t tempFromFloat(float celsius) {
-    return static_cast<Temperature_t>(celsius * 10.0f + 0.5f);  // Round
+Temperature_t tempFromFloat(float f) {
+    if (std::isnan(f) || std::isinf(f)) return TEMP_INVALID;
+    if (f > 3276.7f) return 32767;
+    if (f < -3276.8f) return -32768;
+    return static_cast<Temperature_t>(f * 10.0f + (f >= 0 ? 0.5f : -0.5f));  // round half away from zero
 }
 ```
 
-**Display Formatting:**
+**Display Formatting** (returns characters written, no unit):
 ```cpp
-void formatTemp(char* buf, size_t size, Temperature_t temp) {
-    snprintf(buf, size, "%d.%d°C", temp / 10, abs(temp % 10));
-}
+int formatTemp(char* buf, size_t size, Temperature_t t);
+// TEMP_INVALID → "N/A"; -5 → "-0.5"; 245 → "24.5"
 ```
 
 ### Range
+- **Markers**: `TEMP_INVALID` = -32768, `TEMP_UNKNOWN` = -32767
 - **Min**: -32768 (−3276.8°C) - theoretical limit
 - **Practical Min**: -400 (−40.0°C) - ANDRTF3 sensor limit
 - **Practical Max**: 8500 (850.0°C) - MB8ART sensor limit
 - **Resolution**: 0.1°C (one tenth)
 
 ### Overflow Protection
-```cpp
-// Safe multiplication for rates
-int32_t rate = (static_cast<int32_t>(tempChange) * 60000) / timeMs;
-
-// Clamp to int16_t range
-if (rate > 32767) rate = 32767;
-if (rate < -32768) rate = -32768;
-
-return static_cast<Temperature_t>(rate);
-```
+`tempAdd()`/`tempSub()` compute in `int32_t` and saturate to the `int16_t` range. Wider intermediate results (PID terms, heating curve) are computed in `int32_t`/`int64_t` and clamped before narrowing, see `PIDGainFixedPoint::clampToAdjustment()` and `HeatingCurve::target()`.
 
 ---
 
@@ -731,7 +456,7 @@ return static_cast<Temperature_t>(rate);
 Verify relay states match desired commands while accounting for hardware DELAY timers and distinguishing timing issues from real failures.
 
 ### Location
-`src/modules/tasks/RYN4ProcessingTask.cpp:73` (handleReadTick)
+`src/modules/tasks/RYN4ProcessingTask.cpp` (`handleReadTick()`)
 
 ### Algorithm
 
@@ -743,48 +468,48 @@ Verify relay states match desired commands while accounting for hardware DELAY t
 
 **Solution**: Multi-tier verification with DELAY tracking
 
-**Step 1: DELAY Exclusion**
+**Step 1: DELAY Exclusion (direction-aware)**
 ```cpp
-// Identify which mismatches are from active DELAY timers
-uint8_t mismatchMask = actual ^ desired;       // XOR to find differences
-uint8_t delayMask = g_relayState.delayMask;    // Relays with active DELAY
-uint8_t realMismatch = mismatchMask & ~delayMask;  // Exclude DELAY relays
-
-if (realMismatch == 0) {
-    // All mismatches are from DELAY - expected behavior!
-    LOG_DEBUG("Verification deferred (DELAY active)");
-    return;  // Don't increment counter or retry
-}
+// A relay only gets a DELAY when commanded ON. A DELAY relay reading OFF while
+// commanded ON is a real failure. Only DELAY relays commanded OFF (coasting down
+// on a previous DELAY) are masked.
+uint8_t mismatchMask = actual ^ sent;
+uint8_t delayMask = g_relayState.delayMask.load();
+uint8_t maskableDelay = delayMask & ~sent;             // DELAY + commanded OFF
+uint8_t realMismatch = mismatchMask & ~maskableDelay;
 ```
+Each relay's result also feeds `RelayVerificationManager::checkRelayHealthAndEscalate()`: a persistent mismatch on BURNER_ENABLE escalates to a CRITICAL failsafe (emergency shutdown), other relays to WARNING.
 
 **Step 2: Mismatch Counting**
 ```cpp
-uint8_t mismatches = g_relayState.consecutiveMismatches.fetch_add(1) + 1;
+if (realMismatch != 0) {
+    uint8_t mismatches = g_relayState.consecutiveMismatches.fetch_add(1) + 1;
 
-if (mismatches == 1) {
-    // First mismatch - likely timing race condition
-    LOG_DEBUG("Verification pending (attempt 1/2)");
-    // Silent retry on next READ tick
-} else {
-    // Persistent mismatch - real hardware/communication problem!
-    LOG_ERROR("Verification FAILED after %d attempts!", mismatches);
-    xEventGroupSetBits(relayStatusEventGroup, COMM_ERROR);
+    if (mismatches == 1) {
+        // First mismatch - likely timing issue
+        LOG_DEBUG(TAG, "Relay verification pending (attempt 1/2): Sent: 0x%02X, Actual: 0x%02X", ...);
+    } else {
+        // Persistent mismatch - real problem
+        LOG_ERROR(TAG, "Relay verification FAILED after %d attempts! Sent: 0x%02X, Actual: 0x%02X", ...);
+        // plus "  Relay N: sent=ON, actual=OFF" for each mismatching relay
+        xEventGroupSetBits(relayStatusEventGroup, COMM_ERROR);
+    }
+
+    // Queue retry for next SET tick
+    g_relayState.pendingWrite.store(true);
 }
-
-// Queue retry for next SET tick
-g_relayState.pendingWrite.store(true);
 ```
 
-**Step 3: Success Reset**
+**Step 3: Success Reset** (no real mismatch)
 ```cpp
-if (actual == desired) {
-    uint8_t previousMismatches = g_relayState.consecutiveMismatches.exchange(0);
+uint8_t previousMismatches = g_relayState.consecutiveMismatches.exchange(0);
 
-    if (previousMismatches > 0) {
-        LOG_INFO("Verification SUCCESS after %d attempts", previousMismatches + 1);
-    } else {
-        LOG_DEBUG("Relay states verified");
-    }
+if (previousMismatches > 0) {
+    LOG_INFO(TAG, "Relay verification SUCCESS after %d attempts: 0x%02X", ...);
+} else if (actual != sent) {
+    LOG_DEBUG(TAG, "Relay verification deferred (DELAY coast-down): Sent: 0x%02X, Actual: 0x%02X, Delay mask: 0x%02X", ...);
+} else {
+    LOG_DEBUG(TAG, "Relay states verified: 0x%02X", actual);
 }
 ```
 
@@ -1052,42 +777,39 @@ After re-enabling, a new charge starts only below `tempLimitLow`. Heating preemp
 1. **Simple & Reliable**: No complex symmetric hysteresis calculations
 2. **Prevents Cycling**: Wide band prevents rapid on/off
 3. **Configurable**: Thresholds adjustable via MQTT
-4. **Energy Efficient**: Burner runs continuously in band (modulates power level)
+4. **Power from PID**: Within the band the boiler PID chooses OFF, HALF or FULL
 5. **Legionella Prevention**: High limit can be set to 60°C+ for safety
 
 ### Interaction with PID
 
 Water heating uses **dual control strategy**:
-1. **Two-threshold**: Decides IF heating is needed (ON/OFF decision)
-2. **PID**: Decides WHAT power level when ON (HALF/FULL modulation)
+1. **Two-threshold**: Decides IF a charge is needed (water burner request on/off)
+2. **PID**: Decides the power level during the charge (OFF/HALF/FULL)
 
-**Combined operation**:
+**Combined operation** (default limits 45/65°C):
 ```
-Temp < 50°C:  Two-threshold → Turn ON
-              PID → Modulate between HALF/FULL based on boiler output temp
-                    (target = tank + charge delta)
-Temp > 60°C:  Two-threshold → Turn OFF
-              PID → Disabled (not heating)
+Tank < 45°C:  Two-threshold → charge ON (water burner request)
+              Boiler target = tank + wheater/tempChargeDelta (default 10°C),
+              clamped to the water heating low/high limits
+              PID → OFF/HALF/FULL from boiler output vs that target
+Tank > 65°C:  Two-threshold → charge OFF, request withdrawn
 ```
 
-**Result**: Burner stays ON continuously in 50-60°C band, switching between half and full power for efficient heat transfer.
+**Result**: The water request stays active from below 45°C until above 65°C. Within the band the PID sets the power level. It also commands OFF when its output drops below 35 % (boiler output above target) and switches on again above 55 % (`BoilerTempController::calculateModulating()`), so the burner does not necessarily run continuously during a charge.
 
 ### Example Scenario
 
 ```
-Initial state: Tank at 48°C, heating OFF
+Initial state: Tank at 44°C, charge OFF
 
-T=0s:    Tank 48°C < 50°C (low limit)  → Turn heating ON
-T=30s:   Tank 52°C, burner on HALF     → Stay ON (in band)
-T=60s:   Tank 56°C, burner on FULL     → Stay ON (in band)
-T=90s:   Tank 59°C, burner on HALF     → Stay ON (in band)
-T=120s:  Tank 61°C > 60°C (high limit) → Turn heating OFF
-T=150s:  Tank 59°C                     → Stay OFF (in band)
+Tank 44°C < 45°C (low limit)   → charge ON
+Tank 52°C                      → stay ON (in band), power level from PID
+Tank 64°C                      → stay ON (in band)
+Tank 66°C > 65°C (high limit)  → charge OFF
+Tank 60°C                      → stay OFF (in band)
 ...later...
-T=600s:  Tank 49°C < 50°C              → Turn heating ON again
+Tank 44°C < 45°C               → charge ON again
 ```
-
-**Anti-Cycling**: 10-15 minute heating cycles typical, preventing burner wear.
 
 ---
 
@@ -1157,26 +879,89 @@ Next-state decisions of the burner state machine as header-only functions that n
 
 ---
 
+## 17. Heating Curve and Space Heating Mode
+
+### Purpose
+Compute the boiler target for space heating from outside and room temperature, and decide when space heating is needed (weather mode or room mode).
+
+### Location
+`include/modules/control/HeatingCurve.h` (`HeatingCurve::target()`), `src/modules/control/HeatingControlModuleFixedPoint.cpp`, `src/modules/control/HeatingControlModule.cpp` (`calculateSpaceHeatingTargetTemp()`), `include/modules/control/SpaceHeatingPolicy.h`, `src/modules/tasks/HeatingControlTask.cpp`
+
+### Heating Curve
+
+**Formula:**
+```
+diff   = outside - inside        (°C, inside = measured room temperature)
+target = inside + shift - coeff × diff × (1.4347 + 0.021 × diff + 0.000248 × diff²)
+```
+
+**Fixed point** (`HeatingCurve::target()`): temperatures in tenths of °C, `coeff` scaled by 100 (`heating_curve_coeff * 100`, truncated), `shift` in tenths.
+```cpp
+diff        = outside - inside;                       // tenths
+diffSquared = diff * diff / 10;                       // °C² × 10
+polynomial  = 14347 + 210 * diff / 10 + 248 * diffSquared / 1000;   // × 10000
+adjustment  = coeffX100 * diff * polynomial / ADJUSTMENT_SCALE;     // tenths, ADJUSTMENT_SCALE = 1000000
+target      = clamp(inside + shift - adjustment, lowerLimit, upperLimit);
+```
+All divisions are integer divisions (truncated toward zero). `calculateSpaceHeatingTargetTemp()` passes `burner_low_limit` (`h/bLo`, default 38.0°C) and `heating_high_limit` (`h/sHi`, default 75.0°C) as limits; `BurnerRequestManager::setHeatingRequest()` then clamps the request to `heating_low_limit` (`h/sLo`, default 40.0°C) .. `heating_high_limit` (absolute 20.0-110.0°C).
+
+**Weather mode room shift**: with `heating/weatherControl` on and a valid room reading, `shift += (targetTemp - room) × heating/roomCurveShiftFactor`. Room mode uses the curve without this shift.
+
+### Parameters (`boiler/params/set/<name>`)
+
+| Parameter | Default | Range |
+|-----------|---------|-------|
+| `heating/curveCoeff` | 1.4 | 0.5-4.0 |
+| `heating/curveShift` | 0.0°C | -20.0 to 40.0°C |
+| `heating/weatherControl` | on (struct default) | bool |
+| `heating/outsideThreshold` | 15.0°C (150 tenths) | 5.0-25.0°C |
+| `heating/roomOverheatMargin` | 2.0°C (20 tenths) | 1.0-5.0°C |
+| `heating/roomCurveShiftFactor` | 2.0 | 1.0-4.0 |
+| `heating/hysteresis` | 0.5°C (5 tenths) | 0.1-2.0°C |
+| `heating/targetTemp` | 18.0°C (180 tenths) | 10.0-30.0°C |
+
+### Worked Example (coeff 1.4, shift 0, room 20.0°C)
+
+| Outside | diff (tenths) | polynomial | adjustment (tenths) | Curve result | Heating request |
+|---------|---------------|------------|---------------------|--------------|-----------------|
+| 10.0°C | -100 | 12495 | -174 | 37.4 → 38.0°C (h/bLo) | 40.0°C (h/sLo) |
+| 0.0°C | -200 | 11139 | -311 | 51.1°C | 51.1°C |
+| -10.0°C | -300 | 10279 | -431 | 63.1°C | 63.1°C |
+
+Outside 0.0°C in detail: diffSquared = 40000 / 10 = 4000; polynomial = 14347 - 4200 + 992 = 11139; adjustment = 140 × (-200) × 11139 / 1000000 = -311 (truncated from -311.9); target = 200 + 0 + 311 = 511 = 51.1°C.
+
+Weather mode, room 19.0°C, target 20.0°C, factor 2.0, outside 0.0°C: shift = 1.0 × 2.0 = +2.0°C (20); diff = -190, polynomial = 11252, adjustment = -299; target = 190 + 20 + 299 = 509 = 50.9°C.
+
+### Heating Needed Decision (`HeatingControlTask`)
+
+- **Heating OFF override** (`heatingOverrideOff`): not needed. While an autotune runs the demand is kept.
+- **Weather mode** (`heating/weatherControl` on): needs a valid outside reading, otherwise not needed.
+  - `SpaceHeatingPolicy::outsideColdForHeating()`: start when outside < `outsideThreshold`; while heating, stop only when outside >= `outsideThreshold` + `OUTSIDE_THRESHOLD_HYSTERESIS` (10 = 1.0°C). Threshold 15.0°C: starts at 14.9°C, keeps running at 15.9°C, stops at 16.0°C (`Heating not needed: outside 16.0°C >= stop limit 16.0°C (threshold + hysteresis)`).
+  - Room overheat limit = `targetTemp` + `roomOverheatMargin`: while heating stop when room > limit (`Heating stopped: room X°C > overheat limit Y°C`); while off restart only when room < limit - `hysteresis`. Skipped without a valid room reading.
+  - Needed = outside cold and room not overheated.
+- **Room mode** (`heating/weatherControl` off): needs a valid room reading and `targetTemp` > 0, otherwise not needed. Start when room < `targetTemp`, stop when room >= `targetTemp` + `hysteresis` (target 20.0°C, hysteresis 0.5°C: stops at 20.5°C). The outside temperature is not used for the decision.
+
+---
+
 ## Summary Table
 
 | Algorithm | Purpose | Key Parameter | Location |
 |-----------|---------|---------------|----------|
-| **Rate-of-Change** | Thermal runaway detection | 60s window, 10°C/min limit | BurnerSafetyValidator:295 |
-| **PID Control** | Temperature regulation | Kp/Ki/Kd gains | PIDControlModuleFixedPoint |
+| **PID Control** | Temperature regulation | Kp/Ki/Kd gains, ±500 output limit | PIDControlModuleFixedPoint |
 | **Pump Protection** | Motor lifespan | pumpProtectionMs (15s default), real changes only | RelayControlTask |
-| **MQTT Queuing** | Message prioritization | 20/40 queue split | MQTTTask:150 |
-| **Sensor Fallback** | Redundancy | 3-tier fallback | TemperatureSensorFallback |
-| **Mutex Retry** | Deadlock prevention | 3 retries, exponential | MutexRetryHelper |
-| **Cross-Validation** | Sensor agreement | 5°C tolerance | BurnerSafetyValidator:120 |
-| **Temperature Math** | Fixed-point ops | int16_t tenths | Temperature.h |
-| **Relay Verification** | DELAY-aware checking | 2 mismatches = error | RYN4ProcessingTask:73 |
+| **MQTT Queuing** | Message prioritization | 5 + 5 queues, pressure on 80 % / off 30 % | MQTTTask |
+| **Sensor Fallback** | Stop on missing sensors | STARTUP/NORMAL/SHUTDOWN, no substitute values | TemperatureSensorFallback |
+| **Mutex Retry** | Contention handling | 4 attempts, 10 ms delay, escalation after 5 failures | MutexRetryHelper |
+| **Temperature Math** | Fixed-point ops | int16_t tenths, saturating | Temperature.h |
+| **Relay Verification** | DELAY-aware checking | 2 mismatches = error, only commanded-OFF DELAY masked | RYN4ProcessingTask (handleReadTick) |
 | **Modbus Arbitration** | Bus collision prevention | 500ms ticks, 10-tick cycle | ModbusCoordinator.h:116 |
 | **Water Two-Threshold** | Tank heating control | tempLimitLow/High hysteresis, low < high | WaterChargePolicy.h |
 | **Burner Demand Gate** | Heat demand arming | 6s decision age, 1°C tolerance, 10s retry | BurnerDemandGate.h |
 | **Burner Transitions** | Burner state decisions | 10s no-mode grace, 15s/30s mode switch bounds | BurnerTransitions.h |
+| **Heating Curve** | Space heating boiler target, weather/room mode | coeff 1.4, shift 0, outside hysteresis 1.0°C | HeatingCurve.h, SpaceHeatingPolicy.h |
 
 ---
 
 **Document Version**: 0.1.0
-**Last Updated**: 2025-12-16
+**Last Updated**: 2026-09-15
 **Author**: System Documentation
