@@ -251,8 +251,12 @@ void BurnerControlTask(void* parameter) {
     // Main task loop - truly event-driven
     while (true) {
         // Build event masks
-        const EventBits_t TEMP_UPDATE_BITS = SystemEvents::SensorUpdate::BOILER_OUTPUT | 
-                                            SystemEvents::SensorUpdate::BOILER_RETURN | 
+        // BOILER_OUTPUT is not in this mask: BoilerTempControlTask blocks on it with
+        // clear-on-exit, so FreeRTOS clears it inside xEventGroupSetBits() and this poll
+        // never saw it. The sensor check therefore depended on the return/tank update bits,
+        // which a failed channel does not set; it now also runs on the 1 s STATE_TIMEOUT
+        // (2026-09-15).
+        const EventBits_t TEMP_UPDATE_BITS = SystemEvents::SensorUpdate::BOILER_RETURN |
                                             SystemEvents::SensorUpdate::WATER_TANK;
         const EventBits_t SAFETY_EVENT_BITS = SystemEvents::Burner::FLAME_STATE_CHANGED | 
                                              SystemEvents::Burner::PRESSURE_CHANGED |
@@ -397,7 +401,9 @@ void BurnerControlTask(void* parameter) {
             0         // No wait - just check current state
         );
         if (timeoutBits & SystemEvents::Burner::STATE_TIMEOUT) {
-            BurnerStateMachine::update();
+            // State machine update plus the temperature sensor check, independent of which
+            // sensor channels delivered an update
+            processTemperatureUpdate();
             // Bit already cleared atomically by xEventGroupWaitBits
         }
         (void)SRP::getTaskManager().feedWatchdog();

@@ -135,6 +135,7 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
                     LOG_ERROR(TAG, "COORDINATOR FAILURE: No notification in %ds - signaling error",
                               consecutiveCoordinatorTimeouts * 30);
                     xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);
+                    xEventGroupClearBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_AVAILABLE);
                     // Note: Direct read fallback removed - caused bus contention with coordinator
                     // Recovery requires coordinator restart or system reboot
                 } else {
@@ -199,6 +200,9 @@ void MB8ARTCombinedTaskEventDriven(void* parameter) {
         if ((currentTime - xLastDataTime) > pdMS_TO_TICKS(5000)) {
             LOG_WARN(TAG, "No temperature updates for 5 seconds - data may be stale");
             xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_ERROR);
+            // DATA_AVAILABLE means recent data (SafetyInterlocks communication check). The MB8ART
+            // library cleared it on every request through the old bit overlap; clear it here now
+            xEventGroupClearBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_AVAILABLE);
             errorCount++;
             errorsThisPeriod++;
         }

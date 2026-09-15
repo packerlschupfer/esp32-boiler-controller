@@ -15,32 +15,41 @@ namespace SensorHardware {
      *
      * To change sensor assignments, modify SensorIndices.h ONLY.
      */
+    // Array index = MB8ART channel. The library sets these bits in xSensorEventGroup; until
+    // 2026-09-15 it ignored this table and used its own interleaved bits (update 2n, error
+    // 2n+1), so only BOILER_OUTPUT matched its channel (e.g. "WATER_TANK" was the return
+    // update, DATA_AVAILABLE was cleared on every request). 0 = no event for the channel.
     constexpr std::array<mb8art::SensorHardwareConfig, 8> CONFIGS = {{
-        // Index 0 - BOILER_OUTPUT
-        {SensorIndex::toChannel(0), SystemEvents::SensorUpdate::BOILER_OUTPUT,
+        // CH0 - boiler output
+        {SensorIndex::BOILER_OUTPUT, SystemEvents::SensorUpdate::BOILER_OUTPUT,
          SystemEvents::SensorUpdate::BOILER_OUTPUT_ERROR, true},
-        // Index 1 - BOILER_RETURN
-        {SensorIndex::toChannel(1), SystemEvents::SensorUpdate::BOILER_RETURN,
+        // CH1 - boiler return
+        {SensorIndex::BOILER_RETURN, SystemEvents::SensorUpdate::BOILER_RETURN,
          SystemEvents::SensorUpdate::BOILER_RETURN_ERROR, true},
-        // Index 2 - WATER_TANK
-        {SensorIndex::toChannel(2), SystemEvents::SensorUpdate::WATER_TANK,
+        // CH2 - water tank
+        {SensorIndex::WATER_TANK, SystemEvents::SensorUpdate::WATER_TANK,
          SystemEvents::SensorUpdate::WATER_TANK_ERROR, true},
-        // Index 3 - WATER_OUTPUT
-        {SensorIndex::toChannel(3), SystemEvents::SensorUpdate::WATER_OUTPUT,
-         SystemEvents::SensorUpdate::WATER_OUTPUT_ERROR, true},
-        // Index 4 - WATER_RETURN
-        {SensorIndex::toChannel(4), SystemEvents::SensorUpdate::WATER_RETURN,
-         SystemEvents::SensorUpdate::WATER_RETURN_ERROR, true},
-        // Index 5 - HEATING_RETURN
-        {SensorIndex::toChannel(5), SystemEvents::SensorUpdate::HEATING_RETURN,
-         SystemEvents::SensorUpdate::HEATING_RETURN_ERROR, true},
-        // Index 6 - OUTSIDE
-        {SensorIndex::toChannel(6), SystemEvents::SensorUpdate::OUTSIDE,
+        // CH3 - outside
+        {SensorIndex::OUTSIDE, SystemEvents::SensorUpdate::OUTSIDE,
          SystemEvents::SensorUpdate::OUTSIDE_ERROR, true},
-        // Index 7 - PRESSURE (handled separately - not a temperature sensor)
-        {SensorIndex::toChannel(7), SystemEvents::SensorUpdate::PRESSURE,
-         SystemEvents::SensorUpdate::PRESSURE_ERROR, true}
+        // CH4 - pressure (4-20 mA): MB8ARTTasks sets PRESSURE / PRESSURE_ERROR after conversion
+        {SensorIndex::PRESSURE_CHANNEL, 0, 0, true},
+        // CH5 - water tank top (optional, no event bit defined)
+        {SensorIndex::WATER_TANK_TOP, 0, 0, true},
+        // CH6 - water heater return (optional)
+        {SensorIndex::WATER_RETURN, SystemEvents::SensorUpdate::WATER_RETURN,
+         SystemEvents::SensorUpdate::WATER_RETURN_ERROR, true},
+        // CH7 - heating return (optional)
+        {SensorIndex::HEATING_RETURN, SystemEvents::SensorUpdate::HEATING_RETURN,
+         SystemEvents::SensorUpdate::HEATING_RETURN_ERROR, true}
     }};
+
+    // The library indexes the table by channel: a changed SensorIndices assignment must reorder it
+    static_assert(CONFIGS[0].channelNumber == 0 && CONFIGS[1].channelNumber == 1 &&
+                  CONFIGS[2].channelNumber == 2 && CONFIGS[3].channelNumber == 3 &&
+                  CONFIGS[4].channelNumber == 4 && CONFIGS[5].channelNumber == 5 &&
+                  CONFIGS[6].channelNumber == 6 && CONFIGS[7].channelNumber == 7,
+                  "SensorHardware::CONFIGS index must equal the MB8ART channel");
 
     // Helper to get config by logical index
     constexpr const mb8art::SensorHardwareConfig& get(uint8_t index) {
