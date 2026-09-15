@@ -366,7 +366,9 @@ void handleFRAMErrorsCommand(const char* payload) {
     if (strcmp(payload, "stats") == 0) {
         ErrorLogFRAM::ErrorStats stats = ErrorLogFRAM::getStats();
 
-        auto buffer = MemoryPools::getTempBuffer();
+        // 128-byte pool buffer: the stats JSON is ~76 chars and was cut off in the
+        // 64-byte temp buffer (2026-09-15)
+        auto buffer = MemoryPools::getString();
         if (!buffer) {
             LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM error stats");
             return;
@@ -399,7 +401,9 @@ void handleFRAMCommand(const char* payload) {
     }
 
     if (strcmp(payload, "status") == 0) {
-        auto buffer = MemoryPools::getTempBuffer();
+        // 128-byte pool buffer: the stats JSON is ~76 chars and was cut off in the
+        // 64-byte temp buffer (2026-09-15)
+        auto buffer = MemoryPools::getString();
         if (!buffer) {
             LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM status");
             return;
@@ -419,7 +423,9 @@ void handleFRAMCommand(const char* payload) {
         LOG_INFO(TAG_CMD, "Published FRAM status");
     }
     else if (strcmp(payload, "counters") == 0) {
-        auto buffer = MemoryPools::getTempBuffer();
+        // 128-byte pool buffer: the stats JSON is ~76 chars and was cut off in the
+        // 64-byte temp buffer (2026-09-15)
+        auto buffer = MemoryPools::getString();
         if (!buffer) {
             LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM counters");
             return;
@@ -438,7 +444,9 @@ void handleFRAMCommand(const char* payload) {
         LOG_INFO(TAG_CMD, "Published FRAM counters");
     }
     else if (strcmp(payload, "runtime") == 0) {
-        auto buffer = MemoryPools::getTempBuffer();
+        // 128-byte pool buffer: the stats JSON is ~76 chars and was cut off in the
+        // 64-byte temp buffer (2026-09-15)
+        auto buffer = MemoryPools::getString();
         if (!buffer) {
             LOG_ERROR(TAG_CMD, "Failed to allocate buffer for FRAM runtime");
             return;
@@ -540,7 +548,9 @@ void handleErrorCommand(const char* topic, const char* payload) {
     else if (strcmp(command, "stats") == 0) {
         ErrorLogFRAM::ErrorStats stats = ErrorLogFRAM::getStats();
 
-        auto buffer = MemoryPools::getTempBuffer();
+        // 128-byte pool buffer: the stats JSON is ~76 chars and was cut off in the
+        // 64-byte temp buffer (2026-09-15)
+        auto buffer = MemoryPools::getString();
         if (!buffer) {
             LOG_ERROR(TAG_CMD, "Failed to allocate buffer for error stats");
             return;
