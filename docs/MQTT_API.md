@@ -773,6 +773,7 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/status/online` | On change | Yes | High | Connection status |
 | `boiler/status/safety_config` | On boot/change | No | Medium | Safety configuration |
 | `boiler/status/burner` | Every 30s in ERROR, on `burner_reset`/`emergency_reset` | No (`lockout_reset`: Yes) | Medium/High | Burner ERROR status, reset command results |
+| `boiler/error/context` | On a critical error (failsafe/emergency stop, relay safety interlock, ignition failure, critical temperature, overheat), at most every 30 s | Yes | Critical | Snapshot: `ec` error code, `c` component, `d` description, `ts` uptime ms, `task`/`tp`, heap `hf`/`hm`/`hb`, `ss` system state bits, `rq` burner request bits, `bo`/`br`/`wt` tenths °C (null if invalid), `p` hundredths BAR, relays `rd`/`ra` desired/actual |
 | `boiler/status/pid/autotune` | On command | Yes | High | Autotune status / method response |
 | `boiler/status/pid/autotune/result` | On start reject, abort, completion | Yes | High | Autotune result JSON |
 | `boiler/status/device/ip` | On boot | Yes | Low | IP address |
