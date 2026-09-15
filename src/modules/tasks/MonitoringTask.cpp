@@ -20,6 +20,7 @@
 #include "config/SystemSettings.h"
 #include "utils/ErrorLogFRAM.h"
 #include "utils/ErrorHandler.h"
+#include "utils/OtaRollbackGuard.h"
 #include "MQTTTask.h"
 #include "MQTTTopics.h"
 #include <ModbusErrorTracker.h>
@@ -278,6 +279,9 @@ void MonitoringTaskEventDriven(void* pvParameters) {
         
         // Increment loop counter
         loopCount++;
+
+        // Confirm or roll back an OTA-updated image (no-op after serial flash)
+        OtaRollbackGuard::check();
 
         if (events == 0) {
             // Timeout - just feed watchdog and continue
