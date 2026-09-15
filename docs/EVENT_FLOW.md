@@ -11,7 +11,7 @@ This document maps the complete event flow for common scenarios in the boiler co
 main.cpp::setup()
 ├─ SystemInitializer::initialize()
 ├─ SharedResourceManager::createAll()
-│  ├─ Creates 14 event groups
+│  ├─ Creates 11 event groups
 │  ├─ Creates 4 mutexes
 │  └─ Sets initial state bits:
 │     - SystemState::BOILER_ENABLED
@@ -162,9 +162,13 @@ WaterPumpTask (PumpControlModule, every 500ms)
 ├─ Checks current pump state: OFF
 ├─ Sets RelayRequest::WATER_PUMP_ON and SystemState::WATER_PUMP_ON
 ├─ Increments water pump start counter
-└─ RelayControlTask switches Relay 6 (WATER_PUMP) ON
-   (WheaterControlTask already set RelayRequest::WATER_PUMP_ON at charge start)
+├─ RelayControlTask switches Relay 6 (WATER_PUMP) ON
+└─ Relay does not follow (request refused by pump motor protection, or relay
+   switched directly by the failsafe) → request re-sent every 2 s
+   (RelayCommandPolicy::pumpRequestResendDue, PUMP_REQUEST_RESEND_MS)
 ```
+
+The pump relay request bits are set only by PumpControlModule (HeatingPumpTask, WaterPumpTask); the control tasks set `HEATING_ON` / `WATER_ON`.
 
 #### Step 5: Burner Ignition Sequence
 ```
@@ -214,8 +218,7 @@ WheaterControlTask
 ├─ Detects tank temp > tempLimitHigh (charge latch released)
 ├─ Calls BurnerRequestManager::clearRequest(RequestSource::WATER)
 │  ├─ Clear BurnerRequest::WATER
-│  ├─ Set BurnerRequest::CHANGED
-│  └─ Clear BurnerRequest::WATER_CHANGED
+│  └─ Set BurnerRequest::CHANGED | WATER_CHANGED
 └─ Clears SystemState::WATER_ON
 ```
 
@@ -398,24 +401,26 @@ CentralizedFailsafe::emergencyStop(reason)
 
 #### Step 5: Subsystem Responses
 ```
-All Control Tasks detect EMERGENCY_STOP
-├─ HeatingControlTask
-│  └─ Clears HEATING request, stops PID
+Responses to a latched EMERGENCY_STOP (Step 4)
+├─ HeatingControlTask (next process run)
+│  └─ Does not read EMERGENCY_STOP; BOILER_ENABLED is cleared, so a running
+│     heating cycle stops: HEATING_ON cleared, HEATING request cleared
 ├─ WheaterControlTask
-│  └─ Clears WATER request
-│     (CentralizedFailsafe::emergencyStop() clears BOILER_ENABLED and calls
-│      notifyWheaterTaskSwitchedOff(): the charge ends on the next run and
-│      does not resume after re-enable unless tank < tempLimitLow)
+│  └─ Does not read EMERGENCY_STOP; notifyWheaterTaskSwitchedOff() and the
+│     cleared BOILER_ENABLED end the charge on the next run: WATER_ON and
+│     WATER request cleared, ControlRequest::WATER_PRIORITY_RELEASED set.
+│     The charge does not resume after re-enable unless tank < tempLimitLow
 ├─ BurnerControlTask
 │  └─ Reads EMERGENCY_STOP without clearing, BurnerStateMachine::emergencyStop()
 │     once per onset; burner stays in ERROR while it is set
 ├─ HeatingPumpTask / WaterPumpTask (PumpControlModule)
-│  └─ Both pumps ON while EMERGENCY_STOP is set until boiler output
-│     < 60.0°C (again from 65.0°C, always without a usable reading)
-└─ MQTTTask
-   └─ Publishes emergency alert
-      Topic: boiler/status/emergency
-      {"reason": "pressure_low", "pressure": 0.35}
+│  ├─ Both pumps ON while EMERGENCY_STOP is set until boiler output
+│  │  < 60.0°C (again from 65.0°C, always without a usable reading)
+│  └─ Released while still dissipating → pumps continue until boiler output
+│     < 60.0°C (without a usable reading: for SystemSettings::pumpCooldownMs)
+└─ MQTT
+   └─ No dedicated emergency message; boiler/cmd/emergency_reset replies on
+      boiler/status/burner (emergency_released / emergency_release_refused:...)
 ```
 
 #### Step 6: Error Indication
@@ -434,7 +439,7 @@ All Control Tasks detect EMERGENCY_STOP
 
 #### Step 7: Recovery
 
-Burner ERROR recovery: see [STATE_MACHINES.md](STATE_MACHINES.md). A latched `SystemState::EMERGENCY_STOP` (Step 4) is released by the MQTT command `boiler/cmd/emergency_reset` (payload `reset`, `CentralizedFailsafe::clearEmergencyStop()`) or by TemperatureSensorFallback on sensor recovery (only a stop caused by stale sensor data), see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md).
+Burner ERROR recovery: see [STATE_MACHINES.md](STATE_MACHINES.md). A latched `SystemState::EMERGENCY_STOP` (Step 4) is released by the MQTT command `boiler/cmd/emergency_reset` (payload `reset`, `CentralizedFailsafe::clearEmergencyStop()`) or by TemperatureSensorFallback on sensor recovery (only a stop caused by stale sensor data), see [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md). `emergency_reset` is refused while temperatures are high, sensors are unavailable or system errors are set; on release it restores `BOILER_ENABLED` from the saved `boilerEnabled` setting. The sensor-recovery release leaves the boiler disabled. If the pumps are still dissipating at release, they continue until the boiler output is below 60.0°C (Step 5).
 
 ---
 
@@ -569,7 +574,7 @@ MB8ARTTask (every 2.5 seconds)
 ├─ Releases mutex
 └─ Sets event bits for each sensor
    ├─ SensorUpdate::BOILER_OUTPUT
-   ├─ SensorUpdate::WHEATER_TANK
+   ├─ SensorUpdate::WATER_TANK
    └─ SensorUpdate::PRESSURE
 ```
 
@@ -577,21 +582,22 @@ MB8ARTTask (every 2.5 seconds)
 ```
 Sensor Events Trigger Multiple Tasks:
 
-SensorUpdate::BOILER_OUTPUT wakes:
-├─ BurnerControlTask
-│  └─ Checks if temp approaching target
-├─ HeatingControlTask
-│  └─ Runs PID loop with new measurement
-└─ SafetyInterlocks
-   └─ Verifies temp < MAX_LIMIT
+SensorUpdate::BOILER_OUTPUT
+├─ BoilerTempControlTask
+│  └─ Waits on it (timeout 2x sensor read interval), runs the PID cycle
+│     and BurnerDemandGate (see Burner Demand Arming Flow)
+└─ BurnerControlTask
+   └─ Checks BOILER_OUTPUT | BOILER_RETURN | WATER_TANK on each loop pass
+      without waiting → BurnerStateMachine::update() and sensor fallback check
 
-SensorUpdate::PRESSURE wakes:
-├─ BurnerControlTask
-│  └─ Safety check includes pressure
-├─ SafetyInterlocks
-│  └─ Verifies 1.0 < pressure < 3.5 BAR
-└─ (Future) PumpSpeedControl
-   └─ Adjust pump based on pressure
+HeatingControlTask and WheaterControlTask do not use sensor events; they run
+on their process timers and read SharedSensorReadings.
+SafetyInterlocks is not a task; continuousSafetyMonitor() runs inside
+BurnerStateMachine::update() in IGNITION/RUNNING_LOW/RUNNING_HIGH.
+
+SensorUpdate::PRESSURE
+└─ No task waits on it; the pressure value is used from SharedSensorReadings
+   by the safety checks (see Emergency Stop Flow)
 ```
 
 ---
@@ -672,17 +678,15 @@ onPreheatingStart() [called 3 hours before start]
 
 3. Error Propagated
    ├─ Set appropriate error event bit
-   │  └─ Burner::ERROR_PRESSURE
-   │  └─ SystemState::BURNER_ERROR
+   │  └─ Burner::ERROR_PRESSURE (set by MB8ARTTask, not read by any task)
+   │  └─ SystemState::BURNER_ERROR (BurnerControlTask, burner in ERROR/LOCKOUT)
    └─ MQTT notification (if connected)
 
-4. System Response
-   ├─ BurnerControl checks error bits
-   ├─ Decides action based on severity
-   │  ├─ CRITICAL → Emergency stop
-   │  ├─ WARNING → Degraded mode
-   │  └─ INFO → Log only
-   └─ Modifies operation accordingly
+4. System Response (no central severity dispatch)
+   ├─ BurnerControlTask does not read error bits; it reacts to the
+   │  EMERGENCY_STOP onset and to BurnerStateMachine safety checks
+   ├─ Failed burner safety checks → BurnerStateMachine ERROR
+   └─ Critical conditions → CentralizedFailsafe (see Emergency Stop Flow)
 
 5. Recovery (no central recovery manager)
    ├─ Burner ERROR: back to IDLE after errorRecoveryMs (default 5 min)
@@ -736,7 +740,7 @@ MonitoringTask (every 5 seconds):
 - HeatingControl: 20 seconds
 - WheaterControl: 20 seconds
 - MQTT: 30 seconds
-- Monitoring: 10 seconds
+- Monitoring: 30 seconds
 
 ---
 
@@ -851,7 +855,7 @@ Task B (Responder)
 ```
 Publisher (Sensor Task)
 ├─ Updates shared data (mutex protected)
-├─ Sets event bit: SensorUpdate::TEMPERATURE
+├─ Sets event bit: SensorUpdate::BOILER_OUTPUT
 └─ Releases mutex
 
 Subscriber 1 (Control Task)
@@ -924,13 +928,15 @@ Network Restored
 ```
 MB8ART Communication Timeout
 ├─ No response after 3 attempts (500ms each)
-├─ Sets SensorUpdate::ERROR
+├─ Sets SensorUpdate::DATA_ERROR
 ├─ SharedSensorReadings marked invalid
 │  └─ isBoilerTempOutputValid = false
 └─ BurnerControl responds
-   ├─ If burner RUNNING:
+   ├─ If burner in IGNITION/RUNNING:
    │  └─ Continue with last known temp (short term)
-   │  └─ If >5s no update: Emergency stop
+   │  └─ Boiler output older than SENSOR_STALE_THRESHOLD_MS (15s):
+   │     SafetyInterlocks::triggerEmergencyShutdown() (latched EMERGENCY_STOP,
+   │     released on sensor recovery)
    └─ If burner IDLE:
       └─ Block start until sensor restored
 ```
@@ -1046,13 +1052,13 @@ boiler/status/errors          # Error notifications
 
 ```
 Event Group: 4 bytes (24 bits + control byte)
-Total: 14 event groups × 4 bytes = 56 bytes
+Total: 11 event groups × 4 bytes = 44 bytes
 
 Mutexes: 96 bytes each (FreeRTOS structure)
 Total: 4 mutexes × 96 bytes = 384 bytes
 
 Queue: Variable (depends on item size × depth)
-MQTT High: 392 bytes × 3 = 1176 bytes
+MQTT High: 392 bytes × 5 = 1960 bytes
 MQTT Normal: 392 bytes × 5 = 1960 bytes
 ```
 

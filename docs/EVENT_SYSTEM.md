@@ -8,7 +8,7 @@ The boiler controller uses a zero-overhead event system based on FreeRTOS event 
 
 ## Event Groups
 
-The system uses 5 distinct event groups for different subsystems:
+SharedResourceManager creates 11 named event groups (see [Event Group Organization](#event-group-organization)). The five most used are described below; all bit definitions are listed in [generated/events.md](generated/events.md).
 
 ### 1. SystemState Event Group
 **Handle**: `xSystemStateEventGroup` (via `SRP::getSystemStateEventGroup()`)
@@ -87,20 +87,20 @@ constexpr EventBits_t ANY_ERROR = ERROR_IGNITION | ERROR_FLAME_LOSS |
                                    ERROR_OVERHEAT | ERROR_PRESSURE;
 ```
 
-**Usage Example**:
-```cpp
-// Wait for burner to be running
-EventBits_t bits = xEventGroupWaitBits(
-    SRP::getBurnerEventGroup(),
-    SystemEvents::Burner::RUNNING,
-    pdFALSE,  // Don't clear
-    pdFALSE,  // Wait for any
-    pdMS_TO_TICKS(5000)  // 5 second timeout
-);
+**Bits set by current firmware**: only `ERROR_PRESSURE` and `PRESSURE_OK` (MB8ARTTask, pressure alarm check) and `STATE_TIMEOUT` (BurnerControlTask 1 s timer). The other bits are defined but never set, and nothing reads `ERROR_PRESSURE`. The burner state is published in SystemState (`BURNER_ON`, `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH`, `BURNER_OFF`, `BURNER_ERROR`).
 
-// Check for any errors
-if (bits & SystemEvents::Burner::ANY_ERROR) {
-    // Handle error
+**Usage Example** (BurnerControlTask main loop):
+```cpp
+// Read-and-clear the timer event without waiting
+EventBits_t timeoutBits = xEventGroupWaitBits(
+    SRP::getBurnerEventGroup(),
+    SystemEvents::Burner::STATE_TIMEOUT,
+    pdTRUE,   // Clear on exit
+    pdFALSE,  // Wait for any
+    0         // No wait
+);
+if (timeoutBits & SystemEvents::Burner::STATE_TIMEOUT) {
+    BurnerStateMachine::update();
 }
 ```
 
@@ -114,10 +114,10 @@ if (bits & SystemEvents::Burner::ANY_ERROR) {
 | 1 | WATER | Water heating requesting burner |
 | 3 | POWER_LOW | Request low power mode |
 | 4 | POWER_HIGH | Request high power mode |
-| 16-23 | TEMPERATURE | **Encoded temperature** (8 bits) |
-| 18 | CHANGED | Any request changed |
-| 19 | HEATING_CHANGED | Heating request changed |
-| 20 | WATER_CHANGED | Water request changed |
+| 5 | CHANGED | Any request changed |
+| 6 | HEATING_CHANGED | Heating request changed |
+| 7 | WATER_CHANGED | Water request changed |
+| 16-23 | TEMPERATURE | **Encoded temperature** (8 bits, no flags in this range) |
 
 #### Temperature Encoding
 
@@ -145,9 +145,9 @@ uint8_t targetTempC = (bits >> TEMPERATURE_SHIFT) & 0xFF;
 // Set water request with 65°C target
 BurnerRequestManager::setWaterRequest(
     tempFromWhole(65),  // Temperature_t
-    true,               // High power
-    true                // Priority
+    true                // High power
 );
+// Priority is read from SystemState::WATER_PRIORITY
 // Internally encodes 65 into bits 16-23
 
 // Read current request
@@ -163,17 +163,21 @@ uint8_t targetTemp = (bits >> 16) & 0xFF;  // Extract temperature
 |-----|------|-------------|
 | 0 | BOILER_OUTPUT | Boiler output temp updated |
 | 1 | BOILER_RETURN | Boiler return temp updated |
-| 2 | WHEATER_TANK | Water tank temp updated |
-| 3 | WHEATER_OUTPUT | Water output temp updated |
-| 4 | WHEATER_RETURN | Water return temp updated |
+| 2 | WATER_TANK | Water tank temp updated |
+| 3 | WATER_OUTPUT | Water output temp updated |
+| 4 | WATER_RETURN | Water return temp updated |
 | 5 | HEATING_RETURN | Heating return temp updated |
 | 6 | OUTSIDE | Outside temp updated |
 | 7 | INSIDE | Inside/room temp updated |
-| 8 | PRESSURE | Pressure sensor updated |
-| 9 | ANY_WHEATER | Any water sensor updated |
-| 10 | ANY_HEATING | Any heating sensor updated |
-| 11 | ANY_TEMP | Any temperature updated |
-| 15 | PRESSURE_ERROR | Pressure sensor error |
+| 8 | EXHAUST | Exhaust temp updated |
+| 9 | DATA_AVAILABLE | Sensor data available |
+| 10-18 | BOILER_OUTPUT_ERROR ... EXHAUST_ERROR | Per-sensor error, same order as bits 0-8 |
+| 19 | DATA_ERROR | General sensor data error |
+| 20 | PRESSURE | System pressure updated |
+| 21 | PRESSURE_ERROR | Pressure sensor error |
+| 23 | FIRST_READ_COMPLETE | First sensor read complete |
+
+Combinations: `ALL_TEMPS` (bits 0-7), `CRITICAL_TEMPS` (`BOILER_OUTPUT | EXHAUST`).
 
 **Usage Example**:
 ```cpp
@@ -192,19 +196,27 @@ xEventGroupSetBits(SRP::getSensorEventGroup(),
 ```
 
 ### 5. ControlRequest Event Group
-**Handle**: (various - heating, water control tasks)
-**Purpose**: Control request signaling
+**Handle**: `xControlRequestEventGroup` (via `SRP::getControlRequestsEventGroup()`)
+**Purpose**: Remote control requests from MQTT/scheduler
 
 | Bit | Name | Description |
 |-----|------|-------------|
-| 0 | ENABLE_HEATING | Enable space heating |
-| 1 | DISABLE_HEATING | Disable space heating |
-| 2 | ENABLE_WATER | Enable water heating |
-| 3 | DISABLE_WATER | Disable water heating |
-| 4 | PUMP_START | Start pump |
-| 5 | PUMP_STOP | Stop pump |
-| 6 | BURNER_START | Start burner |
-| 7 | BURNER_STOP | Stop burner |
+| 0-1 | BOILER_ENABLE / BOILER_DISABLE | Enable / disable boiler system |
+| 2-3 | HEATING_ENABLE / HEATING_DISABLE | Enable / disable heating |
+| 4 | HEATING_ON_OVERRIDE | Force heating on |
+| 5 | HEATING_OFF_OVERRIDE | Force heating off |
+| 6-7 | WATER_ENABLE / WATER_DISABLE | Enable / disable water heating |
+| 8-9 | WATER_PRIORITY_ENABLE / WATER_PRIORITY_DISABLE | Enable / disable water priority |
+| 10 | WATER_ON_OVERRIDE | Force water heating on |
+| 11 | WATER_OFF_OVERRIDE | Force water heating off |
+| 12-17 | MQTT_ENABLE ... MQTT_REPORT_DISABLE | MQTT enable / command / report switches |
+| 18 | WATER_PRIORITY_RELEASED | Water priority was released (notify heating) |
+| 19 | PID_SAVE | Save PID parameters |
+| 20 | SAVE_PARAMETERS | Save system parameters |
+| 22 | PID_AUTOTUNE | Start PID auto-tuning |
+| 23 | PID_AUTOTUNE_STOP | Stop PID auto-tuning |
+
+**Control-task handling**: HeatingControlTask (`HEATING_ON_OVERRIDE`, `HEATING_OFF_OVERRIDE`, `WATER_PRIORITY_RELEASED`) and WheaterControlTask (`WATER_ON_OVERRIDE`, `WATER_OFF_OVERRIDE`) check the group after each timer wait, clear the bits they found and pass the override bits to `processHeatingState(pendingControl)` / `processWaterHeatingState(pendingControl)`, which OR them into the bits they read.
 
 ## Event-Driven Task Pattern
 
@@ -245,16 +257,17 @@ For detecting changes (not just state):
 xEventGroupSetBits(group, HEATING_CHANGED | CHANGED);
 
 // Burner control task waits for changes
+// (timeout 100 ms in IGNITION/RUNNING, 3 s when IDLE without demand, else 1 s)
 EventBits_t bits = xEventGroupWaitBits(
     SRP::getBurnerRequestEventGroup(),
-    SystemEvents::BurnerRequest::CHANGED,
-    pdTRUE,  // Clear on exit - ready for next change
+    SystemEvents::BurnerRequest::CHANGE_EVENT_BITS,
+    pdTRUE,  // Clear on exit - a change during processing is kept for the next pass
     pdFALSE,
-    pdMS_TO_TICKS(5000)
+    pdMS_TO_TICKS(timeoutMs)
 );
 
 // Process the change
-if (bits & CHANGED) {
+if (bits & CHANGE_EVENT_BITS) {
     // Read current request state
     EventBits_t request = xEventGroupGetBits(group);
     processNewRequest(request);
@@ -264,24 +277,22 @@ if (bits & CHANGED) {
 ## Event Group Organization
 
 ```
-FreeRTOS Event Groups (24 bits each)
-├── SystemState (14 resources created by SharedResourceManager)
-│   ├── GeneralSystem
-│   ├── System
-│   ├── SystemState
-│   ├── ControlRequests
-│   ├── Wheater
-│   ├── Heating
-│   ├── Burner
-│   ├── BurnerRequest
-│   ├── Sensor
-│   ├── ErrorNotification
-│   ├── Timer
-│   ├── Relay
-│   ├── RelayStatus
-│   └── RelayRequest
-└── (Additional MQTT event group created dynamically)
+FreeRTOS Event Groups (24 usable bits each, bits 24-31 reserved by FreeRTOS)
+└── SharedResourceManager::initializeStandardResources() (11 groups)
+    ├── GeneralSystem
+    ├── SystemState
+    ├── ControlRequests
+    ├── Heating
+    ├── Burner
+    ├── BurnerRequest
+    ├── Sensor
+    ├── ErrorNotification
+    ├── Relay
+    ├── RelayStatus
+    └── RelayRequest
 ```
+
+Further event groups are created outside SharedResourceManager (device-ready group in SystemInitializer, `xGeneralSystemEventGroup` in `main.cpp`, SchedulerContext, TaskDependencyManager, EventAggregator instances).
 
 ## Benefits of Event-Driven Architecture
 
@@ -334,53 +345,44 @@ EventBits_t bits = xEventGroupWaitBits(group, VALUE_CHANGED, pdTRUE, ...);
 ### Burner Start Sequence
 
 ```
-1. WheaterControl detects tank temp < setpoint
-   → Sets BurnerRequest::WATER | WATER_CHANGED | CHANGED
-   → Encodes target temp (65°C) in bits 16-23
+1. WheaterControlTask starts a charge
+   → Sets SystemState::WATER_ON
+   → BurnerRequestManager::setWaterRequest(): BurnerRequest::WATER, power bit,
+     target encoded in bits 16-23, CHANGED | WATER_CHANGED
 
-2. BurnerControl task wakes on CHANGED bit
-   → Reads request bits
-   → Decodes target temp
-   → Performs safety checks
+2. BurnerControlTask wakes on CHANGE_EVENT_BITS
+   → Decodes target, safety checks, publishes BurnerDemandGate permission
+   → BurnerStateMachine::setHeatDemand(true) now, or later by BoilerTempControlTask
 
-3. BurnerControl sets Burner::ENABLE
-   → State machine starts: IDLE → PRE_PURGE
+3. BurnerStateMachine: IDLE → PRE_PURGE (2 s) → IGNITION → RUNNING_LOW/HIGH
+   → Sets SystemState::BURNER_ON on entering RUNNING_LOW/HIGH
+   → BURNER_WATER_LOW/HIGH are set by BurnerControlTask::updateBurnerState(),
+     which only runs on a request change (often still BURNER_OFF at that time)
 
-4. After pre-purge (10s)
-   → State machine: PRE_PURGE → IGNITION
-   → Sets SystemState::BURNER_ON
-
-5. After ignition confirmed
-   → State machine: IGNITION → RUNNING_HIGH
-   → Sets Burner::RUNNING | HIGH_POWER
-
-6. WheaterPump detects SystemState::WATER_ON
-   → Starts water circulation pump
-   → Sets SystemState::WATER_PUMP_ON
+4. WaterPumpTask (PumpControlModule) follows SystemState::WATER_ON
+   → Sets RelayRequest::WATER_PUMP_ON and SystemState::WATER_PUMP_ON
 ```
+
+Details: [EVENT_FLOW.md, Water Heating Request Flow](EVENT_FLOW.md#water-heating-request-flow).
 
 ### Emergency Shutdown
 
 ```
-1. SafetyInterlocks detects pressure < 0.5 BAR
-   → Sets Burner::ERROR_PRESSURE
+1. Failed safety interlock while the burner runs
+   → BurnerStateMachine::emergencyStop(): burner relays OFF, state ERROR
+     (SystemState::EMERGENCY_STOP is not set on this path)
 
-2. BurnerControl checks safety on every cycle
-   → Detects ERROR_PRESSURE bit
-   → Immediately sets SystemState::EMERGENCY_STOP
-   → Clears all burner request bits
-   → State machine: ANY → ERROR
+2. Coordinated stop: CentralizedFailsafe::emergencyStop()
+   → Burner relays OFF, both pumps forced ON for heat dissipation
+   → Sets SystemState::EMERGENCY_STOP (latched), clears BOILER_ENABLED
 
-3. CentralizedFailsafe triggered
-   → Saves emergency state to FRAM
-   → Notifies all tasks via EMERGENCY_STOP bit
-
-4. All control tasks react
-   → WheaterControl clears WATER request
-   → HeatingControl clears HEATING request
-   → Pumps stop
-   → System enters safe state
+3. Reactions
+   → BurnerControlTask: BurnerStateMachine::emergencyStop() once per onset
+   → PumpControlModule: pumps stay ON until the boiler output has cooled
+   → Heating/water tasks end their requests because BOILER_ENABLED is cleared
 ```
+
+MB8ARTTask sets `Burner::ERROR_PRESSURE` on a pressure alarm, but no task reads it. Details and release: [EVENT_FLOW.md, Emergency Stop Flow](EVENT_FLOW.md#emergency-stop-flow).
 
 ## Debugging Events
 
@@ -396,11 +398,10 @@ LOG_DEBUG(TAG, "Events received: 0x%06X", bits);
 ### Common Event Combinations
 
 ```cpp
-// Burner active for water heating at high power
+// Burner active for water heating at high power (SystemState group)
 EventBits_t expectedBits = SystemState::BURNER_ON |
                            SystemState::WATER_ON |
-                           Burner::RUNNING |
-                           Burner::HIGH_POWER;
+                           SystemState::BURNER_WATER_HIGH;
 
 // Any heating-related activity
 EventBits_t heatingMask = SystemState::HEATING_ON |
@@ -430,11 +431,19 @@ EventBits_t heatingMask = SystemState::HEATING_ON |
 Events are generated from a Python script for consistency:
 
 ```bash
-# Regenerate events (if needed)
-python scripts/generate_events_zero_overhead.py
+# Run from the repository root
+python3 tools/generate_events_zero_overhead.py tools/event_config.yaml
 
-# Output: include/events/SystemEventsGenerated.h
+# Output: include/events/SystemEventsGenerated.h and docs/generated/events.md
+# (paths from the output: section of event_config.yaml)
 ```
+
+**Do not regenerate until `tools/event_config.yaml` is corrected.** The header was edited by hand and the config no longer matches it:
+- BurnerRequest `CHANGED` / `HEATING_CHANGED` / `WATER_CHANGED` are bits 18-20 in the config but 5-7 in the header. Regenerating would move them back into the temperature field (bits 16-23).
+- HeatingEvent `ON` / `OFF` are parsed as YAML booleans and generated as `True` / `False`.
+- The `Error` group key appears twice; the second definition silently replaces the first.
+
+`docs/generated/events.md` is currently corrected by hand to match the header.
 
 ## Migration Notes
 
@@ -478,5 +487,4 @@ void task() {
 | Sensor | Sensor data ready | Control tasks |
 | ControlRequest | Command signaling | MQTT, UI, Scheduler |
 
-Total event bits available: 5 groups × 24 bits = 120 event bits
-Currently used: ~85 bits (~71% utilization)
+Each event group has 24 usable bits (bits 24-31 are reserved by FreeRTOS). The table lists the five groups described above; SharedResourceManager creates 11 (see Event Group Organization).

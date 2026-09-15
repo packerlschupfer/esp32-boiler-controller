@@ -1,6 +1,8 @@
 # Event System Documentation
 Generated: 2025-12-08 01:44:51
 
+Corrected by hand on 2026-09-15 to match `include/events/SystemEventsGenerated.h` (BurnerRequest change bits, ControlRequest `PID_SAVE`/`SAVE_PARAMETERS`, RelayControl `POWER_BOOST_*`). Do not regenerate until `tools/event_config.yaml` is fixed, see [EVENT_SYSTEM.md](../EVENT_SYSTEM.md#code-generation).
+
 ## Overview
 This system uses zero-overhead namespaced constants for event management.
 All constants compile to the same machine code as traditional #define macros.
@@ -81,9 +83,9 @@ All constants compile to the same machine code as traditional #define macros.
 | 1 | `WATER` | Water heating requesting burner |
 | 3 | `POWER_LOW` | Request low power mode |
 | 4 | `POWER_HIGH` | Request high power mode |
-| 18 | `CHANGED` | Any request changed |
-| 19 | `HEATING_CHANGED` | Heating request changed |
-| 20 | `WATER_CHANGED` | Water request changed |
+| 5 | `CHANGED` | Any request changed |
+| 6 | `HEATING_CHANGED` | Heating request changed |
+| 7 | `WATER_CHANGED` | Water request changed |
 
 **Special Regions:**
 - Bits 16-23: Encoded target temperature
@@ -186,10 +188,10 @@ All constants compile to the same machine code as traditional #define macros.
 | 16 | `MQTT_REPORT_ENABLE` | Enable MQTT reporting |
 | 17 | `MQTT_REPORT_DISABLE` | Disable MQTT reporting |
 | 18 | `WATER_PRIORITY_RELEASED` | Water priority was released (notify heating) |
+| 19 | `PID_SAVE` | Save PID parameters |
+| 20 | `SAVE_PARAMETERS` | Save system parameters |
 | 22 | `PID_AUTOTUNE` | Start PID auto-tuning |
 | 23 | `PID_AUTOTUNE_STOP` | Stop PID auto-tuning |
-| 24 | `PID_SAVE` | Save PID parameters |
-| 25 | `SAVE_PARAMETERS` | Save system parameters |
 
 ### DeviceReady
 **Handle:** `deviceReadyEventGroup`
@@ -301,8 +303,8 @@ All constants compile to the same machine code as traditional #define macros.
 | 5 | `BURNER_ENABLE_OFF` | Disable burner |
 | 6 | `WATER_MODE_ON` | Switch to water mode |
 | 7 | `WATER_MODE_OFF` | Exit water mode |
-| 8 | `HALF_POWER_ON` | Switch to half power |
-| 9 | `HALF_POWER_OFF` | Exit half power |
+| 8 | `POWER_BOOST_ON` | Activate power boost (full power) |
+| 9 | `POWER_BOOST_OFF` | Deactivate power boost (half power) |
 | 10 | `VALVE_OPEN` | Open valve |
 | 11 | `VALVE_CLOSE` | Close valve |
 | 12 | `ALARM_ON` | Activate alarm |
