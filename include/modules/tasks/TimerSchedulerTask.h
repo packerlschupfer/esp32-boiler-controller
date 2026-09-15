@@ -19,9 +19,11 @@ namespace TimerScheduler {
     
     /**
      * Get scheduler status as JSON
-     * @return Pointer to static buffer with JSON status (do not free)
+     * @param out Caller buffer (at least 48 bytes)
+     * @param size Size of out
+     * @return out, or a constant error JSON if the buffer is too small
      */
-    const char* getStatusJSON();
+    const char* getStatusJSON(char* out, size_t size);
     
     /**
      * Check if any schedule is currently active

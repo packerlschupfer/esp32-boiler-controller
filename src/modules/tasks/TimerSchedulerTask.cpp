@@ -444,8 +444,9 @@ void TimerSchedulerTask(void* parameter) {
 
 // Publish scheduler status
 static void publishSchedulerStatus() {
-    const char* status = TimerScheduler::getStatusJSON();
-    MQTTTask::publish(MQTT_STATUS_SCHEDULER_INFO, status);
+    // Local buffer: called from the scheduler task and from the MQTT task ("status")
+    char status[128];
+    MQTTTask::publish(MQTT_STATUS_SCHEDULER_INFO, TimerScheduler::getStatusJSON(status, sizeof(status)));
 }
 
 // Round 14 Issue #11: Cleanup function for scheduler resources
@@ -483,6 +484,10 @@ static void cleanupScheduler() {
 
 // Namespace implementation for public interface
 namespace TimerScheduler {
+
+// Reply buffer for processMQTTCommand(), which only runs in the MQTT task (single-task
+// static, docs/MEMORY_OPTIMIZATION.md). Sized to the MQTT publish payload.
+static char s_replyBuffer[sizeof(MQTTPublishRequest::payload)];
 
 void processMQTTCommand(const String& command, const String& payload) {
     if (!isInitialized) {
@@ -531,7 +536,8 @@ void processMQTTCommand(const String& command, const String& payload) {
         auto validation = MQTTValidator::validateScheduleAdd(doc);
         if (!validation) {
             LOG_ERROR(TAG, "Invalid schedule add command: %s", validation.error);
-            const char* response = SchedulerResponseFormatter::formatErrorResponse(validation.error);
+            const char* response = SchedulerResponseFormatter::formatErrorResponse(
+                s_replyBuffer, sizeof(s_replyBuffer), validation.error);
             MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
             return;
         }
@@ -671,7 +677,8 @@ void processMQTTCommand(const String& command, const String& payload) {
                                                SchedulerEvents::SCHEDULER_EVENT_SAVE_SCHEDULES);
 
         // Send response using formatter
-        const char* response = SchedulerResponseFormatter::formatStatusResponse(true, schedule.id);
+        const char* response = SchedulerResponseFormatter::formatStatusResponse(
+            s_replyBuffer, sizeof(s_replyBuffer), true, schedule.id);
         LOG_INFO(TAG, "Publishing add response: %s to %s", response, MQTT_TOPIC_SCHEDULER_RESPONSE);
         MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
         
@@ -699,7 +706,8 @@ void processMQTTCommand(const String& command, const String& payload) {
         auto validation = MQTTValidator::validateScheduleRemove(doc);
         if (!validation) {
             LOG_ERROR(TAG, "Invalid schedule remove command: %s", validation.error);
-            const char* response = SchedulerResponseFormatter::formatErrorResponse(validation.error);
+            const char* response = SchedulerResponseFormatter::formatErrorResponse(
+                s_replyBuffer, sizeof(s_replyBuffer), validation.error);
             MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
             return;
         }
@@ -736,7 +744,7 @@ void processMQTTCommand(const String& command, const String& payload) {
 
         // Send response using formatter
         const char* response = found ?
-            SchedulerResponseFormatter::formatStatusResponse(true, id) :
+            SchedulerResponseFormatter::formatStatusResponse(s_replyBuffer, sizeof(s_replyBuffer), true, id) :
             SchedulerResponseFormatter::PreformattedResponses::ERROR_NOT_FOUND;
         MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
 
@@ -754,7 +762,8 @@ void processMQTTCommand(const String& command, const String& payload) {
         }
 
         // List schedules using formatter (mutex held)
-        const char* response = SchedulerResponseFormatter::formatScheduleList(timerSchedules);
+        const char* response = SchedulerResponseFormatter::formatScheduleList(
+            s_replyBuffer, sizeof(s_replyBuffer), timerSchedules);
         xSemaphoreGive(schedulesMutex);
 
         LOG_INFO(TAG, "Publishing list response: %s", response);
@@ -764,10 +773,9 @@ void processMQTTCommand(const String& command, const String& payload) {
     }
 }
 
-const char* getStatusJSON() {
-    // Use formatter for consistent response (returns pointer to static buffer)
+const char* getStatusJSON(char* out, size_t size) {
     return SchedulerResponseFormatter::formatScheduleStatus(
-        timerSchedules, activeSchedules, isAnyScheduleActive());
+        out, size, timerSchedules, activeSchedules, isAnyScheduleActive());
 }
 
 bool isAnyScheduleActive() {
