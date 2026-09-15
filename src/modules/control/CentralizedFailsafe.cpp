@@ -275,6 +275,7 @@ void CentralizedFailsafe::emergencyStop(const char* reason, EmergencyStopRelease
         (xEventGroupGetBits(SRP::getSystemStateEventGroup()) & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
     latchCause_.store(EmergencyStopRelease::mergeCause(alreadyLatched, latchCause_.load(), cause));
 
+    const bool enteringCritical = currentLevel.load() < FailsafeLevel::CRITICAL;
     currentLevel.store(FailsafeLevel::EMERGENCY);
 
     // 1. Immediately shut down burner via BurnerSystemController
@@ -304,7 +305,16 @@ void CentralizedFailsafe::emergencyStop(const char* reason, EmergencyStopRelease
     
     // 6. Log to persistent storage
     ErrorHandler::logError(TAG, SystemError::SYSTEM_FAILSAFE_TRIGGERED, reason);
-    
+
+    // 6b. FRAM emergency record. triggerFailsafe() saves it when entering CRITICAL; direct
+    // stops (critical temperature, stale sensors, request watchdog) never did (2026-09-15).
+    // Written directly, without the relay/sensor mutex waits of saveEmergencyState(): the
+    // caller may hold the sensor mutex.
+    if (enteringCritical) {
+        CriticalDataStorage::saveEmergencyState(static_cast<uint8_t>(SystemError::EMERGENCY_STOP),
+                                                static_cast<uint32_t>(SystemError::EMERGENCY_STOP));
+    }
+
     // 7. Schedule transition to shutdown after timeout
     // This would typically be handled by a supervisor task
 }
