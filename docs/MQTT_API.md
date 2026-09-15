@@ -589,7 +589,7 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 |-----------|-------|-------|---------|-------------|
 | Tank start | `wheater/tempLimitLow` | 300-600 (30.0-60.0°C) | 450 | Start a charge below this |
 | Tank stop | `wheater/tempLimitHigh` | 500-850 (50.0-85.0°C) | 650 | Stop a charge above this |
-| Outside threshold | `heating/outsideThreshold` | 50-250 (5.0-25.0°C) | 150 | Weather-compensated heating runs below this |
+| Outside threshold | `heating/outsideThreshold` | 50-250 (5.0-25.0°C) | 150 | Weather-compensated heating starts below this and stops at threshold + 1.0°C (hysteresis) |
 | Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
 | Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
 | Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |
