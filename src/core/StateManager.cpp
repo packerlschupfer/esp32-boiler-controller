@@ -1,6 +1,7 @@
 // src/core/StateManager.cpp
 #include "core/StateManager.h"
 #include "modules/tasks/WheaterControlTask.h"  // notifyWheaterTaskSwitchedOff()
+#include "modules/tasks/PersistentStorageTask.h"  // PersistentStorageTask_RequestSave()
 #include "core/SystemResourceProvider.h"
 #include "events/SystemEventsGenerated.h"
 #include "shared/SharedSensorReadings.h"
@@ -462,12 +463,20 @@ void StateManager::clearSettingsDirty() {
 void StateManager::markSettingsDirty() {
     if (dirtyFlagMutex_ == nullptr) {
         settingsDirty_ = true;
-        return;
+    } else {
+        MutexGuard guard(dirtyFlagMutex_, pdMS_TO_TICKS(10));
+        if (guard.hasLock()) {
+            settingsDirty_ = true;
+        }
     }
-    MutexGuard guard(dirtyFlagMutex_, pdMS_TO_TICKS(10));
-    if (guard.hasLock()) {
-        settingsDirty_ = true;
-    }
+
+    // Save now: the dirty flag had no consumer and PersistentStorageTask only saves on
+    // request, so boiler/heating/water enable, water priority and the OFF overrides
+    // stayed RAM-only and a reboot restored the previous state (2026-09-15: water
+    // heating switched off came back on after a reset). The enable, priority and
+    // override parameters are registered directly on the SystemSettings fields, so
+    // saveAll() stores the current values.
+    PersistentStorageTask_RequestSave();
 }
 
 // ========== Internal Helpers ==========

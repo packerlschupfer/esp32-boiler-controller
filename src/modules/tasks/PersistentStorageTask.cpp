@@ -673,7 +673,7 @@ void PersistentStorageTask(void* pvParameters) {
     
     // Removed automatic save timer - saves now triggered only by MQTT commands
     // This prevents unnecessary flash wear from periodic writes
-    LOG_INFO(TAG, "Automatic saves disabled - use MQTT commands to save");
+    LOG_INFO(TAG, "No periodic saves - saved on parameter set, boiler/params/save and enable/priority/override commands");
     
     // Main event-driven loop
     
