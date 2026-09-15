@@ -1,7 +1,7 @@
 # Event System Documentation
-Generated: 2025-12-08 01:44:51
+Generated: 2026-09-15 23:05:22
 
-Corrected by hand on 2026-09-15 to match `include/events/SystemEventsGenerated.h` (BurnerRequest change bits, ControlRequest `PID_SAVE`/`SAVE_PARAMETERS`, RelayControl `POWER_BOOST_*`). Do not regenerate until `tools/event_config.yaml` is fixed, see [EVENT_SYSTEM.md](../EVENT_SYSTEM.md#code-generation).
+Generated from `tools/event_config.yaml` by `tools/generate_events_zero_overhead.py`.
 
 ## Overview
 This system uses zero-overhead namespaced constants for event management.
@@ -88,7 +88,7 @@ All constants compile to the same machine code as traditional #define macros.
 | 7 | `WATER_CHANGED` | Water request changed |
 
 **Special Regions:**
-- Bits 16-23: Encoded target temperature
+- Bits 16-23: Encoded target temperature (bits 16-23, do NOT use these bits for flags!)
 
 **Derived Constants:**
 - `ANY_REQUEST`: HEATING | WATER

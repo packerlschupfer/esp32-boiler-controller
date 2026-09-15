@@ -179,6 +179,10 @@ uint8_t targetTemp = (bits >> 16) & 0xFF;  // Extract temperature
 
 Combinations: `ALL_TEMPS` (bits 0-7), `CRITICAL_TEMPS` (`BOILER_OUTPUT | EXHAUST`).
 
+**Who sets the per-channel bits**: the MB8ART library, using `SensorHardware::CONFIGS` (`include/config/SensorHardwareConfig.h`, index = channel from `SensorIndices.h`): CH0 `BOILER_OUTPUT`, CH1 `BOILER_RETURN`, CH2 `WATER_TANK`, CH3 `OUTSIDE`, CH6 `WATER_RETURN`, CH7 `HEATING_RETURN` with their `*_ERROR` bits; CH4 (pressure) and CH5 have no library bits, `PRESSURE` / `PRESSURE_ERROR` come from MB8ARTTasks after conversion. `INSIDE` / `INSIDE_ERROR` come from ANDRTF3Task, `DATA_AVAILABLE` / `DATA_ERROR` / `FIRST_READ_COMPLETE` from MB8ARTTasks. Before 2026-09-15 the library ignored the table and used interleaved bits (update 2n, error 2n+1), which overlapped these names (see CHANGELOG).
+
+**Consumers**: BoilerTempControlTask waits on `BOILER_OUTPUT` (clear-on-exit), BurnerControlTask polls `BOILER_RETURN | WATER_TANK` and also updates on its 1 s timer, SafetyInterlocks reads `DATA_AVAILABLE`, MonitoringTask and OtaRollbackGuard read `FIRST_READ_COMPLETE`.
+
 **Usage Example**:
 ```cpp
 // Wait for boiler temperature update
@@ -438,12 +442,10 @@ python3 tools/generate_events_zero_overhead.py tools/event_config.yaml
 # (paths from the output: section of event_config.yaml)
 ```
 
-**Do not regenerate until `tools/event_config.yaml` is corrected.** The header was edited by hand and the config no longer matches it:
-- BurnerRequest `CHANGED` / `HEATING_CHANGED` / `WATER_CHANGED` are bits 18-20 in the config but 5-7 in the header. Regenerating would move them back into the temperature field (bits 16-23).
-- HeatingEvent `ON` / `OFF` are parsed as YAML booleans and generated as `True` / `False`.
-- The `Error` group key appears twice; the second definition silently replaces the first.
-
-`docs/generated/events.md` is currently corrected by hand to match the header.
+Regenerating reproduces the committed header byte for byte, except the `Generated on:` timestamp line. Edit `tools/event_config.yaml`, never the header. Quote names that YAML would read as booleans (the HeatingEvent names are `"True"` / `"False"`). Optional config keys:
+- `comment` on an event: comment line emitted above that constant
+- `next_free_bit` on a group: replaces the computed "Next free bit" text
+- `migration_macro_order` on a group: order of the migration helper macros (must list every event once)
 
 ## Migration Notes
 

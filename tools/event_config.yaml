@@ -81,11 +81,13 @@ event_groups:
       # Note: Bit 2 was PRIORITY_WATER, now removed - use SystemState::WATER_PRIORITY instead
       - { name: POWER_LOW, bit: 3, desc: "Request low power mode" }
       - { name: POWER_HIGH, bit: 4, desc: "Request high power mode" }
-      - { name: CHANGED, bit: 18, desc: "Any request changed" }
-      - { name: HEATING_CHANGED, bit: 19, desc: "Heating request changed" }
-      - { name: WATER_CHANGED, bit: 20, desc: "Water request changed" }
+      # Change bits (5-7), kept out of the temperature field (bits 16-23)
+      - { name: CHANGED, bit: 5, desc: "Any request changed", comment: "M9: Moved CHANGED bits from 18-20 to 5-7 to avoid collision with TEMPERATURE_MASK (bits 16-23)" }
+      - { name: HEATING_CHANGED, bit: 6, desc: "Heating request changed" }
+      - { name: WATER_CHANGED, bit: 7, desc: "Water request changed" }
+    next_free_bit: "8 (bits 8-15 free, bits 16-23 reserved for temperature)"
     special_regions:
-      - { name: TEMPERATURE, start_bit: 16, end_bit: 23, desc: "Encoded target temperature" }
+      - { name: TEMPERATURE, start_bit: 16, end_bit: 23, desc: "Encoded target temperature (bits 16-23, do NOT use these bits for flags!)" }
     derived_bits:
       - { name: ANY_REQUEST, expr: "HEATING | WATER" }
       - { name: POWER_BITS, expr: "POWER_LOW | POWER_HIGH" }
@@ -127,115 +129,6 @@ event_groups:
       - { name: ALL_TEMPS, expr: "BOILER_OUTPUT | BOILER_RETURN | WATER_TANK | WATER_OUTPUT | WATER_RETURN | HEATING_RETURN | OUTSIDE | INSIDE" }
       - { name: CRITICAL_TEMPS, expr: "BOILER_OUTPUT | EXHAUST" }
 
-  # Error Event Group (xErrorEventGroup)
-  Error:
-    handle: xErrorEventGroup
-    description: "System error tracking"
-    events:
-      # Component errors (0-7)
-      - { name: SENSOR_FAILURE, bit: 0, desc: "Sensor has failed" }
-      - { name: SENSOR_RESOLVED, bit: 1, desc: "Sensor error resolved" }
-      - { name: WATER_HEATER, bit: 2, desc: "Water heater error" }
-      - { name: WATER_HEATER_RESOLVED, bit: 3, desc: "Water heater error resolved" }
-      - { name: BURNER, bit: 4, desc: "Burner error" }
-      - { name: BURNER_RESOLVED, bit: 5, desc: "Burner error resolved" }
-      - { name: PUMP, bit: 6, desc: "Pump error" }
-      - { name: PUMP_RESOLVED, bit: 7, desc: "Pump error resolved" }
-      # System errors (8-15)
-      - { name: GENERAL_SYSTEM, bit: 8, desc: "General system error" }
-      - { name: GENERAL_SYSTEM_RESOLVED, bit: 9, desc: "System error resolved" }
-      - { name: COMMUNICATION, bit: 10, desc: "Communication error" }
-      - { name: COMMUNICATION_RESOLVED, bit: 11, desc: "Communication error resolved" }
-      - { name: MEMORY, bit: 12, desc: "Memory error" }
-      - { name: MEMORY_RESOLVED, bit: 13, desc: "Memory error resolved" }
-      - { name: SAFETY, bit: 14, desc: "Safety check failed" }
-      - { name: SAFETY_RESOLVED, bit: 15, desc: "Safety error resolved" }
-      # Critical errors (16-21)
-      - { name: OVERHEAT, bit: 16, desc: "Overheating detected" }
-      - { name: OVERHEAT_RESOLVED, bit: 17, desc: "Overheat resolved" }
-      - { name: MODBUS, bit: 18, desc: "Modbus error" }
-      - { name: RELAY, bit: 19, desc: "Relay control error" }
-      - { name: NETWORK, bit: 20, desc: "Network error" }
-      - { name: HEATING, bit: 20, desc: "Heating system error" }
-      - { name: HEATING_CLEARED, bit: 21, desc: "Heating error cleared" }
-      - { name: DETECTED, bit: 22, desc: "General error detected" }
-    derived_bits:
-      - { name: ANY_ACTIVE, expr: "SENSOR_FAILURE | WATER_HEATER | BURNER | PUMP | GENERAL_SYSTEM | COMMUNICATION | MEMORY | SAFETY | OVERHEAT | MODBUS | RELAY | NETWORK" }
-      - { name: CRITICAL, expr: "OVERHEAT | SAFETY | BURNER" }
-
-  # Control Request Event Group (xControlRequestEventGroup)
-  ControlRequest:
-    handle: xControlRequestEventGroup
-    description: "Remote control requests from MQTT/scheduler"
-    events:
-      # System control (0-7)
-      - { name: BOILER_ENABLE, bit: 0, desc: "Enable boiler system" }
-      - { name: BOILER_DISABLE, bit: 1, desc: "Disable boiler system" }
-      - { name: HEATING_ENABLE, bit: 2, desc: "Enable heating" }
-      - { name: HEATING_DISABLE, bit: 3, desc: "Disable heating" }
-      - { name: HEATING_ON_OVERRIDE, bit: 4, desc: "Force heating on" }
-      - { name: HEATING_OFF_OVERRIDE, bit: 5, desc: "Force heating off" }
-      - { name: WATER_ENABLE, bit: 6, desc: "Enable water heating" }
-      - { name: WATER_DISABLE, bit: 7, desc: "Disable water heating" }
-      # Water control (8-11)
-      - { name: WATER_PRIORITY_ENABLE, bit: 8, desc: "Enable water priority" }
-      - { name: WATER_PRIORITY_DISABLE, bit: 9, desc: "Disable water priority" }
-      - { name: WATER_ON_OVERRIDE, bit: 10, desc: "Force water heating on" }
-      - { name: WATER_OFF_OVERRIDE, bit: 11, desc: "Force water heating off" }
-      # MQTT control (12-17)
-      - { name: MQTT_ENABLE, bit: 12, desc: "Enable MQTT" }
-      - { name: MQTT_DISABLE, bit: 13, desc: "Disable MQTT" }
-      - { name: MQTT_COMMAND_ENABLE, bit: 14, desc: "Enable MQTT commands" }
-      - { name: MQTT_COMMAND_DISABLE, bit: 15, desc: "Disable MQTT commands" }
-      - { name: MQTT_REPORT_ENABLE, bit: 16, desc: "Enable MQTT reporting" }
-      - { name: MQTT_REPORT_DISABLE, bit: 17, desc: "Disable MQTT reporting" }
-      # Inter-task notification events (18-20)
-      - { name: WATER_PRIORITY_RELEASED, bit: 18, desc: "Water priority was released (notify heating)" }
-      - { name: PID_SAVE, bit: 19, desc: "Save PID parameters" }
-      - { name: SAVE_PARAMETERS, bit: 20, desc: "Save system parameters" }
-      # PID control (22-23) - Note: bits 24-31 reserved by FreeRTOS!
-      - { name: PID_AUTOTUNE, bit: 22, desc: "Start PID auto-tuning" }
-      - { name: PID_AUTOTUNE_STOP, bit: 23, desc: "Stop PID auto-tuning" }
-
-  # Device Ready Event Group (local to SystemInitializer)
-  DeviceReady:
-    handle: deviceReadyEventGroup
-    description: "Device initialization status tracking"
-    events:
-      - { name: MB8ART_READY, bit: 0, desc: "MB8ART device initialized and ready" }
-      - { name: MB8ART_ERROR, bit: 1, desc: "MB8ART initialization error" }
-      - { name: RYN4_READY, bit: 2, desc: "RYN4 device initialized and ready" }
-      - { name: RYN4_ERROR, bit: 3, desc: "RYN4 initialization error" }
-    derived_bits:
-      - { name: ALL_CRITICAL_READY, expr: "MB8ART_READY | RYN4_READY" }
-
-  # Heating Event Group (xHeatingEventGroup)
-  HeatingEvent:
-    handle: xHeatingEventGroup
-    description: "Heating system control events"
-    events:
-      # System events (0-8)
-      - { name: ON, bit: 0, desc: "Heating system is turned on" }
-      - { name: OFF, bit: 1, desc: "Heating system is turned off" }
-      - { name: TEMP_LOW, bit: 2, desc: "Temperature below setpoint" }
-      - { name: TEMP_HIGH, bit: 3, desc: "Temperature above setpoint" }
-      - { name: ERROR, bit: 4, desc: "Heating system error occurred" }
-      - { name: PUMP_ON, bit: 5, desc: "Heating pump turned on" }
-      - { name: PUMP_OFF, bit: 6, desc: "Heating pump turned off" }
-      - { name: DEMAND, bit: 7, desc: "Heat demand detected" }
-      - { name: NO_DEMAND, bit: 8, desc: "No heat demand" }
-      # Auto-tuning events (9-13)
-      - { name: AUTOTUNE_START, bit: 9, desc: "Start PID auto-tuning" }
-      - { name: AUTOTUNE_STOP, bit: 10, desc: "Stop PID auto-tuning" }
-      - { name: AUTOTUNE_RUNNING, bit: 11, desc: "Auto-tuning in progress" }
-      - { name: AUTOTUNE_COMPLETE, bit: 12, desc: "Auto-tuning completed" }
-      - { name: AUTOTUNE_FAILED, bit: 13, desc: "Auto-tuning failed" }
-      # Error conditions (16-19)
-      - { name: ERROR_SENSOR, bit: 16, desc: "Temperature sensor error" }
-      - { name: ERROR_PUMP, bit: 17, desc: "Heating pump error" }
-      - { name: ERROR_OVERHEAT, bit: 18, desc: "Overheating detected" }
-      - { name: ERROR_TIMEOUT, bit: 19, desc: "Heating timeout" }
-
   # Error Notification Event Group (ERROR_NOTIFICATION)
   Error:
     handle: ERROR_NOTIFICATION
@@ -276,6 +169,106 @@ event_groups:
       - { name: SENSOR, expr: "SENSOR_FAILURE", desc: "Alias for sensor failure" }
       - { name: ANY_ACTIVE, expr: "SENSOR_FAILURE | WHEATER | BURNER | PUMP | GENERAL_SYSTEM | COMMUNICATION | MEMORY | SAFETY | OVERHEAT" }
       - { name: ALL_RESOLVED, expr: "SENSOR_RESOLVED | WHEATER_RESOLVED | BURNER_RESOLVED | PUMP_RESOLVED | GENERAL_SYSTEM_RESOLVED | COMMUNICATION_RESOLVED | MEMORY_RESOLVED | SAFETY_RESOLVED | OVERHEAT_RESOLVED" }
+
+  # Control Request Event Group (xControlRequestEventGroup)
+  ControlRequest:
+    handle: xControlRequestEventGroup
+    description: "Remote control requests from MQTT/scheduler"
+    events:
+      # System control (0-7)
+      - { name: BOILER_ENABLE, bit: 0, desc: "Enable boiler system" }
+      - { name: BOILER_DISABLE, bit: 1, desc: "Disable boiler system" }
+      - { name: HEATING_ENABLE, bit: 2, desc: "Enable heating" }
+      - { name: HEATING_DISABLE, bit: 3, desc: "Disable heating" }
+      - { name: HEATING_ON_OVERRIDE, bit: 4, desc: "Force heating on" }
+      - { name: HEATING_OFF_OVERRIDE, bit: 5, desc: "Force heating off" }
+      - { name: WATER_ENABLE, bit: 6, desc: "Enable water heating" }
+      - { name: WATER_DISABLE, bit: 7, desc: "Disable water heating" }
+      # Water control (8-11)
+      - { name: WATER_PRIORITY_ENABLE, bit: 8, desc: "Enable water priority" }
+      - { name: WATER_PRIORITY_DISABLE, bit: 9, desc: "Disable water priority" }
+      - { name: WATER_ON_OVERRIDE, bit: 10, desc: "Force water heating on" }
+      - { name: WATER_OFF_OVERRIDE, bit: 11, desc: "Force water heating off" }
+      # MQTT control (12-17)
+      - { name: MQTT_ENABLE, bit: 12, desc: "Enable MQTT" }
+      - { name: MQTT_DISABLE, bit: 13, desc: "Disable MQTT" }
+      - { name: MQTT_COMMAND_ENABLE, bit: 14, desc: "Enable MQTT commands" }
+      - { name: MQTT_COMMAND_DISABLE, bit: 15, desc: "Disable MQTT commands" }
+      - { name: MQTT_REPORT_ENABLE, bit: 16, desc: "Enable MQTT reporting" }
+      - { name: MQTT_REPORT_DISABLE, bit: 17, desc: "Disable MQTT reporting" }
+      # Inter-task notification events (18-20)
+      - { name: WATER_PRIORITY_RELEASED, bit: 18, desc: "Water priority was released (notify heating)" }
+      - { name: PID_SAVE, bit: 19, desc: "Save PID parameters" }
+      - { name: SAVE_PARAMETERS, bit: 20, desc: "Save system parameters" }
+      # PID control (22-23) - Note: bits 24-31 reserved by FreeRTOS!
+      - { name: PID_AUTOTUNE, bit: 22, desc: "Start PID auto-tuning" }
+      - { name: PID_AUTOTUNE_STOP, bit: 23, desc: "Stop PID auto-tuning" }
+    next_free_bit: "21 (Note: bits 24-31 reserved by FreeRTOS!)"
+    migration_macro_order:
+      - BOILER_ENABLE
+      - BOILER_DISABLE
+      - HEATING_ENABLE
+      - HEATING_DISABLE
+      - HEATING_ON_OVERRIDE
+      - HEATING_OFF_OVERRIDE
+      - WATER_ENABLE
+      - WATER_DISABLE
+      - WATER_PRIORITY_ENABLE
+      - WATER_PRIORITY_DISABLE
+      - WATER_ON_OVERRIDE
+      - WATER_OFF_OVERRIDE
+      - MQTT_ENABLE
+      - MQTT_DISABLE
+      - MQTT_COMMAND_ENABLE
+      - MQTT_COMMAND_DISABLE
+      - MQTT_REPORT_ENABLE
+      - MQTT_REPORT_DISABLE
+      - WATER_PRIORITY_RELEASED
+      - PID_AUTOTUNE
+      - PID_AUTOTUNE_STOP
+      - PID_SAVE
+      - SAVE_PARAMETERS
+
+  # Device Ready Event Group (local to SystemInitializer)
+  DeviceReady:
+    handle: deviceReadyEventGroup
+    description: "Device initialization status tracking"
+    events:
+      - { name: MB8ART_READY, bit: 0, desc: "MB8ART device initialized and ready" }
+      - { name: MB8ART_ERROR, bit: 1, desc: "MB8ART initialization error" }
+      - { name: RYN4_READY, bit: 2, desc: "RYN4 device initialized and ready" }
+      - { name: RYN4_ERROR, bit: 3, desc: "RYN4 initialization error" }
+    derived_bits:
+      - { name: ALL_CRITICAL_READY, expr: "MB8ART_READY | RYN4_READY" }
+
+  # Heating Event Group (xHeatingEventGroup)
+  HeatingEvent:
+    handle: xHeatingEventGroup
+    description: "Heating system control events"
+    events:
+      # System events (0-8)
+      # Names are quoted strings: unquoted ON/OFF are YAML booleans. The header
+      # uses True/False, so they are kept as-is (do not rename without code changes).
+      - { name: "True", bit: 0, desc: "Heating system is turned on" }
+      - { name: "False", bit: 1, desc: "Heating system is turned off" }
+      - { name: TEMP_LOW, bit: 2, desc: "Temperature below setpoint" }
+      - { name: TEMP_HIGH, bit: 3, desc: "Temperature above setpoint" }
+      - { name: ERROR, bit: 4, desc: "Heating system error occurred" }
+      - { name: PUMP_ON, bit: 5, desc: "Heating pump turned on" }
+      - { name: PUMP_OFF, bit: 6, desc: "Heating pump turned off" }
+      - { name: DEMAND, bit: 7, desc: "Heat demand detected" }
+      - { name: NO_DEMAND, bit: 8, desc: "No heat demand" }
+      # Auto-tuning events (9-13)
+      - { name: AUTOTUNE_START, bit: 9, desc: "Start PID auto-tuning" }
+      - { name: AUTOTUNE_STOP, bit: 10, desc: "Stop PID auto-tuning" }
+      - { name: AUTOTUNE_RUNNING, bit: 11, desc: "Auto-tuning in progress" }
+      - { name: AUTOTUNE_COMPLETE, bit: 12, desc: "Auto-tuning completed" }
+      - { name: AUTOTUNE_FAILED, bit: 13, desc: "Auto-tuning failed" }
+      # Error conditions (16-19)
+      - { name: ERROR_SENSOR, bit: 16, desc: "Temperature sensor error" }
+      - { name: ERROR_PUMP, bit: 17, desc: "Heating pump error" }
+      - { name: ERROR_OVERHEAT, bit: 18, desc: "Overheating detected" }
+      - { name: ERROR_TIMEOUT, bit: 19, desc: "Heating timeout" }
 
   # General System Event Group (xGeneralSystemEventGroup)
   GeneralSystem:

@@ -58,10 +58,15 @@ def generate_zero_overhead_header(config):
                 bit = event['bit']
                 name = event['name']
                 desc = event['desc']
+                # Optional comment line emitted above the constant
+                if 'comment' in event:
+                    output.append(f"        // {event['comment']}")
                 output.append(f"        constexpr EventBits_t {name} = (1UL << {bit}UL);  // {desc}")
                 max_bit = max(max_bit, bit)
-            
-            output.append(f"        // Next free bit: {max_bit + 1}")
+
+            # Optional override of the "Next free bit" text
+            next_free = group_data.get('next_free_bit', max_bit + 1)
+            output.append(f"        // Next free bit: {next_free}")
         
         # Special regions (like temperature encoding)
         if 'special_regions' in group_data:
@@ -117,7 +122,15 @@ def generate_zero_overhead_header(config):
     output.append("/*")
     for group_name, group_data in config['event_groups'].items():
         if 'events' in group_data:
-            for event in group_data['events']:
+            events = group_data['events']
+            # Optional explicit order of the migration macros (event names)
+            order = group_data.get('migration_macro_order')
+            if order:
+                by_name = {e['name']: e for e in events}
+                if sorted(order) != sorted(by_name):
+                    sys.exit(f"{group_name}: migration_macro_order must list every event name exactly once")
+                events = [by_name[n] for n in order]
+            for event in events:
                 old_style = f"{group_name.upper()}_{event['name']}_BIT"
                 new_style = f"SystemEvents::{group_name}::{event['name']}"
                 output.append(f"#define {old_style} {new_style}")
@@ -213,6 +226,8 @@ def generate_documentation(config):
     output = []
     output.append("# Event System Documentation")
     output.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    output.append("")
+    output.append("Generated from `tools/event_config.yaml` by `tools/generate_events_zero_overhead.py`.")
     output.append("")
     output.append("## Overview")
     output.append("This system uses zero-overhead namespaced constants for event management.")
