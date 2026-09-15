@@ -12,6 +12,7 @@
 #include "modules/control/SafetyInterlocks.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/ReturnPreheater.h"
+#include "modules/control/SensorFailureConfirm.h"
 #include "shared/SharedResources.h"
 #include "events/SystemEventsGenerated.h"
 #include "events/TemperatureEventHelpers.h"
@@ -251,13 +252,15 @@ void BurnerControlTask(void* parameter) {
     // Main task loop - truly event-driven
     while (true) {
         // Build event masks
-        // Note (2026-09-15): no task sets these per-channel bits in SRP's sensor event group
-        // (the MB8ART library keeps its channel bits in its own group), so this trigger and the
-        // sensor check in processTemperatureUpdate() never run; the state machine is updated
-        // by the 1 s STATE_TIMEOUT below
-        const EventBits_t TEMP_UPDATE_BITS = SystemEvents::SensorUpdate::BOILER_OUTPUT |
-                                            SystemEvents::SensorUpdate::BOILER_RETURN |
-                                            SystemEvents::SensorUpdate::WATER_TANK;
+        // MB8ARTTasks sets each channel's update bit (valid reading) or error bit (invalid)
+        // after every read; these bits were never set before 2026-09-15. BOILER_OUTPUT is left
+        // to BoilerTempControlTask, which waits on it with clear-on-exit; the return/tank update
+        // and the error bits give one wake-up per read even when a channel fails
+        const EventBits_t TEMP_UPDATE_BITS = SystemEvents::SensorUpdate::BOILER_RETURN |
+                                            SystemEvents::SensorUpdate::WATER_TANK |
+                                            SystemEvents::SensorUpdate::BOILER_OUTPUT_ERROR |
+                                            SystemEvents::SensorUpdate::BOILER_RETURN_ERROR |
+                                            SystemEvents::SensorUpdate::WATER_TANK_ERROR;
         const EventBits_t SAFETY_EVENT_BITS = SystemEvents::Burner::FLAME_STATE_CHANGED | 
                                              SystemEvents::Burner::PRESSURE_CHANGED |
                                              SystemEvents::Burner::FLOW_CHANGED | 
@@ -436,14 +439,21 @@ static void processTemperatureUpdate() {
     // Update state machine when temperatures change
     BurnerStateMachine::update();
     
-    // Check temperature sensor status
-    if (!TemperatureSensorFallback::canContinueOperation()) {
-        if (burnerState.lastHeatDemand) {
-            LOG_ERROR(TAG, "Temperature sensor failure - emergency shutdown");
-            BurnerStateMachine::emergencyStop();
-            burnerState.lastHeatDemand = false;
-            // Signal sensor error (bits not defined in current system)
-        }
+    // Check temperature sensor status. One invalid reading already makes the heating and water
+    // tasks drop their requests; the burner emergency stop (ERROR for errorRecoveryMs) follows
+    // only when the required sensors stay missing with heat demand (SensorFailureConfirm)
+    static SensorFailureConfirm::State sensorFailure;
+    const bool wasFailing = sensorFailure.failing;
+    const bool sensorsOk = TemperatureSensorFallback::canContinueOperation();
+    if (SensorFailureConfirm::shouldStop(sensorFailure, sensorsOk, burnerState.lastHeatDemand, millis())) {
+        LOG_ERROR(TAG, "Temperature sensor failure for %lu s with heat demand - emergency shutdown",
+                  static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
+        BurnerStateMachine::emergencyStop();
+        burnerState.lastHeatDemand = false;
+        sensorFailure = SensorFailureConfirm::State();
+    } else if (sensorFailure.failing && !wasFailing) {
+        LOG_WARN(TAG, "Temperature sensors missing with heat demand - emergency stop if still missing after %lu s",
+                 static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
     }
 }
 

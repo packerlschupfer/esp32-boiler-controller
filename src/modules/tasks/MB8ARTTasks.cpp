@@ -6,6 +6,7 @@
 #include "config/SystemConstants.h"
 #include "config/SystemSettingsStruct.h"
 #include "config/SensorIndices.h"
+#include "config/SensorHardwareConfig.h"
 #include <atomic>
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"
@@ -481,6 +482,31 @@ void updateSensorData(const std::vector<float>& temperatureData) {
             xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::FIRST_READ_COMPLETE);
         }
         
+        // Per-channel update/error bits in SRP's sensor event group (never set before 2026-09-15;
+        // the MB8ART library keeps its own copy in a separate event group). Consumers:
+        // BoilerTempControlTask (BOILER_OUTPUT), BurnerControlTask (return/tank and error bits).
+        // Valid channel: set update bit, clear error bit. Invalid channel: set error bit.
+        if (mb8artDevice != nullptr) {
+            EventBits_t updateBits = 0;
+            EventBits_t errorBitsToSet = 0;
+            EventBits_t errorBitsToClear = 0;
+            for (uint8_t ch = 0; ch < MB8ART_ACTIVE_CHANNELS && ch < SensorHardware::CONFIGS.size(); ch++) {
+                const auto& channelConfig = SensorHardware::CONFIGS[ch];
+                if (mb8artDevice->getSensorReading(ch).isTemperatureValid) {
+                    updateBits |= channelConfig.updateEventBit;
+                    errorBitsToClear |= channelConfig.errorEventBit;
+                } else {
+                    errorBitsToSet |= channelConfig.errorEventBit;
+                }
+            }
+            if (errorBitsToClear != 0) {
+                xEventGroupClearBits(SRP::getSensorEventGroup(), errorBitsToClear);
+            }
+            if ((updateBits | errorBitsToSet) != 0) {
+                xEventGroupSetBits(SRP::getSensorEventGroup(), updateBits | errorBitsToSet);
+            }
+        }
+
         // Always set data available bit after successful update
         xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::DATA_AVAILABLE);
 

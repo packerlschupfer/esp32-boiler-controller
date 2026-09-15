@@ -43,6 +43,12 @@ void test_ota_validation_waits_for_min_uptime();
 void test_ota_validation_needs_sensors_and_network();
 void test_ota_validation_rolls_back_after_max_wait();
 
+// Sensor failure confirmation (burner stop on persistently missing sensors)
+void test_sensor_failure_single_glitch_does_not_stop();
+void test_sensor_failure_persistent_with_demand_stops();
+void test_sensor_failure_without_demand_never_stops();
+void test_sensor_failure_millis_wrap();
+
 // Autotune peak/trough tracking (lagging plant)
 void test_relay_extrema_peaks_include_post_switch_overshoot();
 void test_relay_extrema_troughs_include_post_switch_undershoot();
@@ -473,6 +479,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_ota_validation_waits_for_min_uptime);
     RUN_TEST(test_ota_validation_needs_sensors_and_network);
     RUN_TEST(test_ota_validation_rolls_back_after_max_wait);
+
+    // Sensor failure confirmation
+    RUN_TEST(test_sensor_failure_single_glitch_does_not_stop);
+    RUN_TEST(test_sensor_failure_persistent_with_demand_stops);
+    RUN_TEST(test_sensor_failure_without_demand_never_stops);
+    RUN_TEST(test_sensor_failure_millis_wrap);
 
     // Autotune peak/trough tracking (lagging plant)
     RUN_TEST(test_relay_extrema_peaks_include_post_switch_overshoot);
