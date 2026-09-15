@@ -37,9 +37,22 @@ Not checked here: pumps (the pump check was removed; the burner requires an acti
 - Boiler output limit: 110.0°C (`MAX_BOILER_TEMP_C`, `SafetyConfig::maxBoilerTemp` default; BurnerControlTask request check and BoilerTempControlTask demand arming)
 - Minimum pressure: 1.00 BAR
 - Maximum pressure: 3.50 BAR
-- Thermal shock differential: 35.0°C
+- Thermal shock differential for this check: 35.0°C (`ReturnPreheat::MAX_DIFFERENTIAL`). The periodic full check in SafetyInterlocks uses the configurable `SafetyConfig::thermalShockDifferentialC` instead (default 45.0°C, see Runtime-Configurable Safety Parameters)
 
-**Result**: Returns a `ValidationResult` (`SAFE_TO_OPERATE` or the failure reason). BurnerControlTask then withdraws the heat demand; `THERMAL_SHOCK_RISK` starts return preheating, results other than `SENSOR_FAILURE`/`PUMP_FAILURE` call `BurnerStateMachine::emergencyStop()`.
+**Result**: Returns a `ValidationResult` (`SAFE_TO_OPERATE` or the failure reason). On a failure BurnerControlTask (`updateBurnerState()`) always withdraws the heat demand and then acts on the result:
+
+| Result | Cause | BurnerControlTask action |
+|--------|-------|--------------------------|
+| `EMERGENCY_STOP_ACTIVE` | `EMERGENCY_STOP` bit set | `BurnerStateMachine::emergencyStop()` -> ERROR |
+| `INSUFFICIENT_SENSORS` | Fewer than 2 valid sensors, or MB8ART data older than `SafetyConfig::sensorStaleMs` | `emergencyStop()` -> ERROR |
+| `TEMPERATURE_EXCEEDED` | Boiler output at or above the limit, or (water mode) tank at or above `maxWaterTemp` | `emergencyStop()` -> ERROR |
+| `PRESSURE_EXCEEDED` | Pressure below 1.00 or above 3.50 BAR | `emergencyStop()` -> ERROR |
+| `HARDWARE_INTERLOCK_OPEN` | Not returned (stub) | `emergencyStop()` -> ERROR |
+| `SENSOR_FAILURE` | No valid pressure reading (build without `ALLOW_NO_PRESSURE_SENSOR`) | Demand blocked only |
+| `THERMAL_SHOCK_RISK` | Boiler output more than 35.0°C above return | Demand blocked, return preheating started |
+| `PUMP_FAILURE` | Not returned (pump check removed) | Demand blocked only |
+
+`emergencyStop()` switches the burner relays off and holds the burner in ERROR for `SafetyConfig::errorRecoveryMs` (default 300000 ms = 5 min); after that it returns to IDLE once the safety check passes. It does not set the `EMERGENCY_STOP` latch. BoilerTempControlTask runs the same validation before arming the demand, but on a failure it only blocks the demand (and starts return preheating on `THERMAL_SHOCK_RISK`); it never calls `emergencyStop()`.
 
 ---
 
@@ -87,7 +100,7 @@ Pump verification was removed (Round 18/19): SafetyInterlocks does not check the
 
 The burner never switches pumps off: the former `setAllRelays(false)` in `emergencyShutdown()` also stopped the pumps, and PumpControlModule only writes on its own state changes, so they stayed off with the heat exchanger still hot.
 
-`CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (stale sensor data during operation, critical temperature, burner request watchdog) and the EMERGENCY failsafe level. The emergency state is written to FRAM (`saveEmergencyState()`) when the failsafe level first reaches CRITICAL or higher.
+`CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (stale sensor data during operation, critical temperature, burner request watchdog) and the EMERGENCY failsafe level. The FRAM emergency record (`CriticalDataStorage`) is written when the failsafe level first reaches CRITICAL or higher: by `triggerFailsafe()` (`saveEmergencyState()`) and, since 2026-09-15, by `emergencyStop()` itself (error code `EMERGENCY_STOP`), so direct stops (critical temperature, stale sensors, request watchdog) leave a record too.
 
 **Emergency Stop Latch**: `EMERGENCY_STOP` stays set until released. BurnerControlTask reads it without clearing and stops the burner once per onset; while it is set the burner stays in ERROR (safety check fails), and `boiler/cmd/system` `on` alone does not restart it. A reboot clears it (event bits are not persisted; the FRAM emergency record is only logged at boot).
 
@@ -130,10 +143,11 @@ RYN4 relay module supports hardware DELAY commands (0x06XX format) that automati
 // Every relay ON command includes 10-second auto-OFF timer
 Command: 0x060A  // Turn relay ON, auto-OFF after 10 seconds (0x0A = 10)
 
-// Renewed every 5 seconds (50% safety margin)
-SET tick occurs at: 0.5s, 3.0s, 5.5s, 8.0s, 10.5s...
-DELAY expires at:  10.5s if not renewed at 5.5s
-Safety margin:     5 seconds (50% of 10s)
+// Renewal on an elapsed-time schedule, checked on every Modbus SET tick:
+// renewed once 5 s (DELAY_WATCHDOG_SECONDS / 2) have passed since the last renewal
+// or state change (a state change re-issues the DELAY commands and counts as renewal).
+// A failed renewal is retried on the next SET tick.
+Safety margin:     at least 5 seconds (50% of 10s)
 ```
 
 **Protection Scenarios**:
@@ -149,7 +163,7 @@ Safety margin:     5 seconds (50% of 10s)
 **Key Features**:
 1. **Hardware-enforced**: RYN4 module handles timing independently
 2. **Fail-safe**: Default is OFF if ESP32 fails
-3. **Automatic renewal**: Normal operation renews every 5s (ticks 1, 6)
+3. **Automatic renewal**: Normal operation renews once 5 s have elapsed, checked on every SET tick; a failed renewal is retried on the next SET tick
 4. **Compact protocol**: Contiguous relays renewed efficiently (minimizes Modbus traffic)
 5. **State tracking**: ESP32 tracks DELAY expiry to skip verification
 
@@ -157,7 +171,7 @@ Safety margin:     5 seconds (50% of 10s)
 ```cpp
 // SystemConstants::Relay
 constexpr uint8_t DELAY_WATCHDOG_SECONDS = 10;  // Auto-OFF timer
-// Renewed at 5s intervals (Modbus SET ticks: 1, 6 in 10-tick cycle)
+// Renewal interval DELAY_WATCHDOG_SECONDS / 2 = 5 s, elapsed-time based, retried on the next SET tick
 ```
 
 **Benefits**:
@@ -187,7 +201,7 @@ constexpr uint8_t DELAY_WATCHDOG_SECONDS = 10;  // Auto-OFF timer
 
 ## Runtime-Configurable Safety Parameters
 
-All safety parameters can be adjusted at runtime via MQTT and persist across reboots.
+The parameters below can be adjusted at runtime via MQTT and persist across reboots. `SafetyConfig` also holds `errorRecoveryMs` (default 300000 ms, range 60000-1800000) and the PID integral limits; these are loaded from NVS but have no MQTT command.
 
 ### SafetyConfig Module
 
@@ -233,6 +247,14 @@ MQTT: boiler/cmd/config/post_purge_ms
 - Adjust based on boiler volume and chimney draft
 - Regulatory requirements may mandate minimum duration
 
+#### 4. Thermal Shock Differential
+```cpp
+Range: 100-600 (tenths of °C, 10.0-60.0°C)
+Default: 450 (45.0°C)
+MQTT: boiler/cmd/config/thermal_shock_c
+```
+**Purpose**: Maximum boiler output minus return differential in the periodic full check of SafetyInterlocks (`performFullSafetyCheck()`). The burner start check in BurnerSafetyValidator keeps its fixed 35.0°C limit and starts return preheating above it.
+
 ---
 
 ## Safety Configuration Management
@@ -240,13 +262,13 @@ MQTT: boiler/cmd/config/post_purge_ms
 ### Loading Configuration
 
 **Startup Sequence**:
-1. `PersistentStorageTask` loads SafetyConfig from NVS (line 306)
+1. `PersistentStorageTask` loads SafetyConfig from NVS (line 566)
 2. If no stored values, defaults are used
 3. Configuration published to MQTT when broker connects
 
 **Code**:
 ```cpp
-// src/modules/tasks/PersistentStorageTask.cpp:306
+// src/modules/tasks/PersistentStorageTask.cpp:566
 SafetyConfig::loadFromNVS();
 ```
 
@@ -270,7 +292,7 @@ SafetyConfig::loadFromNVS();
 mosquitto_pub -t "boiler/cmd/config/sensor_stale_ms" -m "120000"
 
 # Device responds on boiler/status/safety_config:
-# {"pump_prot":15000,"sensor_stale":120000,"post_purge":90000}
+# {"pump_prot":15000,"sensor_stale":120000,"post_purge":90000,"thermal_shock_c":450}
 ```
 
 ---
@@ -369,6 +391,7 @@ Power level change refused on entry: DEGRADED failsafe -> POST_PURGE
 ```cpp
 Entry: Water <-> heating change while safe and burning
 Safety: Safety check failure -> ERROR
+        Explicit disable of the mode the relays still run in, or of the boiler -> POST_PURGE
 Wait for the new mode's request only while heating is likely wanted,
   at most 15s (MODE_SWITCH_MAX_WAIT_MS), otherwise POST_PURGE
 Hard limit: 30s (MODE_SWITCH_HARD_TIMEOUT_MS) -> POST_PURGE
@@ -387,7 +410,8 @@ Restart: Heat demand returns -> PRE_PURGE (same conditions as a start from IDLE,
 Trigger: 3 failed ignition attempts
 Action: Burner relays off, ALARM relay on
 Recovery: Automatic after 5 min (LOCKOUT_TIME_MS) or resetLockout() (MQTT burner_reset)
-          Retry counter only reset by resetLockout() or a successful ignition
+          Retry counter reset by resetLockout(), on leaving LOCKOUT (also after the
+          automatic expiry), at every new start and on a successful ignition
 ```
 
 ### 8. ERROR State
@@ -435,7 +459,7 @@ Recovery: Automatic after SafetyConfig::errorRecoveryMs (default 5 min) once the
 ```
 Topic: boiler/status/safety_config
 Frequency: On boot and after changes
-Format: {"pump_prot":15000,"sensor_stale":60000,"post_purge":90000}
+Format: {"pump_prot":15000,"sensor_stale":60000,"post_purge":90000,"thermal_shock_c":450}
 ```
 
 **System Health**:
@@ -452,7 +476,19 @@ Trigger: Rejected MQTT commands (not safety violations)
 Format: plain string: invalid_config_value, invalid_numeric_value, unknown_command
 ```
 
-Safety validation failures are not published as an MQTT message. `BurnerSafetyValidator::logSafetyEvent()` logs them, records `RELAY_SAFETY_INTERLOCK` via `ErrorHandler::logError()` and sets the `Error::SAFETY` bit.
+**Error Context Snapshot**:
+```
+Topic: boiler/error/context (retained)
+Trigger: ErrorHandler::logError() with a critical error code: SYSTEM_FAILSAFE_TRIGGERED,
+         IGNITION_FAILURE, RELAY_SAFETY_INTERLOCK, TEMPERATURE_CRITICAL, SYSTEM_OVERHEATED,
+         EMERGENCY_STOP
+Rate: At most one snapshot per 30 s; captured in the erroring task, published by the MQTT task
+Content: Error code, component, description, task, heap, system state and burner request bits,
+         boiler/return/tank temperatures, pressure, relay desired/actual state
+```
+Field names and formats: see [MQTT_API.md](MQTT_API.md) (Published Topics, `boiler/error/context`).
+
+Safety validation failures have no dedicated MQTT message. `BurnerSafetyValidator::logSafetyEvent()` logs them, records `RELAY_SAFETY_INTERLOCK` via `ErrorHandler::logError()` (which captures an error context snapshot) and sets the `Error::SAFETY` bit. `CentralizedFailsafe::emergencyStop()` logs `SYSTEM_FAILSAFE_TRIGGERED` and therefore also captures one.
 
 ### Command Topics
 
@@ -461,6 +497,7 @@ Safety validation failures are not published as an MQTT message. `BurnerSafetyVa
 boiler/cmd/config/pump_protection_ms    - Pump motor protection
 boiler/cmd/config/sensor_stale_ms       - Sensor staleness timeout
 boiler/cmd/config/post_purge_ms         - Post-purge duration
+boiler/cmd/config/thermal_shock_c       - Thermal shock differential (tenths of °C)
 ```
 
 See [MQTT_API.md](MQTT_API.md) for complete command reference.
@@ -510,9 +547,9 @@ See [MQTT_API.md](MQTT_API.md) for complete command reference.
 ### Safety Test Scenarios
 
 **Recommended Tests**:
-1. **Over-temperature**: Simulate boiler output >=110°C -> expect burner start blocked; >=115°C during operation -> expect emergency stop (`CentralizedFailsafe::emergencyStop()`)
+1. **Over-temperature**: Simulate boiler output >=110°C at a request -> expect burner start refused and ERROR for `errorRecoveryMs` (`TEMPERATURE_EXCEEDED` calls `BurnerStateMachine::emergencyStop()`); >=115°C during operation -> expect emergency stop (`CentralizedFailsafe::emergencyStop()`)
 2. **Sensor staleness**: Disconnect Modbus -> expect shutdown after timeout
-3. **Pressure loss**: Simulate low pressure -> expect burner inhibit
+3. **Pressure loss**: Simulate pressure below 1.00 BAR at a request -> expect ERROR for `errorRecoveryMs` (default 5 min, `PRESSURE_EXCEEDED` calls `emergencyStop()`); a missing pressure reading (`SENSOR_FAILURE`) only blocks the demand
 4. **Thermal shock**: Boiler output more than 35°C above return -> expect burner blocked and return preheating (heating pump cycling). There is no pump interlock: a stopped pump does not cut off the burner directly
 5. **Post-purge**: Shutdown during heating -> verify burner relays stay off for `SafetyConfig::postPurgeMs` (default 90s) while pumps follow their mode
 
