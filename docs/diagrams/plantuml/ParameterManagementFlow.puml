@@ -107,10 +107,16 @@ end note
 note bottom of NVS
   ESP32-PersistentStorage writes with Preferences
   (putBool, putInt, ...) in namespace esplan.
-  Save: boiler/params/save or saveAll().
-  SAVE_INTERVAL_MS (5 min) is defined in SystemConstants.
-  Not verified: load at startup, NVS partition
-  size, CRC checks.
+  saveAll() runs on boiler/params/save and on a save
+  request (STORAGE_SAVE_REQUEST_BIT) from setOnChange
+  callbacks and StateManager::markSettingsDirty()
+  (enable, priority, override changes).
+  boiler/cmd/config outside_heating_threshold and
+  room_overheat_margin use the same set path
+  (PersistentStorageTask_SetParameter).
+  SAVE_INTERVAL_MS (5 min) is defined but unused.
+  loadAll() runs when the task starts.
+  Not verified: NVS partition size, CRC checks.
   There is no SETTINGS_CHANGED event bit.
 end note
 

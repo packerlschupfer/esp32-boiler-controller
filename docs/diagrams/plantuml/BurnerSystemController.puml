@@ -115,8 +115,12 @@ note bottom of WaterPumpTask
   Pump tasks follow HEATING_ON / WATER_ON
   with a 5 min overrun.
   EMERGENCY_STOP keeps the pumps ON
-  until boiler output < 60°C
+  until boiler output < 60°C, on again
+  from 65°C, ON without a usable reading
   (F13 emergency heat dissipation).
+  After release they continue until < 60°C.
+  A pump task re-sends its request every 2 s
+  while the relay does not match.
 end note
 
 @enduml

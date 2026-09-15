@@ -81,8 +81,9 @@ note right of PersistSvc
   handled by handleMqttCommand() in PersistentStorageTask.
   52 parameters: system, heating, limits, wheater,
   pid, sensor offsets, syslog.
-  SAVE_INTERVAL_MS (5 min) is defined; a periodic
-  auto-save is not verified.
+  Saved with saveAll() on a save request;
+  SAVE_INTERVAL_MS (5 min) is defined but unused
+  (no periodic auto-save).
 end note
 
 note right of FramUsers

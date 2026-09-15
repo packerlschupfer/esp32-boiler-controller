@@ -87,8 +87,10 @@ note over BSM, HW
 end note
 
 note over HCT, WCT
-  Heating: start below target - heating_hysteresis,
-  stop above target + hysteresis (default 0.5 °C).
+  Heating (room mode): start below target,
+  stop at target + hysteresis (default 0.5 °C).
+  Weather mode: start below outsideThreshold,
+  stop at threshold + 1.0 °C.
   Water: start below tempLimitLow,
   stop above tempLimitHigh (defaults 45 / 65 °C).
 end note

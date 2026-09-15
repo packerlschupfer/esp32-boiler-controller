@@ -61,7 +61,10 @@ note over Client, Module
   52 registered parameters: system 5, heating 8, h/ 4, w/ 2,
   wheater 7, pid 9, sensor/offset 9, syslog 8.
   heating/targetTemp is an int in tenths of °C, range 100-300.
-  SAVE_INTERVAL_MS (5 min) is defined; a periodic auto-save is not verified.
+  Other saves: setOnChange callbacks and StateManager::markSettingsDirty()
+  (enable, priority, override changes) request saveAll() from PersistentStorageTask.
+  boiler/cmd/config outside_heating_threshold / room_overheat_margin use the set path.
+  SAVE_INTERVAL_MS (5 min) is defined but unused: no periodic auto-save.
   There is no SETTINGS_CHANGED event bit.
 end note
 

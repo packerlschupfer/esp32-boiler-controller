@@ -1,31 +1,25 @@
 # PlantUML Conversion Guide
 
-## Completed Conversions ✅
+## Conversion Status
 
-1. ✅ **LibraryEcosystem.puml** - Component diagram with 18 libraries
-2. ✅ **BurnerSystemController.puml** - Class diagram with H1 refactoring
-3. ✅ **BurnerStateMachine.puml** - State diagram with 8 states
-4. ✅ **SystemResourceProvider.puml** - Service Locator pattern
-5. ✅ **SharedResourceManager.puml** - Event groups and mutexes
+All diagrams are converted to PlantUML; no Mermaid (`.mmd`) sources remain.
 
-## Remaining Conversions
-
-### High Priority
-- [ ] **StorageArchitecture.puml** - Component diagram for NVS/FRAM/RTC
-- [ ] **TaskOrchestration.puml** - Component/deployment showing 16 tasks
-- [ ] **CompleteSystemArchitecture2025.puml** - Deployment diagram with all layers
-
-### Medium Priority
-- [ ] **ParameterManagementFlow.puml** - Component diagram
-- [ ] **ControlRequestFlow.puml** - Sequence diagram
-- [ ] **HeatingControlLogic.puml** - Activity diagram
-- [ ] **SafetyErrorHandling.puml** - Component/flow diagram
-
-### Lower Priority
-- [ ] **SystemArchitectureOverview.puml** - High-level deployment
-- [ ] **SystemStateLogic.puml** - State diagram
-- [ ] **ParameterUpdateSequence.puml** - Sequence diagram
-- [ ] **HotWaterScheduler.puml** - State diagram (future feature)
+- **LibraryEcosystem.puml** - Component diagram with 21 custom libraries
+- **BurnerSystemController.puml** - Class diagram
+- **BurnerStateMachine.puml** - State diagram with 9 states
+- **SystemResourceProvider.puml** - Service Locator pattern
+- **SharedResourceManager.puml** - Event groups and mutexes
+- **StorageArchitecture.puml** - Component diagram for NVS/FRAM/RTC
+- **TaskOrchestration.puml** - Component diagram showing 19 tasks
+- **CompleteSystemArchitecture2025.puml** - Deployment diagram with all layers
+- **ParameterManagementFlow.puml** - Component diagram
+- **ControlRequestFlow.puml** - Sequence diagram
+- **HeatingControlLogic.puml** - Activity diagram
+- **SafetyErrorHandling.puml** - Component/flow diagram
+- **SystemArchitectureOverview.puml** - High-level deployment
+- **SystemStateLogic.puml** - State diagram
+- **ParameterUpdateSequence.puml** - Sequence diagram
+- **HotWaterScheduler.puml** - State diagram (aspirational, not implemented)
 
 ## Conversion Tips
 

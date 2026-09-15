@@ -31,7 +31,7 @@ elseif (heatingOverrideOff set?) then (yes)
   stop
 else (no)
   if (Weather-compensated control?) then (yes)
-    :Needed when outside is below outsideThreshold\nand the room is not overheated\n(stop above target + overheat margin,\nrestart below that limit - heating_hysteresis);
+    :Needed when outside is below outsideThreshold\n(stops only at threshold + 1.0 °C)\nand the room is not overheated\n(stop above target + overheat margin,\nrestart below that limit - heating_hysteresis);
   else (room mode)
     :When off: start when room is below target\nWhen on: stop at room >= target + heating_hysteresis;
   endif

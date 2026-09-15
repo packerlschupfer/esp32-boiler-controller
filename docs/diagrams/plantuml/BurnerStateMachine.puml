@@ -9,7 +9,9 @@ IDLE : Burner relays off
 IDLE : Waiting for heat demand
 
 PRE_PURGE : Entry: burner relays off
-PRE_PURGE : Duration: 2 s
+PRE_PURGE : Duration: 2 s, then IGNITION only if demand
+PRE_PURGE : and mode request are still present (step())
+PRE_PURGE : StateMachine backstop 4 s
 
 IGNITION : Entry: activate R1 (heating) or R3 (water)
 IGNITION : and start the requested power level
@@ -57,15 +59,15 @@ RUNNING_LOW --> ERROR : safety interlock failure\nor emergencyStop()
 RUNNING_HIGH --> ERROR : safety interlock failure\nor emergencyStop()
 
 MODE_SWITCHING --> RUNNING_HIGH : relays switched\n(high power requested and allowed)
-MODE_SWITCHING --> RUNNING_LOW : relays switched (low power), or\ndemand reverted with running mode ON bit set
-MODE_SWITCHING --> POST_PURGE : no request for the new mode,\nrelay switch failed,\nrevert without ON bit after 15 s,\nor 30 s hard timeout
+MODE_SWITCHING --> RUNNING_LOW : relays switched (low power), or\ndemand reverted and the ON bits\nselect the running mode
+MODE_SWITCHING --> POST_PURGE : explicit disable,\nno request for the new mode,\nrelay switch failed,\nrevert not confirmed after 15 s,\nor 30 s hard timeout
 MODE_SWITCHING --> ERROR : safety failure
 
 POST_PURGE --> IDLE : after postPurgeMs (90 s)
 POST_PURGE --> PRE_PURGE : early restart: heat demand + active mode request\n+ safety OK + minimum off-time over,\nand the mode was not just disabled
 
 LOCKOUT --> IDLE : after 5 min\nor manual reset (MQTT)
-ERROR --> IDLE : after the recovery delay\nonce safety conditions pass
+ERROR --> IDLE : recovery delay over,\nEMERGENCY_STOP released,\nsafety conditions pass
 
 note right of IDLE
   A latched heat demand without an active mode
@@ -100,6 +102,17 @@ note right of ERROR
   emergencyStop() leads here from any state;
   safety interlocks are checked continuously
   in IGNITION, RUNNING_LOW and RUNNING_HIGH.
+
+  While EMERGENCY_STOP is latched the burner
+  stays in ERROR, also after the recovery delay.
+  Release: boiler/cmd/emergency_reset, or sensor
+  recovery after a stale-sensor stop.
+end note
+
+note right of MODE_SWITCHING
+  Leaving MODE_SWITCHING records the power level
+  for anti-flapping, so a restart after a stop
+  from here keeps the 20 s minimum off-time.
 end note
 
 @enduml

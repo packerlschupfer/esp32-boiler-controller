@@ -68,7 +68,7 @@ package "Recovery Mechanisms" {
 
     component [Manual Reset\nMQTT burner_reset (LOCKOUT only)\nMQTT emergency_reset (EMERGENCY_STOP)\nno physical button] as ManualReset
 
-    component [Burner SM Recovery\nERROR: automatic after errorRecoveryMs\n(default 5 min) once safe\nLOCKOUT: after 5 min or manual reset] as BurnerRecovery
+    component [Burner SM Recovery\nERROR: after errorRecoveryMs\n(default 5 min) once EMERGENCY_STOP\nis released and safe\nLOCKOUT: after 5 min or manual reset] as BurnerRecovery
 
     component [Factory Reset\nClear all data\nRestore defaults\nFull reinit] as FactoryReset
 }
@@ -84,6 +84,7 @@ package "Failsafe States" {
 package "Error Reporting" {
     component [MQTT Report\nJSON Details] as MQTTReport
     component [FRAM Log\nFull Details] as FRAMLog
+    component [Error Context\nErrorContextCapture snapshot\n(critical errors, 30 s limit)\nMQTTTask: boiler/error/context\nretained] as ErrorContext
     component [LED_BUILTIN\non = running\nblinking = init failure\nno error codes] as LEDStatus
 }
 
@@ -148,6 +149,7 @@ CommErrors --> CommFailsafe : on failure
 ErrorHandler --> MQTTReport
 ErrorHandler --> FRAMLog
 Critical --> MQTTReport : urgent
+ErrorHandler --> ErrorContext : logError()
 
 note right of ErrorHandler
   Failsafe levels (CentralizedFailsafe):
@@ -188,11 +190,12 @@ note right of EmergencyStop
     sensors unavailable or critical error bits set
   - restores BOILER_ENABLED from the saved setting
   - or cleared by TemperatureSensorFallback on
-    sensor recovery
+    sensor recovery (stale-sensor stop only)
 
   Burner state machine recovery:
-  - ERROR: automatic after errorRecoveryMs
-    (default 5 min) once safety conditions pass
+  - ERROR: after errorRecoveryMs (default 5 min)
+    once EMERGENCY_STOP is released and safety
+    conditions pass (stays in ERROR while latched)
   - LOCKOUT: after 5 min or manual reset
 end note
 

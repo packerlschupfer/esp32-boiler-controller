@@ -39,7 +39,7 @@ SystemIdle --> MixedMode : Both demands
 
 state HeatingMode {
     [*] --> CheckHeatingDemand
-    CheckHeatingDemand --> HeatingActive : room < target - heating_hysteresis\n(default 0.5 °C)
+    CheckHeatingDemand --> HeatingActive : room < target\n(room mode)
     CheckHeatingDemand --> HeatingStandby : Temp OK
 
     state HeatingActive {
@@ -172,13 +172,15 @@ note bottom of EmergencyStop
   E-STOP button, MQTT command to trigger an emergency stop
 
   Recovery:
-  - Burner ERROR: automatic after errorRecoveryMs
-    (default 5 min) once safety conditions pass
+  - Burner ERROR: after errorRecoveryMs (default 5 min)
+    once EMERGENCY_STOP is released and safety
+    conditions pass (stays in ERROR while latched)
   - Burner LOCKOUT: after 5 min or MQTT burner_reset
   - EMERGENCY_STOP: MQTT boiler/cmd/emergency_reset "reset"
     (refused while boiler >= 110 °C, sensors unavailable
     or critical error bits set; restores the saved boiler
     enable), or cleared by sensor recovery
+    (stale-sensor stop only)
 end note
 
 @enduml

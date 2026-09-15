@@ -129,7 +129,7 @@ MonitorTask --> RelayData : collect
 MonitorTask --> SystemState : check
 MonitorTask --> MQTTTask : report
 
-StorageTask --> SystemSettings : auto-save\n5 min
+StorageTask --> SystemSettings : saveAll on\nsave request
 
 ' Scheduler Flow
 SchedulerTask --> SensorData : read tank temp
