@@ -6,7 +6,6 @@
 #include <freertos/semphr.h>
 #include <cstdint>
 #include <array>
-#include <string>
 #include "utils/ErrorHandler.h"
 #include "config/SystemConstants.h"
 #include "core/SystemResourceProvider.h"
@@ -153,9 +152,19 @@ public:
     // weaker predicate was a trap for whoever adopted it next.
 
     /**
-     * @brief Generate health report JSON
+     * @brief Serialise a compact health report into a caller-provided buffer
+     *
+     * Fixed-buffer on purpose. The std::string + elastic JsonDocument version this
+     * replaces built a ~700-900 B report (every subsystem, every task) plus its own
+     * allocations, on a device whose free DRAM floor under ordinary HA polling was
+     * measured at 576 B on 2026-09-16. Only subsystems that are unhealthy or have
+     * recorded errors are included - unhealthy first - and the object is trimmed to
+     * fit the buffer: "n" is how many were included, "nt" how many were notable, so
+     * a trimmed report is detectable rather than silently short.
+     *
+     * @return bytes written excluding the NUL, or 0 if the buffer is unusable
      */
-    std::string generateHealthReport() const;
+    size_t generateHealthReport(char* buffer, size_t size) const;
     
     /**
      * @brief Register a task for monitoring

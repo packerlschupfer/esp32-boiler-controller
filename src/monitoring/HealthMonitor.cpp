@@ -182,55 +182,95 @@ HealthMonitor::NetworkMetrics HealthMonitor::getNetworkMetrics() const {
     return networkMetrics_;
 }
 
-std::string HealthMonitor::generateHealthReport() const {
+size_t HealthMonitor::generateHealthReport(char* buffer, size_t size) const {
+    if (!buffer || size < 2) {
+        return 0;
+    }
+    buffer[0] = '\0';
+
     SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(100));
     if (!guard.hasLock()) {
-        return "{}";
-    }
-    
-    JsonDocument doc;  // ArduinoJson v7 - elastic capacity
-
-    // Overall health
-    doc["status"] = healthStatusToString(overallHealth_);
-    doc["timestamp"] = millis();
-
-    // Memory metrics
-    JsonObject memory = doc["memory"].to<JsonObject>();
-    memory["free"] = memoryMetrics_.currentFreeHeap;
-    memory["min_free"] = memoryMetrics_.minFreeHeap;
-    memory["max_alloc"] = memoryMetrics_.maxAllocHeap;
-    memory["alloc_failures"] = memoryMetrics_.allocationFailures;
-
-    // Network metrics
-    JsonObject network = doc["network"].to<JsonObject>();
-    network["connected"] = networkMetrics_.isConnected;
-    network["disconnects"] = networkMetrics_.disconnectCount;
-    network["availability"] = networkMetrics_.availabilityFP / 100.0f;  // Convert FP to percentage
-
-    // Subsystem health
-    JsonObject subsystems = doc["subsystems"].to<JsonObject>();
-    for (size_t i = 0; i < static_cast<size_t>(Subsystem::NUM_SUBSYSTEMS); i++) {
-        const auto& health = subsystemHealth_[i];
-        JsonObject subsys = subsystems[subsystemToString(static_cast<Subsystem>(i))].to<JsonObject>();
-        subsys["success"] = health.successCount;
-        subsys["errors"] = health.errorCount;
-        subsys["error_rate"] = health.errorRateFP / 100.0f;  // Convert FP to percentage
-        subsys["healthy"] = health.isHealthy;
+        // The previous version returned "{}" here, which is indistinguishable from a
+        // clean report with nothing to say. A report nobody could produce is news.
+        const int n = snprintf(buffer, size, "{\"st\":\"unknown\",\"err\":\"busy\"}");
+        return (n > 0 && static_cast<size_t>(n) < size) ? static_cast<size_t>(n) : 0;
     }
 
-    // Task health
-    JsonArray tasks = doc["tasks"].to<JsonArray>();
-    for (size_t i = 0; i < taskCount_; i++) {
-        const auto& task = taskMetrics_[i];
-        JsonObject taskObj = tasks.add<JsonObject>();
-        taskObj["name"] = task.name;
-        taskObj["stack_free"] = task.stackHighWaterMark;
-        taskObj["healthy"] = task.isHealthy;
+    JsonDocument doc;  // ArduinoJson v7 - trimmed to `size` below, never emitted raw
+
+    doc["st"] = healthStatusToString(overallHealth_);
+    doc["up"] = millis() / 1000;
+
+    // Memory: the DRAM figures, deliberately not currentFreeHeap. The getFreeHeap()
+    // family counts IRAM (~57 kB) and stays reassuring while the DRAM that actually
+    // serves allocations is down to a few hundred bytes - measured at 576 B free
+    // under ordinary HA polling on 2026-09-16.
+    doc["blk"] = memoryMetrics_.largestFreeBlock;
+    doc["min"] = memoryMetrics_.minFreeHeap;
+    if (memoryMetrics_.allocationFailures > 0) {
+        doc["af"] = memoryMetrics_.allocationFailures;
     }
-    
-    std::string output;
-    serializeJson(doc, output);
-    return output;
+
+    doc["nc"] = networkMetrics_.isConnected ? 1 : 0;
+    doc["nd"] = networkMetrics_.disconnectCount;
+    doc["na"] = networkMetrics_.availabilityFP;  // fixed point, 10000 = 100%
+
+    // Task metrics are deliberately absent. HealthMonitor::registerTask() has no
+    // callers anywhere (SystemInitializer::registerTask is an unrelated method that
+    // only fills its own cleanup list), so taskCount_ is always 0, checkTaskHealth()
+    // iterates nothing, and every task field would be a constant. Publishing them
+    // would re-export a dead code path as a documented API.
+
+    constexpr size_t N = static_cast<size_t>(Subsystem::NUM_SUBSYSTEMS);
+
+    // Only subsystems worth reading about: eight all-zero entries would crowd out the
+    // one that matters. "nt" is how many were notable, "n" how many fit.
+    size_t notable = 0;
+    for (size_t i = 0; i < N; i++) {
+        if (!subsystemHealth_[i].isHealthy || subsystemHealth_[i].errorCount > 0) {
+            notable++;
+        }
+    }
+    doc["nt"] = notable;
+
+    JsonObject subs = doc["sub"].to<JsonObject>();
+    size_t shown = 0;
+    bool full = false;
+
+    // Unhealthy first, then merely-erroring, so truncation sheds the least important.
+    for (int pass = 0; pass < 2 && !full; pass++) {
+        for (size_t i = 0; i < N && !full; i++) {
+            const auto& health = subsystemHealth_[i];
+            const bool include = (pass == 0) ? !health.isHealthy
+                                            : (health.isHealthy && health.errorCount > 0);
+            if (!include) continue;
+
+            const char* name = subsystemToString(static_cast<Subsystem>(i));
+            JsonObject entry = subs[name].to<JsonObject>();
+            entry["e"] = health.errorCount;
+            entry["r"] = health.errorRateFP;  // fixed point, 10000 = 100%
+            entry["h"] = health.isHealthy ? 1 : 0;
+
+            doc["n"] = shown + 1;
+            if (measureJson(doc) >= size) {  // >= keeps room for the NUL
+                subs.remove(name);
+                full = true;
+                break;
+            }
+            shown++;
+        }
+    }
+    doc["n"] = shown;  // <= 8, so never wider than the value measured above
+
+    if (measureJson(doc) >= size) {
+        // Base fields alone overflow a short buffer: emit valid JSON rather than a
+        // truncated fragment. Cannot happen at the 320-byte MQTT payload size.
+        const int n = snprintf(buffer, size, "{\"st\":\"%s\",\"err\":\"nofit\"}",
+                               healthStatusToString(overallHealth_));
+        return (n > 0 && static_cast<size_t>(n) < size) ? static_cast<size_t>(n) : 0;
+    }
+
+    return serializeJson(doc, buffer, size);
 }
 
 void HealthMonitor::registerTask(TaskHandle_t handle, const char* name) {

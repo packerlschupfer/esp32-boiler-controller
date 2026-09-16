@@ -19,6 +19,7 @@
 #include "utils/CriticalDataStorage.h"
 #include "core/SystemResourceProvider.h"
 #include "core/StateManager.h"
+#include "monitoring/HealthMonitor.h"  // boiler/cmd/diagnostics -> "health"
 #include <nvs_flash.h>  // For nvs_flash_erase()
 #include "MQTTTopics.h"
 #include "utils/MemoryPool.h"
@@ -665,6 +666,40 @@ void handleDiagnosticsCommand(const char* payload) {
     if (!payload || payload[0] == '\0') {
         MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "missing_payload", 0, false,
                           MQTTPriority::PRIORITY_HIGH);
+        return;
+    }
+
+    // "health" is served from HealthMonitor, not RuntimeDiagnostics: it has no
+    // DiagnosticCommand to map to, and it fits a single payload, so it skips the
+    // chunked text capture below entirely.
+    if (strcmp(payload, "health") == 0) {
+        HealthMonitor* health = SystemResourceProvider::getHealthMonitor();
+        if (!health) {
+            // Null until MonitoringTask's initialize() succeeds - say so rather than
+            // publishing an empty report that reads as "nothing wrong".
+            MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "unavailable", 0, false,
+                              MQTTPriority::PRIORITY_HIGH);
+            return;
+        }
+
+        static char healthReply[sizeof(MQTTPublishRequest::payload)];
+        const size_t len = health->generateHealthReport(healthReply, sizeof(healthReply));
+        if (len == 0) {
+            MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "empty_report", 0, false,
+                              MQTTPriority::PRIORITY_HIGH);
+            return;
+        }
+
+        // Same reasoning as flush(): a LOW-priority publish can be throttled or
+        // evicted, and a caller waiting on a report it will never get deserves to know.
+        if (!MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_REPORT, healthReply, 0, false,
+                               MQTTPriority::PRIORITY_LOW)) {
+            LOG_WARN(TAG_CMD, "Health report dropped by the publish queue");
+            MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "dropped", 0, false,
+                              MQTTPriority::PRIORITY_HIGH);
+            return;
+        }
+        LOG_INFO(TAG_CMD, "Published health report (%u B)", static_cast<unsigned>(len));
         return;
     }
 
