@@ -349,6 +349,7 @@ On release `EMERGENCY_STOP` is cleared, `BOILER_ENABLED` is set only if the save
 | `boiler/cmd/wheater` | as `boiler/cmd/water` | Alias of `boiler/cmd/water` |
 | `boiler/cmd/heating` | number 15-30 | Sets the room target in °C, reply `target:<°C>` on `boiler/status/heating` |
 | `boiler/cmd/status` | any | Logged only, nothing is published |
+| `boiler/cmd/diagnostics` | `memory`, `tasks`, `events`, `sensors`, `relays`, `network` | Runtime diagnostics text dump on `boiler/status/diagnostics/report`, split into 320-byte chunks (at most 8, newline-separated lines). `mutexes`, `modbus` and `selftest` exist but are stubs and reply `not_implemented`; any other payload replies `unknown_command`; an empty payload replies `missing_payload` - all on `boiler/status/diagnostics/error`. A dump cut off by the chunk cap also publishes `truncated` there. Read-only: no reboot/watchdog/error-injection command is reachable from this topic |
 | `boiler/cmd/fram` | `status` | `boiler/status/fram/status`: `{"connected":true,"size":..,"integrity":true}` |
 | `boiler/cmd/fram` | `counters` | `boiler/status/fram/counters`: `{"b":..,"h":..,"w":..,"e":..}` (burner starts, heating pump starts, water pump starts, errors) |
 | `boiler/cmd/fram` | `runtime` | `boiler/status/fram/runtime`: `{"t":..,"h":..,"w":..,"b":..}` (hours total, heating, water, burner) |

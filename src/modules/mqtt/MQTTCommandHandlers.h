@@ -73,6 +73,18 @@ void handleErrorCommand(const char* topic, const char* payload);
 void handleSchedulerCommand(const char* topic, const char* payload);
 
 /**
+ * @brief Handle runtime diagnostics requests (boiler/cmd/diagnostics)
+ *
+ * Read-only dumps only. The payload selects one of a fixed whitelist of
+ * RuntimeDiagnostics dumps; it is never passed into the class as text, because
+ * DiagnosticCommand also contains FORCE_REBOOT (implemented, calls ESP.restart())
+ * and this is a gas boiler controller. Unknown payloads are rejected.
+ *
+ * @param payload One of: memory, tasks, events, sensors, relays, network, modbus
+ */
+void handleDiagnosticsCommand(const char* payload);
+
+/**
  * @brief Main command router - dispatches to specific handlers
  * @param topic Full topic path (e.g., "boiler/cmd/heating")
  * @param payload Command payload

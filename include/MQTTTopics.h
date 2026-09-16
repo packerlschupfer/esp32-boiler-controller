@@ -59,6 +59,13 @@
 #define MQTT_STATUS_ERRORS_CRITICAL     MQTT_STATUS_ERRORS_PREFIX "/critical"
 #define MQTT_STATUS_ERRORS_DUMP         MQTT_STATUS_ERRORS_PREFIX "/dump"
 
+// Runtime diagnostics (boiler/cmd/diagnostics). Read-only dumps only - the
+// RuntimeDiagnostics enum also carries FORCE_REBOOT, which is deliberately NOT
+// reachable from an MQTT payload on a boiler controller
+#define MQTT_STATUS_DIAGNOSTICS_PREFIX  MQTT_STATUS_PREFIX "/diagnostics"
+#define MQTT_STATUS_DIAGNOSTICS_REPORT  MQTT_STATUS_DIAGNOSTICS_PREFIX "/report"
+#define MQTT_STATUS_DIAGNOSTICS_ERROR   MQTT_STATUS_DIAGNOSTICS_PREFIX "/error"
+
 // Command topics (subscribed by device)
 #define MQTT_CMD_PREFIX                 MQTT_BASE_PREFIX "/cmd"
 #define MQTT_CMD_SYSTEM                 MQTT_CMD_PREFIX "/system"
@@ -71,6 +78,7 @@
 #define MQTT_CMD_FRAM_ERRORS            MQTT_CMD_PREFIX "/fram_errors"
 #define MQTT_CMD_FRAM                   MQTT_CMD_PREFIX "/fram"
 #define MQTT_CMD_TEST                   MQTT_CMD_PREFIX "/test"
+#define MQTT_CMD_DIAGNOSTICS            MQTT_CMD_PREFIX "/diagnostics"
 
 // Scheduler command topics (generic timer scheduler)
 // All handled by TimerScheduler::processMQTTCommand via the boiler/cmd/scheduler/+ subscription

@@ -29,6 +29,7 @@
 #include "modules/tasks/BoilerTempControlTask.h"  // For getBoilerTempController()
 #include "modules/control/BoilerTempController.h" // For BoilerTempController class
 #include "modules/tasks/PersistentStorageTask.h"  // For syslog settings save
+#include "diagnostics/RuntimeDiagnostics.h"        // boiler/cmd/diagnostics
 #include <RuntimeStorage.h>
 #include <ArduinoJson.h>
 #include <esp_log.h>
@@ -649,6 +650,110 @@ void handleErrorCommand(const char* topic, const char* payload) {
     }
 }
 
+// Runtime diagnostics over MQTT. Chunking is required because a text dump is far
+// larger than one 320-byte payload. This runs in the esp-mqtt task (boiler/cmd/+ is
+// a subscribe() callback; registerTopicHandler has no users), so MQTTTask drains the
+// publish queue while we publish here and the chunks do not evict each other. Keep
+// the pacing short regardless - this task also runs the MQTT protocol itself. The
+// chunk count is capped because LOW priority lands in the 5-slot normal queue with
+// drop-oldest, which discards the OLDEST entry silently.
+static constexpr size_t DIAG_MAX_CHUNKS = 8;
+static constexpr uint32_t DIAG_CHUNK_PACING_MS = 25;
+
+void handleDiagnosticsCommand(const char* payload) {
+    if (!payload || payload[0] == '\0') {
+        MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "missing_payload", 0, false,
+                          MQTTPriority::PRIORITY_HIGH);
+        return;
+    }
+
+    // Whitelist: the payload selects a fixed enum value and is NEVER passed into
+    // RuntimeDiagnostics as text. DiagnosticCommand also carries FORCE_REBOOT, which
+    // is implemented and calls ESP.restart() - that must not be reachable by MQTT on
+    // a boiler controller. (There is no string dispatch to reach it either: the
+    // executeCommand(std::string) overload is declared but never defined.)
+    RuntimeDiagnostics::DiagnosticCommand cmd;
+    if (strcmp(payload, "memory") == 0) {
+        cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_MEMORY;
+    } else if (strcmp(payload, "tasks") == 0) {
+        cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_TASKS;
+    } else if (strcmp(payload, "events") == 0) {
+        cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_EVENT_GROUPS;
+    } else if (strcmp(payload, "sensors") == 0) {
+        cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_SENSORS;
+    } else if (strcmp(payload, "relays") == 0) {
+        cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_RELAYS;
+    } else if (strcmp(payload, "network") == 0) {
+        cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_NETWORK;
+    } else if (strcmp(payload, "mutexes") == 0 || strcmp(payload, "modbus") == 0 ||
+               strcmp(payload, "selftest") == 0) {
+        // Defined but stubs: they only print "not yet implemented"
+        MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "not_implemented", 0, false,
+                          MQTTPriority::PRIORITY_HIGH);
+        return;
+    } else {
+        MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "unknown_command", 0, false,
+                          MQTTPriority::PRIORITY_HIGH);
+        return;
+    }
+
+    static char chunk[sizeof(MQTTPublishRequest::payload)];
+    size_t used = 0;
+    size_t chunks = 0;
+    bool truncated = false;
+
+    auto flush = [&]() {
+        if (used == 0) return;
+        chunk[used] = '\0';
+        MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_REPORT, chunk, 0, false,
+                          MQTTPriority::PRIORITY_LOW);
+        used = 0;
+        chunks++;
+        vTaskDelay(pdMS_TO_TICKS(DIAG_CHUNK_PACING_MS));
+    };
+
+    // Capture MUST go through executeCommand(): it sets currentOutput_, while the
+    // individual dump functions ignore their own OutputCallback argument and would
+    // silently log instead of publishing.
+    RuntimeDiagnostics::executeCommand(cmd, [&](const std::string& line) {
+        if (chunks >= DIAG_MAX_CHUNKS) {
+            truncated = true;
+            return;
+        }
+        const size_t len = line.size();
+        if (len == 0) return;
+
+        if (len + 2 >= sizeof(chunk)) {  // single line longer than one payload
+            flush();
+            const size_t copy = sizeof(chunk) - 2;
+            memcpy(chunk, line.c_str(), copy);
+            used = copy;
+            truncated = true;
+            flush();
+            return;
+        }
+        if (used + len + 2 >= sizeof(chunk)) {
+            flush();
+            if (chunks >= DIAG_MAX_CHUNKS) {
+                truncated = true;
+                return;
+            }
+        }
+        memcpy(chunk + used, line.c_str(), len);
+        used += len;
+        chunk[used++] = '\n';
+    });
+
+    flush();
+
+    if (truncated) {
+        MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "truncated", 0, false,
+                          MQTTPriority::PRIORITY_LOW);
+    }
+    LOG_INFO(TAG_CMD, "Diagnostics '%s': %u chunk(s)%s", payload,
+             static_cast<unsigned>(chunks), truncated ? " (truncated)" : "");
+}
+
 void handleSchedulerCommand(const char* topic, const char* payload) {
     LOG_INFO(TAG_CMD, "Scheduler command on %s: %s", topic, payload);
 
@@ -1016,6 +1121,9 @@ void routeControlCommand(const char* topic, const char* payload) {
         } else {
             LOG_WARN(TAG_CMD, "Unknown emergency_reset payload: %s (use 'reset')", payload);
         }
+    }
+    else if (strcmp(command, "diagnostics") == 0) {
+        handleDiagnosticsCommand(payload);
     }
     else if (strstr(topic, "/config/") != nullptr) {
         handleSafetyConfigCommand(topic, payload);
