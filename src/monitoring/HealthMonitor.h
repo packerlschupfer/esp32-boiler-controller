@@ -221,6 +221,13 @@ private:
     HealthStatus overallHealth_;
     uint32_t lastHealthCheckTime_;
     
+    // Unlocked variants for use by the private helpers below, which already run with
+    // healthMutex_ held by updateMetrics(). The public recordError()/recordSuccess()
+    // take a NON-recursive mutex, so calling them from there blocked for the full
+    // timeout and then silently recorded nothing.
+    void recordErrorLocked(Subsystem subsystem, SystemError error);
+    void recordSuccessLocked(Subsystem subsystem);
+
     // Helper methods
     void updateMemoryMetrics();
     void updateNetworkMetrics();
@@ -231,7 +238,11 @@ private:
     const char* subsystemToString(Subsystem subsystem) const;
 };
 
-// Note: HealthMonitor is accessed via SystemResourceProvider::getHealthMonitor()
+// Note: HealthMonitor is accessed via SystemResourceProvider::getHealthMonitor().
+// The global is assigned by MonitoringTask once initialize() has succeeded - never
+// before, since initialize() itself runs a metric pass and a half-built instance must
+// not be visible to getHealthMonitor().
+extern HealthMonitor* gHealthMonitor;
 
 // Convenience macros
 #define HEALTH_RECORD_SUCCESS(subsystem) \

@@ -83,31 +83,23 @@ void HealthMonitor::updateMetrics() {
     lastHealthCheckTime_ = now;
 }
 
-void HealthMonitor::recordSuccess(Subsystem subsystem) {
-    SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(50));
-    if (!guard.hasLock()) {
-        return;
-    }
-    
+void HealthMonitor::recordSuccessLocked(Subsystem subsystem) {
+    // Caller must already hold healthMutex_.
     size_t index = static_cast<size_t>(subsystem);
     if (index < subsystemHealth_.size()) {
         subsystemHealth_[index].successCount++;
     }
 }
 
-void HealthMonitor::recordError(Subsystem subsystem, SystemError error) {
-    SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(50));
-    if (!guard.hasLock()) {
-        return;
-    }
-    
+void HealthMonitor::recordErrorLocked(Subsystem subsystem, SystemError error) {
+    // Caller must already hold healthMutex_.
     size_t index = static_cast<size_t>(subsystem);
     if (index < subsystemHealth_.size()) {
         auto& health = subsystemHealth_[index];
         health.errorCount++;
         health.lastError = error;
         health.lastErrorTime = millis();
-        
+
         // Log significant errors
         if (health.errorCount % 10 == 0) {  // Every 10th error
             LOG_WARN("HealthMonitor", "%s subsystem: %lu errors, last: %s",
@@ -116,6 +108,22 @@ void HealthMonitor::recordError(Subsystem subsystem, SystemError error) {
                     ErrorHandler::errorToString(error));
         }
     }
+}
+
+void HealthMonitor::recordSuccess(Subsystem subsystem) {
+    SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(50));
+    if (!guard.hasLock()) {
+        return;
+    }
+    recordSuccessLocked(subsystem);
+}
+
+void HealthMonitor::recordError(Subsystem subsystem, SystemError error) {
+    SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(50));
+    if (!guard.hasLock()) {
+        return;
+    }
+    recordErrorLocked(subsystem, error);
 }
 
 HealthMonitor::HealthStatus HealthMonitor::getOverallHealth() const {
@@ -316,7 +324,7 @@ void HealthMonitor::updateMemoryMetrics() {
         LOG_ERROR("HealthMonitor", "Critical DRAM: largest block %u B, %u B free (internal heap %u B)",
                   static_cast<unsigned>(dramBlock), static_cast<unsigned>(dramFree),
                   static_cast<unsigned>(memoryMetrics_.currentFreeHeap));
-        recordError(Subsystem::MEMORY, SystemError::SYSTEM_LOW_MEMORY);
+        recordErrorLocked(Subsystem::MEMORY, SystemError::SYSTEM_LOW_MEMORY);
     } else if (dramBlock < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
         LOG_WARN("HealthMonitor", "Low DRAM: largest block %u B, %u B free",
                  static_cast<unsigned>(dramBlock), static_cast<unsigned>(dramFree));
@@ -333,7 +341,7 @@ void HealthMonitor::updateNetworkMetrics() {
     if (wasConnected && !networkMetrics_.isConnected) {
         networkMetrics_.disconnectCount++;
         networkMetrics_.lastDisconnectTime = now;
-        recordError(Subsystem::NETWORK, SystemError::NETWORK_NOT_CONNECTED);
+        recordErrorLocked(Subsystem::NETWORK, SystemError::NETWORK_NOT_CONNECTED);
 
         // Proactively notify other tasks via event bits
         xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
@@ -347,7 +355,7 @@ void HealthMonitor::updateNetworkMetrics() {
         if (networkMetrics_.lastDisconnectTime > 0) {
             networkMetrics_.totalDowntime += (now - networkMetrics_.lastDisconnectTime);
         }
-        recordSuccess(Subsystem::NETWORK);
+        recordSuccessLocked(Subsystem::NETWORK);
 
         // Clear network error bit when link is restored
         xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),

@@ -14,6 +14,7 @@
 #include "events/SystemEventsGenerated.h"
 #include <EthernetManager.h>
 #include <esp_log.h>
+#include "monitoring/HealthMonitor.h"  // wired up here; see the init below
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
 #include "shared/Temperature.h"
@@ -221,6 +222,23 @@ void MonitoringTaskEventDriven(void* pvParameters) {
     // Mark event aggregator as ready - timer callbacks can now safely access it
     monitoringEventsReady = true;
 
+    // Wire up HealthMonitor. It had never been instantiated: gHealthMonitor stayed
+    // nullptr, so SRP::getHealthMonitor() returned null to every caller and the whole
+    // class - including every HEALTH_RECORD_ERROR site across the firmware - was a
+    // silent no-op. Assign the global only AFTER initialize() succeeds, because
+    // initialize() runs a metric pass of its own and a half-built instance must never
+    // be reachable through getHealthMonitor().
+    {
+        HealthMonitor& hm = HealthMonitor::getInstance();
+        const auto hmInit = hm.initialize();
+        if (hmInit.isSuccess()) {
+            gHealthMonitor = &hm;
+            LOG_INFO(TAG, "HealthMonitor initialized and published");
+        } else {
+            LOG_ERROR(TAG, "HealthMonitor init failed - health tracking stays disabled");
+        }
+    }
+
     // Feed watchdog before entering main loop
     (void)SRP::getTaskManager().feedWatchdog();
 
@@ -290,6 +308,12 @@ void MonitoringTaskEventDriven(void* pvParameters) {
 
         // Handle health check event
         if (events & MONITOR_EVENT_HEALTH_CHECK) {
+            // Drive HealthMonitor's metric pass. Nothing called this before, which is
+            // why the DRAM gate in updateMemoryMetrics() never ran.
+            if (HealthMonitor* hm = SRP::getHealthMonitor()) {
+                hm->updateMetrics();
+            }
+
             // Quick health check - only critical metrics
             uint32_t freeHeap = ESP.getFreeHeap();
             uint32_t minFreeHeap = ESP.getMinFreeHeap();

@@ -897,13 +897,16 @@ void MQTTTask::processPublishQueue() {
             LOG_DEBUG(TAG, "Published high priority to %s", request.topic);
         }
 
-        // Feed per message: this loop may drain up to MAX_ITEMS_PER_ITERATION
-        // publishes, each of which can block on the network. Progress keeps the
-        // task alive; a real hang inside one publish still trips the watchdog.
-        (void)SRP::getTaskManager().feedWatchdog();
-
         processed++;
         highQueueItems--;
+
+        // Bounded drain instead of a per-message watchdog feed (see DRAIN_BUDGET_MS
+        // above). Leaving the loop returns to the top of the task loop, where the one
+        // per-iteration feed happens; the rest is drained next pass.
+        if ((millis() - now) >= DRAIN_BUDGET_MS) {
+            LOG_DEBUG(TAG, "Drain budget reached after %d high-priority message(s)", processed);
+            break;
+        }
 
         // Brief yield every 4 messages to allow other tasks - reduced from 10ms per message
         if (processed % 4 == 0 && highQueueItems > 0) {
@@ -938,11 +941,14 @@ void MQTTTask::processPublishQueue() {
             LOG_DEBUG(TAG, "Published normal priority to %s", request.topic);
         }
         
-        // Feed per message - see the high-priority loop above.
-        (void)SRP::getTaskManager().feedWatchdog();
-
         normalProcessed++;
         normalQueueItems--;
+
+        // Bounded drain - see the high-priority loop above.
+        if ((millis() - now) >= DRAIN_BUDGET_MS) {
+            LOG_DEBUG(TAG, "Drain budget reached after %d normal-priority message(s)", normalProcessed);
+            break;
+        }
 
         // Brief yield every 4 messages to allow other tasks
         if (normalProcessed % 4 == 0 && normalQueueItems > 0) {
