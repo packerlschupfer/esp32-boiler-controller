@@ -73,17 +73,18 @@
 #define MQTT_CMD_TEST                   MQTT_CMD_PREFIX "/test"
 
 // Scheduler command topics (generic timer scheduler)
+// All handled by TimerScheduler::processMQTTCommand via the boiler/cmd/scheduler/+ subscription
 #define MQTT_CMD_SCHEDULER_PREFIX       MQTT_CMD_PREFIX "/scheduler"
-#define MQTT_CMD_SCHEDULER_COMMAND      MQTT_CMD_SCHEDULER_PREFIX "/command"
 #define MQTT_CMD_SCHEDULE_ADD           MQTT_CMD_SCHEDULER_PREFIX "/add"
-#define MQTT_CMD_SCHEDULE_UPDATE        MQTT_CMD_SCHEDULER_PREFIX "/update"
 #define MQTT_CMD_SCHEDULE_REMOVE        MQTT_CMD_SCHEDULER_PREFIX "/remove"
 #define MQTT_CMD_SCHEDULE_LIST          MQTT_CMD_SCHEDULER_PREFIX "/list"
+#define MQTT_CMD_SCHEDULE_STATUS        MQTT_CMD_SCHEDULER_PREFIX "/status"
 #define MQTT_CMD_SCHEDULE_ENABLE        MQTT_CMD_SCHEDULER_PREFIX "/enable"
-#define MQTT_CMD_SCHEDULE_DISABLE       MQTT_CMD_SCHEDULER_PREFIX "/disable"
-#define MQTT_CMD_SCHEDULE_CLEAR         MQTT_CMD_SCHEDULER_PREFIX "/clear"
-#define MQTT_CMD_VACATION_SET           MQTT_CMD_SCHEDULER_PREFIX "/vacation"
-#define MQTT_CMD_PUMP_EXERCISE          MQTT_CMD_SCHEDULER_PREFIX "/pump_exercise"
+#define MQTT_CMD_SCHEDULE_DISABLE       MQTT_CMD_SCHEDULER_PREFIX "/disable"  // enable with "enabled":false
+#define MQTT_CMD_SCHEDULE_CLEAR         MQTT_CMD_SCHEDULER_PREFIX "/clear"    // payload "confirm"
+// Removed 2026-09-16: /update, /command, /vacation and /pump_exercise had a topic but no
+// handler, so they were accepted and silently ignored. The wildcard subscription still
+// delivers them and processMQTTCommand() replies not_implemented (SchedulerCommandPolicy).
 
 // Scheduler status topics
 #define MQTT_STATUS_SCHEDULER_PREFIX    MQTT_STATUS_PREFIX "/scheduler"
@@ -106,13 +107,6 @@
 
 // Safety configuration status topic
 #define MQTT_STATUS_SAFETY_CONFIG        MQTT_STATUS_PREFIX "/safety_config"
-
-// Alert topics (IMPROVEMENT 3: Silent Failure Detection)
-#define MQTT_ALERT_PREFIX                MQTT_BASE_PREFIX "/alert"
-#define MQTT_ALERT_DEGRADED_OPERATION    MQTT_ALERT_PREFIX "/degraded_operation"
-
-// Degraded operation status (IMPROVEMENT 3)
-#define MQTT_STATUS_DEGRADED_CHECKS      MQTT_STATUS_PREFIX "/degraded_checks"
 
 // Error context topic (IMPROVEMENT 4)
 #define MQTT_ERROR_PREFIX                MQTT_BASE_PREFIX "/error"

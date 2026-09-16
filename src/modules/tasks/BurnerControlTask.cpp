@@ -463,6 +463,18 @@ static void processTemperatureUpdate() {
     }
     if (!BurnerDemandGate::sensorFallbackCheckNeeded(modeRequested, demandArmed)) {
         sensorFailure = SensorFailureConfirm::State();
+        // Idle: refresh the reported mode at most every IDLE_FALLBACK_REFRESH_MS, so the `sf`
+        // field of boiler/status/sensors and the retained boiler/status/sensor_mode match
+        // reality (idle kept the startup value) without the per-read flapping. Reporting only:
+        // nothing arms from here, a new request is checked by processBurnerRequest() first.
+        static constexpr uint32_t IDLE_FALLBACK_REFRESH_MS = 30000;
+        static uint32_t lastIdleRefreshMs = 0;
+        const uint32_t nowMs = millis();
+        if (lastIdleRefreshMs == 0 || (nowMs - lastIdleRefreshMs) >= IDLE_FALLBACK_REFRESH_MS) {
+            lastIdleRefreshMs = nowMs;
+            TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+            (void)TemperatureSensorFallback::canContinueOperation();
+        }
         return;
     }
 

@@ -73,6 +73,60 @@ namespace SchedulerCommandPolicy {
         return d;
     }
 
+    inline bool equalsToken(const char* value, const char* token) {
+        return value != nullptr && strcmp(value, token) == 0;
+    }
+
+    /**
+     * @brief boiler/cmd/scheduler/disable is an alias of enable with "enabled":false
+     *
+     * The state comes from the topic, so {"id":N} is a complete payload. A payload asking for
+     * the opposite state is a mistake and is rejected instead of disabling anyway.
+     * @return nullptr if the payload is acceptable, otherwise the error code for the reply
+     */
+    inline const char* validateDisableAlias(bool hasEnabled, bool enabledIsBool, bool enabled) {
+        if (hasEnabled && (!enabledIsBool || enabled)) return "enabled_conflicts_with_topic";
+        return nullptr;
+    }
+
+    // boiler/cmd/scheduler/clear erases every schedule, so it takes an explicit payload like
+    // the FRAM format command ("format_confirm") instead of acting on an empty message
+    constexpr char CLEAR_CONFIRM_PAYLOAD[] = "confirm";
+
+    inline bool clearConfirmed(const char* payload) {
+        return equalsToken(payload, CLEAR_CONFIRM_PAYLOAD);
+    }
+
+    // Reply messages for scheduler sub-topics that no branch handles. MQTTSubscriptionManager
+    // subscribes boiler/cmd/scheduler/+, so every sub-topic reaches processMQTTCommand(); an
+    // unhandled one used to return without a reply, which looks like a hung command to the
+    // caller (2026-09-16).
+    constexpr char REPLY_NOT_IMPLEMENTED[] = "not_implemented";
+    constexpr char REPLY_UNKNOWN_COMMAND[] = "unknown_command";
+
+    inline bool isHandledCommand(const char* command) {
+        return equalsToken(command, "add") || equalsToken(command, "remove") ||
+               equalsToken(command, "enable") || equalsToken(command, "disable") ||
+               equalsToken(command, "clear") || equalsToken(command, "list") ||
+               equalsToken(command, "status");
+    }
+
+    /**
+     * @brief Reply message for a scheduler command without a handler
+     *
+     * "not_implemented" for the sub-topics MQTTTopics.h defined without an implementation
+     * (update, vacation, pump_exercise, command), "unknown_command" for anything else.
+     * @return nullptr if the command has a handler
+     */
+    inline const char* unhandledReply(const char* command) {
+        if (isHandledCommand(command)) return nullptr;
+        if (equalsToken(command, "update") || equalsToken(command, "vacation") ||
+            equalsToken(command, "pump_exercise") || equalsToken(command, "command")) {
+            return REPLY_NOT_IMPLEMENTED;
+        }
+        return REPLY_UNKNOWN_COMMAND;
+    }
+
     // Status reply {"active":..,"count":..,"activeIds":[..],"disabledIds":[..]}
     constexpr size_t STATUS_MIN_BUFFER = 80;
     constexpr size_t MAX_STATUS_IDS = 20;  // schedules::MAX_SCHEDULES

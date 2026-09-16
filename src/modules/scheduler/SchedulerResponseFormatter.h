@@ -37,6 +37,15 @@ public:
     }
 
     /**
+     * @brief Format the reply to boiler/cmd/scheduler/clear
+     */
+    static const char* formatClearResponse(char* out, size_t size, unsigned cleared) {
+        if (out == nullptr || size == 0) return PreformattedResponses::ERROR_BUFFER;
+        snprintf(out, size, "{\"status\":\"ok\",\"cleared\":%u}", cleared);
+        return out;
+    }
+
+    /**
      * @brief Format an error response
      */
     static const char* formatErrorResponse(char* out, size_t size, const char* error, uint8_t id = 0) {

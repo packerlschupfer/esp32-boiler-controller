@@ -366,4 +366,6 @@ event_groups:
 output:
   header: include/events/SystemEventsGenerated.h
   documentation: docs/generated/events.md
-  generator_script: tools/generate_events.py
+  # tools/generate_events.py is the older generator and emits a different header;
+  # the committed include/events/SystemEventsGenerated.h comes from this one
+  generator_script: tools/generate_events_zero_overhead.py

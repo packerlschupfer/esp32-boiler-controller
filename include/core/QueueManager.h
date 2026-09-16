@@ -129,8 +129,7 @@ public:
     
     // Global metrics
     void getGlobalMetrics(size_t& totalQueues, size_t& totalMessages, size_t& totalDropped);
-    void publishMetrics();  // Publish to MQTT diagnostics
-    
+
     // Health monitoring
     bool isHealthy() const;
     uint16_t getAverageUtilizationFP() const;  // Fixed-point: 0-10000 = 0-100%
@@ -151,9 +150,6 @@ private:
     std::unordered_map<TaskHandle_t, std::vector<std::string>> taskQueues_;
     SemaphoreHandle_t mutex_;
     bool emergencyMode_;
-    
-    static constexpr uint32_t METRICS_PUBLISH_INTERVAL_MS = SystemConstants::QueueManagement::METRICS_PUBLISH_INTERVAL_MS;
-    uint32_t lastMetricsPublish_;
 };
 
 // Convenience macro for getting a queue

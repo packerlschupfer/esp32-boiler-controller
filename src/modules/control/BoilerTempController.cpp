@@ -85,7 +85,7 @@ bool BoilerTempController::initialize() {
     lastOutput_.changed = false;
 
     lastPIDOutput_ = 0;
-    lastPIDTime_ = millis();
+    lastCycleTime_ = millis();
 
     // Load configuration from SystemSettings
     SystemSettings& settings = SRP::getSystemSettings();
@@ -217,6 +217,31 @@ BoilerTempController::ControlOutput BoilerTempController::calculate(
 BoilerTempController::ControlOutput BoilerTempController::calculateBangBang(
     Temperature_t target, Temperature_t current) {
 
+    // Same pause rule as the modulating path (BoilerPowerLevel::bangBangCycleStart):
+    // this controller only runs while a request is active and not during autotune, so
+    // after a pause the last level belongs to a request that ended minutes or hours ago.
+    // A stale HALF/FULL would hold the burner on until the boiler is offHysteresis
+    // (5.0 °C) above the new target. Last cycle time read before millis(), like
+    // calculateModulating(), so the difference cannot wrap.
+    const uint32_t lastCycleMs = lastCycleTime_;
+    const uint32_t now = millis();
+    lastCycleTime_ = now;
+
+    if (BoilerPowerLevel::pidPaused(now, lastCycleMs)) {
+        const PowerLevel startLevel =
+            BoilerPowerLevel::bangBangCycleStart(lastOutput_.powerLevel, true);
+        if (startLevel != lastOutput_.powerLevel) {
+            LOG_INFO(TAG, "Bang-bang resumed after %lu ms pause - level %s -> %s",
+                     static_cast<unsigned long>(now - lastCycleMs),
+                     powerLevelToString(lastOutput_.powerLevel),
+                     powerLevelToString(startLevel));
+        }
+        // calculate() compares against lastOutput_ for `changed`; the burner is not
+        // driven by this controller during a pause
+        lastOutput_.powerLevel = startLevel;
+        lastOutput_.burnerOn = (startLevel != PowerLevel::OFF);
+    }
+
     ControlOutput output = lastOutput_;
     output.modulationPercent = 0;  // Not used for two-stage
 
@@ -291,11 +316,11 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
 
     // Calculate time delta since last PID calculation (last time read before millis(),
     // like predictHeatDemand())
-    const uint32_t lastPidMs = lastPIDTime_;
+    const uint32_t lastPidMs = lastCycleTime_;
     uint32_t now = millis();
     uint32_t dtMs = now - lastPidMs;
     if (dtMs == 0) dtMs = 100;  // Minimum 100ms
-    lastPIDTime_ = now;
+    lastCycleTime_ = now;
 
     // The PID only runs while a request is active and not during autotune, so the
     // first call after a pause sees a dt of minutes or hours. Integrating that
@@ -426,12 +451,12 @@ bool BoilerTempController::predictHeatDemand(Temperature_t targetTemp, Temperatu
         return false;
     }
 
-    // calculate() writes lastPIDTime_ and lastOutput_ from BoilerTempControlTask without
-    // mutex_. Copy them first and take millis() afterwards: every stored lastPIDTime_ is
+    // calculate() writes lastCycleTime_ and lastOutput_ from BoilerTempControlTask without
+    // mutex_. Copy them first and take millis() afterwards: every stored lastCycleTime_ is
     // a millis() value from before our read, so now - lastPidMs cannot wrap into a false
     // pause (review R1-2). A cycle completing concurrently only makes this prediction
     // one cycle old, which BoilerTempControlTask's level-triggered decide() corrects.
-    const uint32_t lastPidMs = lastPIDTime_;
+    const uint32_t lastPidMs = lastCycleTime_;
     const PowerLevel lastLevel = lastOutput_.powerLevel;
     const uint32_t nowMs = millis();
 
@@ -441,20 +466,24 @@ bool BoilerTempController::predictHeatDemand(Temperature_t targetTemp, Temperatu
         return true;
     }
 
+    // Both paths start from OFF after a pause (BoilerPowerLevel::modulatingCycleStart /
+    // bangBangCycleStart), so the prediction must use the same start level
+    const bool paused = BoilerPowerLevel::pidPaused(nowMs, lastPidMs);
+
     PowerLevel level;
     if (config_.burnerType == BurnerType::TWO_STAGE) {
         const BoilerPowerLevel::BangBangBands bands = {
             config_.offHysteresis, config_.onHysteresis, config_.fullPowerThreshold
         };
-        level = BoilerPowerLevel::fromBangBangError(lastLevel,
-                                                    tempSub(targetTemp, currentTemp), bands);
+        level = BoilerPowerLevel::fromBangBangError(
+            BoilerPowerLevel::bangBangCycleStart(lastLevel, paused),
+            tempSub(targetTemp, currentTemp), bands);
     } else {
         // updateMode() resets the PID on a mode or gain change (level kept),
         // calculateModulating() after a pause (level from OFF, nominal dt):
         // BoilerPowerLevel::modulatingCycleStart()
         const bool modeOrGainsChanged = (waterMode != isWaterMode_) ||
             (kp != config_.modKp) || (ki != config_.modKi) || (kd != config_.modKd);
-        const bool paused = BoilerPowerLevel::pidPaused(nowMs, lastPidMs);
         const BoilerPowerLevel::Thresholds thresholds = {
             config_.offThreshold, config_.halfThreshold, config_.fullThreshold, config_.thresholdHysteresis
         };
@@ -487,7 +516,7 @@ void BoilerTempController::reset() {
         pidController_->reset();
     }
     lastPIDOutput_ = 0;
-    lastPIDTime_ = millis();
+    lastCycleTime_ = millis();
 
     LOG_INFO(TAG, "Controller reset (including PID)");
 }
@@ -681,6 +710,12 @@ bool BoilerTempController::startAutoTuning(Temperature_t setpoint) {
                  relayAmplitude, hysteresis);
     }
 
+    // Mode of this run, from the same source as updateMode() and read before mutex_.
+    // updateMode() does not run while tuning, so isWaterMode_ would still hold the mode of
+    // the last normal control cycle when the result is saved (review 2026-09-14 pid-4).
+    const EventBits_t startRequestBits = BurnerRequestManager::getCurrentRequests();
+    const bool waterModeAtStart = (startRequestBits & SystemEvents::BurnerRequest::WATER) != 0;
+
     MutexGuard guard(mutex_, MUTEX_TIMEOUT);
     if (!guard.hasLock()) {
         LOG_ERROR(TAG, "startAutoTuning: mutex timeout");
@@ -717,13 +752,17 @@ bool BoilerTempController::startAutoTuning(Temperature_t setpoint) {
     if (autoTuner_->startTuning(setpointFloat, relayAmplitude, hysteresis, tuningMethod_)) {
         autoTuningActive_ = true;
         autoTuneSetpoint_ = setpoint;
+        autoTuneWaterMode_ = waterModeAtStart;
+        // The tuner gets the time since this moment, not an absolute millis() (pid-7)
+        autoTuneClock_.start(millis());
 
         // Reset PID for fresh start after tuning
         if (pidController_ != nullptr) {
             pidController_->reset();
         }
 
-        LOG_INFO(TAG, "Auto-tuning started at setpoint %.1f°C", setpointFloat);
+        LOG_INFO(TAG, "Auto-tuning started at setpoint %.1f°C in %s mode",
+                 setpointFloat, waterModeAtStart ? "WATER" : "SPACE");
         return true;
     }
 
@@ -752,9 +791,13 @@ BoilerTempController::ControlOutput BoilerTempController::updateAutoTuning(Tempe
         return output;
     }
 
-    // Update auto-tuner with current temperature
+    // Update auto-tuner with current temperature.
+    // Time base: seconds since startAutoTuning(), from uint32_t millis() differences.
+    // static_cast<float>(millis()) / 1000.0f was absolute, so the ~49-day millis() wrap
+    // threw the tuner's peak/trough times and its timeout backwards, and near the wrap the
+    // float mantissa quantised the value to 0.5 s steps (AutotuneClock, review pid-7).
     float currentTempFloat = tempToFloat(currentTemp);
-    float currentTime = static_cast<float>(millis()) / 1000.0f;  // Convert to seconds
+    float currentTime = autoTuneClock_.elapsedSeconds(millis());
 
     float tunerOutput = autoTuner_->update(currentTempFloat, currentTime);
 
@@ -816,13 +859,25 @@ bool BoilerTempController::applyAutoTuningResults() {
         return false;
     }
 
+    // Gain set of the run, not of the (stale) isWaterMode_ flag. A mode change during the
+    // run means the oscillation was measured on two different loads, so the result belongs
+    // to neither gain set - reject it instead of writing wrong gains (AutotuneGainTarget).
+    const AutotuneGainTarget::Target gainTarget = getTunedGainTarget();
+    if (gainTarget == AutotuneGainTarget::Target::REJECT_MODE_CHANGED) {
+        LOG_ERROR(TAG, "Auto-tuning result rejected: started in %s mode, %s mode active now",
+                  autoTuneWaterMode_ ? "WATER" : "SPACE",
+                  autoTuneWaterMode_ ? "SPACE" : "WATER");
+        return false;
+    }
+    const bool waterGains = (gainTarget == AutotuneGainTarget::Target::WATER);
+
     // Apply the tuned gains to active gains
     config_.modKp = results.Kp;
     config_.modKi = results.Ki;
     config_.modKd = results.Kd;
 
     // Also update mode-specific gains so they persist across mode switches
-    if (isWaterMode_) {
+    if (waterGains) {
         config_.waterKp = results.Kp;
         config_.waterKi = results.Ki;
         config_.waterKd = results.Kd;
@@ -848,6 +903,17 @@ uint8_t BoilerTempController::getAutoTuningProgress() const {
         return 0;
     }
     return autoTuner_->getProgress();
+}
+
+AutotuneGainTarget::Target BoilerTempController::getTunedGainTarget() const {
+    // Mode now, from the active burner request - the same source updateMode() uses.
+    // autoTuneWaterMode_ is written once in startAutoTuning() and only read here and in
+    // applyAutoTuningResults(), so no mutex is needed (like isWaterMode()); taking one
+    // would also deadlock the caller that already holds mutex_.
+    const EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
+    const bool waterModeNow = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
+
+    return AutotuneGainTarget::select(autoTuneWaterMode_, waterModeNow);
 }
 
 bool BoilerTempController::getTunedGains(float& kp, float& ki, float& kd) const {

@@ -7,7 +7,9 @@
 #include "shared/Temperature.h"
 #include "modules/control/PIDControlModuleFixedPoint.h"
 #include "modules/control/PIDAutoTuner.h"
-#include "modules/control/BoilerPowerLevel.h"  // power level mapping shared with the native tests
+#include "modules/control/BoilerPowerLevel.h"    // power level mapping shared with the native tests
+#include "modules/control/AutotuneClock.h"       // wrap-safe autotune run time
+#include "modules/control/AutotuneGainTarget.h"  // which gain set an autotune result belongs to
 
 /**
  * @brief Boiler Temperature Controller for cascade control
@@ -189,6 +191,10 @@ public:
 
     /**
      * @brief Check if currently in water heating mode
+     *
+     * Tracked by updateMode(), which only runs on a normal control cycle: during an
+     * autotune run this flag keeps the mode of the last such cycle. Use the active
+     * burner request (or getTunedGainTarget()) while tuning.
      * @return true if water heating mode active
      */
     bool isWaterMode() const { return isWaterMode_; }
@@ -250,6 +256,16 @@ public:
      */
     bool getTunedGains(float& kp, float& ki, float& kd) const;
 
+    /**
+     * @brief Gain set the finished autotune result belongs to (AutotuneGainTarget)
+     *
+     * Compares the mode captured at startAutoTuning() with the mode of the active burner
+     * request; returns REJECT_MODE_CHANGED if they differ, because the oscillation then
+     * came partly from the other loop. isWaterMode_ cannot answer this: updateMode() does
+     * not run while tuning (review 2026-09-14 pid-4).
+     */
+    AutotuneGainTarget::Target getTunedGainTarget() const;
+
 private:
     Config config_;
     ControlOutput lastOutput_;
@@ -260,7 +276,10 @@ private:
     // PID controller for modulating mode
     PIDControlModuleFixedPoint* pidController_ = nullptr;
     uint8_t lastPIDOutput_ = 0;
-    uint32_t lastPIDTime_ = 0;
+    // millis() of the last control cycle; both calculateModulating() and
+    // calculateBangBang() stamp it, so the pause check (BoilerPowerLevel::pidPaused)
+    // covers either burner type
+    uint32_t lastCycleTime_ = 0;
 
     // Mode tracking for gain switching
     bool isWaterMode_ = false;
@@ -269,6 +288,12 @@ private:
     PIDAutoTuner* autoTuner_ = nullptr;
     bool autoTuningActive_ = false;
     Temperature_t autoTuneSetpoint_ = 0;
+    // Mode of the run, captured at startAutoTuning(): the results are only valid for the
+    // loop the relay test actually drove (pid-4)
+    bool autoTuneWaterMode_ = false;
+    // Run time for the tuner: millis() differences instead of an absolute millis()/1000
+    // (wrap and float resolution, pid-7)
+    AutotuneClock::Clock autoTuneClock_;
     // Loaded from SystemSettings::autotuneMethod in initialize(). ZN-PI default:
     // the boiler's relay period is ~9 min, which makes ZN-PID's Kd absurd (~2000).
     PIDAutoTuner::TuningMethod tuningMethod_ = PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PI;

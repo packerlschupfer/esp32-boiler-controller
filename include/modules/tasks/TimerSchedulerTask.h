@@ -12,7 +12,8 @@ void TimerSchedulerTask(void* parameter);
 namespace TimerScheduler {
     /**
      * Process MQTT command for scheduler
-     * @param command The command (add, remove, enable, list, status)
+     * @param command The command (add, remove, enable, disable, clear, list, status); any
+     *                other sub-topic replies not_implemented or unknown_command
      * @param payload The JSON payload
      */
     void processMQTTCommand(const String& command, const String& payload);

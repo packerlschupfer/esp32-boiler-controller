@@ -9,6 +9,7 @@
 #include "modules/control/BurnerSafetyValidator.h"  // F2: validate before arming demand
 #include "modules/control/ReturnPreheater.h"        // F2: thermal-shock mitigation
 #include "modules/control/BurnerDemandGate.h"       // Arming rules shared with BurnerControlTask
+#include "modules/control/AutotuneGainTarget.h"     // Gain set an autotune result belongs to
 #include "modules/tasks/BurnerControlTask.h"        // getBurnerDemandPermission()
 #include "shared/SharedResources.h"
 #include "events/SystemEventsGenerated.h"
@@ -212,6 +213,11 @@ void BoilerTempControlTask(void* parameter) {
             EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
             bool hasActiveRequest = (requestBits & SystemEvents::BurnerRequest::HEATING) ||
                                    (requestBits & SystemEvents::BurnerRequest::WATER);
+            // Mode of this cycle for the safety validation below: controller.isWaterMode()
+            // is only updated by updateMode(), which does not run during a tuning run
+            // (review 2026-09-14 pid-4), so a water request that started after the run
+            // began would skip the water temperature limit check
+            const bool waterModeNow = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
 
             if (!hasActiveRequest) {
                 LOG_WARN(TAG, "No active heating request - stopping auto-tuning for safety");
@@ -309,7 +315,7 @@ void BoilerTempControlTask(void* parameter) {
                         BurnerSafetyValidator::SafetyConfig safetyConfig;
                         safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
                         auto vr = BurnerSafetyValidator::validateBurnerOperation(
-                            readings, safetyConfig, controller.isWaterMode());
+                            readings, safetyConfig, waterModeNow);
                         if (vr == BurnerSafetyValidator::ValidationResult::SAFE_TO_OPERATE) {
                             // Refused if BurnerControlTask revoked the permission meanwhile;
                             // retried next cycle
@@ -338,7 +344,22 @@ void BoilerTempControlTask(void* parameter) {
                 if (!controller.isAutoTuning()) {
                     SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
 
-                    if (controller.applyAutoTuningResults()) {
+                    // Gain set of the run: the mode captured at startAutoTuning() compared
+                    // with the active request. controller.isWaterMode() cannot be used
+                    // here - updateMode() does not run while tuning, so it still holds the
+                    // mode of the last normal control cycle (review 2026-09-14 pid-4).
+                    const AutotuneGainTarget::Target gainTarget = controller.getTunedGainTarget();
+
+                    if (gainTarget == AutotuneGainTarget::Target::REJECT_MODE_CHANGED) {
+                        // Water and space were measured on the same run: the result
+                        // describes neither loop, and the live water gains are hand
+                        // corrected values that must not be overwritten by it
+                        SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                        LOG_WARN(TAG, "Auto-tuning result discarded - heating mode changed during the run");
+                        MQTTTask::publish("boiler/status/pid/autotune/result",
+                            "{\"status\":\"rejected\",\"reason\":\"mode changed\"}", 0, true,
+                            MQTTPriority::PRIORITY_HIGH);
+                    } else if (controller.applyAutoTuningResults()) {
                         SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_COMPLETE);
 
                         // Get the tuned gains
@@ -347,8 +368,8 @@ void BoilerTempControlTask(void* parameter) {
                             // Update SystemSettings for persistence
                             SystemSettings& settings = SRP::getSystemSettings();
 
-                            // Save to correct gain set based on current mode
-                            if (controller.isWaterMode()) {
+                            // Save to the gain set the relay test actually measured
+                            if (gainTarget == AutotuneGainTarget::Target::WATER) {
                                 settings.wHeaterKp = kp;
                                 settings.wHeaterKi = ki;
                                 settings.wHeaterKd = kd;
@@ -367,7 +388,7 @@ void BoilerTempControlTask(void* parameter) {
                             char buffer[160];
                             snprintf(buffer, sizeof(buffer),
                                 "{\"status\":\"complete\",\"mode\":\"%s\",\"kp\":%.4f,\"ki\":%.5f,\"kd\":%.4f}",
-                                controller.isWaterMode() ? "water" : "space",
+                                AutotuneGainTarget::toString(gainTarget),
                                 kp, ki, kd);
                             MQTTTask::publish("boiler/status/pid/autotune/result", buffer, 0, true,
                                 MQTTPriority::PRIORITY_HIGH);

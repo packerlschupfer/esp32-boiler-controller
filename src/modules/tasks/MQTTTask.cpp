@@ -23,7 +23,6 @@
 #include <TaskManager.h>
 #include "utils/PooledString.h"
 #include "utils/MemoryPool.h"
-#include "diagnostics/MQTTDiagnostics.h"
 #include "modules/tasks/TimerSchedulerTask.h"
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/BurnerStateMachine.h"

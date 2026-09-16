@@ -172,6 +172,21 @@ namespace BoilerPowerLevel {
     }
 
     /**
+     * @brief Start of the next bang-bang cycle (calculateBangBang, predictHeatDemand)
+     *
+     * The two-stage path had no pause handling at all, so fromBangBangError() could start
+     * from a HALF or FULL left over from a request that ended minutes or hours ago and
+     * hold the burner on until the boiler is offHysteresis (5 °C) *above* the new target.
+     * Symmetric to modulatingCycleStart(): after a pause the level starts from OFF,
+     * because this controller did not drive the burner during the pause. The bands
+     * themselves are unchanged - from OFF the burner comes back on at onHysteresis below
+     * target, which is where a two-stage burner belongs.
+     */
+    inline Level bangBangCycleStart(Level lastLevel, bool paused) {
+        return paused ? Level::OFF : lastLevel;
+    }
+
+    /**
      * @brief Prediction of the next modulating cycle (BoilerTempController::predictHeatDemand)
      *
      * Applies modulatingCycleStart() to a copy of the PID state and runs one cycle with the

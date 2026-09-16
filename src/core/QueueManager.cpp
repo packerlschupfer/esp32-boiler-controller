@@ -1,14 +1,10 @@
 // src/core/QueueManager.cpp
 #include "core/QueueManager.h"
 #include "LoggingMacros.h"
-#include "diagnostics/MQTTDiagnostics.h"
 #include "utils/MutexGuard.h"
 #include "modules/tasks/MQTTTask.h"  // For MQTTMessage and MQTTPriority
 #include <algorithm>
 #include <cstring>
-
-// Static member initialization
-constexpr uint32_t QueueManager::METRICS_PUBLISH_INTERVAL_MS;
 
 // ManagedQueue implementation
 QueueManager::ManagedQueue::ManagedQueue(const std::string& name, const QueueConfig& config)
@@ -325,10 +321,9 @@ void QueueManager::ManagedQueue::checkCircuitBreakerRecovery() {
 }
 
 // QueueManager implementation
-QueueManager::QueueManager() 
-    : emergencyMode_(false)
-    , lastMetricsPublish_(0) {
-    
+QueueManager::QueueManager()
+    : emergencyMode_(false) {
+
     mutex_ = xSemaphoreCreateMutex();
     if (!mutex_) {
         LOG_ERROR("QueueManager", "Failed to create mutex");
@@ -428,56 +423,6 @@ void QueueManager::getGlobalMetrics(size_t& totalQueues, size_t& totalMessages, 
         const auto& metrics = entry.second->getMetrics();
         totalMessages += entry.second->getMessagesWaiting();
         totalDropped += metrics.getTotalDropped();
-    }
-}
-
-void QueueManager::publishMetrics() {
-    MQTTDiagnostics* diagnostics = MQTTDiagnostics::getInstance();
-    if (!diagnostics || !diagnostics->isEnabled()) {
-        return;
-    }
-    
-    // Check publish interval
-    uint32_t now = millis();
-    if (now - lastMetricsPublish_ < METRICS_PUBLISH_INTERVAL_MS) {
-        return;
-    }
-    lastMetricsPublish_ = now;
-    
-    MutexGuard guard(mutex_);
-
-    // Round 20 Issue #9: Static buffers reduce stack pressure (ESP32 optimization)
-    // THREAD-SAFETY: ✅ Mutex-protected - MutexGuard ensures safe access
-    // RATIONALE: MQTT task has only 712B free stack, 256B+128B+64B=448B would be fatal
-    // See: docs/MEMORY_OPTIMIZATION.md for complete rationale
-    // Build metrics JSON
-    static char buffer[256];  // Reduced from 512, actual usage ~150 bytes
-    uint16_t avgUtil = getAverageUtilizationFP();
-    snprintf(buffer, sizeof(buffer),
-        "{\"queues\":%zu,\"emergency\":%s,\"healthy\":%s,\"avgUtil\":%u.%02u,\"critical\":%zu}",
-        queues_.size(),
-        emergencyMode_ ? "true" : "false",
-        isHealthy() ? "true" : "false",
-        avgUtil / 100, avgUtil % 100,  // Fixed-point to X.XX%
-        getCriticalQueueCount()
-    );
-    
-    diagnostics->publishDiagnostics("queues", buffer, true);
-    
-    // Publish individual queue metrics for critical queues
-    for (const auto& entry : queues_) {
-        const auto& queue = entry.second;
-        const auto& metrics = queue->getMetrics();
-        
-        if (!metrics.isHealthy() || queue->getConfig().warningThreshold > 0) {
-            // Round 20 Issue #9: Static buffers reduce stack pressure (mutex-protected above)
-            static char queueBuffer[128];  // Reduced from 256, actual usage ~100 bytes
-            metrics.toJSON(queueBuffer, sizeof(queueBuffer));
-
-            static char topic[64];  // Reduced from 128
-            snprintf(topic, sizeof(topic), "queues/%s", entry.first.c_str());
-            diagnostics->publishDiagnostics(topic, queueBuffer, true);
-        }
     }
 }
 

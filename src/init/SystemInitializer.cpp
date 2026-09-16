@@ -40,7 +40,6 @@
 
 // Error handling and monitoring utilities
 #include "utils/ErrorHandler.h"
-#include "utils/FailOpenMonitor.h"
 
 // Core services
 #include "core/SharedResourceManager.h"
@@ -493,10 +492,6 @@ Result<void> SystemInitializer::initializeControlModules() {
     // Initialize temperature sensor fallback system
     LOG_INFO(TAG, "Initializing temperature sensor fallback...");
     TemperatureSensorFallback::initialize();
-
-    // Initialize fail-open monitoring (IMPROVEMENT 3)
-    LOG_INFO(TAG, "Initializing fail-open monitor...");
-    FailOpenMonitor::initialize();
 
     // Note: ModbusErrorTracker (IMPROVEMENT 5) uses static initialization - no init() needed
 

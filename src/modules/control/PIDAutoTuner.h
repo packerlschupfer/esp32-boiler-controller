@@ -169,8 +169,14 @@ private:
     // State
     TuningState state;
     bool relayState;             // Current relay state (high/low)
-    float startTime;             // Tuning start time
-    float lastSwitchTime;        // Last relay switch time
+    // Time base: seconds since the start of the run (BoilerTempController feeds it from
+    // AutotuneClock), so only differences are compared and the ~49-day millis() wrap
+    // cannot reach the tuner. startTimeValid replaces the old "startTime == 0" sentinel,
+    // which is true at the first sample of a relative time base and would re-base the run
+    // on every update - the timeout would never fire (review 2026-09-14 pid-7).
+    bool startTimeValid;         // First sample seen
+    float startTime;             // Time of the first sample (seconds)
+    float lastSwitchTime;        // Last relay switch time (seconds)
 
     // Peak/trough tracking over whole relay phases (peak = max of OFF phase,
     // trough = min of ON phase, because the boiler lags the relay)
@@ -221,7 +227,8 @@ public:
     /**
      * @brief Update auto-tuning process
      * @param currentTemp Current process temperature
-     * @param currentTime Current time in seconds
+     * @param currentTime Seconds since the start of this run - monotonic and free of the
+     *        millis() wrap (AutotuneClock), never an absolute millis()/1000
      * @return Control output (-100 to 100)
      */
     float update(float currentTemp, float currentTime);

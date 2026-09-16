@@ -17,6 +17,7 @@ PIDAutoTuner::PIDAutoTuner()
     , method(TuningMethod::ZIEGLER_NICHOLS_PI)
     , state(TuningState::IDLE)
     , relayState(false)
+    , startTimeValid(false)
     , startTime(0)
     , lastSwitchTime(0) {
     
@@ -61,6 +62,7 @@ bool PIDAutoTuner::startTuning(float targetSetpoint, float relayAmplitude,
     // Reset state
     state = TuningState::RELAY_TEST;
     relayState = false;
+    startTimeValid = false;
     startTime = 0;
     lastSwitchTime = 0;
     result = TuningResult();
@@ -85,19 +87,32 @@ float PIDAutoTuner::update(float currentTemp, float currentTime) {
         return 0.0f;
     }
     
-    // Initialize start time
-    if (startTime == 0) {
+    // Initialize start time. An explicit flag, not "startTime == 0": currentTime is the
+    // time since the start of the run, so the first sample really is 0 s.
+    if (!startTimeValid) {
         startTime = currentTime;
         lastSwitchTime = currentTime;
+        startTimeValid = true;
     }
-    
-    // Check for timeout
+
+    // The caller guarantees a monotonic time base (AutotuneClock). Time running backwards
+    // means the time source wrapped or was re-based: every stored peak/trough time would
+    // then be out of order (negative periods, wrong Tu) and the timeout below could never
+    // fire again. Fail the run instead of analysing corrupt data.
+    if (currentTime < startTime) {
+        LOG_ERROR(TAG, "Auto-tuning time base went backwards (%.1f < %.1f) - aborting",
+                  currentTime, startTime);
+        state = TuningState::FAILED;
+        return 0.0f;
+    }
+
+    // Check for timeout (elapsed time only, never an absolute comparison)
     if ((currentTime - startTime) > MAX_TUNING_TIME) {
         LOG_ERROR(TAG, "Auto-tuning timeout");
         state = TuningState::FAILED;
         return 0.0f;
     }
-    
+
     // Perform relay control
     float output = relayControl(currentTemp, currentTime);
     
@@ -155,7 +170,7 @@ uint8_t PIDAutoTuner::getCycleCount() const {
 }
 
 float PIDAutoTuner::getElapsedTime() const {
-    if (state == TuningState::IDLE || startTime == 0) return 0.0f;
+    if (state == TuningState::IDLE || !startTimeValid) return 0.0f;
     if (!oscillationData.empty()) {
         return oscillationData.back().time - startTime;
     }

@@ -492,7 +492,10 @@ static char s_replyBuffer[sizeof(MQTTPublishRequest::payload)];
 
 void processMQTTCommand(const String& command, const String& payload) {
     if (!isInitialized) {
-        LOG_WARN(TAG, "Scheduler not initialized, ignoring command");
+        // Reply instead of returning silently: a command without an answer looks like a hang
+        LOG_WARN(TAG, "Scheduler not initialized, rejecting command");
+        MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+            "{\"status\":\"error\",\"msg\":\"not_initialized\"}");
         return;
     }
     
@@ -562,6 +565,8 @@ void processMQTTCommand(const String& command, const String& payload) {
             schedule.type = ScheduleType::SPACE_HEATING;
         } else {
             LOG_ERROR(TAG, "Unknown schedule type: %s", typeStr);
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+                SchedulerResponseFormatter::PreformattedResponses::ERROR_INVALID_TYPE);
             return;
         }
 
@@ -607,6 +612,8 @@ void processMQTTCommand(const String& command, const String& payload) {
         IScheduleAction* handler = getActionHandler(schedule.type);
         if (!handler) {
             LOG_ERROR(TAG, "No handler for schedule type");
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+                SchedulerResponseFormatter::PreformattedResponses::ERROR_INVALID_TYPE);
             return;
         }
         
@@ -770,8 +777,9 @@ void processMQTTCommand(const String& command, const String& payload) {
             // Trigger save
             xEventGroupSetBits(schedulerEventGroup, SchedulerEvents::SCHEDULER_EVENT_SAVE_SCHEDULES);
         }
-    } else if (command == "enable") {
-        // Payload {"id":N,"enabled":true|false}
+    } else if (command == "enable" || command == "disable") {
+        // Payload {"id":N,"enabled":true|false}; the disable alias takes {"id":N}
+        const bool disableAlias = (command == "disable");
         constexpr size_t MAX_ENABLE_JSON_SIZE = 64;
         if (payload.length() > MAX_ENABLE_JSON_SIZE) {
             LOG_ERROR(TAG, "Enable JSON too large: %d bytes (max %d)", payload.length(), MAX_ENABLE_JSON_SIZE);
@@ -796,6 +804,22 @@ void processMQTTCommand(const String& command, const String& payload) {
         request.hasEnabled = !doc["enabled"].isNull();
         request.enabledIsBool = doc["enabled"].is<bool>();
 
+        if (disableAlias) {
+            // The topic carries the state, so "enabled" may be omitted; a payload asking for
+            // the opposite state is a mistake and must not disable the schedule anyway
+            const char* conflict = SchedulerCommandPolicy::validateDisableAlias(
+                request.hasEnabled, request.enabledIsBool, doc["enabled"].as<bool>());
+            if (conflict) {
+                LOG_ERROR(TAG, "Invalid schedule disable command: %s", conflict);
+                const char* response = SchedulerResponseFormatter::formatErrorResponse(
+                    s_replyBuffer, sizeof(s_replyBuffer), conflict);
+                MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+                return;
+            }
+            request.hasEnabled = true;
+            request.enabledIsBool = true;
+        }
+
         const char* invalid = SchedulerCommandPolicy::validateEnable(request);
         if (invalid) {
             LOG_ERROR(TAG, "Invalid schedule enable command: %s", invalid);
@@ -806,7 +830,7 @@ void processMQTTCommand(const String& command, const String& payload) {
         }
 
         uint8_t id = static_cast<uint8_t>(request.id);
-        bool enable = doc["enabled"].as<bool>();
+        bool enable = disableAlias ? false : doc["enabled"].as<bool>();
         bool found = false;
         bool changed = false;
 
@@ -852,6 +876,47 @@ void processMQTTCommand(const String& command, const String& payload) {
             xEventGroupSetBits(schedulerEventGroup, SchedulerEvents::SCHEDULER_EVENT_CHECK_SCHEDULE |
                                                    SchedulerEvents::SCHEDULER_EVENT_SAVE_SCHEDULES);
         }
+    } else if (command == "clear") {
+        // Erases every schedule: require the explicit payload, like the FRAM format command
+        if (!SchedulerCommandPolicy::clearConfirmed(payload.c_str())) {
+            LOG_WARN(TAG, "Scheduler clear requested - send '%s' to proceed",
+                     SchedulerCommandPolicy::CLEAR_CONFIRM_PAYLOAD);
+            const char* response = SchedulerResponseFormatter::formatErrorResponse(
+                s_replyBuffer, sizeof(s_replyBuffer), "use_confirm");
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+            return;
+        }
+
+        if (schedulesMutex == nullptr || xSemaphoreTake(schedulesMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            LOG_ERROR(TAG, "Failed to acquire schedules mutex for clear");
+            MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE,
+                "{\"success\":false,\"error\":\"mutex_timeout\"}");
+            return;
+        }
+
+        // End running schedules first (mutex held): releases their water/heating request
+        // like remove does, otherwise the request would stay until the next check
+        const size_t cleared = timerSchedules.size();
+        for (auto& schedule : timerSchedules) {
+            auto activeIt = activeSchedules.find(schedule.id);
+            if (activeIt != activeSchedules.end() && activeIt->second) {
+                deactivateSchedule(schedule);
+            }
+        }
+        timerSchedules.clear();
+        activeSchedules.clear();
+        schedulesModified = true;
+
+        xSemaphoreGive(schedulesMutex);
+
+        LOG_WARN(TAG, "Cleared %u schedules via MQTT", static_cast<unsigned>(cleared));
+
+        const char* response = SchedulerResponseFormatter::formatClearResponse(
+            s_replyBuffer, sizeof(s_replyBuffer), static_cast<unsigned>(cleared));
+        MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
+
+        // Save the empty list (ScheduleStorage writes a header with count 0)
+        xEventGroupSetBits(schedulerEventGroup, SchedulerEvents::SCHEDULER_EVENT_SAVE_SCHEDULES);
     } else if (command == "list") {
         // Round 14 Issue #5: Acquire mutex for thread-safe access
         if (schedulesMutex == nullptr || xSemaphoreTake(schedulesMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -872,6 +937,14 @@ void processMQTTCommand(const String& command, const String& payload) {
         // Reply buffer instead of publishSchedulerStatus()'s 128-byte stack buffer: room for
         // all active and disabled IDs, and less MQTT task stack
         MQTTTask::publish(MQTT_STATUS_SCHEDULER_INFO, getStatusJSON(s_replyBuffer, sizeof(s_replyBuffer)));
+    } else {
+        // boiler/cmd/scheduler/+ delivers every sub-topic here, so a command without a branch
+        // must answer: it was ignored before and looked like a hung command (2026-09-16)
+        const char* reason = SchedulerCommandPolicy::unhandledReply(command.c_str());
+        LOG_WARN(TAG, "Scheduler command '%s': %s", command.c_str(), reason);
+        const char* response = SchedulerResponseFormatter::formatErrorResponse(
+            s_replyBuffer, sizeof(s_replyBuffer), reason);
+        MQTTTask::publish(MQTT_TOPIC_SCHEDULER_RESPONSE, response);
     }
 }
 
