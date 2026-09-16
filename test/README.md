@@ -199,7 +199,7 @@ void tearDown() {
 
 void test_health_monitor_initial_state() {
     auto& hm = HealthMonitor::getInstance();
-    TEST_ASSERT_EQUAL(HealthMonitor::HealthStatus::UNKNOWN, hm.getOverallHealth());
+    TEST_ASSERT_EQUAL(HealthMonitor::HealthStatus::GOOD, hm.getOverallHealth());
 }
 
 int main() {

@@ -501,7 +501,13 @@ void HealthMonitor::resetForTesting() {
     instance.networkStartTime_ = 0;
 
     // Reset overall health
-    instance.overallHealth_ = HealthStatus::UNKNOWN;
+    // GOOD, not UNKNOWN: this used to assign HealthStatus::UNKNOWN, which is not a
+    // member of the enum (EXCELLENT/GOOD/WARNING/CRITICAL/FAILED). It never failed to
+    // build because UNIT_TEST is defined only in the native_test env, which is
+    // platform = native and does not compile src/ - so this file has never once been
+    // built with this block enabled. GOOD matches what the constructor initialises
+    // overallHealth_ to, so reset restores the constructed state.
+    instance.overallHealth_ = HealthStatus::GOOD;
     instance.lastHealthCheckTime_ = 0;
 
     // Note: healthMutex_ is NOT reset - it persists across test runs
