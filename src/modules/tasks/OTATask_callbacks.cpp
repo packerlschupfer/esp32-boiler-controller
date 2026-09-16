@@ -94,12 +94,20 @@ void OTATask::onOTAStart() {
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
             mqtt->setAutoReconnect(false);
-            mqtt->disconnect();
-            s_mqttStoppedForOta = true;
-            // Serial-only from here until the reboot or onOTAError - MQTT is down
-            LOG_WARN(TAG, "MQTT stopped - DRAM after: %u free, largest %u",
-                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
+            // Trust disconnect()'s return, not our own isConnected() check: that reads
+            // the event-group bit while the teardown is guarded by the client's own
+            // flag, and the two diverge briefly during disconnect handling. Testing the
+            // wrong one made this log "MQTT stopped" while nothing was freed.
+            s_mqttStoppedForOta = mqtt->disconnect();
+            if (s_mqttStoppedForOta) {
+                // Serial-only from here until the reboot or onOTAError - MQTT is down
+                LOG_WARN(TAG, "MQTT stopped - DRAM after: %u free, largest %u",
+                         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+                         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
+            } else {
+                LOG_ERROR(TAG, "MQTT teardown did NOT happen - OTA may starve for DRAM");
+                mqtt->setAutoReconnect(true);  // nothing was torn down, restore policy
+            }
         } else {
             LOG_INFO(TAG, "MQTT not connected - no teardown needed for OTA");
         }
@@ -121,8 +129,12 @@ void OTATask::onOTAEnd() {
         }
     }
 
-    // Resume any suspended operations
-    // SensorTask::resume();
+    // Clear the teardown flag here too. The device normally reboots immediately after
+    // this callback, so it rarely matters - but correctness should not depend on
+    // ArduinoOTA's _rebootOnSuccess default, especially since this callback REPLACED
+    // OTAManager's own restarting onEnd. If the reboot ever does not happen, leaving
+    // the flag set would strand MQTT torn down with auto-reconnect disabled.
+    s_mqttStoppedForOta = false;
 
     // Indicate OTA complete with LED
     // StatusLed::setPattern(2, 500, 1000);  // Double blink

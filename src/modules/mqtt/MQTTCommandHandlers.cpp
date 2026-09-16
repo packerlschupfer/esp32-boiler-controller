@@ -718,8 +718,17 @@ void handleDiagnosticsCommand(const char* payload) {
     auto flush = [&]() {
         if (used == 0) return;
         chunk[used] = '\0';
-        MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_REPORT, chunk, 0, false,
-                          MQTTPriority::PRIORITY_LOW);
+        // Check the return: a LOW-priority publish is dropped outright when queue
+        // utilisation reaches 50%, and DROP_OLDEST can evict an already-queued chunk.
+        // Counting a dropped chunk as sent produced a dump with silent holes and no
+        // "truncated" marker - and the payloads carry no index, so the receiver could
+        // not tell. Report it instead.
+        if (!MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_REPORT, chunk, 0, false,
+                               MQTTPriority::PRIORITY_LOW)) {
+            truncated = true;
+            LOG_WARN(TAG_CMD, "Diagnostics chunk %u dropped by the publish queue",
+                     static_cast<unsigned>(chunks));
+        }
         used = 0;
         chunks++;
         vTaskDelay(pdMS_TO_TICKS(DIAG_CHUNK_PACING_MS));

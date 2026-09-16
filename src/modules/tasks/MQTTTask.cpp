@@ -24,6 +24,7 @@
 #include "utils/PooledString.h"
 #include "utils/MemoryPool.h"
 #include "modules/tasks/TimerSchedulerTask.h"
+#include "modules/tasks/OTATask.h"  // suppress reconnects while an OTA is running
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/BurnerStateMachine.h"
 #include <cstring>
@@ -411,7 +412,11 @@ void MQTTTask::taskFunction(void* parameter) {
         }
 
         // Circuit breaker: check if cooldown has expired
-        if (circuitBreakerOpen_.load() && millis() >= circuitBreakerCooldownEnd_) {
+        // Not while an OTA is running: reconnecting re-allocates the esp-mqtt task
+        // stack and buffers that onOTAStart deliberately freed for the transfer, and
+        // re-enables auto-reconnect for the rest of it. The cooldown simply waits.
+        if (circuitBreakerOpen_.load() && millis() >= circuitBreakerCooldownEnd_ &&
+            !OTATask::isOtaInProgress()) {
             LOG_INFO(TAG, "Circuit breaker cooldown expired - resuming reconnection");
             circuitBreakerOpen_.store(false);
             consecutiveDisconnects_.store(0);
@@ -851,6 +856,19 @@ void MQTTTask::processPublishQueue() {
     MQTTPublishRequest request;
     int processed = 0;
     const int maxPerIteration = SystemConstants::Tasks::MQTT::MAX_ITEMS_PER_ITERATION;
+
+    // Bound the drain instead of feeding the watchdog after every message.
+    //
+    // Feeding per message restarted the 30 s budget each time, so a task publishing
+    // one slow message per iteration would never trip the watchdog - wedged but
+    // invisible. Simply removing those feeds is not safe either: MQTTManager::publish
+    // waits up to 5 s for its mutex, and 12 of those is 60 s against a 30 s timeout.
+    // So leave the loop after this budget, which returns to the top of the task loop
+    // where the single per-iteration feed happens; anything left is drained on the
+    // next pass, since MQTT_TASK_PROCESS_QUEUE is re-set while messages remain. A
+    // single publish that blocks longer than the watchdog still trips it - correct,
+    // because that genuinely is a wedged task.
+    constexpr uint32_t DRAIN_BUDGET_MS = 5000;
 
     // Process high priority queue first - process ALL high priority messages
     while (highQueueItems > 0 && processed < maxPerIteration &&
