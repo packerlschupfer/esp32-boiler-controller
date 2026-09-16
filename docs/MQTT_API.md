@@ -640,7 +640,7 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 | Topic | Payload | Action |
 |-------|---------|--------|
 | `boiler/params/set/{parameter}` | value (plain or `{"value":...}`) | Set a parameter (range-checked) |
-| `boiler/params/get/{parameter}` | empty | Publish the value to `boiler/params/status/{parameter}` (a group name such as `heating` publishes the group) |
+| `boiler/params/get/{parameter}` | empty | Publish the value to `boiler/params/status/{parameter}`. A bare group name (no slash) publishes the whole group to `boiler/params/status/{group}` - the groups are `wheater`, `heating`, `h`, `w`, `pid`, `sensor`, `syslog`, `preheat`, `pump`, `boiler`, `system`, i.e. the same set `get/all` publishes. A name that is neither a group nor a registered parameter is silently ignored. Note: before ESP32-PersistentStorage fixed this (2026-09-16), only `heating`, `wheater`, `pid`, `sensor` and `system` worked as group reads; the others returned nothing |
 | `boiler/params/get/all` | empty | Publish all parameters grouped (`boiler/params/status/...`, then `boiler/params/status/complete`) |
 | `boiler/params/list` | empty | Publish the parameter names to `boiler/params/list/response` |
 | `boiler/params/save` | empty | Save all parameters to NVS |
