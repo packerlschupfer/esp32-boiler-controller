@@ -177,6 +177,8 @@ void RuntimeDiagnostics::dumpMemoryInfo(OutputCallback outputCb) {
     output("  IRAM (32BIT): %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_32BIT)).c_str());
     output("  malloc (DEFAULT): %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)).c_str());
     output("  esp_get_free_heap_size: %s", formatBytes(esp_get_free_heap_size()).c_str());
+    output("  DRAM min since boot: %s",
+           formatBytes(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)).c_str());
     output("  Largest free block: %s", formatBytes(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)).c_str());
     
     // Memory fragmentation estimate

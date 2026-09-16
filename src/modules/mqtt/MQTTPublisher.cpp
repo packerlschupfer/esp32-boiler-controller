@@ -58,6 +58,11 @@ void publishSystemStatus() {
     doc["heap_dram"] = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     doc["heap_dram_blk"] = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
     doc["heap_def"] = esp_get_free_heap_size();
+    // Minimum DRAM ever seen since boot. Needed before any change that permanently
+    // reserves or reclaims DRAM: current free says nothing about the peak demand, and
+    // sizing against a stale figure is exactly how the task-stack trim nearly went
+    // wrong (PersistentStorage showed 3096 B spare until get/all ran, then 1580 B).
+    doc["heap_dram_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
 
     // Round 16 Issue #5: Add heap fragmentation percentage
     // Fragmentation = 100 - (max_block * 100 / free_heap)
