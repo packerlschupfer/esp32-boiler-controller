@@ -379,11 +379,26 @@ HealthMonitor::HealthStatus HealthMonitor::calculateHealthStatus() const {
     // Start with excellent
     HealthStatus worstStatus = HealthStatus::EXCELLENT;
     
-    // Check memory
-    if (memoryMetrics_.currentFreeHeap < memoryCriticalThreshold_) {
-        return HealthStatus::CRITICAL;
-    } else if (memoryMetrics_.currentFreeHeap < memoryWarningThreshold_) {
-        worstStatus = HealthStatus::WARNING;
+    // Check memory against the largest free DRAM block, not currentFreeHeap.
+    //
+    // This was the last surviving inert comparison of the set: currentFreeHeap is
+    // ESP.getFreeHeap() (MALLOC_CAP_INTERNAL, ~57 kB here because it counts IRAM the
+    // allocator cannot hand out), tested against memoryCriticalThreshold_/
+    // memoryWarningThreshold_ of 10/20 kB - so neither branch could ever be taken,
+    // even with 192 bytes of real free DRAM. Same reasoning and same limits as
+    // updateMemoryMetrics(): allocations fail on contiguity, and the largest block is
+    // the stable signal, whereas total free DRAM dips to a few hundred bytes during a
+    // normal Home Assistant poll burst.
+    //
+    // Skipped during an OTA for the same reason as the gate above: Update.begin()
+    // takes a 4096 B sector buffer and drops the largest block to ~1.5 kB by design
+    // until onOTAStart frees memory - that is expected, not ill health.
+    if (!OTATask::isOtaInProgress()) {
+        if (memoryMetrics_.largestFreeBlock < SystemConstants::System::MIN_DRAM_BLOCK_CRITICAL) {
+            return HealthStatus::CRITICAL;
+        } else if (memoryMetrics_.largestFreeBlock < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
+            worstStatus = HealthStatus::WARNING;
+        }
     }
     
     // Check network
