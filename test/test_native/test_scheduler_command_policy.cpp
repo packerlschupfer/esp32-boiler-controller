@@ -93,6 +93,52 @@ void test_scheduler_space_mode_default_targets() {
     TEST_ASSERT_FALSE(spaceModeValid(3));
 }
 
+void test_scheduler_disable_alias_rejects_conflicting_payload() {
+    // boiler/cmd/scheduler/disable {"id":3}: the topic supplies the state
+    TEST_ASSERT_NULL(validateDisableAlias(false, false, false));
+    // {"id":3,"enabled":false} only repeats what the topic says
+    TEST_ASSERT_NULL(validateDisableAlias(true, true, false));
+
+    // {"id":3,"enabled":true} asks for the opposite of the topic
+    TEST_ASSERT_EQUAL_STRING("enabled_conflicts_with_topic", validateDisableAlias(true, true, true));
+    // {"id":3,"enabled":"false"} is not a bool
+    TEST_ASSERT_EQUAL_STRING("enabled_conflicts_with_topic", validateDisableAlias(true, false, false));
+}
+
+void test_scheduler_clear_requires_confirm_payload() {
+    TEST_ASSERT_TRUE(clearConfirmed(CLEAR_CONFIRM_PAYLOAD));
+    TEST_ASSERT_EQUAL_STRING("confirm", CLEAR_CONFIRM_PAYLOAD);
+
+    // Anything else must not erase the schedules
+    TEST_ASSERT_FALSE(clearConfirmed(nullptr));
+    TEST_ASSERT_FALSE(clearConfirmed(""));
+    TEST_ASSERT_FALSE(clearConfirmed("{}"));
+    TEST_ASSERT_FALSE(clearConfirmed("CONFIRM"));
+    TEST_ASSERT_FALSE(clearConfirmed("confirm\n"));
+    TEST_ASSERT_FALSE(clearConfirmed("{\"confirm\":true}"));
+}
+
+void test_scheduler_unhandled_command_always_replies() {
+    // Commands with their own branch reply themselves
+    const char* handled[] = {"add", "remove", "enable", "disable", "clear", "list", "status"};
+    for (const char* command : handled) {
+        TEST_ASSERT_TRUE(isHandledCommand(command));
+        TEST_ASSERT_NULL(unhandledReply(command));
+    }
+
+    // Sub-topics MQTTTopics.h defined without an implementation
+    const char* declared[] = {"update", "vacation", "pump_exercise", "command"};
+    for (const char* command : declared) {
+        TEST_ASSERT_FALSE(isHandledCommand(command));
+        TEST_ASSERT_EQUAL_STRING("not_implemented", unhandledReply(command));
+    }
+
+    // Everything else still gets a reply instead of silence
+    TEST_ASSERT_EQUAL_STRING("unknown_command", unhandledReply("bogus"));
+    TEST_ASSERT_EQUAL_STRING("unknown_command", unhandledReply(""));
+    TEST_ASSERT_EQUAL_STRING("unknown_command", unhandledReply(nullptr));
+}
+
 void test_scheduler_status_lists_active_and_disabled_ids() {
     char out[320];
     const uint8_t active[] = {1};

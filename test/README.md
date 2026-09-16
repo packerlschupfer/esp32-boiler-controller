@@ -75,7 +75,7 @@ pio test -e native_test -v
 ### Native Tests (`test_native/`)
 These tests run on your development machine and test pure logic without hardware dependencies.
 
-All native tests are declared and run from `test_main.cpp` (233 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
+All native tests are declared and run from `test_main.cpp` (265 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
 
 `test_pid_autotuner.cpp` exercises a simplified local model (no firmware headers, only Unity, standard headers and `MockTime`), not the firmware class. The firmware autotune peak/trough detection is covered by `test_relay_extrema_tracker.cpp`, the firmware burner transition logic by `test_burner_transitions.cpp`.
 
@@ -159,7 +159,6 @@ Some singletons provide `resetForTesting()` methods (only compiled with `UNIT_TE
 |-----------|--------------|-------|
 | **HealthMonitor** | `HealthMonitor::resetForTesting()` | Resets all metrics, counters, and state |
 | **SchedulerContext** | `SchedulerContext::resetForTesting()` | Calls cleanup(), clears schedules. Requires reinit after reset |
-| **MQTTDiagnostics** | `MQTTDiagnostics::resetForTesting()` | Deletes instance. Requires reinit after reset |
 
 ### ❌ Non-Resetable Singletons (Use Mocks Instead)
 

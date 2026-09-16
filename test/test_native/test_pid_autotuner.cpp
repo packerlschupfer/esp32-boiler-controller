@@ -13,6 +13,7 @@
 #include <numeric>
 #include <vector>
 #include "mocks/MockTime.h"
+#include "../../include/modules/control/AutotuneClock.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -123,6 +124,7 @@ private:
     TuningMethod method;
     TuningState state;
     bool relayState;
+    bool startTimeValid;   // First sample seen (the firmware's replacement for startTime == 0)
     float startTime;
     float lastSwitchTime;
 
@@ -146,7 +148,7 @@ public:
     TestPIDAutoTuner()
         : setpoint(0), outputStep(40.0f), hysteresis(1.0f),
           method(TuningMethod::ZIEGLER_NICHOLS_PI), state(TuningState::IDLE),
-          relayState(false), startTime(0), lastSwitchTime(0) {}
+          relayState(false), startTimeValid(false), startTime(0), lastSwitchTime(0) {}
 
     bool startTuning(float targetSetpoint,
                      float relayAmplitude = 40.0f,
@@ -169,6 +171,7 @@ public:
 
         state = TuningState::RELAY_TEST;
         relayState = false;
+        startTimeValid = false;
         startTime = 0;
         lastSwitchTime = 0;
         result = TuningResult();
@@ -181,9 +184,19 @@ public:
             return 0.0f;
         }
 
-        if (startTime == 0) {
+        // Time base is the time since the start of the run, so the first sample is 0 s:
+        // an explicit flag, not "startTime == 0" (PIDAutoTuner::update)
+        if (!startTimeValid) {
             startTime = currentTime;
             lastSwitchTime = currentTime;
+            startTimeValid = true;
+        }
+
+        // Time running backwards means a wrapped or re-based time source: fail instead of
+        // analysing peak times that are no longer ordered
+        if (currentTime < startTime) {
+            state = TuningState::FAILED;
+            return 0.0f;
         }
 
         if ((currentTime - startTime) > MAX_TUNING_TIME) {
@@ -233,7 +246,7 @@ public:
     }
 
     float getElapsedTime() const {
-        if (state == TuningState::IDLE || startTime == 0) return 0.0f;
+        if (state == TuningState::IDLE || !startTimeValid) return 0.0f;
         if (!oscillationData.empty()) {
             return oscillationData.back().time - startTime;
         }
@@ -741,6 +754,108 @@ void test_pid_elapsed_time() {
     tuner->update(60.0f, 15.0f);
     // Elapsed = 15 - 5 = 10
     TEST_ASSERT_FLOAT_WITHIN(0.1f, 10.0f, tuner->getElapsedTime());
+
+    pid_teardown();
+}
+
+// ============================================================================
+// Run time base: millis() wrap and float resolution (review 2026-09-14 pid-7)
+// ============================================================================
+
+void test_autotune_clock_survives_millis_wrap() {
+    AutotuneClock::Clock clock;
+
+    // Start 2.0 s before the millis() wrap (~49.7 days of uptime)
+    const uint32_t startMs = 0xFFFFF830u;  // + 2000 ms == 0
+    clock.start(startMs);
+    TEST_ASSERT_TRUE(clock.started());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, clock.elapsedSeconds(startMs));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.5f, clock.elapsedSeconds(startMs + 1500u));
+
+    // Straight through the wrap: the unsigned difference stays monotonic, so the tuner
+    // never sees time jump back to 0 (which used to kill the timeout and the peak order)
+    TEST_ASSERT_EQUAL_UINT32(2000u, clock.elapsedMs(0u));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.0f, clock.elapsedSeconds(0u));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.5f, clock.elapsedSeconds(500u));
+    // 40 minutes after the wrap
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 2402.0f, clock.elapsedSeconds(2400u * 1000u));
+}
+
+void test_autotune_clock_keeps_resolution_at_high_uptime() {
+    const uint32_t nowMs = 0xFFFF0000u;
+
+    // Old time base static_cast<float>(millis()) / 1000.0f: the 24-bit mantissa cannot
+    // hold milliseconds at this magnitude, so two samples 100 ms apart become one time
+    TEST_ASSERT_EQUAL_FLOAT(static_cast<float>(nowMs) / 1000.0f,
+                            static_cast<float>(nowMs + 100u) / 1000.0f);
+
+    // Relative time keeps the full resolution regardless of uptime
+    AutotuneClock::Clock clock;
+    clock.start(nowMs);
+    TEST_ASSERT_FLOAT_WITHIN(0.0005f, 0.1f, clock.elapsedSeconds(nowMs + 100u));
+    TEST_ASSERT_FLOAT_WITHIN(0.0005f, 2.5f, clock.elapsedSeconds(nowMs + 2500u));
+}
+
+void test_autotune_elapsed_time_counts_from_the_first_sample() {
+    pid_setup();
+
+    tuner->startTuning(60.0f, 40.0f, 1.0f);
+
+    // With a relative time base the first sample really is t = 0 s. The old
+    // "startTime == 0" sentinel did not accept it as the start, so the run was re-based
+    // to the second sample and both elapsed time and timeout were one sample short.
+    tuner->update(58.0f, 0.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, tuner->getElapsedTime());
+    tuner->update(58.5f, 2.5f);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 2.5f, tuner->getElapsedTime());
+    tuner->update(59.0f, 100.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 100.0f, tuner->getElapsedTime());
+
+    pid_teardown();
+}
+
+void test_autotune_run_across_millis_wrap_keeps_running() {
+    pid_setup();
+
+    AutotuneClock::Clock clock;
+    const uint32_t startMs = 0xFFFFF000u;  // ~4 s before the wrap
+    clock.start(startMs);
+    tuner->startTuning(60.0f, 40.0f, 1.0f);
+
+    // 200 samples 2.5 s apart (497.5 s) through the wrap, temperature parked at the
+    // setpoint so only the time base can end the run
+    uint32_t nowMs = startMs;
+    for (int i = 0; i < 200; i++) {
+        tuner->update(60.0f, clock.elapsedSeconds(nowMs));
+        nowMs += 2500u;
+    }
+    TEST_ASSERT_EQUAL(TestPIDAutoTuner::TuningState::RELAY_TEST, tuner->getState());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 497.5f, tuner->getElapsedTime());
+
+    // The timeout still fires on elapsed time (600 s here) - not never, not early
+    float failedAt = 0.0f;
+    for (int i = 0; i < 500 && tuner->getState() == TestPIDAutoTuner::TuningState::RELAY_TEST; i++) {
+        failedAt = clock.elapsedSeconds(nowMs);
+        tuner->update(60.0f, failedAt);
+        nowMs += 2500u;
+    }
+    TEST_ASSERT_EQUAL(TestPIDAutoTuner::TuningState::FAILED, tuner->getState());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 602.5f, failedAt);
+
+    pid_teardown();
+}
+
+void test_autotune_backwards_time_base_fails_instead_of_corrupting() {
+    pid_setup();
+
+    tuner->startTuning(60.0f, 40.0f, 1.0f);
+    tuner->update(58.0f, 100.0f);
+    tuner->update(59.0f, 102.5f);
+
+    // An absolute, wrapping time source jumps backwards mid-run: peak/trough times would
+    // no longer be ordered (negative periods) and the timeout could never fire again
+    tuner->update(59.5f, 0.5f);
+    TEST_ASSERT_EQUAL(TestPIDAutoTuner::TuningState::FAILED, tuner->getState());
 
     pid_teardown();
 }

@@ -269,6 +269,43 @@ void test_boiler_pid_holds_half_near_target() {
     }
 }
 
+void test_bang_bang_pause_starts_from_off() {
+    const BoilerPowerLevel::BangBangBands b = BoilerPowerLevel::defaultBangBangBands();
+
+    // Stale HALF from a request that ended long ago: the band holds the burner on until
+    // 5.0 C above the new target (2.0 C above target here still returns HALF)
+    TEST_ASSERT_TRUE(BoilerPowerLevel::fromBangBangError(Level::HALF, -20, b) == Level::HALF);
+
+    // After a pause the level starts from OFF, like BoilerPowerLevel::modulatingCycleStart
+    const Level start = BoilerPowerLevel::bangBangCycleStart(Level::HALF, true);
+    TEST_ASSERT_TRUE(start == Level::OFF);
+    TEST_ASSERT_TRUE(BoilerPowerLevel::fromBangBangError(start, -20, b) == Level::OFF);
+    TEST_ASSERT_TRUE(BoilerPowerLevel::bangBangCycleStart(Level::FULL, true) == Level::OFF);
+
+    // The thresholds are unchanged: from OFF the burner comes back on 3.0 C below target
+    // and goes FULL above 10.0 C below target
+    TEST_ASSERT_TRUE(BoilerPowerLevel::fromBangBangError(start, 30, b) == Level::OFF);
+    TEST_ASSERT_TRUE(BoilerPowerLevel::fromBangBangError(start, 31, b) == Level::HALF);
+    TEST_ASSERT_TRUE(BoilerPowerLevel::fromBangBangError(start, 101, b) == Level::FULL);
+
+    // Without a pause the level (and its hysteresis) is kept, e.g. a seamless handover
+    TEST_ASSERT_TRUE(BoilerPowerLevel::bangBangCycleStart(Level::HALF, false) == Level::HALF);
+    TEST_ASSERT_TRUE(BoilerPowerLevel::bangBangCycleStart(Level::FULL, false) == Level::FULL);
+    TEST_ASSERT_TRUE(BoilerPowerLevel::bangBangCycleStart(Level::OFF, false) == Level::OFF);
+}
+
+void test_bang_bang_pause_detection_is_wrap_safe() {
+    // Both burner types share pidPaused() and the control cycle timestamp
+    TEST_ASSERT_FALSE(BoilerPowerLevel::pidPaused(12500u, 10000u));
+    TEST_ASSERT_FALSE(BoilerPowerLevel::pidPaused(20000u, 10000u));
+    TEST_ASSERT_TRUE(BoilerPowerLevel::pidPaused(20001u, 10000u));
+
+    // Last cycle just before the millis() wrap, this cycle just after: 2.5 s, no pause
+    const uint32_t lastMs = 0xFFFFF000u;
+    TEST_ASSERT_FALSE(BoilerPowerLevel::pidPaused(lastMs + 2500u, lastMs));
+    TEST_ASSERT_TRUE(BoilerPowerLevel::pidPaused(lastMs + 20000u, lastMs));
+}
+
 void test_boiler_pid_cold_start_full_then_half_before_target() {
     FixedPointPIDStep::State pid = FixedPointPIDStep::resetState();
     Level level = cycle(Level::OFF, pid, 470, 400);

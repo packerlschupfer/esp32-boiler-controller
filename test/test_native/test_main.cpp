@@ -174,6 +174,8 @@ void test_power_map_half_and_full_hysteresis();
 void test_power_map_exact_switch_points_from_reset();
 void test_bang_bang_bands_and_hold();
 void test_bang_bang_full_threshold_is_exclusive();
+void test_bang_bang_pause_starts_from_off();
+void test_bang_bang_pause_detection_is_wrap_safe();
 void test_boiler_pid_off_above_target_stays_off_through_band();
 void test_boiler_pid_holds_half_near_target();
 void test_boiler_pid_cold_start_full_then_half_before_target();
@@ -196,6 +198,9 @@ void test_relay_policy_pump_request_resent_until_relay_follows();
 void test_scheduler_enable_payload_validation();
 void test_scheduler_enable_ends_active_run_only_when_disabled();
 void test_scheduler_space_mode_default_targets();
+void test_scheduler_disable_alias_rejects_conflicting_payload();
+void test_scheduler_clear_requires_confirm_payload();
+void test_scheduler_unhandled_command_always_replies();
 void test_scheduler_status_lists_active_and_disabled_ids();
 void test_scheduler_status_worst_case_fits_mqtt_payload();
 void test_scheduler_status_small_buffer_stays_valid_json();
@@ -305,6 +310,17 @@ void test_pid_ziegler_nichols_pi_method();
 void test_pid_ziegler_nichols_pid_method();
 void test_pid_progress_tracking();
 void test_pid_elapsed_time();
+
+// Autotune run time (millis() wrap, float resolution)
+void test_autotune_clock_survives_millis_wrap();
+void test_autotune_clock_keeps_resolution_at_high_uptime();
+void test_autotune_elapsed_time_counts_from_the_first_sample();
+void test_autotune_run_across_millis_wrap_keeps_running();
+void test_autotune_backwards_time_base_fails_instead_of_corrupting();
+
+// Autotune result gain set (mode captured at the start of the run)
+void test_autotune_gains_go_to_the_gain_set_of_the_run();
+void test_autotune_result_rejected_when_mode_changed();
 
 // Burner safety rules (Layer-1 checks of BurnerSafetyValidator)
 void test_safety_rules_safe_readings_pass();
@@ -449,6 +465,17 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pid_ziegler_nichols_pid_method);
     RUN_TEST(test_pid_progress_tracking);
     RUN_TEST(test_pid_elapsed_time);
+
+    // Autotune run time (millis() wrap, float resolution)
+    RUN_TEST(test_autotune_clock_survives_millis_wrap);
+    RUN_TEST(test_autotune_clock_keeps_resolution_at_high_uptime);
+    RUN_TEST(test_autotune_elapsed_time_counts_from_the_first_sample);
+    RUN_TEST(test_autotune_run_across_millis_wrap_keeps_running);
+    RUN_TEST(test_autotune_backwards_time_base_fails_instead_of_corrupting);
+
+    // Autotune result gain set (mode captured at the start of the run)
+    RUN_TEST(test_autotune_gains_go_to_the_gain_set_of_the_run);
+    RUN_TEST(test_autotune_result_rejected_when_mode_changed);
 
     // Burner safety rules (Layer-1 checks of BurnerSafetyValidator)
     RUN_TEST(test_safety_rules_safe_readings_pass);
@@ -622,6 +649,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_power_map_exact_switch_points_from_reset);
     RUN_TEST(test_bang_bang_bands_and_hold);
     RUN_TEST(test_bang_bang_full_threshold_is_exclusive);
+    RUN_TEST(test_bang_bang_pause_starts_from_off);
+    RUN_TEST(test_bang_bang_pause_detection_is_wrap_safe);
     RUN_TEST(test_boiler_pid_off_above_target_stays_off_through_band);
     RUN_TEST(test_boiler_pid_holds_half_near_target);
     RUN_TEST(test_boiler_pid_cold_start_full_then_half_before_target);
@@ -644,6 +673,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_scheduler_enable_payload_validation);
     RUN_TEST(test_scheduler_enable_ends_active_run_only_when_disabled);
     RUN_TEST(test_scheduler_space_mode_default_targets);
+    RUN_TEST(test_scheduler_disable_alias_rejects_conflicting_payload);
+    RUN_TEST(test_scheduler_clear_requires_confirm_payload);
+    RUN_TEST(test_scheduler_unhandled_command_always_replies);
     RUN_TEST(test_scheduler_status_lists_active_and_disabled_ids);
     RUN_TEST(test_scheduler_status_worst_case_fits_mqtt_payload);
     RUN_TEST(test_scheduler_status_small_buffer_stays_valid_json);
