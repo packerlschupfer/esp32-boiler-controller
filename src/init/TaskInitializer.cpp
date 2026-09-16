@@ -116,7 +116,13 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
     if (SRP::getTaskManager().startTask(
         SyslogInitializer::SyslogTask,
         "SyslogTask",
-        4096,  // Stack for EthernetUDP + message formatting
+        // 2026-09-17: 4096 -> 3072, funding the pump stack increase above at zero net
+        // DRAM cost. Measured on the device: 2064 B free of 4096 (~50% unused), and
+        // this mark is trustworthy because syslog runs continuously - unlike the idle
+        // burner/relay tasks, whose high-water marks would be stale and must NOT be
+        // trimmed from. Worst frame in this path is Syslog::sendInternal at 1088 B,
+        // which runs here (async subscriber task), not on the calling task's stack.
+        3072,  // Stack for EthernetUDP + message formatting
         nullptr,
         1,  // Low priority
         syslogWdtConfig)) {
@@ -313,7 +319,25 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     LOG_INFO(TAG, "Free heap before pump tasks: %d bytes", ESP.getFreeHeap());
 
     // Stack size for pump tasks (lightweight event-driven tasks)
-    constexpr uint32_t STACK_SIZE_PUMP_TASK = 2048;
+    // 2026-09-17: was 2048, which left WaterPump 288 B and HeatingPump 420 B of free
+    // stack - the two tightest tasks on the device. This local constant BYPASSED
+    // ProjectConfig's STACK_SIZE_PUMP_CONTROL_TASK, which was deliberately raised to
+    // 3072 after profiling ("Dec 2025: was 2560, had 700-768 free"); the pumps never
+    // saw that increase and ran below even the size already judged too small.
+    //
+    // Measured cause (objdump frame sizes): a single LOG_* call from this task costs
+    // ~1312 B - PumpControlTask 160 + log_write_impl 80 + custom_log_write 64 +
+    // Logger::logV 64 + vsnprintf 144 + _vfprintf_r 800. The task's own logic is only
+    // 160 B, so there is no demand-side saving available short of removing logging
+    // from a safety-relevant task.
+    //
+    // 2560 rather than the configured 3072 purely for DRAM budget: +1024 B here is
+    // funded exactly by trimming SyslogTask 4096 -> 3072 below, keeping total DRAM
+    // unchanged. Free DRAM was 4608 B with a 476 B floor, so spending a net 1024 B
+    // would push the largest free block under MIN_DRAM_BLOCK_WARNING (2560). Raising
+    // these to the profiled 3072 needs another 1024 B from somewhere - see the OTA
+    // task (3072 B), which is the obvious source if OTA is ever dropped.
+    constexpr uint32_t STACK_SIZE_PUMP_TASK = 2560;
     constexpr uint8_t PRIORITY_PUMP_TASK = 3;  // Same as control tasks
 
     // Heating pump task
