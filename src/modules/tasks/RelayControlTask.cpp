@@ -62,6 +62,21 @@ SemaphoreHandle_t RelayControlTask::relayStateMutex_ = nullptr;    // Round 20 I
 uint8_t RelayControlTask::consecutiveFailures[8] = {0};            // Consecutive failure tracking
 TickType_t RelayControlTask::pumpLastStateChangeTime[2] = {0, 0};  // Pump motor protection tracking
 
+// Guards the rate-limiter and pump-timer arrays (toggleCount, toggleTimestamps,
+// pumpLastStateChangeTime). processSingleRelay() runs in MORE THAN ONE TASK: the relay
+// task drains requests via RelayCommandProcessor and also clears the counters in
+// updateRateLimitCounters(), while BurnerControlTask and BoilerTempControlTask reach
+// the same code through BurnerStateMachine, SafetyInterlocks and CentralizedFailsafe's
+// ten non-emergency setRelayState() calls. consumeToggle() is a check-then-act on two
+// arrays, so without this the limiter could lose an increment (under-limiting) or read
+// a stale lastToggleTicks and spuriously reject a genuine command - and a spurious
+// rejection is what escalated to an emergency stop on 2026-09-14 15:41:25.
+//
+// Must be file-static, not function-local: a stack-local portMUX excludes nothing (see
+// the note in BurnerRequestManager.cpp). relayStateMutex_ cannot be reused - it is
+// non-recursive and checkPumpProtection() already takes it.
+static portMUX_TYPE rateLimitMux = portMUX_INITIALIZER_UNLOCKED;
+
 
 bool RelayControlTask::init(RYN4* device) {
     if (initialized) {
@@ -340,17 +355,28 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
         toggleTimestamps,
         toggleCount
     };
-    const RelayCommandPolicy::Admission admission = RelayCommandPolicy::admit(
-        relayIndex, desiredState, state, emergencyBypass, limiter, xTaskGetTickCount(),
-        &RelayControlTask::checkPumpProtection);
+    // RelayCommandPolicy::admit() is decomposed here so the critical section covers
+    // ONLY consumeToggle(). It cannot wrap the whole call: checkPumpProtection() takes
+    // relayStateMutex_ for up to 10 ms, and blocking on a mutex inside
+    // portENTER_CRITICAL is illegal. Step order and semantics are identical to
+    // admit(); test_relay_policy_decomposed_matches_admit pins that equivalence so the
+    // two cannot drift apart.
+    if (RelayCommandPolicy::appliesProtection(desiredState, state, emergencyBypass)) {
+        portENTER_CRITICAL(&rateLimitMux);
+        const bool toggleAllowed =
+            RelayCommandPolicy::consumeToggle(limiter, relayIndex, xTaskGetTickCount());
+        portEXIT_CRITICAL(&rateLimitMux);
 
-    if (admission == RelayCommandPolicy::Admission::RATE_LIMITED) {
-        LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
-        return false;
-    }
-    if (admission == RelayCommandPolicy::Admission::PUMP_PROTECTED) {
-        // Pump protection blocks this state change - not an error, just too soon
-        return false;
+        if (!toggleAllowed) {
+            LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
+            return false;
+        }
+
+        // Deliberately OUTSIDE the critical section: this takes relayStateMutex_.
+        if (!RelayControlTask::checkPumpProtection(relayIndex, state)) {
+            // Pump protection blocks this state change - not an error, just too soon
+            return false;
+        }
     }
 
     LOG_INFO(TAG, "Queuing relay %d to %s", relayIndex, state ? "ON" : "OFF");
@@ -361,8 +387,10 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
     g_relayState.setRelay(relayIndex - 1, state);
 
     // Update pump protection timestamp for pump relays - only on a real state change
+    portENTER_CRITICAL(&rateLimitMux);
     const int8_t pumpTimer = RelayCommandPolicy::restartPumpTimer(
         relayIndex, realChange, xTaskGetTickCount(), pumpLastStateChangeTime);
+    portEXIT_CRITICAL(&rateLimitMux);
     if (pumpTimer == 0) {
         LOG_DEBUG(TAG, "Heating pump protection timer reset");
     } else if (pumpTimer == 1) {
@@ -467,8 +495,12 @@ void RelayControlTask::updateRateLimitCounters() {
 
     // Reset counters every minute
     if (elapsed >= pdMS_TO_TICKS(60000)) {
+        // Same guard as consumeToggle(): this clears all eight counters from the relay
+        // task while other tasks may be mid-increment. Logging stays outside.
+        portENTER_CRITICAL(&rateLimitMux);
         memset(toggleCount, 0, sizeof(toggleCount));
         rateWindowStart = now;
+        portEXIT_CRITICAL(&rateLimitMux);
         #if defined(LOG_MODE_DEBUG_FULL)
         LOG_DEBUG(TAG, "Rate limit counters reset");
         #endif

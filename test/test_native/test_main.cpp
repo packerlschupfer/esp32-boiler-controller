@@ -193,6 +193,7 @@ void test_relay_policy_noop_and_emergency_skip_limiter_and_pump_check();
 void test_relay_policy_pump_protection_checked_after_rate_limit();
 void test_relay_policy_pump_timer_only_on_real_change();
 void test_relay_policy_pump_request_resent_until_relay_follows();
+void test_relay_policy_decomposed_matches_admit();
 
 // Scheduler command policy (enable command, space mode defaults, status reply)
 void test_scheduler_enable_payload_validation();
@@ -668,6 +669,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_relay_policy_pump_protection_checked_after_rate_limit);
     RUN_TEST(test_relay_policy_pump_timer_only_on_real_change);
     RUN_TEST(test_relay_policy_pump_request_resent_until_relay_follows);
+    RUN_TEST(test_relay_policy_decomposed_matches_admit);
 
     // Scheduler command policy (enable command, space mode defaults, status reply)
     RUN_TEST(test_scheduler_enable_payload_validation);

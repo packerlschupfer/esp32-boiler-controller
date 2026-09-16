@@ -53,10 +53,15 @@ bool sendRelay(uint8_t& desiredMask, uint8_t relayIndex, bool state, uint32_t no
     if (skipDuplicate(relayIndex, desiredState, state)) {
         return true;
     }
-    const Admission admission = admit(relayIndex, desiredState, state, false,
-                                      makeLimiter(), nowTicks, &pumpProtection);
-    if (admission != Admission::ACCEPTED) {
-        return false;
+    // Mirrors processSingleRelay() since the rate-limiter lock was added: admit() is
+    // decomposed there so only consumeToggle() sits inside the critical section.
+    if (appliesProtection(desiredState, state, false)) {
+        if (!consumeToggle(makeLimiter(), relayIndex, nowTicks)) {
+            return false;
+        }
+        if (!pumpProtection(relayIndex, state)) {
+            return false;
+        }
     }
     const uint8_t mask = static_cast<uint8_t>(1u << (relayIndex - 1));
     desiredMask = state ? static_cast<uint8_t>(desiredMask | mask)
@@ -65,10 +70,70 @@ bool sendRelay(uint8_t& desiredMask, uint8_t relayIndex, bool state, uint32_t no
     return true;
 }
 
+// The exact step sequence processSingleRelay() runs instead of calling admit(), so the
+// production decomposition can be compared against admit() directly.
+Admission decomposedAdmit(uint8_t relayIndex, bool desiredState, bool requestedState,
+                          bool emergencyBypass, const RateLimiter& limiter,
+                          uint32_t nowTicks, bool (*pumpProtectionAllows)(uint8_t, bool)) {
+    if (!appliesProtection(desiredState, requestedState, emergencyBypass)) {
+        return Admission::ACCEPTED;
+    }
+    if (!consumeToggle(limiter, relayIndex, nowTicks)) {
+        return Admission::RATE_LIMITED;
+    }
+    if (!pumpProtectionAllows(relayIndex, requestedState)) {
+        return Admission::PUMP_PROTECTED;
+    }
+    return Admission::ACCEPTED;
+}
+
 #define ASSERT_ADMISSION(expected, actual) \
     TEST_ASSERT_EQUAL_INT(static_cast<int>(expected), static_cast<int>(actual))
 
 }  // namespace
+
+void test_relay_policy_decomposed_matches_admit() {
+    // processSingleRelay() no longer calls admit(): the rate-limiter lock must cover
+    // consumeToggle() alone, because checkPumpProtection() takes a mutex and cannot run
+    // inside portENTER_CRITICAL. That leaves two copies of the same decision, which is
+    // exactly the "limiter re-implemented" trap (io-6). Pin them together: for every
+    // input combination the decomposed sequence must return the same Admission AND
+    // leave the same side effects in the limiter arrays.
+    const bool values[2] = {false, true};
+
+    for (uint8_t relayIndex = 0; relayIndex <= 9; relayIndex++) {
+        for (int d = 0; d < 2; d++) {
+            for (int r = 0; r < 2; r++) {
+                for (int e = 0; e < 2; e++) {
+                    for (int p = 0; p < 2; p++) {
+                        resetRelayState();
+                        pumpAllows = values[p];
+                        const Admission viaAdmit =
+                            admit(relayIndex, values[d], values[r], values[e],
+                                  makeLimiter(), 5000, &pumpProtection);
+                        uint32_t admitLastToggle[8];
+                        uint32_t admitToggles[8];
+                        std::memcpy(admitLastToggle, lastToggle, sizeof(lastToggle));
+                        std::memcpy(admitToggles, toggles, sizeof(toggles));
+                        const unsigned admitPumpChecks = pumpChecks;
+
+                        resetRelayState();
+                        pumpAllows = values[p];
+                        const Admission viaSteps =
+                            decomposedAdmit(relayIndex, values[d], values[r], values[e],
+                                            makeLimiter(), 5000, &pumpProtection);
+
+                        ASSERT_ADMISSION(viaAdmit, viaSteps);
+                        TEST_ASSERT_EQUAL_UINT(admitPumpChecks, pumpChecks);
+                        TEST_ASSERT_EQUAL_MEMORY(admitLastToggle, lastToggle,
+                                                 sizeof(lastToggle));
+                        TEST_ASSERT_EQUAL_MEMORY(admitToggles, toggles, sizeof(toggles));
+                    }
+                }
+            }
+        }
+    }
+}
 
 void test_relay_policy_noop_commands_skip_protection() {
     // Unchanged relay (e.g. POWER_BOOST re-sent OFF in a mode-switch batch) must
