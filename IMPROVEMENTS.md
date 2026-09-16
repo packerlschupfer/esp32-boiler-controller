@@ -71,10 +71,10 @@ Or add `defaultBurnerFailsafe(level)` to the DEGRADED case in the switch block, 
 
 ### C4. FailOpenMonitor and ErrorContextCapture Never Called — 6KB Dead Memory Pools
 
-**Status**: Partly done.
-- ErrorContextCapture is wired in: `ErrorHandler.cpp:155` calls `recordCriticalError()`, and `MQTTTask.cpp:444` calls `publishPending()`, which publishes `boiler/error/context`.
-- FailOpenMonitor: only `initialize()` is called (`SystemInitializer.cpp:499`); `recordFailOpen()` and `publishDegradedStatus()` have no callers.
-- The 4 pools (`MemoryPool.cpp:14-17`) still have no users.
+**Status**: Done (2026-09-16), by removal rather than integration.
+- ErrorContextCapture is wired in: `ErrorHandler.cpp:155` calls `recordCriticalError()`, and `MQTTTask.cpp:444` calls `publishPending()`, which publishes `boiler/error/context`. Kept.
+- FailOpenMonitor: removed. Only `initialize()` was ever called; `recordFailOpen()` / `publishDegradedStatus()` had no call sites, so the counters stayed zero and the two topics were never published. Wiring it up would have meant adding new monitoring calls at four safety-check sites, which is not a mechanical change; removal was preferred.
+- The 4 unused pools were removed from `MemoryPool.h/.cpp`. They allocated lazily, so they had never claimed heap: no RAM was reclaimed, only dead code.
 
 **Files**:
 - `src/utils/FailOpenMonitor.cpp:37` — `recordFailOpen()` has zero call sites
@@ -206,9 +206,9 @@ Establish a library version bump workflow: update SHA, clean build, test, commit
 
 ### H7. FailOpenMonitor::publishDegradedStatus() Never Called From Task Loop
 
-**Status**: Open. Still no caller outside `FailOpenMonitor.cpp`.
+**Status**: Obsolete (2026-09-16). FailOpenMonitor was removed, so there is nothing left to publish. See C4.
 
-**File**: `src/utils/FailOpenMonitor.cpp:86`
+**File**: `src/utils/FailOpenMonitor.cpp:86` (deleted)
 
 **Problem**: `publishDegradedStatus()` is defined and builds an MQTT JSON payload with all tracked fail-open check counts, but it is never called from any periodic task (MonitoringTask, MQTTTask, etc.). Even if `recordFailOpen()` were wired in (see C4), the accumulated data would never be published.
 
@@ -349,9 +349,9 @@ Mock SRP dependencies using the existing test patterns.
 
 ### L4. FailOpenMonitor Threshold Check Uses == Instead of >=
 
-**Status**: Open. Still `==` (`FailOpenMonitor.cpp:49`).
+**Status**: Obsolete (2026-09-16). FailOpenMonitor was removed. See C4.
 
-**File**: `src/utils/FailOpenMonitor.cpp:49`
+**File**: `src/utils/FailOpenMonitor.cpp:49` (deleted)
 
 **Problem**: The MQTT alert condition is:
 ```cpp

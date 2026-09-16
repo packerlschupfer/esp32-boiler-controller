@@ -163,20 +163,18 @@ MQTT, NTP and OTA are not started here. They run as tasks created later (MQTTTas
 2. **TemperatureSensorFallback**
    - Sensor validation and fallback logic
 
-3. **FailOpenMonitor**
+3. **BurnerRequestManager**
 
-4. **BurnerRequestManager**
-
-5. **HeatingControlModule**
+4. **HeatingControlModule**
    - Space heating control with weather compensation
 
-6. **WheaterControlModule** (Water heating)
+5. **WheaterControlModule** (Water heating)
    - Tank heating with scheduling
 
-7. **PIDControlModule**
+6. **PIDControlModule**
    - PID temperature control
 
-8. **BurnerSystemController**
+7. **BurnerSystemController**
    - Integrates all control logic
    - 8-state burner FSM
    - 4-layer safety system

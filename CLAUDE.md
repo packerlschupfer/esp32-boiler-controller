@@ -555,13 +555,6 @@ Extracted 2 helper classes (199-line reduction, 20%):
 - **RelayVerificationManager.h/cpp** - Pump protection and health monitoring
 - **RelayCommandProcessor.h/cpp** - Relay request event processing
 
-### Memory Pool Expansion
-Added 4 new memory pools (+6KB total):
-- **DiagnosticBuffer** - 4 × 256B = 1KB
-- **ConfigBuffer** - 4 × 512B = 2KB
-- **CalcBuffer** - 8 × 128B = 1KB
-- **ErrorBuffer** - 8 × 256B = 2KB
-
 ### SafeLog Utility
 Created **SafeLog.h** for safe float logging (prevents stack overflow):
 ```cpp

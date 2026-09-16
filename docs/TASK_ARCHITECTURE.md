@@ -45,7 +45,7 @@ The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (ta
 
 *Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Fixed in all modes: HeatingPump/WaterPump 2048, BoilerTempCtrl 3072, NTPTask 4096, SyslogTask 4096 (literals in the start calls). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
 
-Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task. `MQTTDiagnostics::initialize()` ("MQTTDiagnostics" task) and `TaskDependencyManager` ("TaskHealthMonitor" task) also contain `xTaskCreate` calls, but nothing calls them, so those tasks are not started.
+Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task. (The never-started "MQTTDiagnostics" and "TaskHealthMonitor" tasks were removed with their modules on 2026-09-16.)
 
 ---
 
@@ -62,7 +62,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Purpose**: Manages the burner state machine, enforces safety interlocks, coordinates heating/water demand, and handles emergency shutdown.
 
 **Event Groups**:
-- **Sensor Event Group** (waits): `FIRST_READ_COMPLETE`, `DATA_AVAILABLE` at startup; polls `BOILER_RETURN`, `WATER_TANK` and the `BOILER_OUTPUT/BOILER_RETURN/WATER_TANK_ERROR` bits each loop (one wake-up per MB8ART read)
+- **Sensor Event Group** (waits): `FIRST_READ_COMPLETE`, `DATA_AVAILABLE` at startup; polls `BOILER_RETURN`, `WATER_TANK` and the `BOILER_OUTPUT/BOILER_RETURN/WATER_TANK_ERROR` bits whenever its request-bit wait ends (100 ms while running, 1 s, 3 s when idle), so in idle it can react up to 3 s after a read
 - **Burner Event Group** (sets/waits): `STATE_TIMEOUT`, `FLAME_STATE_CHANGED`, `PRESSURE_CHANGED`, `FLOW_CHANGED`, `SAFETY_EVENT`
 - **Burner Request Event Group** (waits): `HEATING`, `WATER`, `CHANGE_EVENT_BITS`, `TEMPERATURE_MASK`
 - **System State Event Group** (sets): `BURNER_OFF`, `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH`, `BURNER_ERROR`

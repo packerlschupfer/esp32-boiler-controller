@@ -21,8 +21,12 @@ Scheduler (JSON, replies on boiler/scheduler/response):
   boiler/cmd/scheduler/add     {"type":"water_heating","name":"..","start_hour":6,...,"days":[1,2,3,4,5]}
   boiler/cmd/scheduler/remove  {"id":3}
   boiler/cmd/scheduler/enable  {"id":3,"enabled":false}   # disable ends a running schedule; saved to FRAM
+  boiler/cmd/scheduler/disable {"id":3}                   # alias of enable with "enabled":false
+  boiler/cmd/scheduler/clear   confirm                    # erases ALL schedules (plain payload, like format_confirm)
   boiler/cmd/scheduler/list    {}
   boiler/cmd/scheduler/status  (any)    # reply on boiler/status/scheduler/info (activeIds, disabledIds)
+  Unimplemented (update, vacation, pump_exercise) reply not_implemented, other sub-topics
+  unknown_command - a scheduler command is never answered with silence.
   Days: 0=Sun, 1=Mon ... 6=Sat (7 rejected). space_heating without target_temp: COMFORT 21, ECO 18, FROST 10.
   "priority" in add is ignored (use boiler/cmd/water priority_on|priority_off).
 

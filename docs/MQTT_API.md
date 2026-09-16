@@ -258,7 +258,28 @@ A disabled schedule does not start. Disabling a running schedule ends it at once
 
 **Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 64 bytes), `{"status":"error","msg":"not_found"}` (unknown id), `{"status":"error","msg":"<validation error>","id":0}` (`missing_id`, `invalid_id_type`, `id_out_of_range`, `missing_enabled`, `invalid_enabled_type` - `enabled` must be JSON `true`/`false`), `{"success":false,"error":"mutex_timeout"}`
 
-Other unknown scheduler commands (e.g. `update`, `disable`, `clear`) are ignored without a reply.
+**Alias**: `boiler/cmd/scheduler/disable` is the same command with the state in the topic, so `{"id": 3}` is a complete payload and replies `{"status":"ok","id":3,"enabled":false}`. `"enabled": false` may be repeated, but `{"id":3,"enabled":true}` (or a non-boolean `enabled`) is rejected with `{"status":"error","msg":"enabled_conflicts_with_topic","id":0}` instead of disabling the schedule - switch a schedule back on with `enable`. Everything else (validation, FRAM save, ending a running schedule) is identical.
+
+#### Clear All Schedules
+**Topic**: `boiler/cmd/scheduler/clear`
+**Payload**: `confirm` (plain text, exactly - not JSON)
+**Response**: `boiler/scheduler/response`
+
+Erases every schedule from RAM and FRAM. Running schedules are ended first like `remove` (`schedule_end` event, their water or heating request is released). Destructive and not undoable, so it needs the explicit payload the same way `boiler/cmd/fram` needs `format_confirm`; new schedules start again at id 1.
+
+**Response**: `{"status":"ok","cleared":3}` (`cleared` is the number of schedules erased)
+
+**Error Responses**: `{"status":"error","msg":"use_confirm","id":0}` (any other payload - nothing is erased), `{"success":false,"error":"mutex_timeout"}`
+
+#### Unknown Scheduler Commands
+The firmware subscribes `boiler/cmd/scheduler/+`, so every sub-topic reaches the scheduler. A command without a handler now always answers on `boiler/scheduler/response` instead of staying silent (until 2026-09-16 it was ignored, which looked like a hung command):
+
+| Command | Response |
+|---------|----------|
+| `update`, `vacation`, `pump_exercise`, `command` | `{"status":"error","msg":"not_implemented","id":0}` |
+| any other sub-topic | `{"status":"error","msg":"unknown_command","id":0}` |
+
+`update` is not implemented (it would have to revalidate and repack the FRAM record): change a schedule with `remove` followed by `add`. These four topics were removed from `include/MQTTTopics.h` on 2026-09-16 - they had a topic macro but never a handler. Before the scheduler task is running, every scheduler command replies `{"status":"error","msg":"not_initialized"}`.
 
 ### Control Commands
 
@@ -886,7 +907,7 @@ More status topics (system/heating/water replies, sensor fallback, FRAM, alerts)
 | `boiler/cmd/config/preheat_pump_min_ms` | Min pump state change | Integer (1000-30000) |
 | `boiler/cmd/config/preheat_safe_diff` | Safe differential | Integer (100-300) tenths °C |
 | `boiler/config/+` | Logged only, no effect | Any |
-| `boiler/cmd/scheduler/+` | Schedule commands (`add`, `remove`, `enable`, `list`, `status`) | JSON |
+| `boiler/cmd/scheduler/+` | Schedule commands (`add`, `remove`, `enable`, `disable`, `clear`, `list`, `status`); any other sub-topic replies `not_implemented` or `unknown_command` | JSON (`clear`: `confirm`) |
 | `boiler/params/#` | Parameter commands (PersistentStorage) | Plain value or `{"value":...}` |
 | `errors/+` | Error log commands (`list`, `clear`, `stats`, `critical`, `dump`); also `boiler/cmd/errors` with the command in the payload | String |
 
@@ -1034,7 +1055,7 @@ normalPriorityConfig.overflowStrategy = QueueManager::OverflowStrategy::DROP_OLD
 
 ## Diagnostic Topics
 
-There are no `diagnostics/tasks` or `diagnostics/memory` topics: `MQTTDiagnostics` (`src/diagnostics/`) is never initialized, so none of its topics are published.
+There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagnostics` module that would have published them was never initialized and was removed on 2026-09-16; the only `boiler/diagnostics/*` topics are the Modbus ones (`boiler/diagnostics/modbus/<addr>`, published by MonitoringTask).
 
 ### System Health (memory and task count)
 **Topic**: `boiler/status/health` (not retained)

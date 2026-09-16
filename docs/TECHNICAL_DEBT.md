@@ -68,6 +68,18 @@ This document tracks completed architectural changes and pending improvements fo
 - **Lines Saved**: 235 lines
 - **Status**: ✅ Complete
 
+### Dead Code Cleanup (2026-09-16)
+- **Files Deleted**:
+  - `src/utils/FailOpenMonitor.h/.cpp` - only `initialize()` was ever called; `recordFailOpen()` had no call site, so the counters stayed zero and `boiler/alert/degraded_operation` / `boiler/status/degraded_checks` were never published
+  - `src/diagnostics/MQTTDiagnostics.h/.cpp`, `MQTTDiagnostics_MemoryRecovery.cpp`, `DiagnosticsRecoveryTimer.h/.cpp` - `initialize()` was never called, so the "MQTTDiagnostics" task never ran and `enabled` stayed false; every other entry point (queue metrics, emergency memory recovery, recovery timer) was only reachable from that task
+  - `src/core/TaskDependencyManager.cpp`, `include/core/TaskDependencyManager.h` - no caller anywhere; its "TaskHealthMonitor" task was never started
+- **Also Removed**:
+  - `QueueManager::publishMetrics()` plus `lastMetricsPublish_` / `METRICS_PUBLISH_INTERVAL_MS` (only caller was the dead diagnostics task; the body returned early on `isEnabled()`)
+  - The four unused Round 21 memory pools (`DiagnosticBuffer`, `ConfigBuffer`, `CalcBuffer`, `ErrorBuffer`) from `MemoryPool.h/.cpp` - never allocated from, and lazily initialised, so no RAM change
+  - Topic macros `MQTT_ALERT_PREFIX`, `MQTT_ALERT_DEGRADED_OPERATION`, `MQTT_STATUS_DEGRADED_CHECKS` (`alert/critical` and `alert/warning` use string literals in `ErrorHandler.cpp` and are unaffected)
+- **Runtime Behaviour**: unchanged, except that the boot log line `Initializing fail-open monitor...` is gone
+- **Status**: ✅ Complete
+
 ## Pending TODOs
 
 Status markers checked against the code on 2026-09-15: **Open**, **Partly done**, **Done**.

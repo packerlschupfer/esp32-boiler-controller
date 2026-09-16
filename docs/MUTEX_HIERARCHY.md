@@ -50,7 +50,6 @@ BurnerSafetyValidator has no mutex of its own; it takes `relayReadingsMutex` thr
 ### Level 5: Diagnostics/Logging (Highest - Acquire Last)
 | Mutex | Location | Purpose | Timeout |
 |-------|----------|---------|---------|
-| `MQTTDiagnostics::mutex` | MQTTDiagnostics.cpp | Diagnostic data | 100ms |
 | `bufferMutex_` | ErrorLogFRAM.cpp | Error log buffer | 50ms |
 | `SafeFormatter::bufferMutex` | SafeFormatter.h | String formatting | 10ms |
 | `otaStatusMutex` | OTATask_callbacks.cpp | OTA status | 100ms |

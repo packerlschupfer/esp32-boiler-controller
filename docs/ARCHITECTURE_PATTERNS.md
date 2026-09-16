@@ -248,7 +248,7 @@ Follow these naming patterns for extracted modules:
 |------|---------|---------|
 | Safety logic | `*SafetyChecks` | `BurnerSafetyChecks` |
 | Control logic | `*Controller` | `BurnerPowerController` |
-| Tracking/monitoring | `*Tracker`, `*Monitor` | `BurnerRuntimeTracker`, `FailOpenMonitor` |
+| Tracking/monitoring | `*Tracker`, `*Monitor` | `BurnerRuntimeTracker`, `HealthMonitor` |
 | Processing | `*Processor`, `*Manager` | `RelayCommandProcessor`, `RelayVerificationManager` |
 
 ## Thread Safety Guidelines

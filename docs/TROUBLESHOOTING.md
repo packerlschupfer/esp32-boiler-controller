@@ -36,15 +36,14 @@ rm -rf .pio && pio run
 
 ### Compilation warnings about pressure sensor
 
-**Symptom:**
+**Symptom:** the pressure readings look like simulated values (`boiler/status/sensors` field `p` drifts around 1.80 BAR and never reacts), and the log shows once at startup:
 ```
-warning: 'USE_REAL_PRESSURE_SENSOR' is not defined
+[MB8ARTTask][I] Using FAKE pressure data: 1.80 BAR (sensor not installed)
 ```
 
-**Solution:** This is expected during development. For production:
-1. Install physical pressure sensor
-2. Enable `USE_REAL_PRESSURE_SENSOR` in `ProjectConfig.h`
-3. Remove `ALLOW_NO_PRESSURE_SENSOR` flag
+**Cause:** `USE_REAL_PRESSURE_SENSOR` is not defined in `src/config/ProjectConfig.h`. It IS defined in the current firmware, so this only appears in a build where it was commented out.
+
+**Solution:** define `USE_REAL_PRESSURE_SENSOR` in `src/config/ProjectConfig.h` (CH4 is then read as a 4-20 mA sensor, 0-5 BAR) and rebuild. `ALLOW_NO_PRESSURE_SENSOR` is a separate flag that lets the burner start without a valid pressure reading; it is not set in any build environment.
 
 ---
 

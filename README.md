@@ -296,7 +296,7 @@ esp32-boiler-controller/
 │   ├── testing/          # Test and monitoring scripts
 │   └── ...               # MQTT test scripts, parameter init
 ├── tools/                 # Development tools
-│   ├── generate_events.py # Event bit code generator (event_config.yaml)
+│   ├── generate_events_zero_overhead.py # Event bit code generator (event_config.yaml)
 │   └── monitoring/       # System monitoring utilities
 ├── test/                  # Unit and integration tests
 ├── homeassistant/         # Home Assistant integration

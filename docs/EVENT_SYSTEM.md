@@ -296,7 +296,7 @@ FreeRTOS Event Groups (24 usable bits each, bits 24-31 reserved by FreeRTOS)
     └── RelayRequest
 ```
 
-Further event groups are created outside SharedResourceManager (device-ready group in SystemInitializer, `xGeneralSystemEventGroup` in `main.cpp`, SchedulerContext, TaskDependencyManager, EventAggregator instances).
+Further event groups are created outside SharedResourceManager (device-ready group in SystemInitializer, `xGeneralSystemEventGroup` in `main.cpp`, SchedulerContext, EventAggregator instances).
 
 ## Benefits of Event-Driven Architecture
 

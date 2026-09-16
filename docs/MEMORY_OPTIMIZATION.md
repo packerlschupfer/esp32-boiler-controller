@@ -220,9 +220,9 @@ char* p5 = TempBuffer::get();  // Overwrites p1!
 
 ---
 
-### 7. Memory Pools (Round 21 Expansion)
+### 7. Memory Pools
 
-#### Existing Memory Pools (Pre-Round 21)
+#### Defined Memory Pools
 ```cpp
 namespace MemoryPools {
     MemoryPool<MqttBuffer, 4> mqttBufferPool;           // 4 × 256B = 1KB
@@ -239,31 +239,9 @@ namespace MemoryPools {
 
 **Thread-safety**: Each pool has an internal mutex (`lazyInit()` pattern).
 
-#### Round 21 Memory Pool Expansion (+6KB)
+**Current use**: `MemoryPool::lazyInit()` mallocs the blocks on first `allocate()`, so a pool that is never allocated from takes no heap. In use today: `logBufferPool` and `jsonBufferPool` (MQTTPublisher), `getString()` / `getLogBuffer()` / `getTempBuffer()` (MQTTCommandHandlers, FRAM replies).
 
-```cpp
-namespace MemoryPools {
-    // NEW: Diagnostic message buffers (4 × 256B = 1KB)
-    MemoryPool<DiagnosticBuffer, 4> diagnosticBufferPool;
-
-    // NEW: Configuration buffers (4 × 512B = 2KB)
-    MemoryPool<ConfigBuffer, 4> configBufferPool;
-
-    // NEW: Calculation buffers (8 × 128B = 1KB)
-    MemoryPool<CalcBuffer, 8> calcBufferPool;
-
-    // NEW: Error message buffers (8 × 256B = 2KB)
-    MemoryPool<ErrorBuffer, 8> errorBufferPool;
-}
-// New Total: 10,496 bytes (~10.2KB)
-```
-
-**Rationale**:
-- Reduces heap allocation churn during diagnostics and error handling
-- Pre-allocated pools prevent fragmentation during runtime
-- Small RAM cost (3% of available heap) for significant stability improvement
-
-**Current use**: The four Round 21 pools are defined in `src/utils/MemoryPool.cpp` but are not used anywhere yet. `MemoryPool::lazyInit()` mallocs the blocks on first `allocate()`, so an unused pool takes no heap. In use today: `logBufferPool` and `jsonBufferPool` (MQTTPublisher), `getString()` / `getLogBuffer()` (MQTTCommandHandlers).
+Round 21 had added four further pools (`diagnosticBufferPool`, `configBufferPool`, `calcBufferPool`, `errorBufferPool`, 6KB nominal) as infrastructure for diagnostics and error handling. Nothing ever allocated from them, so they were removed on 2026-09-16. Because of the lazy init they had never claimed heap, so the removal is a code-clarity change, not a RAM saving.
 
 **Usage Pattern**:
 ```cpp
@@ -287,8 +265,7 @@ auto str = MemoryPools::getString();
 - Caller must check and handle gracefully (skip operation or fallback)
 - Pool stats available via `getStats()` for monitoring
 
-**Measured Impact** (from Round 21):
-- RAM usage increased from ~40KB to ~46KB (+6KB as expected)
+**Measured Impact**:
 - Heap fragmentation reduced significantly during stress testing
 - No pool exhaustion observed under normal operation
 
