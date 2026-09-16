@@ -26,7 +26,6 @@ HealthMonitor::HealthMonitor()
       memoryCriticalThreshold_(SystemConstants::System::MIN_FREE_HEAP_CRITICAL),
       networkMetrics_{},
       networkStartTime_(0),
-      taskCount_(0),
       overallHealth_(HealthStatus::GOOD),
       lastHealthCheckTime_(0) {
 }
@@ -82,10 +81,7 @@ void HealthMonitor::updateMetrics() {
 
     // Update subsystem health
     updateSubsystemHealth();
-    
-    // Check task health
-    checkTaskHealth();
-    
+
     // Calculate overall health
     overallHealth_ = calculateHealthStatus();
     
@@ -222,11 +218,8 @@ size_t HealthMonitor::generateHealthReport(char* buffer, size_t size) const {
     doc["nd"] = networkMetrics_.disconnectCount;
     doc["na"] = networkMetrics_.availabilityFP;  // fixed point, 10000 = 100%
 
-    // Task metrics are deliberately absent. HealthMonitor::registerTask() has no
-    // callers anywhere (SystemInitializer::registerTask is an unrelated method that
-    // only fills its own cleanup list), so taskCount_ is always 0, checkTaskHealth()
-    // iterates nothing, and every task field would be a constant. Publishing them
-    // would re-export a dead code path as a documented API.
+    // No task metrics: the whole task-monitoring apparatus was removed on 2026-09-16
+    // because registerTask() had no callers, so taskCount_ was permanently 0.
 
     constexpr size_t N = static_cast<size_t>(Subsystem::NUM_SUBSYSTEMS);
 
@@ -280,37 +273,7 @@ size_t HealthMonitor::generateHealthReport(char* buffer, size_t size) const {
     return serializeJson(doc, buffer, size);
 }
 
-void HealthMonitor::registerTask(TaskHandle_t handle, const char* name) {
-    SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(50));
-    if (!guard.hasLock()) {
-        return;
-    }
-    
-    if (taskCount_ < MAX_MONITORED_TASKS && handle != nullptr) {
-        taskMetrics_[taskCount_].name = name;
-        taskMetrics_[taskCount_].stackHighWaterMark = uxTaskGetStackHighWaterMark(handle);
-        taskMetrics_[taskCount_].lastCheckTime = millis();
-        taskMetrics_[taskCount_].isHealthy = true;
-        taskCount_++;
-    }
-}
 
-void HealthMonitor::checkTaskHealth() {
-    // Note: This is called with mutex already held
-    for (size_t i = 0; i < taskCount_; i++) {
-        auto& task = taskMetrics_[i];
-        
-        // Get task handle by name (would need TaskManager integration)
-        // For now, just check if stack is critically low
-        if (task.stackHighWaterMark < 256) {
-            task.isHealthy = false;
-            LOG_WARN("HealthMonitor", "Task %s has low stack: %d bytes",
-                    task.name, task.stackHighWaterMark);
-        }
-        
-        task.lastCheckTime = millis();
-    }
-}
 
 void HealthMonitor::updateMemoryMetrics() {
     memoryMetrics_.currentFreeHeap = ESP.getFreeHeap();
@@ -492,13 +455,6 @@ HealthMonitor::HealthStatus HealthMonitor::calculateHealthStatus() const {
         }
     }
     
-    // Check tasks
-    for (size_t i = 0; i < taskCount_; i++) {
-        if (!taskMetrics_[i].isHealthy) {
-            worstStatus = std::max(worstStatus, HealthStatus::WARNING);
-        }
-    }
-    
     return worstStatus;
 }
 
@@ -547,10 +503,6 @@ void HealthMonitor::resetForTesting() {
     // Reset network metrics
     instance.networkMetrics_ = NetworkMetrics{};
     instance.networkStartTime_ = 0;
-
-    // Reset task metrics
-    instance.taskMetrics_.fill(TaskMetrics{});
-    instance.taskCount_ = 0;
 
     // Reset overall health
     instance.overallHealth_ = HealthStatus::UNKNOWN;

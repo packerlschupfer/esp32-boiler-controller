@@ -74,16 +74,6 @@ public:
     };
     
     /**
-     * @brief Task health metrics
-     */
-    struct TaskMetrics {
-        const char* name;
-        UBaseType_t stackHighWaterMark;
-        uint32_t lastCheckTime;
-        bool isHealthy;
-    };
-    
-    /**
      * @brief Network health metrics
      */
     struct NetworkMetrics {
@@ -168,15 +158,14 @@ public:
      */
     size_t generateHealthReport(char* buffer, size_t size) const;
     
-    /**
-     * @brief Register a task for monitoring
-     */
-    void registerTask(TaskHandle_t handle, const char* name);
-    
-    /**
-     * @brief Check task health
-     */
-    void checkTaskHealth();
+    // Removed 2026-09-16: registerTask(), checkTaskHealth(), TaskMetrics and the
+    // taskMetrics_/taskCount_ members. registerTask() had no callers anywhere - the
+    // registerTask calls in TaskInitializer.cpp are SystemInitializer::registerTask,
+    // an unrelated method that only appends to its own cleanup list - so taskCount_
+    // was permanently 0, checkTaskHealth() iterated nothing, stackHighWaterMark was
+    // only ever assigned inside the registration that never ran, and the low-stack
+    // warning it existed to raise could not fire. The task branch in
+    // calculateHealthStatus() was dead for the same reason.
     
     /**
      * @brief Set memory warning threshold
@@ -225,11 +214,6 @@ private:
     // Network metrics
     NetworkMetrics networkMetrics_;
     uint32_t networkStartTime_;
-    
-    // Task monitoring
-    static constexpr size_t MAX_MONITORED_TASKS = 20;
-    std::array<TaskMetrics, MAX_MONITORED_TASKS> taskMetrics_;
-    size_t taskCount_;
     
     // Overall health
     HealthStatus overallHealth_;
