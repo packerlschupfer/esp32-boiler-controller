@@ -625,6 +625,16 @@ namespace SystemConstants {
         constexpr uint32_t DETAILED_REPORT_INTERVAL_MS = 300000; // 5 minutes
         constexpr uint32_t ERROR_REPORT_COOLDOWN_MS = 3600000;   // 1 hour
 
+        // Subsystem health: error rate above which a subsystem is marked unhealthy.
+        // Fixed point against FixedPoint::PERCENTAGE_SCALE (10000), so 2500 = 25%.
+        // Sits above the levels calculateHealthStatus() already uses for the overall
+        // status (1000 = 10% -> CRITICAL, 500 = 5% -> WARNING), because this one is
+        // what makes HealthStatus::FAILED reachable at all. Only applied once
+        // MIN_SAMPLES_FOR_STATISTICS samples exist - below that the rate is forced to
+        // 0 - and recovery stays purely time-based (see updateSubsystemHealth), since
+        // the rate is cumulative since boot and never decays.
+        constexpr uint16_t SUBSYSTEM_UNHEALTHY_RATE_FP = 2500;
+
         // Memory recovery
         constexpr uint32_t RECOVERY_DELAY_MS = 30000;            // 30s - diagnostics task resume delay
 

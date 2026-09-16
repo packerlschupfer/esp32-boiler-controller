@@ -68,11 +68,13 @@ void HealthMonitor::updateMetrics() {
     // Update network metrics
     updateNetworkMetrics();
     
+    // Calculate error rates BEFORE judging subsystem health: updateSubsystemHealth()
+    // now marks a subsystem unhealthy from errorRateFP, and running it first made that
+    // decision act on the previous cycle's rate - one tick stale.
+    calculateErrorRates();
+
     // Update subsystem health
     updateSubsystemHealth();
-    
-    // Calculate error rates
-    calculateErrorRates();
     
     // Check task health
     checkTaskHealth();
@@ -349,13 +351,30 @@ void HealthMonitor::updateNetworkMetrics() {
 
 void HealthMonitor::updateSubsystemHealth() {
     uint32_t now = millis();
-    
-    // Check for stale subsystems (no activity in 5 minutes)
+    constexpr uint32_t QUIET_PERIOD_MS = 300000;  // 5 min without an error = recovered
+
+    // isHealthy previously had no way to become false: it was initialised true and
+    // only ever re-set to true here, so calculateHealthStatus()'s
+    // `if (!health.isHealthy) return FAILED;` could never fire and the report's
+    // per-subsystem "healthy" field was a constant. This adds the missing half.
+    //
+    // Recovery is tested FIRST and deliberately stays time-based. errorRateFP is
+    // cumulative since boot and never decays, and some subsystems only ever call
+    // recordError() and never recordSuccess() - MQTT is one - so a single error pins
+    // them at 100% permanently. Rate-based recovery would latch those unhealthy
+    // forever; a quiet period cannot. Testing recovery first also gives hysteresis:
+    // a subsystem goes unhealthy on a sustained rate and clears only after it has
+    // genuinely stopped erroring, not merely when the average dips.
     for (auto& health : subsystemHealth_) {
-        uint32_t totalOps = health.successCount + health.errorCount;
-        if (totalOps > 0 && (now - health.lastErrorTime) > 300000) {
-            // No errors in 5 minutes, mark as healthy
+        const uint32_t totalOps = health.successCount + health.errorCount;
+        const bool quiet = (totalOps > 0) && ((now - health.lastErrorTime) > QUIET_PERIOD_MS);
+
+        if (quiet) {
             health.isHealthy = true;
+        } else if (health.errorRateFP > SystemConstants::Diagnostics::SUBSYSTEM_UNHEALTHY_RATE_FP) {
+            // errorRateFP is 0 below MIN_SAMPLES_FOR_STATISTICS (calculateErrorRates),
+            // so a couple of early errors cannot trip this.
+            health.isHealthy = false;
         }
     }
 }
