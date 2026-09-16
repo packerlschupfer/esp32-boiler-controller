@@ -167,15 +167,16 @@ public:
     // warning it existed to raise could not fire. The task branch in
     // calculateHealthStatus() was dead for the same reason.
     
-    /**
-     * @brief Set memory warning threshold
-     */
-    void setMemoryWarningThreshold(size_t bytes) { memoryWarningThreshold_ = bytes; }
-    
-    /**
-     * @brief Set memory critical threshold
-     */
-    void setMemoryCriticalThreshold(size_t bytes) { memoryCriticalThreshold_ = bytes; }
+    // Removed 2026-09-16: setMemoryWarningThreshold()/setMemoryCriticalThreshold() and
+    // the memoryWarningThreshold_/memoryCriticalThreshold_ members they wrote. Nothing
+    // ever read them - memory is judged directly against MIN_DRAM_BLOCK_WARNING /
+    // MIN_DRAM_BLOCK_CRITICAL in updateMemoryMetrics() and calculateHealthStatus().
+    // They were not repurposed as runtime-tunable limits because the constructor
+    // seeded them from the internal-heap MIN_FREE_HEAP_* constants, an order of
+    // magnitude above the DRAM-block figures the gate compares: routing them into that
+    // comparison would have pinned a healthy boiler at CRITICAL. Re-seeding them would
+    // have produced tunable thresholds with no caller, which is a subtler trap than a
+    // setter that plainly does nothing.
     
     /**
      * @brief Get singleton instance
@@ -208,8 +209,6 @@ private:
     
     // Memory metrics
     MemoryMetrics memoryMetrics_;
-    size_t memoryWarningThreshold_;
-    size_t memoryCriticalThreshold_;
     
     // Network metrics
     NetworkMetrics networkMetrics_;

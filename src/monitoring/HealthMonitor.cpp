@@ -22,8 +22,6 @@ HealthMonitor::HealthMonitor()
       // getMemoryMetrics() on a constructed-but-uninitialised instance would read
       // garbage - and the health report publishes these fields verbatim.
       memoryMetrics_{},
-      memoryWarningThreshold_(SystemConstants::System::MIN_FREE_HEAP_WARNING),
-      memoryCriticalThreshold_(SystemConstants::System::MIN_FREE_HEAP_CRITICAL),
       networkMetrics_{},
       networkStartTime_(0),
       overallHealth_(HealthStatus::GOOD),
@@ -289,7 +287,7 @@ void HealthMonitor::updateMemoryMetrics() {
     
     // Judge memory on what malloc() can actually serve. The previous check compared
     // currentFreeHeap (ESP.getFreeHeap(), i.e. MALLOC_CAP_INTERNAL, ~58 kB on this
-    // device) against memoryCriticalThreshold_/memoryWarningThreshold_ (10/20 kB), so
+    // device) against the old internal-heap limits of 10/20 kB, so
     // it could never fire - most of that "free heap" is IRAM-only and malloc() cannot
     // return it. Measured 2026-09-16: 57 kB "free" with a 48 kB "largest block" while
     // byte-addressable DRAM was 7 kB with a 4.2 kB ceiling, and ordinary Home Assistant
@@ -417,8 +415,8 @@ HealthMonitor::HealthStatus HealthMonitor::calculateHealthStatus() const {
     //
     // This was the last surviving inert comparison of the set: currentFreeHeap is
     // ESP.getFreeHeap() (MALLOC_CAP_INTERNAL, ~57 kB here because it counts IRAM the
-    // allocator cannot hand out), tested against memoryCriticalThreshold_/
-    // memoryWarningThreshold_ of 10/20 kB - so neither branch could ever be taken,
+    // allocator cannot hand out), tested against the old internal-heap limits of
+    // 10/20 kB - so neither branch could ever be taken,
     // even with 192 bytes of real free DRAM. Same reasoning and same limits as
     // updateMemoryMetrics(): allocations fail on contiguity, and the largest block is
     // the stable signal, whereas total free DRAM dips to a few hundred bytes during a
@@ -497,8 +495,6 @@ void HealthMonitor::resetForTesting() {
 
     // Reset memory metrics
     instance.memoryMetrics_ = MemoryMetrics{};
-    instance.memoryWarningThreshold_ = 10240;  // Default 10KB
-    instance.memoryCriticalThreshold_ = 5120;  // Default 5KB
 
     // Reset network metrics
     instance.networkMetrics_ = NetworkMetrics{};
