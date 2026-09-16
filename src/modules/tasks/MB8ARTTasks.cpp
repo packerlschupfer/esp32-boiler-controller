@@ -380,9 +380,14 @@ void updateSensorData(const std::vector<float>& temperatureData) {
                 SRP::getSensorReadings().isSystemPressureValid = true;
                 SRP::getSensorReadings().lastPressureUpdateTimestamp = millis();
                 
-                Pressure_t fixedPressure = SRP::getSensorReadings().systemPressure;
+                // Declared here rather than just before the alarm check below: this is
+                // the only consumer when LOG_DEBUG is compiled out (as it is in
+                // esp32_test), and a local read solely by a vanishing macro produced an
+                // unused-variable warning. One local now serves both the log and the
+                // alarm comparison - systemPressure is not touched in between.
+                Pressure_t pressureFixed = SRP::getSensorReadings().systemPressure;
                 LOG_DEBUG("MB8ARTTask", "Ch7 (Pressure): %d.%02d BAR (%d.%02d mA)", 
-                          fixedPressure / 100, abs(fixedPressure % 100),
+                          pressureFixed / 100, abs(pressureFixed % 100),
                           (int)currentMA, (int)(currentMA * 100) % 100);
                 
                 // Set pressure update event bit
@@ -390,7 +395,6 @@ void updateSensorData(const std::vector<float>& temperatureData) {
                 
                 // Check for pressure alarms (wider alarm thresholds than operating limits)
                 using namespace SystemConstants::Safety::Pressure;
-                Pressure_t pressureFixed = SRP::getSensorReadings().systemPressure;
                 if (pressureFixed < ALARM_MIN || pressureFixed > ALARM_MAX) {
                     LOG_WARN("MB8ARTTask", "Pressure alarm: %d.%02d BAR (alarm limits: %d.%02d-%d.%02d BAR)",
                              pressureFixed / 100, abs(pressureFixed % 100),

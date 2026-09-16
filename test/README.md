@@ -70,6 +70,23 @@ pio test -e esp32_test --upload-port /dev/ttyUSB0
 pio test -e native_test -v
 ```
 
+### Compile-check the `UNIT_TEST` code (no hardware needed)
+
+```bash
+pio run -e esp32_test
+```
+
+Run this after touching anything under `#ifdef UNIT_TEST` in `src/`. It is a **build**, not a test run, so no board needs to be attached.
+
+`UNIT_TEST` is defined in two environments, and only one of them compiles `src/`:
+
+| env | platform | compiles `src/`? | compiles `#ifdef UNIT_TEST` blocks in `src/`? |
+|-----|----------|------------------|-----------------------------------------------|
+| `native_test` | native | no | no |
+| `esp32_test` | ESP32 | yes | yes |
+
+`native_test` builds only `test_native/`, so `UNIT_TEST` blocks inside `src/` never reach a compiler there. `esp32_test` is the only environment that compiles them - and because it normally wants a board in order to *run*, it rarely gets built at all. On 2026-09-16 that gap let `HealthMonitor::resetForTesting()` sit in the tree assigning `HealthStatus::UNKNOWN`, a value absent from the enum: an outright compile error in `esp32_test` that no routine command ever surfaced.
+
 ## Test Categories
 
 ### Native Tests (`test_native/`)
