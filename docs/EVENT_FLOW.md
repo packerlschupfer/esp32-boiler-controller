@@ -204,7 +204,7 @@ RUNNING_HIGH state
 ├─ MB8ARTTask reads temperatures every 2.5s
 │  ├─ Boiler output temp increasing
 │  ├─ Water tank temp rising
-│  └─ Sets SensorUpdate::BOILER_OUTPUT / BOILER_RETURN / WATER_TANK (or the *_ERROR bit per channel)
+│  └─ Sets SensorUpdate::BOILER_OUTPUT / BOILER_RETURN / WATER_TANK / OUTSIDE (or the *_ERROR bit per channel)
 ├─ WheaterControlTask monitors progress
 │  └─ Tank: 25.2°C → 35.5°C → 45.8°C → ...
 └─ MQTTTask publishes sensors every 10s
@@ -589,9 +589,12 @@ SensorUpdate::BOILER_OUTPUT
 
 SensorUpdate::BOILER_RETURN | WATER_TANK | BOILER_OUTPUT/BOILER_RETURN/WATER_TANK_ERROR
 └─ BurnerControlTask
-   └─ Polls them on each loop pass (one wake-up per read) → BurnerStateMachine::update()
-      and the sensor check: emergency stop only after 10 s of missing sensors with heat
-      demand (SensorFailureConfirm); BurnerStateMachine::update() also runs on the 1 s timer
+   └─ Polls them when its request-bit wait ends (100 ms running / 1 s / 3 s idle)
+      → BurnerStateMachine::update(), and the sensor check only while a mode request is
+      active or the demand is armed: emergency stop after 10 s of missing sensors with
+      demand (SensorFailureConfirm). A missing boiler output reading sets SENSOR_FAILURE
+      and trips the 5 s full safety check earlier.
+      BurnerStateMachine::update() also runs on the 1 s STATE_TIMEOUT
 
 HeatingControlTask and WheaterControlTask do not use sensor events; they run
 on their process timers and read SharedSensorReadings.

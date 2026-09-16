@@ -66,7 +66,7 @@ Not checked here: pumps (the pump check was removed; the burner requires an acti
 1. **Emergency stop** - Every call
 2. **Critical temperature** - Boiler output at or above 115.0°C (`CRITICAL_BOILER_TEMP_C`) -> `triggerEmergencyShutdown()`; every call
 3. **Sensor staleness** - Boiler output channel stale (`StateManager::isSensorStale()`) -> `triggerEmergencyShutdown()`; every call
-4. **Full check** - `performFullSafetyCheck()` every 5 s (`FULL_CHECK_INTERVAL_MS`) while HEATING_ON or WATER_ON is set: emergency stop, critical error bits (SENSOR_FAILURE, MODBUS, RELAY), at least 2 valid and fresh sensors, boiler output and return below 110.0°C, thermal shock (`SafetyConfig::thermalShockDifferentialC`), sensor and relay communication, pressure 1.00-3.50 BAR (skipped without a valid pressure reading)
+4. **Full check** - `performFullSafetyCheck()` every 5 s (`FULL_CHECK_INTERVAL_MS`) while HEATING_ON or WATER_ON is set: emergency stop, critical error bits (SENSOR_FAILURE - set by the sensor fallback only while the boiler output reading is missing -, MODBUS, RELAY), at least 2 valid and fresh sensors, boiler output and return below 110.0°C, thermal shock (`SafetyConfig::thermalShockDifferentialC`), sensor and relay communication, pressure 1.00-3.50 BAR (skipped without a valid pressure reading)
 
 Pump verification was removed (Round 18/19): SafetyInterlocks does not check the pumps.
 

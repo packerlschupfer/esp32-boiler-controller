@@ -103,24 +103,21 @@ For the heating pump and water pump relays:
 
 **Implementation:**
 ```cpp
-// RelayControlTask::processSingleRelay() (simplified), relayIndex is 1-based
-const bool desiredState = g_relayState.getRelay(relayIndex - 1);
-const bool realChange = !RelayCommandPolicy::isNoOp(desiredState, state);
-const bool protect = RelayCommandPolicy::appliesProtection(desiredState, state, emergencyBypass);
-
-if (protect && !checkRateLimit(relayIndex)) {
-    return false;  // MIN_RELAY_SWITCH_INTERVAL_MS / MAX_RELAY_TOGGLE_RATE_PER_MIN
-}
-if (protect && !checkPumpProtection(relayIndex, state)) {
-    return false;  // elapsed < SafetyConfig::pumpProtectionMs
+// RelayControlTask::processSingleRelay() (simplified), relayIndex is 1-based.
+// The decision is in include/shared/RelayCommandPolicy.h (native-tested):
+// desiredBit() reads the 0-based desired mask, admit() checks no-op/emergency first,
+// then the rate limiter (consumeToggle(): MIN_RELAY_SWITCH_INTERVAL_MS /
+// MAX_RELAY_TOGGLE_RATE_PER_MIN), then pump protection (SafetyConfig::pumpProtectionMs)
+switch (RelayCommandPolicy::admit(/* desired, state, emergency, limiter, pump check */)) {
+    case RelayCommandPolicy::RATE_LIMITED:   return false;
+    case RelayCommandPolicy::PUMP_PROTECTED: return false;
+    case RelayCommandPolicy::ACCEPTED:       break;
 }
 
 g_relayState.setRelay(relayIndex - 1, state);
 
 // Pump relays only: restart the protection window on a real state change
-if (realChange && relayIndex == heatingPumpPhysical) {
-    pumpLastStateChangeTime[0] = xTaskGetTickCount();
-}
+RelayCommandPolicy::restartPumpTimer(/* relayIndex, realChange, now, timers */);
 ```
 
 ### Parameters
@@ -323,9 +320,9 @@ SHUTDOWN → NORMAL    1 valid check
 ```
 `canContinueOperation()` returns true only in NORMAL. `getSafeOperatingParams()` gives 110.0°C / 100 % in NORMAL and 0 in STARTUP and SHUTDOWN.
 
-BurnerControlTask evaluates it after every MB8ART read. The heating and water tasks drop their requests as soon as it fails; the burner emergency stop (ERROR for `errorRecoveryMs`) follows only when it stays false for 10 s while heat demand persists (`SensorFailureConfirm.h`), so a single bad reading does not lock the burner out.
+BurnerControlTask evaluates it after an MB8ART read while a mode request is active or the demand is armed (not in idle). The heating and water tasks drop their requests as soon as it fails; the burner emergency stop (ERROR for `errorRecoveryMs`) follows only when it stays false for 10 s while the demand persists (`SensorFailureConfirm.h`), so a single bad room, tank or return reading does not lock the burner out. A missing boiler output reading sets `SENSOR_FAILURE` and trips the 5 s full safety check earlier.
 
-**Entering SHUTDOWN:** ERROR `SHUTDOWN: Missing sensors: Boiler Return, Room Temperature (required for space heating)` (example), sets `SENSOR_FAILURE` and `SENSOR_DEGRADED`, publishes retained `boiler/status/sensor_fallback` (JSON with `mode` and `missing`) and `boiler/status/sensor_mode`.
+**Entering SHUTDOWN:** ERROR `SHUTDOWN: Missing sensors: Boiler Return, Room Temperature (required for space heating)` (example), sets `SENSOR_DEGRADED`, and `SENSOR_FAILURE` only while the boiler output reading is missing (2026-09-16: a missing room, tank or return reading no longer triggers the 5 s full-check emergency stop; BurnerControlTask's 10 s confirmation applies instead), publishes retained `boiler/status/sensor_fallback` (JSON with `mode` and `missing`) and `boiler/status/sensor_mode`.
 
 **SHUTDOWN → NORMAL:** clears both bits, calls `CentralizedFailsafe::releaseAfterSensorRecovery()` (releases `EMERGENCY_STOP` only if stale sensor data caused it) and publishes `boiler/status/sensor_fallback/recovery`.
 
