@@ -51,8 +51,7 @@ private:
     static bool processSetMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety
     static bool processToggleAllRelays();
     
-    // Rate limiting methods (from version 2)
-    static bool checkRateLimit(uint8_t relayIndex);
+    // Rate limiting (from version 2); per-command check in RelayCommandPolicy::admit()
     static void updateRateLimitCounters();
     
     // System state monitoring for relay coordination

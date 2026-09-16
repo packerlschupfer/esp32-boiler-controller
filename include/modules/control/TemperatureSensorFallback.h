@@ -99,6 +99,9 @@ private:
     // Check sensor age
     static bool isSensorDataFresh(uint32_t lastUpdateTime, uint32_t maxAge = 30000);  // Default to SystemConstants::Timing::SENSOR_TIMEOUT_MS
     
+    // updateSensorStatus() body; caller holds the fallback mutex (TemperatureSensorFallback.cpp)
+    static FallbackMode updateSensorStatusLocked();
+
     // Get specific error message for missing sensors
     static const char* getMissingSensorMessage();
 };

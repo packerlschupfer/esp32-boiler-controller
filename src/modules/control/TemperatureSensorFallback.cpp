@@ -15,8 +15,39 @@
 #include "modules/tasks/MQTTTask.h"
 #include "MQTTTopics.h"
 #include <ArduinoJson.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <freertos/timers.h>
 
 static const char* TAG = "TempSensorFallback";
+
+// Guards currentStatus, the hysteresis counters and the mode change side effects (retained
+// MQTT publishes, error bits, health monitor, emergency release) as one sequence (review R4-3).
+// Callers: BurnerControlTask (priority 4), HeatingControlTask and WheaterControlTask
+// (priority 3), their 60 s safetyCheckCallback timers (timer daemon task) and the MQTT
+// emergency_reset command (CentralizedFailsafe::clearEmergencyStop).
+// Lock order: this mutex first; under it the sensor readings mutex, the health monitor mutex,
+// the logger and the MQTT queues (no wait) are used. None of their holders calls into
+// TemperatureSensorFallback. Read-only getters (getCurrentMode, getStatus) stay lock-free.
+static SemaphoreHandle_t fallbackMutex = nullptr;
+static constexpr TickType_t FALLBACK_MUTEX_TIMEOUT = pdMS_TO_TICKS(50);
+
+static bool takeFallbackMutex() {
+    if (fallbackMutex == nullptr) {
+        return true;  // before initialize() (creation failure is logged there)
+    }
+    // Never block the timer daemon task (HeatingControlTask/WheaterControlTask safetyCheckCallback)
+    const bool inTimerTask = (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) &&
+                             (xTaskGetCurrentTaskHandle() == xTimerGetTimerDaemonTaskHandle());
+    return xSemaphoreTake(fallbackMutex, inTimerTask ? 0 : FALLBACK_MUTEX_TIMEOUT) == pdTRUE;
+}
+
+static void giveFallbackMutex() {
+    if (fallbackMutex != nullptr) {
+        xSemaphoreGive(fallbackMutex);
+    }
+}
 
 // Helper function to publish sensor fallback status immediately on mode change
 static void publishFallbackModeChange(TemperatureSensorFallback::FallbackMode newMode,
@@ -61,6 +92,14 @@ uint8_t TemperatureSensorFallback::consecutiveInvalidCount = 0;
 
 void TemperatureSensorFallback::initialize() {
     LOG_INFO(TAG, "Initializing temperature sensor fallback system with hysteresis");
+    // Called by SystemInitializer and again by BurnerControlTask: create the mutex once
+    if (fallbackMutex == nullptr) {
+        fallbackMutex = xSemaphoreCreateMutex();
+        if (fallbackMutex == nullptr) {
+            LOG_ERROR(TAG, "Failed to create fallback mutex - state updates unguarded");
+        }
+    }
+    const bool locked = takeFallbackMutex();
     currentStatus = SensorStatus(); // Reset to defaults
     initializationTime = millis();
     consecutiveValidCount = 0;
@@ -69,30 +108,56 @@ void TemperatureSensorFallback::initialize() {
     // Start in STARTUP mode
     currentStatus.currentMode = FallbackMode::STARTUP;
     currentStatus.currentOperationMode = OperationMode::NONE;
+    if (locked) {
+        giveFallbackMutex();
+    }
 }
 
 void TemperatureSensorFallback::cleanup() {
+    // The mutex is kept: another task may still call in
+    const bool locked = takeFallbackMutex();
     currentStatus = SensorStatus();
     initializationTime = 0;
     consecutiveValidCount = 0;
     consecutiveInvalidCount = 0;
+    if (locked) {
+        giveFallbackMutex();
+    }
     LOG_INFO(TAG, "Temperature sensor fallback cleaned up");
 }
 
 void TemperatureSensorFallback::setOperationMode(OperationMode mode) {
+    if (!takeFallbackMutex()) {
+        // Another task is evaluating; BurnerControlTask sets the mode again on its next
+        // sensor read or request change
+        LOG_WARN(TAG, "setOperationMode: mutex timeout - operation mode not changed");
+        return;
+    }
     if (currentStatus.currentOperationMode != mode) {
         const char* modeNames[] = {"NONE", "SPACE_HEATING", "WATER_HEATING", "BOTH"};
         LOG_INFO(TAG, "Operation mode changed: %s -> %s",
                 modeNames[static_cast<int>(currentStatus.currentOperationMode)],
                 modeNames[static_cast<int>(mode)]);
         currentStatus.currentOperationMode = mode;
-        
+
         // Force immediate sensor status update when mode changes
-        updateSensorStatus();
+        updateSensorStatusLocked();
     }
+    giveFallbackMutex();
 }
 
 TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorStatus() {
+    if (!takeFallbackMutex()) {
+        // Another task (or the timer task found the mutex taken): report the last mode and
+        // change nothing - the holder is evaluating the same readings
+        return currentStatus.currentMode;
+    }
+    const FallbackMode mode = updateSensorStatusLocked();
+    giveFallbackMutex();
+    return mode;
+}
+
+TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorStatusLocked() {
     uint32_t now = millis();
     
     // Reset missing sensor flags
@@ -210,6 +275,25 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
             break;
     }
     
+    // Error bits follow the missing sensor (2026-09-16, user decision): only a missing boiler
+    // output reading leaves the overheat protection blind, so only that sets SENSOR_FAILURE,
+    // which SafetyInterlocks::checkSystemErrors() treats as critical (emergency stop within the
+    // 5 s full check). A missing room/tank/return reading marks degraded operation only: the
+    // mode task stops the burner normally and BurnerControlTask's 10 s confirmation
+    // (SensorFailureConfirm) handles a demand that persists. Re-evaluated on every update so a
+    // boiler output failing later inside SHUTDOWN still sets the bit.
+    if (currentStatus.currentMode == FallbackMode::SHUTDOWN) {
+        xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
+                           SystemEvents::GeneralSystem::SENSOR_DEGRADED);
+        if (!currentStatus.boilerOutputValid) {
+            xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
+                               SystemEvents::Error::SENSOR_FAILURE);
+        } else {
+            xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),
+                                 SystemEvents::Error::SENSOR_FAILURE);
+        }
+    }
+
     // Log mode changes
     if (currentStatus.currentMode != previousMode) {
         const char* modeNames[] = {"STARTUP", "NORMAL", "SHUTDOWN"};
@@ -223,9 +307,7 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
         if (currentStatus.currentMode == FallbackMode::SHUTDOWN) {
             LOG_ERROR(TAG, "SHUTDOWN: %s", getMissingSensorMessage());
 
-            // Set error bits - both SENSOR_FAILURE and SENSOR_DEGRADED for different listeners
-            xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
-                              SystemEvents::Error::SENSOR_FAILURE | SystemEvents::GeneralSystem::SENSOR_DEGRADED);
+            // Error bits are set above, depending on which sensor is missing
 
             // Record in health monitor
             HealthMonitor* healthMonitor = SRP::getHealthMonitor();
@@ -296,14 +378,15 @@ bool TemperatureSensorFallback::hasRequiredSensors() {
 }
 
 bool TemperatureSensorFallback::canContinueOperation() {
-    updateSensorStatus();
-    
-    switch (currentStatus.currentMode) {
+    // Decide on the mode this call evaluated, not a later re-read of the shared status
+    FallbackMode mode = updateSensorStatus();
+
+    switch (mode) {
         case FallbackMode::STARTUP:
             // During startup, allow operation if sensors become available
             // Re-check sensor status to potentially transition to NORMAL
-            updateSensorStatus();
-            if (currentStatus.currentMode == FallbackMode::NORMAL) {
+            mode = updateSensorStatus();
+            if (mode == FallbackMode::NORMAL) {
                 return true;
             }
             // Still in startup - log occasionally

@@ -322,25 +322,33 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
     // current desired state (e.g. an unchanged relay in a burner mode-switch batch)
     // is not a toggle: counting it let the rate limiter reject the genuine
     // POWER_BOOST change 2 ms later and escalate to an emergency stop
-    // (2026-09-14 15:41:25). relayIndex is 1-based, g_relayState 0-based.
-    const bool desiredState = g_relayState.getRelay(relayIndex - 1);
+    // (2026-09-14 15:41:25). Decision rules and index mapping in RelayCommandPolicy.
+    const bool desiredState = RelayCommandPolicy::desiredBit(
+        g_relayState.desired.load(std::memory_order_acquire), relayIndex);
     const bool realChange = !RelayCommandPolicy::isNoOp(desiredState, state);
-    const bool protect = RelayCommandPolicy::appliesProtection(desiredState, state, emergencyBypass);
 
-    // Rate limit for relay protection. An emergency/failsafe command bypasses it:
+    // Rate limit, then pump motor protection for relays 5 and 6 (heating and water
+    // pumps). An emergency/failsafe command bypasses both:
     // review-fix - the rate limiter (MAX_RELAY_TOGGLE_RATE_PER_MIN /
     // MIN_RELAY_SWITCH_INTERVAL_MS) would otherwise silently drop a safety pump-ON
     // that follows rapid cycling, defeating F13's emergency heat-dissipation hold.
-    if (protect && !checkRateLimit(relayIndex)) {
+    // F13: pump protection exists to prevent rapid cycling, not to block a
+    // safety-ON for heat dissipation.
+    const RelayCommandPolicy::RateLimiter limiter = {
+        pdMS_TO_TICKS(MIN_RELAY_SWITCH_INTERVAL_MS),
+        MAX_RELAY_TOGGLE_RATE_PER_MIN,
+        toggleTimestamps,
+        toggleCount
+    };
+    const RelayCommandPolicy::Admission admission = RelayCommandPolicy::admit(
+        relayIndex, desiredState, state, emergencyBypass, limiter, xTaskGetTickCount(),
+        &RelayControlTask::checkPumpProtection);
+
+    if (admission == RelayCommandPolicy::Admission::RATE_LIMITED) {
         LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
         return false;
     }
-
-    // Check pump motor protection for relays 5 and 6 (heating and water pumps)
-    // This prevents rapid on/off cycling that can damage pump motors.
-    // F13: emergency/failsafe commands bypass this - protection exists to prevent
-    // rapid cycling, not to block a safety-ON for heat dissipation.
-    if (protect && !checkPumpProtection(relayIndex, state)) {
+    if (admission == RelayCommandPolicy::Admission::PUMP_PROTECTED) {
         // Pump protection blocks this state change - not an error, just too soon
         return false;
     }
@@ -352,18 +360,12 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
     // relayIndex is 1-based, g_relayState uses 0-based bit positions
     g_relayState.setRelay(relayIndex - 1, state);
 
-    // Update pump protection timestamp for pump relays - only on a real state
-    // change, otherwise re-sent unchanged pump commands keep restarting the
-    // protection window and block the next genuine change.
-    const uint8_t heatingPumpPhysical = RelayIndex::toPhysical(RelayIndex::HEATING_PUMP);
-    const uint8_t waterPumpPhysical = RelayIndex::toPhysical(RelayIndex::WATER_PUMP);
-    if (!realChange) {
-        // no pump protection timer update
-    } else if (relayIndex == heatingPumpPhysical) {
-        pumpLastStateChangeTime[0] = xTaskGetTickCount();
+    // Update pump protection timestamp for pump relays - only on a real state change
+    const int8_t pumpTimer = RelayCommandPolicy::restartPumpTimer(
+        relayIndex, realChange, xTaskGetTickCount(), pumpLastStateChangeTime);
+    if (pumpTimer == 0) {
         LOG_DEBUG(TAG, "Heating pump protection timer reset");
-    } else if (relayIndex == waterPumpPhysical) {
-        pumpLastStateChangeTime[1] = xTaskGetTickCount();
+    } else if (pumpTimer == 1) {
         LOG_DEBUG(TAG, "Water pump protection timer reset");
     }
 
@@ -456,35 +458,6 @@ bool RelayControlTask::processToggleAllRelays() {
     }
 
     return processSetMultipleRelays(newStates);
-}
-
-// NEW METHOD: Check rate limit (from v2)
-bool RelayControlTask::checkRateLimit(uint8_t relayIndex) {
-    if (relayIndex < 1 || relayIndex > 8) {
-        return false;
-    }
-    
-    uint8_t idx = relayIndex - 1;
-    TickType_t now = xTaskGetTickCount();
-    
-    // Check minimum interval
-    if (toggleTimestamps[idx] != 0) {
-        TickType_t elapsed = now - toggleTimestamps[idx];
-        if (elapsed < pdMS_TO_TICKS(MIN_RELAY_SWITCH_INTERVAL_MS)) {
-            return false;
-        }
-    }
-    
-    // Check rate limit
-    if (toggleCount[idx] >= MAX_RELAY_TOGGLE_RATE_PER_MIN) {
-        return false;
-    }
-    
-    // Update tracking
-    toggleTimestamps[idx] = now;
-    toggleCount[idx]++;
-    
-    return true;
 }
 
 // NEW METHOD: Update rate limit counters (from v2)
@@ -650,13 +623,11 @@ bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
     // command-history cache, which is a second copy that can silently diverge from
     // desired/hardware (lost-update race, RYN4 power cycle, DELAY-masked lost write).
     // A redundant failsafe OFF to a safety-critical relay must NEVER be skipped, so
-    // defense-in-depth still re-asserts even if the caches diverged.
-    const bool safetyCriticalRelay =
-        (relayIndex == RelayIndex::toPhysical(RelayIndex::BURNER_ENABLE) ||
-         relayIndex == RelayIndex::toPhysical(RelayIndex::POWER_BOOST) ||
-         relayIndex == RelayIndex::toPhysical(RelayIndex::WATER_MODE));
-    bool desiredState = g_relayState.getRelay(relayIndex - 1);
-    if (desiredState == state && !(state == false && safetyCriticalRelay)) {
+    // defense-in-depth still re-asserts even if the caches diverged
+    // (RelayCommandPolicy::skipDuplicate).
+    const bool desiredState = RelayCommandPolicy::desiredBit(
+        g_relayState.desired.load(std::memory_order_acquire), relayIndex);
+    if (RelayCommandPolicy::skipDuplicate(relayIndex, desiredState, state)) {
         LOG_DEBUG(TAG, "Relay %d already in desired state (%s), skipping command",
                   relayIndex, state ? "ON" : "OFF");
         return true;  // Already in desired state, no action needed

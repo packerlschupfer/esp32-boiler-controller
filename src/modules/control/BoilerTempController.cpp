@@ -223,12 +223,12 @@ BoilerTempController::ControlOutput BoilerTempController::calculateBangBang(
     // Calculate error (positive = need more heat)
     Temperature_t error = tempSub(target, current);
 
-    // Convert thresholds to signed for comparison
-    Temperature_t offThreshold = config_.offHysteresis;      // e.g., +50 (+5.0°C)
-    Temperature_t onThreshold = config_.onHysteresis;        // e.g., +30 (+3.0°C)
-    Temperature_t fullThreshold = config_.fullPowerThreshold; // e.g., +100 (+10.0°C)
+    // Bands, e.g. off +50 (+5.0°C), on +30 (+3.0°C), full +100 (+10.0°C)
+    const BoilerPowerLevel::BangBangBands bands = {
+        config_.offHysteresis, config_.onHysteresis, config_.fullPowerThreshold
+    };
 
-    // Three-point bang-bang control with hysteresis
+    // Three-point bang-bang control with hysteresis (BoilerPowerLevel::fromBangBangError)
     //
     // State transitions (error = target - current):
     //   error > fullThreshold      → FULL power (very cold, need max heat)
@@ -238,23 +238,7 @@ BoilerTempController::ControlOutput BoilerTempController::calculateBangBang(
     // Hysteresis prevents rapid switching at boundaries:
     //   - Stay in current state unless error crosses a threshold
     //   - Different thresholds for turning ON vs OFF
-
-    bool shouldBeOff = (error < -offThreshold);  // Too hot: turn off
-    bool shouldBeFull = (error > fullThreshold); // Very cold: full power
-    bool shouldBeOn = (error > onThreshold);     // Cold enough: at least half power
-
-    PowerLevel desiredLevel;
-
-    if (shouldBeOff) {
-        desiredLevel = PowerLevel::OFF;
-    } else if (shouldBeFull) {
-        desiredLevel = PowerLevel::FULL;
-    } else if (shouldBeOn) {
-        desiredLevel = PowerLevel::HALF;
-    } else {
-        // In hysteresis band - maintain current state
-        desiredLevel = lastOutput_.powerLevel;
-    }
+    PowerLevel desiredLevel = BoilerPowerLevel::fromBangBangError(lastOutput_.powerLevel, error, bands);
 
     // Check anti-flapping before changing power level
     if (desiredLevel != lastOutput_.powerLevel) {
@@ -305,25 +289,35 @@ BoilerTempController::ControlOutput BoilerTempController::calculateBangBang(
 BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
     Temperature_t target, Temperature_t current) {
 
-    ControlOutput output = lastOutput_;
-
-    // Calculate time delta since last PID calculation
+    // Calculate time delta since last PID calculation (last time read before millis(),
+    // like predictHeatDemand())
+    const uint32_t lastPidMs = lastPIDTime_;
     uint32_t now = millis();
-    uint32_t dtMs = now - lastPIDTime_;
+    uint32_t dtMs = now - lastPidMs;
     if (dtMs == 0) dtMs = 100;  // Minimum 100ms
     lastPIDTime_ = now;
 
     // The PID only runs while a request is active and not during autotune, so the
     // first call after a pause sees a dt of minutes or hours. Integrating that
     // throws the integral straight to its clamp (2026-09-13: burner FULL above
-    // target right after an autotune stop). Restart the PID instead.
-    static constexpr uint32_t PID_MAX_DT_MS = 10000;     // control cycle is 2.5 s
-    static constexpr uint32_t PID_NOMINAL_DT_MS = 2500;
-    if (dtMs > PID_MAX_DT_MS) {
-        LOG_INFO(TAG, "PID resumed after %lu ms pause - resetting PID state", dtMs);
+    // target right after an autotune stop). Restart the PID instead, and start the
+    // power mapping from OFF: the level of the previous request (HALF, or FULL after
+    // an autotune stop) is stale and HALF holds down to 35 % (review R1-1).
+    // (BoilerPowerLevel::PID_MAX_DT_MS 10 s, PID_NOMINAL_DT_MS 2.5 s)
+    if (BoilerPowerLevel::pidPaused(now, lastPidMs)) {
+        const BoilerPowerLevel::CycleStart start =
+            BoilerPowerLevel::modulatingCycleStart(lastOutput_.powerLevel, true, false);
+        LOG_INFO(TAG, "PID resumed after %lu ms pause - resetting PID state, level %s -> %s",
+                 dtMs, powerLevelToString(lastOutput_.powerLevel), powerLevelToString(start.level));
         pidController_->reset();
-        dtMs = PID_NOMINAL_DT_MS;
+        // calculate() compares against lastOutput_ for `changed`; the burner is not
+        // driven by this controller during a pause
+        lastOutput_.powerLevel = start.level;
+        lastOutput_.burnerOn = (start.level != PowerLevel::OFF);
+        dtMs = BoilerPowerLevel::PID_NOMINAL_DT_MS;
     }
+
+    ControlOutput output = lastOutput_;
 
     // Calculate PID adjustment
     // The PID outputs a temperature adjustment; we scale this to 0-100%
@@ -355,42 +349,13 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
     lastPIDOutput_ = pidOutput;
     output.modulationPercent = pidOutput;
 
-    // Map PID output to power level with hysteresis
-    PowerLevel desiredLevel = lastOutput_.powerLevel;
-
-    // Apply hysteresis around thresholds to prevent rapid switching
-    uint8_t offLow = config_.offThreshold;
-    uint8_t halfHigh = config_.halfThreshold + config_.thresholdHysteresis;
-    uint8_t fullLow = config_.fullThreshold - config_.thresholdHysteresis;
-    uint8_t fullHigh = config_.fullThreshold;
-
-    // State machine with hysteresis
-    switch (lastOutput_.powerLevel) {
-        case PowerLevel::OFF:
-            // Currently OFF - need to cross halfThreshold + hysteresis to turn on
-            if (pidOutput > halfHigh) {
-                desiredLevel = (pidOutput > fullHigh) ? PowerLevel::FULL : PowerLevel::HALF;
-            }
-            break;
-
-        case PowerLevel::HALF:
-            // Currently HALF - check both directions
-            if (pidOutput < offLow) {
-                desiredLevel = PowerLevel::OFF;
-            } else if (pidOutput > fullHigh) {
-                desiredLevel = PowerLevel::FULL;
-            }
-            break;
-
-        case PowerLevel::FULL:
-            // Currently FULL - need to drop below fullThreshold - hysteresis to reduce
-            if (pidOutput < offLow) {
-                desiredLevel = PowerLevel::OFF;
-            } else if (pidOutput < fullLow) {
-                desiredLevel = PowerLevel::HALF;
-            }
-            break;
-    }
+    // Map PID output to power level with hysteresis (BoilerPowerLevel::fromPidOutput):
+    // OFF needs > halfThreshold + hysteresis to turn on, FULL drops to HALF below
+    // fullThreshold - hysteresis, HALF/FULL turn off below offThreshold
+    const BoilerPowerLevel::Thresholds thresholds = {
+        config_.offThreshold, config_.halfThreshold, config_.fullThreshold, config_.thresholdHysteresis
+    };
+    PowerLevel desiredLevel = BoilerPowerLevel::fromPidOutput(lastOutput_.powerLevel, pidOutput, thresholds);
 
     // Check anti-flapping before changing power level
     if (desiredLevel != lastOutput_.powerLevel) {
@@ -433,6 +398,77 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
     }
 
     return output;
+}
+
+bool BoilerTempController::predictHeatDemand(Temperature_t targetTemp, Temperature_t currentTemp,
+                                             bool& wantsHeat) const {
+    if (!initialized_ || autoTuningActive_ || pidController_ == nullptr) {
+        return false;
+    }
+
+    // Inputs of the next cycle: updateMode() takes the gains of the mode given by the
+    // WATER request bit straight from SystemSettings (read before mutex_, as there)
+    EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
+    const bool waterMode = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
+    const SystemSettings& settings = SRP::getSystemSettings();
+    const float kp = waterMode ? settings.wHeaterKp : settings.spaceHeatingKp;
+    const float ki = waterMode ? settings.wHeaterKi : settings.spaceHeatingKi;
+    const float kd = waterMode ? settings.wHeaterKd : settings.spaceHeatingKd;
+
+    FixedPointPIDStep::State pidState;
+    FixedPointPIDStep::Limits pidLimits;
+    if (!pidController_->snapshot(pidState, pidLimits)) {
+        return false;
+    }
+
+    MutexGuard guard(mutex_, MUTEX_TIMEOUT);
+    if (!guard.hasLock()) {
+        return false;
+    }
+
+    // calculate() writes lastPIDTime_ and lastOutput_ from BoilerTempControlTask without
+    // mutex_. Copy them first and take millis() afterwards: every stored lastPIDTime_ is
+    // a millis() value from before our read, so now - lastPidMs cannot wrap into a false
+    // pause (review R1-2). A cycle completing concurrently only makes this prediction
+    // one cycle old, which BoilerTempControlTask's level-triggered decide() corrects.
+    const uint32_t lastPidMs = lastPIDTime_;
+    const PowerLevel lastLevel = lastOutput_.powerLevel;
+    const uint32_t nowMs = millis();
+
+    // calculate() returns OFF for an invalid target or reading
+    if (!isValidTarget(targetTemp) || currentTemp == TEMP_INVALID) {
+        wantsHeat = false;
+        return true;
+    }
+
+    PowerLevel level;
+    if (config_.burnerType == BurnerType::TWO_STAGE) {
+        const BoilerPowerLevel::BangBangBands bands = {
+            config_.offHysteresis, config_.onHysteresis, config_.fullPowerThreshold
+        };
+        level = BoilerPowerLevel::fromBangBangError(lastLevel,
+                                                    tempSub(targetTemp, currentTemp), bands);
+    } else {
+        // updateMode() resets the PID on a mode or gain change (level kept),
+        // calculateModulating() after a pause (level from OFF, nominal dt):
+        // BoilerPowerLevel::modulatingCycleStart()
+        const bool modeOrGainsChanged = (waterMode != isWaterMode_) ||
+            (kp != config_.modKp) || (ki != config_.modKi) || (kd != config_.modKd);
+        const bool paused = BoilerPowerLevel::pidPaused(nowMs, lastPidMs);
+        const BoilerPowerLevel::Thresholds thresholds = {
+            config_.offThreshold, config_.halfThreshold, config_.fullThreshold, config_.thresholdHysteresis
+        };
+        level = BoilerPowerLevel::predictModulatingLevel(lastLevel, pidState, pidLimits,
+                                                         paused, modeOrGainsChanged,
+                                                         targetTemp, currentTemp,
+                                                         PIDGainFixedPoint::fromFloat(kp),
+                                                         PIDGainFixedPoint::fromFloat(ki),
+                                                         PIDGainFixedPoint::fromFloat(kd),
+                                                         thresholds);
+    }
+
+    wantsHeat = (level != PowerLevel::OFF);
+    return true;
 }
 
 void BoilerTempController::reset() {

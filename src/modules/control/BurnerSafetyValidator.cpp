@@ -15,94 +15,137 @@
 #include <algorithm>
 #include <cmath>
 #include <atomic>  // Round 14 Issue #2, #3
-#include "utils/Utils.h"  // H1: For consistent elapsedMs() usage
+#include "utils/Utils.h"  // millis()
+#include "modules/control/BurnerSafetyRules.h"
 
 static const char* TAG = "BurnerSafetyValidator";
 
-// Static member definitions
+namespace {
+
+// Sensor readings in the form BurnerSafetyRules evaluates (limits set by the caller)
+BurnerSafetyRules::Inputs makeInputs(const SharedSensorReadings& readings) {
+    BurnerSafetyRules::Inputs in;
+    in.boilerOutput = readings.boilerTempOutput;
+    in.boilerOutputValid = readings.isBoilerTempOutputValid;
+    in.boilerReturn = readings.boilerTempReturn;
+    in.boilerReturnValid = readings.isBoilerTempReturnValid;
+    in.waterTank = readings.waterHeaterTempTank;
+    in.waterTankValid = readings.isWaterHeaterTempTankValid;
+    in.systemPressure = readings.systemPressure;
+    in.systemPressureValid = readings.isSystemPressureValid;
+    // Round 20 Issue #7: Explicit build flag required to allow no pressure sensor
+#ifdef ALLOW_NO_PRESSURE_SENSOR
+    in.allowMissingPressure = true;
+#endif
+    // F5: the boiler/tank sensors must use the MB8ART-only lastBoilerTempUpdateTimestamp;
+    // the shared lastUpdateTimestamp is kept fresh by the ANDRTF3 room sensor and
+    // would mask an MB8ART loss.
+    in.lastBoilerTempUpdateMs = readings.lastBoilerTempUpdateTimestamp;
+    in.nowMs = millis();
+    in.sensorStaleMs = ::SafetyConfig::sensorStaleMs;
+    return in;
+}
+
+// Sensor validation messages (step 2)
+void logSensorChecks(const BurnerSafetyRules::Inputs& in) {
+    if (in.boilerOutputValid && !BurnerSafetyRules::boilerSensorInRange(in.boilerOutput)) {
+        char tempBuf[16];
+        formatTemp(tempBuf, sizeof(tempBuf), in.boilerOutput);
+        LOG_WARN(TAG, "Boiler output temp %s out of range", tempBuf);
+    }
+
+    if (BurnerSafetyRules::sensorDataStale(in)) {
+        uint32_t sensorAge = in.nowMs - in.lastBoilerTempUpdateMs;
+        LOG_ERROR(TAG, "Sensor data is stale: %lu ms old (threshold: %lu ms)",
+                 sensorAge, in.sensorStaleMs);
+    }
+}
+
+}  // namespace
 
 BurnerSafetyValidator::ValidationResult BurnerSafetyValidator::validateBurnerOperation(
     const SharedSensorReadings& readings,
     const SafetyConfig& config,
     bool isWaterMode) {
-    
-    // 1. Check emergency stop first
+
+    // Order, comparisons and limits in BurnerSafetyRules::evaluate() (native-tested):
+    // emergency stop, sensors, temperature limits, pressure, hardware interlocks,
+    // thermal shock. This function only collects the inputs and logs.
     EventBits_t systemBits = xEventGroupGetBits(SRP::getSystemStateEventGroup());
-    if (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) {
+
+    BurnerSafetyRules::Inputs in = makeInputs(readings);
+    in.emergencyStopActive = (systemBits & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+    in.maxBoilerTemp = config.maxBoilerTemp;
+    in.maxWaterTemp = config.maxWaterTemp;
+    in.minRequiredSensors = config.minRequiredSensors;
+
+    const BurnerSafetyRules::Check check =
+        BurnerSafetyRules::evaluate(in, isWaterMode, &BurnerSafetyValidator::checkHardwareInterlocks);
+
+    if (check == BurnerSafetyRules::Check::EMERGENCY_STOP) {
         LOG_ERROR(TAG, "Emergency stop is active");
-        return ValidationResult::EMERGENCY_STOP_ACTIVE;
-    }
-    
-    // 2. Validate sufficient sensors are working
-    uint8_t validSensors = validateTemperatureSensors(readings, config);
-    if (validSensors < config.minRequiredSensors) {
-        LOG_ERROR(TAG, "Insufficient sensors: %d valid, %d required", 
-                 validSensors, config.minRequiredSensors);
-        return ValidationResult::INSUFFICIENT_SENSORS;
-    }
-    
-    // 3. Check temperature limits (>= ensures limit itself triggers protection)
-    if (readings.isBoilerTempOutputValid &&
-        readings.boilerTempOutput >= config.maxBoilerTemp) {
-        char tempBuf[16], limitBuf[16];
-        formatTemp(tempBuf, sizeof(tempBuf), readings.boilerTempOutput);
-        formatTemp(limitBuf, sizeof(limitBuf), config.maxBoilerTemp);
-        LOG_ERROR(TAG, "Boiler temp %s exceeds limit %s", tempBuf, limitBuf);
-        return ValidationResult::TEMPERATURE_EXCEEDED;
-    }
-    
-    // Only check water tank temp limit during water heating mode
-    // During space heating, the water tank temperature is irrelevant
-    if (isWaterMode &&
-        readings.isWaterHeaterTempTankValid &&
-        readings.waterHeaterTempTank >= config.maxWaterTemp) {
-        char tempBuf[16], limitBuf[16];
-        formatTemp(tempBuf, sizeof(tempBuf), readings.waterHeaterTempTank);
-        formatTemp(limitBuf, sizeof(limitBuf), config.maxWaterTemp);
-        LOG_ERROR(TAG, "Water temp %s exceeds limit %s", tempBuf, limitBuf);
-        return ValidationResult::TEMPERATURE_EXCEEDED;
+        return BurnerSafetyRules::toResult(check);
     }
 
-    // 5. Check system pressure (critical for safety)
-    if (readings.isSystemPressureValid) {
-        using namespace SystemConstants::Safety::Pressure;
+    logSensorChecks(in);
 
-        if (readings.systemPressure < MIN_OPERATING) {
+#ifdef ALLOW_NO_PRESSURE_SENSOR
+    if (!in.systemPressureValid && BurnerSafetyRules::pressureCheckPassed(check)) {
+        // Pressure sensor not valid - allow operation with warning (development/testing only)
+        LOG_WARN(TAG, "Pressure sensor not available - operating in degraded mode (ALLOW_NO_PRESSURE_SENSOR enabled)");
+    }
+#endif
+
+    switch (check) {
+        case BurnerSafetyRules::Check::INSUFFICIENT_SENSORS:
+            LOG_ERROR(TAG, "Insufficient sensors: %d valid, %d required",
+                     BurnerSafetyRules::validSensorCount(in), config.minRequiredSensors);
+            break;
+
+        case BurnerSafetyRules::Check::BOILER_TEMP_HIGH: {
+            char tempBuf[16], limitBuf[16];
+            formatTemp(tempBuf, sizeof(tempBuf), readings.boilerTempOutput);
+            formatTemp(limitBuf, sizeof(limitBuf), config.maxBoilerTemp);
+            LOG_ERROR(TAG, "Boiler temp %s exceeds limit %s", tempBuf, limitBuf);
+            break;
+        }
+
+        case BurnerSafetyRules::Check::WATER_TEMP_HIGH: {
+            char tempBuf[16], limitBuf[16];
+            formatTemp(tempBuf, sizeof(tempBuf), readings.waterHeaterTempTank);
+            formatTemp(limitBuf, sizeof(limitBuf), config.maxWaterTemp);
+            LOG_ERROR(TAG, "Water temp %s exceeds limit %s", tempBuf, limitBuf);
+            break;
+        }
+
+        case BurnerSafetyRules::Check::PRESSURE_LOW: {
+            using namespace SystemConstants::Safety::Pressure;
             LOG_ERROR(TAG, "System pressure %d.%02d BAR below minimum %d.%02d BAR",
                      readings.systemPressure / 100, abs(readings.systemPressure % 100),
                      MIN_OPERATING / 100, abs(MIN_OPERATING % 100));
-            return ValidationResult::PRESSURE_EXCEEDED;  // Also covers low pressure
+            break;
         }
 
-        if (readings.systemPressure > MAX_OPERATING) {
+        case BurnerSafetyRules::Check::PRESSURE_HIGH: {
+            using namespace SystemConstants::Safety::Pressure;
             LOG_ERROR(TAG, "System pressure %d.%02d BAR exceeds maximum %d.%02d BAR",
                      readings.systemPressure / 100, abs(readings.systemPressure % 100),
                      MAX_OPERATING / 100, abs(MAX_OPERATING % 100));
-            return ValidationResult::PRESSURE_EXCEEDED;
+            break;
         }
-    } else {
-        // Round 20 Issue #7: Explicit build flag required to allow no pressure sensor
-#ifdef ALLOW_NO_PRESSURE_SENSOR
-        // Pressure sensor not valid - allow operation with warning (development/testing only)
-        LOG_WARN(TAG, "Pressure sensor not available - operating in degraded mode (ALLOW_NO_PRESSURE_SENSOR enabled)");
-#else
-        // Production: No pressure sensor = block burner operation
-        LOG_ERROR(TAG, "Pressure sensor not available - burner operation blocked (production safety)");
-        return ValidationResult::SENSOR_FAILURE;
-#endif
-    }
-    
-    // 6. Check hardware interlocks
-    if (!checkHardwareInterlocks()) {
-        LOG_ERROR(TAG, "Hardware interlock is open");
-        return ValidationResult::HARDWARE_INTERLOCK_OPEN;
-    }
 
-    // 7. Check thermal shock risk (boiler output vs return temperature differential)
-    // If differential is too high, cold return water hitting hot boiler causes thermal stress
-    if (readings.isBoilerTempOutputValid && readings.isBoilerTempReturnValid) {
-        Temperature_t differential = tempSub(readings.boilerTempOutput, readings.boilerTempReturn);
-        if (differential > SystemConstants::Safety::ReturnPreheat::MAX_DIFFERENTIAL) {
+        case BurnerSafetyRules::Check::PRESSURE_MISSING:
+            // Production: No pressure sensor = block burner operation
+            LOG_ERROR(TAG, "Pressure sensor not available - burner operation blocked (production safety)");
+            break;
+
+        case BurnerSafetyRules::Check::HARDWARE_INTERLOCK_OPEN:
+            LOG_ERROR(TAG, "Hardware interlock is open");
+            break;
+
+        case BurnerSafetyRules::Check::THERMAL_SHOCK: {
+            // Cold return water hitting a hot boiler causes thermal stress
+            Temperature_t differential = tempSub(readings.boilerTempOutput, readings.boilerTempReturn);
             char outBuf[16], retBuf[16], diffBuf[16];
             formatTemp(outBuf, sizeof(outBuf), readings.boilerTempOutput);
             formatTemp(retBuf, sizeof(retBuf), readings.boilerTempReturn);
@@ -111,20 +154,25 @@ BurnerSafetyValidator::ValidationResult BurnerSafetyValidator::validateBurnerOpe
             formatTemp(limitBuf, sizeof(limitBuf), SystemConstants::Safety::ReturnPreheat::MAX_DIFFERENTIAL);
             LOG_WARN(TAG, "Thermal shock risk: output=%s return=%s diff=%s (max %s°C)",
                      outBuf, retBuf, diffBuf, limitBuf);
-            return ValidationResult::THERMAL_SHOCK_RISK;
+            break;
         }
+
+        case BurnerSafetyRules::Check::PASSED:
+            // Pump verification REMOVED (Round 18) - by design the burner never checks or
+            // commands pumps. BurnerSystemController switches burner relays only; pumps follow
+            // the HEATING_ON/WATER_ON mode bits via PumpControlModule (ReturnPreheater cycles
+            // the heating pump). The burner instead requires an active mode + request
+            // (BurnerSafetyChecks::hasActiveModeDemand). Physical pump failure is detected via
+            // temperature sensors (no heat transfer = no temp change).
+            LOG_DEBUG(TAG, "All safety validations passed");
+            break;
+
+        case BurnerSafetyRules::Check::EMERGENCY_STOP:
+        default:
+            break;
     }
 
-    // 8. Pump verification REMOVED (Round 18) - by design the burner never checks or
-    // commands pumps. BurnerSystemController switches burner relays only; pumps follow
-    // the HEATING_ON/WATER_ON mode bits via PumpControlModule (ReturnPreheater cycles
-    // the heating pump). The burner instead requires an active mode + request
-    // (BurnerSafetyChecks::hasActiveModeDemand). Physical pump failure is detected via
-    // temperature sensors (no heat transfer = no temp change).
-
-    // All checks passed
-    LOG_DEBUG(TAG, "All safety validations passed");
-    return ValidationResult::SAFE_TO_OPERATE;
+    return BurnerSafetyRules::toResult(check);
 }
 
 bool BurnerSafetyValidator::validatePumpOperation(uint8_t pumpId, bool requireFlow) {
@@ -159,57 +207,6 @@ bool BurnerSafetyValidator::validatePumpOperation(uint8_t pumpId, bool requireFl
 
     return pumpRelayOn;
 }
-
-uint8_t BurnerSafetyValidator::validateTemperatureSensors(
-    const SharedSensorReadings& readings,
-    const SafetyConfig& config) {
-
-    uint8_t validCount = 0;
-    
-    // Check each sensor for validity and freshness using SystemConstants ranges
-    if (readings.isBoilerTempOutputValid) {
-        // Additional range check using sensor-specific limits
-        if (readings.boilerTempOutput >= SystemConstants::Temperature::SensorRange::BOILER_SENSOR_MIN &&
-            readings.boilerTempOutput <= SystemConstants::Temperature::SensorRange::BOILER_SENSOR_MAX) {
-            validCount++;
-        } else {
-            char tempBuf[16];
-            formatTemp(tempBuf, sizeof(tempBuf), readings.boilerTempOutput);
-            LOG_WARN(TAG, "Boiler output temp %s out of range", tempBuf);
-        }
-    }
-
-    if (readings.isBoilerTempReturnValid) {
-        if (readings.boilerTempReturn >= SystemConstants::Temperature::SensorRange::BOILER_SENSOR_MIN &&
-            readings.boilerTempReturn <= SystemConstants::Temperature::SensorRange::BOILER_SENSOR_MAX) {
-            validCount++;
-        }
-    }
-
-    if (readings.isWaterHeaterTempTankValid) {
-        if (readings.waterHeaterTempTank >= SystemConstants::Temperature::SensorRange::WATER_TANK_SENSOR_MIN &&
-            readings.waterHeaterTempTank <= SystemConstants::Temperature::SensorRange::WATER_TANK_SENSOR_MAX) {
-            validCount++;
-        }
-    }
-    
-    // Check sensor data freshness using configurable timeout
-    // H1: Use Utils::elapsedMs() for safe elapsed time (handles millis() wraparound)
-    // F5: this function validates the boiler/tank sensors, so it must use the
-    // MB8ART-only lastBoilerTempUpdateTimestamp; the shared lastUpdateTimestamp
-    // is kept fresh by the ANDRTF3 room sensor and would mask an MB8ART loss.
-    if (readings.lastBoilerTempUpdateTimestamp > 0) {
-        uint32_t sensorAge = Utils::elapsedMs(readings.lastBoilerTempUpdateTimestamp);
-        if (sensorAge > ::SafetyConfig::sensorStaleMs) {
-            LOG_ERROR(TAG, "Sensor data is stale: %lu ms old (threshold: %lu ms)",
-                     sensorAge, ::SafetyConfig::sensorStaleMs);
-            return 0;  // All sensors considered invalid if data is stale
-        }
-    }
-    
-    return validCount;
-}
-
 
 bool BurnerSafetyValidator::checkHardwareInterlocks() {
     // STUB: Hardware interlocks not wired to GPIO in current hardware revision.

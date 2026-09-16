@@ -25,6 +25,7 @@
 #include "config/ProjectConfig.h"
 #include "LoggingMacros.h"
 #include "modules/tasks/BoilerTempControlTask.h"  // BurnerDemandGate: latest PID decision
+#include "modules/control/BoilerTempController.h"  // BurnerDemandGate: predicted PID decision
 #include <TaskManager.h>
 #include <atomic>
 #include <climits>
@@ -33,30 +34,19 @@
 // Timer handle for state machine timeouts only
 static TimerHandle_t stateTimeoutTimer = nullptr;
 
-// BurnerDemandGate permission, read by BoilerTempControlTask (see BurnerDemandGate.h)
-static std::atomic<bool> demandPermitted{false};
-static std::atomic<bool> demandHighPowerAllowed{true};
-static std::atomic<int16_t> demandMaxTargetTemp{0};
-
+// BurnerDemandGate permission, read by BoilerTempControlTask (see BurnerDemandGate.h).
+// Kept in BurnerStateMachine so setHeatDemand(true) checks it under demandMutex; a
+// revoke must be published before the matching setHeatDemand(false).
 static void publishDemandPermission(bool permitted, Temperature_t maxTargetTemp, bool highPowerAllowed) {
-    // Revoke before and grant after the limits change, so a reader never sees a
-    // grant with stale limits
-    if (!permitted) {
-        demandPermitted.store(false);
-    }
-    demandMaxTargetTemp.store(static_cast<int16_t>(maxTargetTemp));
-    demandHighPowerAllowed.store(highPowerAllowed);
-    if (permitted) {
-        demandPermitted.store(true);
-    }
+    BurnerDemandGate::Permission permission;
+    permission.permitted = permitted;
+    permission.highPowerAllowed = highPowerAllowed;
+    permission.maxTargetTemp = static_cast<int16_t>(maxTargetTemp);
+    BurnerStateMachine::setDemandPermission(permission);
 }
 
 BurnerDemandGate::Permission getBurnerDemandPermission() {
-    BurnerDemandGate::Permission permission;
-    permission.permitted = demandPermitted.load();
-    permission.highPowerAllowed = demandHighPowerAllowed.load();
-    permission.maxTargetTemp = demandMaxTargetTemp.load();
-    return permission;
+    return BurnerStateMachine::getDemandPermission();
 }
 
 // State tracking
@@ -385,7 +375,7 @@ void BurnerControlTask(void* parameter) {
             LOG_DEBUG(TAG, "Processing burner request change event (events: 0x%06X)", requestEvents);
             processBurnerRequest();
             lastBlockedRetryMs = millis();
-        } else if (hasHeatingDemand && !demandPermitted.load() &&
+        } else if (hasHeatingDemand && !BurnerStateMachine::getDemandPermission().permitted &&
                    Utils::elapsedMs(lastBlockedRetryMs) >= 10000) {
             LOG_DEBUG(TAG, "Re-evaluating blocked burner request");
             burnerState.lastHeatDemand = false;  // force updateBurnerState() to re-run its checks
@@ -433,19 +423,63 @@ static void stateTimeoutCallback(TimerHandle_t xTimer) {
     }
 }
 
+// TemperatureSensorFallback's required sensors follow the active burner requests
+static TemperatureSensorFallback::OperationMode operationModeForRequests(EventBits_t requestBits) {
+    const bool heatingRequested = (requestBits & SystemEvents::BurnerRequest::HEATING) != 0;
+    const bool waterRequested = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
+    if (heatingRequested && waterRequested) {
+        return TemperatureSensorFallback::OperationMode::BOTH;
+    }
+    if (heatingRequested) {
+        return TemperatureSensorFallback::OperationMode::SPACE_HEATING;
+    }
+    if (waterRequested) {
+        return TemperatureSensorFallback::OperationMode::WATER_HEATING;
+    }
+    return TemperatureSensorFallback::OperationMode::NONE;
+}
+
 static void processTemperatureUpdate() {
     const char* TAG = "BurnerTempUpdate";
-    
-    // Update state machine when temperatures change
+
+    // Update state machine when temperatures change (every read, in every state)
     BurnerStateMachine::update();
-    
+
+    static SensorFailureConfirm::State sensorFailure;
+
+    // The sensor fallback is evaluated only while a mode request is active or the demand
+    // is armed (BurnerDemandGate::sensorFallbackCheckNeeded, review R4-3): this runs on
+    // every MB8ART read, and in idle each single invalid boiler output reading flipped the
+    // fallback NORMAL -> SHUTDOWN -> NORMAL (two retained MQTT publishes, SENSOR_FAILURE set
+    // and cleared, health monitor, emergency release attempt). A new request is checked by
+    // processBurnerRequest() and the heating/water tasks before it can arm.
+    const EventBits_t requestBits = xEventGroupGetBits(cachedHandles.burnerRequestEventGroup);
+    const bool modeRequested =
+        (requestBits & (SystemEvents::BurnerRequest::HEATING | SystemEvents::BurnerRequest::WATER)) != 0;
+    bool demandArmed = false;
+    Temperature_t demandTarget = 0;
+    if (!BurnerStateMachine::getHeatDemandState(demandArmed, demandTarget)) {
+        demandArmed = true;  // unknown (demand mutex timeout): evaluate, assume armed
+    }
+    if (!BurnerDemandGate::sensorFallbackCheckNeeded(modeRequested, demandArmed)) {
+        sensorFailure = SensorFailureConfirm::State();
+        return;
+    }
+
+    // Required sensors of the current requests (review R4-1): a mode left at SPACE_HEATING
+    // kept the fallback in SHUTDOWN for a missing room sensor after the heating request ended
+    TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+
     // Check temperature sensor status. One invalid reading already makes the heating and water
     // tasks drop their requests; the burner emergency stop (ERROR for errorRecoveryMs) follows
-    // only when the required sensors stay missing with heat demand (SensorFailureConfirm)
-    static SensorFailureConfirm::State sensorFailure;
+    // only when the required sensors stay missing with heat demand (SensorFailureConfirm).
+    // Heat demand = armed in the state machine AND a mode request (BurnerDemandGate::
+    // sensorStopDemand). burnerState.lastHeatDemand stayed true after a normal request end
+    // with failing sensors and forced ERROR 10 s later (review R4-1).
     const bool wasFailing = sensorFailure.failing;
     const bool sensorsOk = TemperatureSensorFallback::canContinueOperation();
-    if (SensorFailureConfirm::shouldStop(sensorFailure, sensorsOk, burnerState.lastHeatDemand, millis())) {
+    const bool heatDemandActive = BurnerDemandGate::sensorStopDemand(modeRequested, demandArmed);
+    if (SensorFailureConfirm::shouldStop(sensorFailure, sensorsOk, heatDemandActive, millis())) {
         LOG_ERROR(TAG, "Temperature sensor failure for %lu s with heat demand - emergency shutdown",
                   static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
         BurnerStateMachine::emergencyStop();
@@ -556,41 +590,35 @@ static void processBurnerRequest() {
 
     // Reset flag when system is enabled again
     wasSystemDisabled = false;
-    
+
+    // Update the operation mode BEFORE the sensor check (review R4-1): the required sensors
+    // follow it, and the former order skipped the update while the check failed, so a mode
+    // stuck at SPACE_HEATING kept a missing room sensor blocking a pure water request
+    TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+
     // Check temperature sensor status
     if (!TemperatureSensorFallback::canContinueOperation()) {
-        // Keep BoilerTempControlTask from arming (and let it drop an armed demand)
+        // Keep BoilerTempControlTask from arming, then write OFF (review R1-3):
+        // BoilerTempControlTask never reaches its disarm without a request or with an
+        // invalid/stale boiler temperature, so the demand stayed armed
         publishDemandPermission(false, 0, true);
+        BurnerStateMachine::setHeatDemand(false, 0);
+        burnerState.lastHeatDemand = false;
         return;
     }
-    
+
     // Get safe operating parameters
     TemperatureSensorFallback::getSafeOperatingParams(
-        burnerState.maxAllowedTemp, 
-        burnerState.maxPowerFactor, 
+        burnerState.maxAllowedTemp,
+        burnerState.maxPowerFactor,
         burnerState.maxRunTime
     );
-    
+
     // Determine heat demand
     bool heatingRequested = (requestBits & SystemEvents::BurnerRequest::HEATING) != 0;
     bool waterRequested = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
     bool waterPriority = (systemStateBits & SystemEvents::SystemState::WATER_PRIORITY) != 0;
-    
-    // Update operation mode
-    if (heatingRequested && waterRequested) {
-        TemperatureSensorFallback::setOperationMode(
-            TemperatureSensorFallback::OperationMode::BOTH);
-    } else if (heatingRequested) {
-        TemperatureSensorFallback::setOperationMode(
-            TemperatureSensorFallback::OperationMode::SPACE_HEATING);
-    } else if (waterRequested) {
-        TemperatureSensorFallback::setOperationMode(
-            TemperatureSensorFallback::OperationMode::WATER_HEATING);
-    } else {
-        TemperatureSensorFallback::setOperationMode(
-            TemperatureSensorFallback::OperationMode::NONE);
-    }
-    
+
     // Determine actual heat demand
     bool heatDemand = false;
     bool isWaterMode = false;
@@ -795,9 +823,20 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
         const bool decisionFresh =
             getBoilerTempDecision(decisionWantsHeat, decisionTarget, decisionAgeMs) &&
             decisionAgeMs <= BurnerDemandGate::DECISION_MAX_AGE_MS;
-        if (BurnerDemandGate::controlTaskMayArm(readingsValid && readings.isBoilerTempOutputValid,
+        const bool boilerTempValid = readingsValid && readings.isBoilerTempOutputValid;
+        // Without a fresh decision for this target, follow what the controller's next
+        // cycle would decide (PID on-threshold and hysteresis), not "boiler < target"
+        BurnerDemandGate::Prediction prediction = BurnerDemandGate::Prediction::UNKNOWN;
+        BoilerTempController* tempController = getBoilerTempController();
+        bool predictedHeat = false;
+        if (boilerTempValid && tempController != nullptr &&
+            tempController->predictHeatDemand(targetTemp, readings.boilerTempOutput, predictedHeat)) {
+            prediction = predictedHeat ? BurnerDemandGate::Prediction::HEAT : BurnerDemandGate::Prediction::OFF;
+        }
+        if (BurnerDemandGate::controlTaskMayArm(boilerTempValid,
                                                 readings.boilerTempOutput, targetTemp,
-                                                decisionFresh, decisionTarget, decisionWantsHeat)) {
+                                                decisionFresh, decisionTarget, decisionWantsHeat,
+                                                prediction)) {
             BurnerStateMachine::setHeatDemand(true, targetTemp, highPower);
         } else {
             char boilerBuf[16], targetBuf[16];

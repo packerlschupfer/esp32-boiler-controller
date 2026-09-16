@@ -43,6 +43,12 @@ Temperature_t BurnerStateMachine::targetTemperature = 0;
 bool BurnerStateMachine::requestedHighPower = false;
 SemaphoreHandle_t BurnerStateMachine::demandMutex = nullptr;
 
+// BurnerDemandGate permission: written by BurnerControlTask, read lock-free by
+// BoilerTempControlTask and checked by setHeatDemand(true) under demandMutex
+static std::atomic<bool> demandPermitted{false};
+static std::atomic<bool> demandHighPowerAllowed{true};
+static std::atomic<int16_t> demandMaxTargetTemp{0};
+
 // ============================================================================
 // THREAD-SAFETY NOTE (Round 14 Issue #1, Round 20 Issue #8):
 // These variables are only accessed by BurnerStateMachine state callbacks which
@@ -202,34 +208,65 @@ void BurnerStateMachine::update() {
     stateMachine.update();
 }
 
-void BurnerStateMachine::setHeatDemand(bool demand, Temperature_t target, bool highPower) {
+bool BurnerStateMachine::setHeatDemand(bool demand, Temperature_t target, bool highPower) {
     if (demandMutex == nullptr) {
         LOG_ERROR(TAG, "setHeatDemand: demandMutex is null");
-        return;
+        return false;
     }
 
     auto guard = MutexRetryHelper::acquireGuard(demandMutex, "BurnerSM-SetDemand");
     if (!guard) {
         LOG_ERROR(TAG, "setHeatDemand: Failed to acquire demand mutex");
-        return;
+        return false;
     }
 
-    // Only update and log if something actually changed
-    bool demandChanged = (heatDemand != demand);
-    bool targetChanged = (target > 0 && tempAbs(tempSub(targetTemperature, target)) > 1);  // > 0.1°C difference
-    bool powerChanged = (requestedHighPower != highPower);
+    // BurnerDemandGate: the permission check and the arming are one step under
+    // demandMutex. BoilerTempControlTask armed from a permission snapshot taken at
+    // the start of its cycle, so a revoke in between was re-armed for one cycle
+    // (review 2026-09-14 bsm-6). A revoke is stored before BurnerControlTask's
+    // setHeatDemand(false): an arm is either refused here or overwritten by that OFF.
+    // Check and write are BurnerDemandGate::applyDemandWrite(), which the native tests
+    // interleave with revokes; the permission must be read here, under demandMutex.
+    BurnerDemandGate::DemandSlot slot = {heatDemand, targetTemperature, requestedHighPower};
+    const BurnerDemandGate::WriteResult result =
+        BurnerDemandGate::applyDemandWrite(slot, demand, target, highPower, demandPermitted.load());
+    if (result == BurnerDemandGate::WriteResult::REFUSED) {
+        LOG_INFO(TAG, "Heat demand ON refused - burner demand not permitted");
+        return false;
+    }
 
-    if (demandChanged || targetChanged || powerChanged) {
-        heatDemand = demand;
-        requestedHighPower = highPower;
-        if (target > 0) {
-            targetTemperature = target;
-        }
+    // Only update and log if something actually changed (target: > 0.1°C difference)
+    if (result == BurnerDemandGate::WriteResult::UPDATED) {
+        heatDemand = slot.demand;
+        requestedHighPower = slot.highPower;
+        targetTemperature = slot.target;
         char tempBuf[16];
         formatTemp(tempBuf, sizeof(tempBuf), targetTemperature);
         LOG_INFO(TAG, "Heat demand: %s, target: %s°C, power: %s",
                  demand ? "ON" : "OFF", tempBuf, highPower ? "HIGH" : "LOW");
     }
+    return true;
+}
+
+void BurnerStateMachine::setDemandPermission(const BurnerDemandGate::Permission& permission) {
+    // Revoke before and grant after the limits change, so a reader never sees a
+    // grant with stale limits
+    if (!permission.permitted) {
+        demandPermitted.store(false);
+    }
+    demandMaxTargetTemp.store(permission.maxTargetTemp);
+    demandHighPowerAllowed.store(permission.highPowerAllowed);
+    if (permission.permitted) {
+        demandPermitted.store(true);
+    }
+}
+
+BurnerDemandGate::Permission BurnerStateMachine::getDemandPermission() {
+    BurnerDemandGate::Permission permission;
+    permission.permitted = demandPermitted.load();
+    permission.highPowerAllowed = demandHighPowerAllowed.load();
+    permission.maxTargetTemp = demandMaxTargetTemp.load();
+    return permission;
 }
 
 void BurnerStateMachine::emergencyStop() {
@@ -277,6 +314,24 @@ bool BurnerStateMachine::getHeatDemandState(bool& outDemand, Temperature_t& outT
 
     outDemand = heatDemand;
     outTarget = targetTemperature;
+    return true;
+}
+
+bool BurnerStateMachine::getHeatDemandState(bool& outDemand, Temperature_t& outTarget, bool& outHighPower) {
+    if (demandMutex == nullptr) {
+        LOG_WARN(TAG, "getHeatDemandState: demandMutex is null");
+        return false;
+    }
+
+    auto guard = MutexRetryHelper::acquireGuard(demandMutex, "BurnerSM-GetDemand");
+    if (!guard) {
+        LOG_WARN(TAG, "getHeatDemandState: Failed to acquire demand mutex");
+        return false;
+    }
+
+    outDemand = heatDemand;
+    outTarget = targetTemperature;
+    outHighPower = requestedHighPower;
     return true;
 }
 
@@ -338,6 +393,7 @@ public:
         Temperature_t targetInside = 0;
         Temperature_t outsideThreshold = 0;
         Temperature_t overheatMargin = 0;
+        Temperature_t hysteresis = BurnerTransitionPolicy::DEFAULT_HEATING_HYSTERESIS;
         if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50)) != pdTRUE) {
             return false;
         }
@@ -348,6 +404,7 @@ public:
             targetInside = s.targetTemperatureInside;
             outsideThreshold = s.outsideTempHeatingThreshold;
             overheatMargin = s.roomTempOverheatMargin;
+            hysteresis = s.heating_hysteresis;
             SRP::giveSystemSettingsMutex();
         }
         SharedSensorReadings readings{};
@@ -359,7 +416,8 @@ public:
         return BurnerTransitionPolicy::heatingLikelyWanted(
             heatingEnabled(), overrideOff, useWeather,
             readings.isOutsideTempValid, readings.outsideTemp, outsideThreshold,
-            readings.isInsideTempValid, readings.insideTemp, targetInside, overheatMargin);
+            readings.isInsideTempValid, readings.insideTemp, targetInside, overheatMargin,
+            hysteresis);
     }
 
     bool canTurnOn() override { return BurnerAntiFlapping::canTurnOn(); }

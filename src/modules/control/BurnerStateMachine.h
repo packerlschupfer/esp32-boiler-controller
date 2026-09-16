@@ -6,6 +6,7 @@
 #include "modules/control/BurnerSystemController.h"
 #include "modules/control/BurnerSMState.h"
 #include "modules/control/BurnerTransitions.h"
+#include "modules/control/BurnerDemandGate.h"
 #include "config/SystemConstants.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"
@@ -53,8 +54,24 @@ public:
      * @param demand True if heat is requested
      * @param target Target temperature (fixed-point, tenths of °C)
      * @param highPower True for high power (full), false for low power (half)
+     * @return false if not applied: demand ON without permission (setDemandPermission)
+     *         or demand mutex timeout
      */
-    static void setHeatDemand(bool demand, Temperature_t target = 0, bool highPower = false);
+    static bool setHeatDemand(bool demand, Temperature_t target = 0, bool highPower = false);
+
+    /**
+     * @brief Publish BurnerControlTask's arming permission (BurnerDemandGate)
+     *
+     * setHeatDemand(true) is refused under demandMutex while not permitted. A revoke
+     * is stored before the caller's setHeatDemand(false), so an arm racing it is
+     * either refused or overwritten by that OFF.
+     */
+    static void setDemandPermission(const BurnerDemandGate::Permission& permission);
+
+    /**
+     * @brief Current arming permission (lock-free)
+     */
+    static BurnerDemandGate::Permission getDemandPermission();
 
     /**
      * @brief Emergency stop
@@ -73,6 +90,13 @@ public:
      * @return true if values were successfully retrieved
      */
     static bool getHeatDemandState(bool& outDemand, Temperature_t& outTarget);
+
+    /**
+     * @brief Get current heat demand state including the requested power (thread-safe)
+     * @param outHighPower Output: high power requested
+     * @return true if values were successfully retrieved
+     */
+    static bool getHeatDemandState(bool& outDemand, Temperature_t& outTarget, bool& outHighPower);
 
     /**
      * @brief Reset from lockout

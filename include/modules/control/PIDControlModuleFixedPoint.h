@@ -6,6 +6,7 @@
 #include <freertos/semphr.h>
 #include "shared/Temperature.h"
 #include "modules/control/PIDGainFixedPoint.h"
+#include "modules/control/FixedPointPIDStep.h"  // PID arithmetic shared with the native tests
 #include <cstdint>
 
 /**
@@ -82,7 +83,13 @@ public:
      * @brief Get current integral value (for debugging)
      * @return Current integral term (scaled)
      */
-    PIDValue_t getIntegral() const { return integral; }
+    PIDValue_t getIntegral() const { return stepState.integral; }
+
+    /**
+     * @brief Copy the PID state and limits (thread-safe), e.g. to predict a step
+     * @return false on mutex timeout
+     */
+    bool snapshot(FixedPointPIDStep::State& outState, FixedPointPIDStep::Limits& outLimits) const;
 
     /**
      * @brief Convert float PID parameters to fixed-point
@@ -123,17 +130,12 @@ public:
     uint32_t getLastUpdateTime() const { return lastUpdateTime; }
 
 private:
-    // PID state variables (all in fixed-point)
-    PIDValue_t integral;           // Accumulated integral (scaled)
-    Temperature_t previousPV;      // Previous process variable (for derivative-on-PV)
-    bool firstRun;                 // Skip derivative on first run after reset
+    // PID state (all in fixed-point): integral, previous PV, first-run flag
+    FixedPointPIDStep::State stepState;
     uint32_t lastUpdateTime;       // Last update time in millis
-    
-    // Limits
-    PIDValue_t integralMin;
-    PIDValue_t integralMax;
-    Temperature_t outputMin;
-    Temperature_t outputMax;
+
+    // Integral and output limits
+    FixedPointPIDStep::Limits stepLimits;
     
     // Thread safety
     SemaphoreHandle_t pidMutex;

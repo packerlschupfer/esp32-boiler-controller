@@ -34,17 +34,28 @@ namespace BurnerTransitionPolicy {
         return runningModeIsWater ? !waterEnabled : !heatingEnabled;
     }
 
+    // SystemSettings heating_hysteresis default (0.5 °C), used until the caller passes the setting
+    constexpr int16_t DEFAULT_HEATING_HYSTERESIS = 5;
+
     /**
      * @brief Will HeatingControlTask request the burner soon?
      *
      * Mirrors HeatingControlTask::checkIfSpaceHeatingNeededEvent() for the turn-on
-     * case. Temperatures in tenths of °C.
+     * (not heating) case: HeatingControlTask is in HeatingOff after yielding to water.
+     * - Weather mode: outside < threshold (SpaceHeatingPolicy start rule) and the room
+     *   below the restart limit target + margin - heating_hysteresis. The overheat check
+     *   previously used the stop limit (room > target + margin), so a room in the
+     *   hysteresis band counted as wanted and MODE_SWITCHING waited 15 s with the
+     *   burner firing for a request that never came (review 2026-09-14).
+     * - Room mode: room < target (the hysteresis only applies to the stop limit).
+     * Temperatures in tenths of °C.
      */
     inline bool heatingLikelyWanted(bool heatingEnabled, bool heatingOverrideOff,
                                     bool useWeatherCompensation,
                                     bool outsideValid, int16_t outsideTemp, int16_t outsideThreshold,
                                     bool roomValid, int16_t roomTemp, int16_t roomTarget,
-                                    int16_t roomOverheatMargin) {
+                                    int16_t roomOverheatMargin,
+                                    int16_t heatingHysteresis = DEFAULT_HEATING_HYSTERESIS) {
         if (!heatingEnabled || heatingOverrideOff) {
             return false;
         }
@@ -52,9 +63,12 @@ namespace BurnerTransitionPolicy {
             if (!outsideValid || outsideTemp >= outsideThreshold) {
                 return false;
             }
-            if (roomValid && roomTarget > 0 &&
-                static_cast<int32_t>(roomTemp) > static_cast<int32_t>(roomTarget) + roomOverheatMargin) {
-                return false;
+            if (roomValid && roomTarget > 0) {
+                const int32_t restartLimit = static_cast<int32_t>(roomTarget) + roomOverheatMargin -
+                                             heatingHysteresis;
+                if (static_cast<int32_t>(roomTemp) >= restartLimit) {
+                    return false;
+                }
             }
             return true;
         }

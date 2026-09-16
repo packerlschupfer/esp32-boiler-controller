@@ -376,6 +376,9 @@ bool SafetyInterlocks::checkSystemErrors() {
 
 bool SafetyInterlocks::checkCommunicationStatus() {
     // Check Modbus communication
+    // DATA_AVAILABLE is set after the first read and never cleared; a lost sensor link is
+    // caught by the stale-sensor emergency stop in continuousSafetyMonitor(), which runs
+    // before this full check
     EventBits_t sensorBits = xEventGroupGetBits(SRP::getSensorEventGroup());
     bool sensorCommOk = (sensorBits & SystemEvents::SensorUpdate::DATA_AVAILABLE) != 0;
     

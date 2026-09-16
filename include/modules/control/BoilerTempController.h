@@ -7,6 +7,7 @@
 #include "shared/Temperature.h"
 #include "modules/control/PIDControlModuleFixedPoint.h"
 #include "modules/control/PIDAutoTuner.h"
+#include "modules/control/BoilerPowerLevel.h"  // power level mapping shared with the native tests
 
 /**
  * @brief Boiler Temperature Controller for cascade control
@@ -41,13 +42,9 @@ public:
     };
 
     /**
-     * @brief Power level output for two-stage burners
+     * @brief Power level output for two-stage burners (OFF = 0, HALF = 1, FULL = 2)
      */
-    enum class PowerLevel {
-        OFF = 0,
-        HALF = 1,
-        FULL = 2
-    };
+    using PowerLevel = BoilerPowerLevel::Level;
 
     /**
      * @brief Control output from the controller
@@ -66,9 +63,9 @@ public:
         BurnerType burnerType = BurnerType::MODULATING;  // Default to PID mode
 
         // Hysteresis bands for bang-bang mode (Temperature_t = tenths of degrees)
-        Temperature_t offHysteresis = 50;       // +5.0°C above target → OFF
-        Temperature_t onHysteresis = 30;        // -3.0°C below target → ON (HALF)
-        Temperature_t fullPowerThreshold = 100; // -10.0°C below target → FULL
+        Temperature_t offHysteresis = BoilerPowerLevel::DEFAULT_OFF_HYSTERESIS;            // +5.0°C above target → OFF
+        Temperature_t onHysteresis = BoilerPowerLevel::DEFAULT_ON_HYSTERESIS;              // -3.0°C below target → ON (HALF)
+        Temperature_t fullPowerThreshold = BoilerPowerLevel::DEFAULT_FULL_POWER_THRESHOLD; // -10.0°C below target → FULL
 
         // Minimum valid target temperature (safety)
         Temperature_t minTargetTemp = 200;      // 20.0°C minimum target
@@ -87,10 +84,10 @@ public:
         // Pure PID mode - output centered at 50% when at target
         // With Kp=5.0: ~10% shift per 2°C error
         // Wide bands minimize burner cycling
-        uint8_t offThreshold = 35;      // Below this → OFF (well above target)
-        uint8_t halfThreshold = 45;     // Above this → at least HALF
-        uint8_t fullThreshold = 75;     // Above this → FULL (significantly below target)
-        uint8_t thresholdHysteresis = 10; // Wide hysteresis prevents oscillation
+        uint8_t offThreshold = BoilerPowerLevel::DEFAULT_OFF_THRESHOLD;      // 35: below this → OFF (well above target)
+        uint8_t halfThreshold = BoilerPowerLevel::DEFAULT_HALF_THRESHOLD;    // 45: above this → at least HALF
+        uint8_t fullThreshold = BoilerPowerLevel::DEFAULT_FULL_THRESHOLD;    // 75: above this → FULL (significantly below target)
+        uint8_t thresholdHysteresis = BoilerPowerLevel::DEFAULT_THRESHOLD_HYSTERESIS; // 10: wide hysteresis prevents oscillation
     };
 
     /**
@@ -118,6 +115,20 @@ public:
      * @return Control output (power level and burner state)
      */
     ControlOutput calculate(Temperature_t targetTemp, Temperature_t currentTemp);
+
+    /**
+     * @brief Would the next control cycle want heat for this target? (BurnerDemandGate)
+     *
+     * For BurnerControlTask's arming check when no fresh decision exists: runs the
+     * PID step and power mapping on a copy of the state, with the PID reset that
+     * updateMode()/calculateModulating() would apply (mode or gain change, pause)
+     * and the current level's hysteresis, from OFF after a pause
+     * (BoilerPowerLevel::predictModulatingLevel). Anti-flapping is not included. Does
+     * not change controller state.
+     * @param wantsHeat Output: HALF or FULL
+     * @return false if unknown (not initialized, autotune active, mutex timeout)
+     */
+    bool predictHeatDemand(Temperature_t targetTemp, Temperature_t currentTemp, bool& wantsHeat) const;
 
     /**
      * @brief Reset controller state

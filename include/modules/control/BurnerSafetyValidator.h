@@ -8,6 +8,7 @@
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"
 #include "config/SystemConstants.h"
+#include "modules/control/BurnerSafetyRules.h"
 
 /**
  * @brief Comprehensive safety validation before burner operations
@@ -18,20 +19,8 @@
  */
 class BurnerSafetyValidator {
 public:
-    // Safety validation results
-    enum class ValidationResult {
-        SAFE_TO_OPERATE,
-        SENSOR_FAILURE,
-        TEMPERATURE_EXCEEDED,
-        PUMP_FAILURE,
-        WATER_FLOW_FAILURE,
-        PRESSURE_EXCEEDED,
-        FLAME_DETECTION_FAILURE,
-        EMERGENCY_STOP_ACTIVE,
-        INSUFFICIENT_SENSORS,
-        HARDWARE_INTERLOCK_OPEN,
-        THERMAL_SHOCK_RISK       // Boiler output - return temperature differential too high
-    };
+    // Safety validation results (defined with the check rules in BurnerSafetyRules.h)
+    using ValidationResult = BurnerSafetyRules::ValidationResult;
 
     // Configuration for safety limits
     struct SafetyConfig {
@@ -81,17 +70,6 @@ public:
      * @return true if pump is operating correctly
      */
     static bool validatePumpOperation(uint8_t pumpId, bool requireFlow = true);
-
-    /**
-     * @brief Validate temperature sensors
-     * @param readings Current sensor readings
-     * @param config Safety configuration
-     * @return Number of valid sensors
-     */
-    static uint8_t validateTemperatureSensors(
-        const SharedSensorReadings& readings,
-        const SafetyConfig& config
-    );
 
     /**
      * @brief Check hardware interlocks
