@@ -61,6 +61,12 @@ static const uint32_t IMMEDIATE_SAVE_DELAY_MS = 1000; // 1 second debounce
 #define STORAGE_SAVE_REQUEST_BIT    (1UL << 0UL)
 #define STORAGE_LOAD_REQUEST_BIT    (1UL << 1UL)
 #define STORAGE_MQTT_RECONNECT_BIT  (1UL << 2UL)
+// Set when an MQTT parameter command has been queued, so the task drains it at
+// once instead of up to 1 s later on the event-wait timeout. Without this, a
+// client burst (boiler/params/get/all plus single reads) overran the 5-slot
+// command queue and xQueueSend dropped the NEWEST commands: measured 2026-09-16
+// as 4 of 8 single reads silently lost, the last four fired (see CHANGELOG)
+#define STORAGE_COMMAND_PENDING_BIT (1UL << 3UL)
 
 // Static event group for storage task
 static EventGroupHandle_t storageEventGroup = nullptr;
@@ -726,6 +732,12 @@ void PersistentStorageTask(void* pvParameters) {
             [storage](const String& topic, const String& payload) {
                 LOG_INFO(TAG, "MQTT cmd: %s", topic.c_str());
                 storage->handleMqttCommand(topic.c_str(), payload.c_str());
+                // Wake the storage task now; the command queue holds only a few
+                // entries and handleMqttCommand() drops on overflow without
+                // telling the caller. Runs in the esp-mqtt task, so only set a bit.
+                if (storageEventGroup) {
+                    xEventGroupSetBits(storageEventGroup, STORAGE_COMMAND_PENDING_BIT);
+                }
             });
 
         if (!result1.isOk()) {
@@ -752,7 +764,8 @@ void PersistentStorageTask(void* pvParameters) {
         // Wait for events with timeout for periodic checks
         EventBits_t bits = xEventGroupWaitBits(
             storageEventGroup,
-            STORAGE_SAVE_REQUEST_BIT | STORAGE_LOAD_REQUEST_BIT | STORAGE_MQTT_RECONNECT_BIT,
+            STORAGE_SAVE_REQUEST_BIT | STORAGE_LOAD_REQUEST_BIT | STORAGE_MQTT_RECONNECT_BIT |
+                STORAGE_COMMAND_PENDING_BIT,
             pdTRUE,  // Clear on exit
             pdFALSE, // Wait for any bit
             pdMS_TO_TICKS(1000)  // 1 second timeout for MQTT monitoring
