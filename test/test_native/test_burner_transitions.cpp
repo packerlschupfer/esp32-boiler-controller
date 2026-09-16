@@ -359,6 +359,32 @@ void test_bsm_step_handover_stops_when_heating_not_wanted() {
     TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
 }
 
+void test_bsm_step_handover_room_in_restart_band_stops() {
+    // Weather mode, target 18.0, margin 1.0, hysteresis 0.5: HeatingControlTask does not
+    // restart at room >= 18.5, so the handover must not wait 15 s with the burner firing
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = BurnerTransitionPolicy::heatingLikelyWanted(
+        true, false, true, true, 100, 150, true, 185, 180, 10, 5);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_NO_DEMAND);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+
+    // Just below the restart limit heating will request: wait for the handover
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = BurnerTransitionPolicy::heatingLikelyWanted(
+        true, false, true, true, 100, 150, true, 184, 180, 10, 5);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_WAIT_FOR_HEATING);
+}
+
 void test_bsm_step_handover_wait_is_bounded() {
     startBurner(true, true);
     requestWater(false);

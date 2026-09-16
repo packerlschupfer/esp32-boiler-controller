@@ -44,14 +44,55 @@ void test_policy_heating_wanted_room_mode() {
 
 void test_policy_heating_wanted_weather_mode() {
     // Outside 10.0 < threshold 15.0, room 22.6 > 18.0 + 1.0 -> overheated, not wanted
-    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 226, 180, 10));
-    // Outside 10.0 < 15.0, room 18.5 <= 19.0 -> wanted (room below target not required)
-    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 185, 180, 10));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 226, 180, 10, 5));
+    // Outside 10.0 < 15.0, room 18.4 < restart limit 18.0 + 1.0 - 0.5 -> wanted
+    // (room below target not required)
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 184, 180, 10, 5));
+    // Room 18.5 was counted as wanted (only > 19.0 was overheated), but HeatingControlTask
+    // does not restart at >= 18.5 (review 2026-09-14)
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 185, 180, 10, 5));
     // Outside 20.0 >= threshold 15.0 -> not wanted even with a cold room
     // (the old wait only checked room < target and would have waited forever)
     TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 200, 150, true, 150, 180, 10));
     // Outside sensor invalid -> not wanted
     TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, false, 100, 150, true, 150, 180, 10));
+}
+
+void test_policy_heating_wanted_weather_mode_restart_limit_boundaries() {
+    // HeatingControlTask not heating: roomOverheated = room >= target + margin - hysteresis
+    // Target 18.0, margin 1.0, hysteresis 0.5 -> restart limit 18.5
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 184, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 185, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 186, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 190, 180, 10, 5));
+    // Default hysteresis is the settings default 0.5 °C
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 184, 180, 10));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 185, 180, 10));
+    // Hysteresis 1.0 -> restart limit 18.0
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 179, 180, 10, 10));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 180, 180, 10, 10));
+    // Hysteresis 0 -> restart limit 19.0 is already overheated (>=)
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 189, 180, 10, 0));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 190, 180, 10, 0));
+    // Room invalid or no room target: no overheat protection, outside decides
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, false, 250, 180, 10, 5));
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 250, 0, 10, 5));
+    // Outside start rule has no hysteresis: outside < threshold
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 149, 150, true, 170, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 150, 150, true, 170, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 151, 150, true, 170, 180, 10, 5));
+}
+
+void test_policy_heating_wanted_room_mode_start_ignores_hysteresis() {
+    // HeatingControlTask not heating in room mode: start when room < target; the
+    // hysteresis only raises the stop limit (target + hysteresis)
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, false, false, 0, 0, true, 179, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, false, false, 0, 0, true, 180, 180, 10, 5));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, false, false, 0, 0, true, 181, 180, 10, 5));
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, false, false, 0, 0, true, 179, 180, 10, 0));
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, false, false, 0, 0, true, 180, 180, 10, 10));
+    // No room target -> not wanted
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, false, false, 0, 0, true, 100, 0, 10, 5));
 }
 
 void test_policy_mode_switch_wait_is_bounded() {

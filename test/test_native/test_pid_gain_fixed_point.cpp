@@ -11,16 +11,22 @@
 #include <cmath>
 
 #include "../../include/modules/control/PIDGainFixedPoint.h"
+#include "../../include/modules/control/FixedPointPIDStep.h"
 
 // setUp and tearDown are defined in test_main.cpp
 
-// P term as in PIDControlModuleFixedPoint (error in tenths of °C), clamped to the
-// boiler PID output limits, then the production BoilerTempController power mapping.
+// First firmware PID step after a reset (FixedPointPIDStep, error in tenths of °C) with
+// only Kp, the boiler PID limits, then the production BoilerTempController power mapping.
 static int32_t pidPowerFromP(int32_t kpFixed, int16_t errorTenths) {
-    int64_t pRaw = static_cast<int64_t>(kpFixed) * errorTenths;
-    int16_t adjustment = PIDGainFixedPoint::clampToAdjustment(pRaw / PIDGainFixedPoint::SCALE,
-                                                              -PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT,
-                                                              PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT);
+    const FixedPointPIDStep::Limits limits = {
+        -100000, 100000,
+        static_cast<int16_t>(-PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT),
+        PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT
+    };
+    FixedPointPIDStep::State state = FixedPointPIDStep::resetState();
+    const int16_t adjustment = FixedPointPIDStep::step(state, limits, 470,
+                                                       static_cast<int16_t>(470 - errorTenths),
+                                                       kpFixed, 0, 0, 2500);
     return PIDGainFixedPoint::powerPercentFromAdjustment(adjustment);
 }
 

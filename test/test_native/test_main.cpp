@@ -61,6 +61,8 @@ void test_policy_boiler_disable_stops_any_mode();
 void test_policy_heating_wanted_respects_enable_and_override();
 void test_policy_heating_wanted_room_mode();
 void test_policy_heating_wanted_weather_mode();
+void test_policy_heating_wanted_weather_mode_restart_limit_boundaries();
+void test_policy_heating_wanted_room_mode_start_ignores_hysteresis();
 void test_policy_mode_switch_wait_is_bounded();
 void test_policy_mode_revert_requires_on_bit();
 void test_policy_mode_switch_exit_records_power_level();
@@ -102,6 +104,7 @@ void test_bsm_step_flame_loss_bypasses_min_on_time();
 void test_bsm_step_heating_to_water_is_seamless();
 void test_bsm_step_water_to_heating_waits_for_heating_request();
 void test_bsm_step_handover_stops_when_heating_not_wanted();
+void test_bsm_step_handover_room_in_restart_band_stops();
 void test_bsm_step_handover_wait_is_bounded();
 void test_bsm_step_failed_mode_switch_stops_burner();
 void test_bsm_step_revert_without_on_bit_does_not_bounce();
@@ -125,7 +128,7 @@ void test_bsm_step_explicit_disable_during_mode_switch_stops();
 // Burner demand gate (who may arm the heat demand)
 void test_gate_hot_boiler_request_does_not_arm();
 void test_gate_cold_boiler_request_arms_immediately();
-void test_gate_handover_uses_temperature_when_decision_was_for_other_target();
+void test_gate_handover_uses_prediction_when_decision_was_for_other_target();
 void test_gate_fresh_matching_decision_wins_over_temperature();
 void test_gate_without_boiler_temperature_control_task_arms();
 void test_gate_pid_arms_demand_it_did_not_see_armed();
@@ -133,12 +136,60 @@ void test_gate_drops_demand_rearmed_while_coasting();
 void test_gate_not_permitted_never_arms();
 void test_gate_power_update_only_on_pid_change();
 void test_gate_fallback_target_cap();
+void test_gate_no_decision_follows_pid_on_threshold();
+void test_gate_band_below_target_no_short_start();
+void test_gate_prediction_follows_current_level();
+void test_gate_revoke_race_cannot_leave_demand_armed();
+void test_gate_demand_write_change_detection();
+
+// Modulating cycle start after a pause (stale power level, pause detection)
+void test_cycle_start_pause_resets_pid_and_starts_off();
+void test_cycle_start_mode_or_gain_change_keeps_level();
+void test_cycle_start_pause_detection_and_read_order();
+void test_prediction_stale_half_after_pause_does_not_arm_above_target();
+
+// Autotune demand (level-triggered OFF/FULL, retry after a blocked ON edge)
+void test_autotune_off_phase_drops_demand_armed_elsewhere();
+void test_autotune_blocked_on_edge_is_retried();
+void test_autotune_armed_but_not_high_reasserts_full();
+void test_autotune_not_permitted_disarms();
+
+// Sensor fallback check and confirmation feed (idle flapping, stale heat demand)
+void test_sensor_check_only_with_request_or_armed_demand();
+void test_sensor_stop_not_forced_after_normal_request_end();
+void test_sensor_stop_still_fires_with_persistent_demand();
+
+// Boiler PID step and power level mapping (firmware code, multi-cycle)
+void test_pid_step_reference_values();
+void test_pid_step_derivative_skipped_after_reset();
+void test_pid_step_zero_dt_uses_one_ms();
+void test_pid_integral_stops_winding_at_output_limit();
+void test_pid_integral_stops_winding_at_negative_output_limit();
+void test_pid_integral_unwinds_while_saturated_against_error();
+void test_pid_step_output_clamped_before_narrowing();
+void test_pid_step_derivative_truncates_toward_zero();
+void test_pid_integral_clamped_to_integral_limits();
+void test_power_map_off_turns_on_only_above_55_percent();
+void test_power_map_half_and_full_hysteresis();
+void test_power_map_exact_switch_points_from_reset();
+void test_bang_bang_bands_and_hold();
+void test_bang_bang_full_threshold_is_exclusive();
+void test_boiler_pid_off_above_target_stays_off_through_band();
+void test_boiler_pid_holds_half_near_target();
+void test_boiler_pid_cold_start_full_then_half_before_target();
 
 // Relay command policy (no-op commands vs rate limiting)
 void test_relay_policy_noop_commands_skip_protection();
 void test_relay_policy_real_changes_are_protected();
 void test_relay_policy_emergency_bypasses_protection();
-void test_relay_policy_mode_switch_then_power_change_counts_once();
+void test_relay_policy_desired_bit_is_zero_based();
+void test_relay_policy_invalid_relay_index_rejected();
+void test_relay_policy_duplicate_off_to_burner_relays_not_skipped();
+void test_relay_policy_batch_resend_then_power_on_accepted();
+void test_relay_policy_rate_limiter_interval_and_window();
+void test_relay_policy_noop_and_emergency_skip_limiter_and_pump_check();
+void test_relay_policy_pump_protection_checked_after_rate_limit();
+void test_relay_policy_pump_timer_only_on_real_change();
 void test_relay_policy_pump_request_resent_until_relay_follows();
 
 // Scheduler command policy (enable command, space mode defaults, status reply)
@@ -255,39 +306,19 @@ void test_pid_ziegler_nichols_pid_method();
 void test_pid_progress_tracking();
 void test_pid_elapsed_time();
 
-// Safety cascade integration tests
-void test_safety_cascade_all_pass();
-void test_safety_cascade_validator_blocks_high_temp();
-void test_safety_cascade_validator_blocks_insufficient_sensors();
-void test_safety_cascade_validator_blocks_thermal_shock();
-void test_safety_cascade_interlocks_emergency_stop();
-void test_safety_cascade_interlocks_system_errors();
-void test_safety_cascade_failsafe_triggered();
-void test_safety_cascade_pressure_out_of_range();
-void test_safety_cascade_stale_sensor_data();
-
-// Mode switching tests
-void test_mode_switching_idle_to_heating();
-void test_mode_switching_heating_to_water();
-void test_mode_switching_rejected_during_transition();
-void test_mode_specific_water_temp_check();
-
-// Progressive preheating tests
-void test_preheating_skipped_low_differential();
-void test_preheating_starts_high_differential();
-void test_preheating_progressive_durations();
-void test_preheating_pump_state_during_cycle();
-void test_preheating_completes_after_cycles();
-
-// Circuit breaker pattern tests
-void test_circuit_breaker_first_failure_assume_safe();
-void test_circuit_breaker_third_failure_triggers_failsafe();
-void test_circuit_breaker_success_resets_counter();
-
-// Combined scenario tests
-void test_complete_heating_activation_workflow();
-void test_water_heating_blocked_by_tank_temp();
-void test_emergency_stop_cascade();
+// Burner safety rules (Layer-1 checks of BurnerSafetyValidator)
+void test_safety_rules_safe_readings_pass();
+void test_safety_rules_emergency_stop_checked_first();
+void test_safety_rules_sensor_ranges_and_count();
+void test_safety_rules_stale_data_invalidates_all_sensors();
+void test_safety_rules_boiler_limit_inclusive();
+void test_safety_rules_water_limit_only_in_water_mode();
+void test_safety_rules_pressure_bounds();
+void test_safety_rules_missing_pressure_blocks_unless_allowed();
+void test_safety_rules_missing_pressure_checked_after_sensors_and_limits();
+void test_safety_rules_interlock_open_before_thermal_shock();
+void test_safety_rules_thermal_shock_above_35c();
+void test_safety_rules_result_codes();
 
 // Common setUp and tearDown
 void setUp(void) {
@@ -419,39 +450,19 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pid_progress_tracking);
     RUN_TEST(test_pid_elapsed_time);
 
-    // Safety cascade integration tests
-    RUN_TEST(test_safety_cascade_all_pass);
-    RUN_TEST(test_safety_cascade_validator_blocks_high_temp);
-    RUN_TEST(test_safety_cascade_validator_blocks_insufficient_sensors);
-    RUN_TEST(test_safety_cascade_validator_blocks_thermal_shock);
-    RUN_TEST(test_safety_cascade_interlocks_emergency_stop);
-    RUN_TEST(test_safety_cascade_interlocks_system_errors);
-    RUN_TEST(test_safety_cascade_failsafe_triggered);
-    RUN_TEST(test_safety_cascade_pressure_out_of_range);
-    RUN_TEST(test_safety_cascade_stale_sensor_data);
-
-    // Mode switching tests
-    RUN_TEST(test_mode_switching_idle_to_heating);
-    RUN_TEST(test_mode_switching_heating_to_water);
-    RUN_TEST(test_mode_switching_rejected_during_transition);
-    RUN_TEST(test_mode_specific_water_temp_check);
-
-    // Progressive preheating tests
-    RUN_TEST(test_preheating_skipped_low_differential);
-    RUN_TEST(test_preheating_starts_high_differential);
-    RUN_TEST(test_preheating_progressive_durations);
-    RUN_TEST(test_preheating_pump_state_during_cycle);
-    RUN_TEST(test_preheating_completes_after_cycles);
-
-    // Circuit breaker pattern tests
-    RUN_TEST(test_circuit_breaker_first_failure_assume_safe);
-    RUN_TEST(test_circuit_breaker_third_failure_triggers_failsafe);
-    RUN_TEST(test_circuit_breaker_success_resets_counter);
-
-    // Combined scenario tests
-    RUN_TEST(test_complete_heating_activation_workflow);
-    RUN_TEST(test_water_heating_blocked_by_tank_temp);
-    RUN_TEST(test_emergency_stop_cascade);
+    // Burner safety rules (Layer-1 checks of BurnerSafetyValidator)
+    RUN_TEST(test_safety_rules_safe_readings_pass);
+    RUN_TEST(test_safety_rules_emergency_stop_checked_first);
+    RUN_TEST(test_safety_rules_sensor_ranges_and_count);
+    RUN_TEST(test_safety_rules_stale_data_invalidates_all_sensors);
+    RUN_TEST(test_safety_rules_boiler_limit_inclusive);
+    RUN_TEST(test_safety_rules_water_limit_only_in_water_mode);
+    RUN_TEST(test_safety_rules_pressure_bounds);
+    RUN_TEST(test_safety_rules_missing_pressure_blocks_unless_allowed);
+    RUN_TEST(test_safety_rules_missing_pressure_checked_after_sensors_and_limits);
+    RUN_TEST(test_safety_rules_interlock_open_before_thermal_shock);
+    RUN_TEST(test_safety_rules_thermal_shock_above_35c);
+    RUN_TEST(test_safety_rules_result_codes);
 
     // PID fixed-point gain conversion (regression: inert boiler PID)
     RUN_TEST(test_pid_gain_conversion_scales_by_1000);
@@ -498,6 +509,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_policy_heating_wanted_respects_enable_and_override);
     RUN_TEST(test_policy_heating_wanted_room_mode);
     RUN_TEST(test_policy_heating_wanted_weather_mode);
+    RUN_TEST(test_policy_heating_wanted_weather_mode_restart_limit_boundaries);
+    RUN_TEST(test_policy_heating_wanted_room_mode_start_ignores_hysteresis);
     RUN_TEST(test_policy_mode_switch_wait_is_bounded);
     RUN_TEST(test_policy_mode_revert_requires_on_bit);
     RUN_TEST(test_policy_mode_switch_exit_records_power_level);
@@ -539,6 +552,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bsm_step_heating_to_water_is_seamless);
     RUN_TEST(test_bsm_step_water_to_heating_waits_for_heating_request);
     RUN_TEST(test_bsm_step_handover_stops_when_heating_not_wanted);
+    RUN_TEST(test_bsm_step_handover_room_in_restart_band_stops);
     RUN_TEST(test_bsm_step_handover_wait_is_bounded);
     RUN_TEST(test_bsm_step_failed_mode_switch_stops_burner);
     RUN_TEST(test_bsm_step_revert_without_on_bit_does_not_bounce);
@@ -562,7 +576,7 @@ int main(int argc, char **argv) {
     // Burner demand gate (who may arm the heat demand)
     RUN_TEST(test_gate_hot_boiler_request_does_not_arm);
     RUN_TEST(test_gate_cold_boiler_request_arms_immediately);
-    RUN_TEST(test_gate_handover_uses_temperature_when_decision_was_for_other_target);
+    RUN_TEST(test_gate_handover_uses_prediction_when_decision_was_for_other_target);
     RUN_TEST(test_gate_fresh_matching_decision_wins_over_temperature);
     RUN_TEST(test_gate_without_boiler_temperature_control_task_arms);
     RUN_TEST(test_gate_pid_arms_demand_it_did_not_see_armed);
@@ -570,12 +584,60 @@ int main(int argc, char **argv) {
     RUN_TEST(test_gate_not_permitted_never_arms);
     RUN_TEST(test_gate_power_update_only_on_pid_change);
     RUN_TEST(test_gate_fallback_target_cap);
+    RUN_TEST(test_gate_no_decision_follows_pid_on_threshold);
+    RUN_TEST(test_gate_band_below_target_no_short_start);
+    RUN_TEST(test_gate_prediction_follows_current_level);
+    RUN_TEST(test_gate_revoke_race_cannot_leave_demand_armed);
+    RUN_TEST(test_gate_demand_write_change_detection);
+
+    // Modulating cycle start after a pause (stale power level, pause detection)
+    RUN_TEST(test_cycle_start_pause_resets_pid_and_starts_off);
+    RUN_TEST(test_cycle_start_mode_or_gain_change_keeps_level);
+    RUN_TEST(test_cycle_start_pause_detection_and_read_order);
+    RUN_TEST(test_prediction_stale_half_after_pause_does_not_arm_above_target);
+
+    // Autotune demand (level-triggered OFF/FULL, retry after a blocked ON edge)
+    RUN_TEST(test_autotune_off_phase_drops_demand_armed_elsewhere);
+    RUN_TEST(test_autotune_blocked_on_edge_is_retried);
+    RUN_TEST(test_autotune_armed_but_not_high_reasserts_full);
+    RUN_TEST(test_autotune_not_permitted_disarms);
+
+    // Sensor fallback check and confirmation feed (idle flapping, stale heat demand)
+    RUN_TEST(test_sensor_check_only_with_request_or_armed_demand);
+    RUN_TEST(test_sensor_stop_not_forced_after_normal_request_end);
+    RUN_TEST(test_sensor_stop_still_fires_with_persistent_demand);
+
+    // Boiler PID step and power level mapping (firmware code, multi-cycle)
+    RUN_TEST(test_pid_step_reference_values);
+    RUN_TEST(test_pid_step_derivative_skipped_after_reset);
+    RUN_TEST(test_pid_step_zero_dt_uses_one_ms);
+    RUN_TEST(test_pid_integral_stops_winding_at_output_limit);
+    RUN_TEST(test_pid_integral_stops_winding_at_negative_output_limit);
+    RUN_TEST(test_pid_integral_unwinds_while_saturated_against_error);
+    RUN_TEST(test_pid_step_output_clamped_before_narrowing);
+    RUN_TEST(test_pid_step_derivative_truncates_toward_zero);
+    RUN_TEST(test_pid_integral_clamped_to_integral_limits);
+    RUN_TEST(test_power_map_off_turns_on_only_above_55_percent);
+    RUN_TEST(test_power_map_half_and_full_hysteresis);
+    RUN_TEST(test_power_map_exact_switch_points_from_reset);
+    RUN_TEST(test_bang_bang_bands_and_hold);
+    RUN_TEST(test_bang_bang_full_threshold_is_exclusive);
+    RUN_TEST(test_boiler_pid_off_above_target_stays_off_through_band);
+    RUN_TEST(test_boiler_pid_holds_half_near_target);
+    RUN_TEST(test_boiler_pid_cold_start_full_then_half_before_target);
 
     // Relay command policy (no-op commands vs rate limiting)
     RUN_TEST(test_relay_policy_noop_commands_skip_protection);
     RUN_TEST(test_relay_policy_real_changes_are_protected);
     RUN_TEST(test_relay_policy_emergency_bypasses_protection);
-    RUN_TEST(test_relay_policy_mode_switch_then_power_change_counts_once);
+    RUN_TEST(test_relay_policy_desired_bit_is_zero_based);
+    RUN_TEST(test_relay_policy_invalid_relay_index_rejected);
+    RUN_TEST(test_relay_policy_duplicate_off_to_burner_relays_not_skipped);
+    RUN_TEST(test_relay_policy_batch_resend_then_power_on_accepted);
+    RUN_TEST(test_relay_policy_rate_limiter_interval_and_window);
+    RUN_TEST(test_relay_policy_noop_and_emergency_skip_limiter_and_pump_check);
+    RUN_TEST(test_relay_policy_pump_protection_checked_after_rate_limit);
+    RUN_TEST(test_relay_policy_pump_timer_only_on_real_change);
     RUN_TEST(test_relay_policy_pump_request_resent_until_relay_follows);
 
     // Scheduler command policy (enable command, space mode defaults, status reply)

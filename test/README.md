@@ -26,7 +26,8 @@ test/
 │   ├── test_sensor_integration.cpp
 │   ├── test_persistent_storage_integration.cpp
 │   ├── test_system_e2e.cpp
-│   ├── test_safety_cascade.cpp      # 5-layer safety integration
+│   ├── test_burner_safety_rules.cpp # BurnerSafetyRules::evaluate() (validator checks)
+│   ├── test_boiler_pid_control.cpp  # FixedPointPIDStep + BoilerPowerLevel (firmware PID)
 │   └── mocks/                        # Mock implementations
 │       ├── MockTime.h/cpp
 │       ├── MockBurnerStateMachine.h
@@ -74,7 +75,7 @@ pio test -e native_test -v
 ### Native Tests (`test_native/`)
 These tests run on your development machine and test pure logic without hardware dependencies.
 
-All native tests are declared and run from `test_main.cpp` (209 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
+All native tests are declared and run from `test_main.cpp` (233 `RUN_TEST` calls); the other files only define test functions, and `setUp()`/`tearDown()` live in `test_main.cpp`. A new test file needs its functions declared and a `RUN_TEST` line there.
 
 `test_pid_autotuner.cpp` exercises a simplified local model (no firmware headers, only Unity, standard headers and `MockTime`), not the firmware class. The firmware autotune peak/trough detection is covered by `test_relay_extrema_tracker.cpp`, the firmware burner transition logic by `test_burner_transitions.cpp`.
 
@@ -133,17 +134,11 @@ Replay tick sequences through the firmware's header-only `BurnerTransitions::ste
 - Tests RAII wrapper functionality
 - Stress tests allocation patterns
 
-#### Safety Cascade Integration Tests (`test_safety_cascade.cpp`)
-Tests the 5-layer safety architecture working together:
-- **Layer cascade**: All 5 layers (Validator → Interlocks → Failsafe → DELAY → Hardware)
-- **Temperature limits**: Boiler and water tank overtemperature blocking
-- **Sensor validation**: Minimum sensor requirements, stale data detection
-- **Thermal shock protection**: 30°C differential limit enforcement
-- **Pressure monitoring**: Operating pressure range enforcement
-- **Emergency stop cascade**: Multi-layer emergency response
-- **Mode switching**: Water ↔ Heating transitions via MODE_SWITCHING state
-- **Progressive preheating**: Thermal shock mitigation with pump cycling
-- **Circuit breaker pattern**: Mutex failure handling (3 consecutive = failsafe)
+#### Burner Safety Rules Tests (`test_burner_safety_rules.cpp`)
+Tests the firmware's Layer 1 pre-start checks (`include/modules/control/BurnerSafetyRules.h`, used by `BurnerSafetyValidator`): check order (emergency stop first), sensor ranges and count, stale data, inclusive boiler limit, water limit only in water mode, pressure bounds, missing pressure sensor, hardware interlock before thermal shock, thermal shock above 35 °C, result codes. `test_safety_cascade.cpp` was removed 2026-09-16: it tested a copy with different limits and order.
+
+#### Boiler PID Tests (`test_boiler_pid_control.cpp`)
+Tests the firmware PID step (`FixedPointPIDStep.h`) and power level mapping (`BoilerPowerLevel.h`) over multiple cycles: reference values, derivative after reset, anti-windup at the output and integral limits, OFF/HALF/FULL hysteresis, bang-bang bands.
 
 ### Embedded Tests (`test_embedded/`)
 These tests run on actual ESP32 hardware to verify hardware-specific functionality.
