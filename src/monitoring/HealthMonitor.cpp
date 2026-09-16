@@ -1,6 +1,8 @@
 // src/monitoring/HealthMonitor.cpp
 #include "HealthMonitor.h"
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include "modules/tasks/OTATask.h"  // suppress DRAM checks during an OTA
 #include <ArduinoJson.h>
 #include <SemaphoreGuard.h>
 #include "EthernetManager.h"
@@ -286,12 +288,38 @@ void HealthMonitor::updateMemoryMetrics() {
     memoryMetrics_.largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
     memoryMetrics_.lastUpdateTime = millis();
     
-    // Check for critically low memory
-    if (memoryMetrics_.currentFreeHeap < memoryCriticalThreshold_) {
-        LOG_ERROR("HealthMonitor", "Critical memory level: %d bytes free", memoryMetrics_.currentFreeHeap);
+    // Judge memory on what malloc() can actually serve. The previous check compared
+    // currentFreeHeap (ESP.getFreeHeap(), i.e. MALLOC_CAP_INTERNAL, ~58 kB on this
+    // device) against memoryCriticalThreshold_/memoryWarningThreshold_ (10/20 kB), so
+    // it could never fire - most of that "free heap" is IRAM-only and malloc() cannot
+    // return it. Measured 2026-09-16: 57 kB "free" with a 48 kB "largest block" while
+    // byte-addressable DRAM was 7 kB with a 4.2 kB ceiling, and ordinary Home Assistant
+    // polling took free DRAM down to 576 B without anything noticing.
+    //
+    // Gate on the largest free block, not total free: allocations fail on contiguity,
+    // and total free DRAM legitimately dips to a few hundred bytes during a poll burst.
+    // Skipped during an OTA, where Update.begin()'s 4096 B sector buffer drops the
+    // largest block to ~1.5 kB by design until onOTAStart frees memory.
+    //
+    // Detection only: recordError() just counts and logs, so this cannot degrade the
+    // burner. The DEGRADED failsafe path runs through
+    // ErrorHandler::handleCriticalError -> attemptMemoryRecovery(), which is
+    // deliberately left alone until thresholds are confirmed over a cold-day cycle.
+    if (OTATask::isOtaInProgress()) {
+        return;
+    }
+
+    const size_t dramFree = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    const size_t dramBlock = memoryMetrics_.largestFreeBlock;
+
+    if (dramBlock < SystemConstants::System::MIN_DRAM_BLOCK_CRITICAL) {
+        LOG_ERROR("HealthMonitor", "Critical DRAM: largest block %u B, %u B free (internal heap %u B)",
+                  static_cast<unsigned>(dramBlock), static_cast<unsigned>(dramFree),
+                  static_cast<unsigned>(memoryMetrics_.currentFreeHeap));
         recordError(Subsystem::MEMORY, SystemError::SYSTEM_LOW_MEMORY);
-    } else if (memoryMetrics_.currentFreeHeap < memoryWarningThreshold_) {
-        LOG_WARN("HealthMonitor", "Low memory warning: %d bytes free", memoryMetrics_.currentFreeHeap);
+    } else if (dramBlock < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
+        LOG_WARN("HealthMonitor", "Low DRAM: largest block %u B, %u B free",
+                 static_cast<unsigned>(dramBlock), static_cast<unsigned>(dramFree));
     }
 }
 

@@ -427,6 +427,21 @@ namespace SystemConstants {
         constexpr size_t MIN_FREE_HEAP_CRITICAL = 10000;   // 10KB
         constexpr size_t MIN_FREE_HEAP_WARNING = 20000;    // 20KB
         constexpr size_t MIN_FREE_HEAP_NORMAL = 40000;     // 40KB
+
+        // DRAM limits. The MIN_FREE_HEAP_* values above are compared against
+        // ESP.getFreeHeap(), which is MALLOC_CAP_INTERNAL and counts IRAM-only memory
+        // that malloc() cannot hand out - it reads ~58 kB on this device, so those
+        // thresholds can never be reached and every gate using them is inert.
+        //
+        // Judge memory on the LARGEST FREE BLOCK instead: an allocation fails on
+        // contiguity, and that figure is stable (measured 2026-09-16: 3572 B under
+        // Home Assistant polling, 4340 B idle, 6388 B after a fresh boot) whereas
+        // total free DRAM legitimately dips to 576 B during a poll burst and would
+        // trip any threshold set above it. WARNING sits ~1 kB below the observed
+        // load floor; CRITICAL sits just above the 1436 B a network receive buffer
+        // needs, i.e. the point where allocations are about to start failing.
+        constexpr size_t MIN_DRAM_BLOCK_WARNING = 2560;
+        constexpr size_t MIN_DRAM_BLOCK_CRITICAL = 1536;
         
         // Memory allocation requirements
         constexpr size_t MIN_HEAP_FOR_MQTT = 30000;        // 30KB for MQTT operations

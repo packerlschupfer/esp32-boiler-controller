@@ -44,6 +44,16 @@ class OTATask {
     // MQTT-enhanced OTA support (from OTATask_MQTT.cpp)
     static bool initWithMQTT();
 
+    /**
+     * @brief True while an OTA transfer is running.
+     *
+     * Exposed so memory monitoring can suppress its low-DRAM checks during an
+     * update: Update.begin() takes a 4096 B sector buffer, which legitimately
+     * drops the largest free block to ~1.5 kB until onOTAStart frees memory.
+     * Read without the status mutex, matching the task loop's own usage.
+     */
+    static bool isOtaInProgress() { return otaUpdateInProgress; }
+
    private:
     static bool otaUpdateInProgress;
     static SemaphoreHandle_t otaStatusMutex;
