@@ -144,11 +144,14 @@ public:
      */
     NetworkMetrics getNetworkMetrics() const;
     
-    /**
-     * @brief Check if system should enter failsafe mode
-     */
-    bool shouldEnterFailsafe() const;
-    
+    // Removed 2026-09-16: shouldEnterFailsafe(). It had no callers anywhere and could
+    // not have worked if it had: it re-entered the non-recursive healthMutex_ via
+    // getSubsystemHealth() (guaranteed 150 ms of timeouts, subsystem check dead), its
+    // memory test compared ESP.getFreeHeap() against a limit that value can never
+    // reach, and every failure path returned false - a failsafe predicate that fails
+    // silent. CentralizedFailsafe owns failsafe decisions with real triggers; a second,
+    // weaker predicate was a trap for whoever adopted it next.
+
     /**
      * @brief Generate health report JSON
      */

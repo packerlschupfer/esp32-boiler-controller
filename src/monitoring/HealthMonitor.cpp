@@ -180,32 +180,6 @@ HealthMonitor::NetworkMetrics HealthMonitor::getNetworkMetrics() const {
     return networkMetrics_;
 }
 
-bool HealthMonitor::shouldEnterFailsafe() const {
-    SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(50));
-    if (!guard.hasLock()) {
-        return false;  // Don't trigger failsafe if we can't check
-    }
-    
-    // Check critical conditions
-    if (overallHealth_ == HealthStatus::FAILED) {
-        return true;
-    }
-    
-    // Check memory
-    if (memoryMetrics_.currentFreeHeap < memoryCriticalThreshold_) {
-        return true;
-    }
-    
-    // Check critical subsystems
-    if (getSubsystemHealth(Subsystem::CONTROL) == HealthStatus::FAILED ||
-        getSubsystemHealth(Subsystem::SENSORS) == HealthStatus::FAILED ||
-        getSubsystemHealth(Subsystem::RELAYS) == HealthStatus::FAILED) {
-        return true;
-    }
-    
-    return false;
-}
-
 std::string HealthMonitor::generateHealthReport() const {
     SemaphoreGuard guard(healthMutex_, pdMS_TO_TICKS(100));
     if (!guard.hasLock()) {
