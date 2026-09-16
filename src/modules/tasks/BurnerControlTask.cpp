@@ -587,23 +587,15 @@ static void processBurnerRequest() {
         BurnerStateMachine::setHeatDemand(false, 0);
         burnerState.lastHeatDemand = false;
 
-        // Plain clear-then-set. The critical section that used to wrap this was removed
-        // for the same two reasons already documented at BurnerRequestManager.cpp:114-125:
-        // the portMUX_TYPE was FUNCTION-LOCAL, so it excluded no other task or core and
-        // bought no atomicity at all, and - worse - it wrapped xEventGroupSetBits(),
-        // which calls vTaskSuspendAll() internally, inside portENTER_CRITICAL. That is
-        // an ESP-IDF violation that can trip configASSERT.
-        //
-        // The old "prevent race with other tasks reading state" claim was false: bits
-        // 16-21 (BURNER_OFF, BURNER_*_LOW/HIGH, BURNER_ERROR) are never tested anywhere
-        // in the firmware, so the clear-then-set window is unobservable. BURNER_ON, the
-        // one bit RelayControlTask does read, is bit 7 and is not in this mask.
-        constexpr EventBits_t BURNER_STATE_BITS =
-            SystemEvents::SystemState::BURNER_OFF | SystemEvents::SystemState::BURNER_HEATING_LOW |
-            SystemEvents::SystemState::BURNER_HEATING_HIGH | SystemEvents::SystemState::BURNER_WATER_LOW |
-            SystemEvents::SystemState::BURNER_WATER_HIGH;
-        xEventGroupClearBits(cachedHandles.systemStateEventGroup, BURNER_STATE_BITS);
-        xEventGroupSetBits(cachedHandles.systemStateEventGroup, SystemEvents::SystemState::BURNER_OFF);
+        // The BURNER_OFF / BURNER_*_LOW / BURNER_*_HIGH status bits used to be cleared
+        // and re-set here. Removed 2026-09-17: nothing in the firmware ever tests bits
+        // 16-21 - no condition, no MQTT publish, no consumer outside this file - so
+        // these were writes to a state nobody reads. Burner state reaches Home
+        // Assistant through the `r` (relay) and `s` (state) fields of
+        // boiler/status/sensors instead. BURNER_ON (bit 7), the one burner bit that IS
+        // read (RelayControlTask:618), is owned by BurnerStateMachine and untouched.
+        // The generated header still defines the constants; it is machine-generated
+        // from tools/event_config.yaml and deliberately not edited.
         return;
     }
 
@@ -866,49 +858,21 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
         }
     }
     
-    // C2: Update system state bits atomically (clear + set in critical section)
-    // This prevents other tasks from seeing intermediate state with all bits cleared
-    constexpr EventBits_t BURNER_STATE_BITS =
-        SystemEvents::SystemState::BURNER_OFF | SystemEvents::SystemState::BURNER_HEATING_LOW |
-        SystemEvents::SystemState::BURNER_HEATING_HIGH | SystemEvents::SystemState::BURNER_WATER_LOW |
-        SystemEvents::SystemState::BURNER_WATER_HIGH | SystemEvents::SystemState::BURNER_ERROR;
-
-    BurnerSMState currentState = BurnerStateMachine::getCurrentState();
-    EventBits_t newStateBit = 0;
-
-    switch (currentState) {
-        case BurnerSMState::IDLE:
-        case BurnerSMState::POST_PURGE:
-            newStateBit = SystemEvents::SystemState::BURNER_OFF;
-            break;
-        case BurnerSMState::RUNNING_LOW:
-            newStateBit = isWaterMode ? SystemEvents::SystemState::BURNER_WATER_LOW
-                                      : SystemEvents::SystemState::BURNER_HEATING_LOW;
-            break;
-        case BurnerSMState::RUNNING_HIGH:
-            newStateBit = isWaterMode ? SystemEvents::SystemState::BURNER_WATER_HIGH
-                                      : SystemEvents::SystemState::BURNER_HEATING_HIGH;
-            break;
-        case BurnerSMState::LOCKOUT:
-        case BurnerSMState::ERROR:
-            newStateBit = SystemEvents::SystemState::BURNER_ERROR;
-            break;
-        default:
-            break;
-    }
-
-    // Plain clear-then-set - see the note at the BURNER_OFF write above. The critical
-    // section removed here was function-local (so it excluded nothing) and wrapped
-    // xEventGroupSetBits() / vTaskSuspendAll() inside portENTER_CRITICAL.
+    // The burner status bits (BURNER_OFF, BURNER_*_LOW/HIGH, BURNER_ERROR) used to be
+    // recomputed from the state machine and published here. Removed 2026-09-17: bits
+    // 16-21 are never tested anywhere in the firmware - no condition, no MQTT publish,
+    // no consumer outside this file - so this whole block wrote a state nobody reads.
+    // Burner state reaches Home Assistant through the `r` (relay) and `s` (state)
+    // fields of boiler/status/sensors.
     //
-    // Note this mask ALSO clears BURNER_ERROR, which CentralizedFailsafe (:163, :557)
-    // and BurnerStateMachine (:343, :702, :786, :811, :922) write from other tasks.
-    // That cross-task write race is PRE-EXISTING and completely unchanged by removing
-    // the spinlock: a function-local portMUX never excluded those writers, and they
-    // take no lock of their own either. It has no consequence today only because
-    // nothing reads the bit.
-    if (newStateBit != 0) {
-        xEventGroupClearBits(cachedHandles.systemStateEventGroup, BURNER_STATE_BITS);
-        xEventGroupSetBits(cachedHandles.systemStateEventGroup, newStateBit);
-    }
+    // This also retires the cross-task BURNER_ERROR clobber noted when the useless
+    // critical section came out: BurnerControlTask was clearing a bit owned and
+    // written by BurnerStateMachine (:343, :702, :786, :811, :922) and
+    // CentralizedFailsafe (:163, :557), with no synchronisation on either side. That
+    // bit now has exactly one set of writers.
+    //
+    // BURNER_ON (bit 7) is unaffected - it is the only burner bit anything reads
+    // (RelayControlTask:618) and BurnerStateMachine owns it. The generated header
+    // still defines all the constants; it is machine-generated from
+    // tools/event_config.yaml and is deliberately not edited.
 }
