@@ -44,30 +44,18 @@ public:
     // Singleton instance
     static ModbusCoordinator& getInstance();
 
-    #ifdef UNIT_TEST
-    /**
-     * @brief Reset singleton for testing - NOT IMPLEMENTED
-     *
-     * DESIGN NOTE: ModbusCoordinator manages FreeRTOS timer and coordinates between
-     * multiple tasks via task notifications. Resetting this would be dangerous:
-     *
-     * 1. Active timer would need to be deleted (may be in callback)
-     * 2. Registered tasks may be waiting for notifications
-     * 3. Mutex may be held by another task
-     * 4. Tick state affects time-critical Modbus scheduling
-     *
-     * RECOMMENDED APPROACH: Use mocks in unit tests:
-     *   - Mock the Modbus coordinator interface
-     *   - Test components independently
-     *   - Don't test real Modbus timing in unit tests
-     *
-     * For integration tests that need real coordination, restart test process.
-     */
-    static void resetForTesting() {
-        // Intentionally not implemented - see comment above
-        // Use mocks in tests instead
-    }
-    #endif
+    // Deliberately NO resetForTesting(). Resetting this singleton is genuinely unsafe:
+    // it owns a FreeRTOS timer that may be mid-callback, registered tasks may be
+    // waiting on notifications, the mutex may be held by another task, and tick state
+    // drives time-critical Modbus scheduling.
+    //
+    // Removed 2026-09-16. It used to exist as an EMPTY body under #ifdef UNIT_TEST,
+    // which is worse than having no function at all: a caller compiles cleanly,
+    // believes the singleton was reset, and gets a silent no-op with no runtime signal.
+    //
+    // Use mocks instead - mock the coordinator interface, test components
+    // independently, and do not test real Modbus timing in unit tests. For integration
+    // tests that need real coordination, restart the test process.
 
     // Register a task to receive notifications
     bool registerSensor(SensorType type, TaskHandle_t taskHandle);

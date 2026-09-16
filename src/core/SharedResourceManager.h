@@ -80,31 +80,18 @@ public:
         return instance;
     }
 
-    #ifdef UNIT_TEST
-    /**
-     * @brief Reset singleton for testing - NOT IMPLEMENTED
-     *
-     * DESIGN NOTE: SharedResourceManager manages FreeRTOS primitives (event groups,
-     * mutexes, queues) that are used throughout the system. Deleting and recreating
-     * these resources would be extremely dangerous:
-     *
-     * 1. Other components may hold handles to these resources
-     * 2. Tasks may be blocked on mutexes/event groups
-     * 3. Queues may contain data
-     * 4. Race conditions during deletion could cause crashes
-     *
-     * RECOMMENDED APPROACH: Use dependency injection and mocks in tests instead:
-     *   - Tests should create mock event groups/mutexes
-     *   - Don't call production SharedResourceManager in unit tests
-     *   - Use test doubles for components that depend on these resources
-     *
-     * If full system reset is needed (integration tests), restart the test process.
-     */
-    static void resetForTesting() {
-        // Intentionally not implemented - see comment above
-        // Use mocks/dependency injection in tests instead
-    }
-    #endif
+    // Deliberately NO resetForTesting(). This singleton owns the FreeRTOS primitives
+    // (event groups, mutexes, queues) used across the whole system, so deleting and
+    // recreating them is unsafe: other components hold handles, tasks may be blocked
+    // on them, queues may still hold data, and deletion races can crash outright.
+    //
+    // Removed 2026-09-16. It used to exist as an EMPTY body under #ifdef UNIT_TEST,
+    // which is worse than having no function at all: a caller compiles cleanly,
+    // believes the singleton was reset, and gets a silent no-op with no runtime signal.
+    //
+    // Use dependency injection and test doubles instead - create mock event
+    // groups/mutexes rather than calling the production manager in unit tests. If a
+    // full system reset is needed for integration tests, restart the test process.
 
     // Delete copy constructor and assignment
     SharedResourceManager(const SharedResourceManager&) = delete;
