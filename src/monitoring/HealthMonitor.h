@@ -67,6 +67,8 @@ public:
         size_t minFreeHeap;
         size_t maxAllocHeap;
         size_t largestFreeBlock;
+        size_t minFreeDram;  // lowest MALLOC_CAP_8BIT since boot - NOT minFreeHeap,
+                             // which is ESP.getMinFreeHeap() and counts IRAM
         uint32_t allocationFailures;
         uint32_t lastUpdateTime;
     };

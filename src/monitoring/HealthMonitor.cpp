@@ -16,8 +16,15 @@ HealthMonitor* gHealthMonitor = nullptr;
 
 HealthMonitor::HealthMonitor() 
     : healthMutex_(nullptr),
+      // Both are plain structs with no default member initialisers, so without this
+      // they hold indeterminate values until the first updateMetrics(). In practice
+      // initialize() runs a metric pass before gHealthMonitor is published, but a
+      // getMemoryMetrics() on a constructed-but-uninitialised instance would read
+      // garbage - and the health report publishes these fields verbatim.
+      memoryMetrics_{},
       memoryWarningThreshold_(SystemConstants::System::MIN_FREE_HEAP_WARNING),
       memoryCriticalThreshold_(SystemConstants::System::MIN_FREE_HEAP_CRITICAL),
+      networkMetrics_{},
       networkStartTime_(0),
       taskCount_(0),
       overallHealth_(HealthStatus::GOOD),
@@ -206,7 +213,7 @@ size_t HealthMonitor::generateHealthReport(char* buffer, size_t size) const {
     // serves allocations is down to a few hundred bytes - measured at 576 B free
     // under ordinary HA polling on 2026-09-16.
     doc["blk"] = memoryMetrics_.largestFreeBlock;
-    doc["min"] = memoryMetrics_.minFreeHeap;
+    doc["min"] = memoryMetrics_.minFreeDram;
     if (memoryMetrics_.allocationFailures > 0) {
         doc["af"] = memoryMetrics_.allocationFailures;
     }
@@ -310,6 +317,11 @@ void HealthMonitor::updateMemoryMetrics() {
     memoryMetrics_.minFreeHeap = ESP.getMinFreeHeap();
     memoryMetrics_.maxAllocHeap = ESP.getMaxAllocHeap();
     memoryMetrics_.largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    // Same source as heap_dram_min on boiler/status/health (MQTTPublisher.cpp) and the
+    // diagnostics memory dump, so the three agree. minFreeHeap above is kept for the
+    // existing struct API but is ESP.getMinFreeHeap() - MALLOC_CAP_INTERNAL, ~56 kB of
+    // which most is IRAM malloc() cannot hand out - and must not be reported as DRAM.
+    memoryMetrics_.minFreeDram = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
     memoryMetrics_.lastUpdateTime = millis();
     
     // Judge memory on what malloc() can actually serve. The previous check compared
