@@ -103,7 +103,11 @@ public:
 
         // Validate days
         if (!doc["days"].isNull()) {
-            if (doc["days"].is<JsonArray>()) {
+            // JsonArrayConst, not JsonArray: doc is a const reference, and in ArduinoJson v7 a
+            // const variant never matches the mutable JsonArray. Every `"days":[..]` payload
+            // therefore fell through to invalid_days_format and only the bitmask worked,
+            // although MQTT_API.md documents the array as the primary form (2026-09-16)
+            if (doc["days"].is<JsonArrayConst>()) {
                 JsonArrayConst days = doc["days"].as<JsonArrayConst>();
                 if (days.size() == 0) {
                     return ValidationResult(false, "empty_days_array");
