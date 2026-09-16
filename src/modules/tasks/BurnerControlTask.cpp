@@ -587,16 +587,23 @@ static void processBurnerRequest() {
         BurnerStateMachine::setHeatDemand(false, 0);
         burnerState.lastHeatDemand = false;
 
-        // C2: Atomic clear-and-set to prevent race with other tasks reading state
+        // Plain clear-then-set. The critical section that used to wrap this was removed
+        // for the same two reasons already documented at BurnerRequestManager.cpp:114-125:
+        // the portMUX_TYPE was FUNCTION-LOCAL, so it excluded no other task or core and
+        // bought no atomicity at all, and - worse - it wrapped xEventGroupSetBits(),
+        // which calls vTaskSuspendAll() internally, inside portENTER_CRITICAL. That is
+        // an ESP-IDF violation that can trip configASSERT.
+        //
+        // The old "prevent race with other tasks reading state" claim was false: bits
+        // 16-21 (BURNER_OFF, BURNER_*_LOW/HIGH, BURNER_ERROR) are never tested anywhere
+        // in the firmware, so the clear-then-set window is unobservable. BURNER_ON, the
+        // one bit RelayControlTask does read, is bit 7 and is not in this mask.
         constexpr EventBits_t BURNER_STATE_BITS =
             SystemEvents::SystemState::BURNER_OFF | SystemEvents::SystemState::BURNER_HEATING_LOW |
             SystemEvents::SystemState::BURNER_HEATING_HIGH | SystemEvents::SystemState::BURNER_WATER_LOW |
             SystemEvents::SystemState::BURNER_WATER_HIGH;
-        portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
-        portENTER_CRITICAL(&spinlock);
         xEventGroupClearBits(cachedHandles.systemStateEventGroup, BURNER_STATE_BITS);
         xEventGroupSetBits(cachedHandles.systemStateEventGroup, SystemEvents::SystemState::BURNER_OFF);
-        portEXIT_CRITICAL(&spinlock);
         return;
     }
 
@@ -890,12 +897,18 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
             break;
     }
 
-    // Atomic clear-and-set using critical section
+    // Plain clear-then-set - see the note at the BURNER_OFF write above. The critical
+    // section removed here was function-local (so it excluded nothing) and wrapped
+    // xEventGroupSetBits() / vTaskSuspendAll() inside portENTER_CRITICAL.
+    //
+    // Note this mask ALSO clears BURNER_ERROR, which CentralizedFailsafe (:163, :557)
+    // and BurnerStateMachine (:343, :702, :786, :811, :922) write from other tasks.
+    // That cross-task write race is PRE-EXISTING and completely unchanged by removing
+    // the spinlock: a function-local portMUX never excluded those writers, and they
+    // take no lock of their own either. It has no consequence today only because
+    // nothing reads the bit.
     if (newStateBit != 0) {
-        portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
-        portENTER_CRITICAL(&spinlock);
         xEventGroupClearBits(cachedHandles.systemStateEventGroup, BURNER_STATE_BITS);
         xEventGroupSetBits(cachedHandles.systemStateEventGroup, newStateBit);
-        portEXIT_CRITICAL(&spinlock);
     }
 }
