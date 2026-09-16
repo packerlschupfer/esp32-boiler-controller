@@ -17,6 +17,11 @@
 
 static const char* TAG = "OTA";
 
+// True once onOTAStart has torn the MQTT client down, so the restore runs exactly
+// once: a failed OTA delivers more than one error callback (OTA_CONNECT_ERROR then
+// Aborted were both seen on 2026-09-16) and the restore ran twice.
+static bool s_mqttStoppedForOta = false;
+
 // OTA callback implementations
 void OTATask::onOTAStart() {
     LOG_INFO(TAG, "OTA update starting");
@@ -90,6 +95,7 @@ void OTATask::onOTAStart() {
                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
             mqtt->setAutoReconnect(false);
             mqtt->disconnect();
+            s_mqttStoppedForOta = true;
             // Serial-only from here until the reboot or onOTAError - MQTT is down
             LOG_WARN(TAG, "MQTT stopped - DRAM after: %u free, largest %u",
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
@@ -167,7 +173,8 @@ void OTATask::onOTAError(ota_error_t error) {
     // Only reached when the OTA failed - on success the device reboots instead.
     {
         MQTTManager* mqtt = SRP::getMQTTManager();
-        if (mqtt && !mqtt->isConnected()) {
+        if (s_mqttStoppedForOta && mqtt && !mqtt->isConnected()) {
+            s_mqttStoppedForOta = false;  // restore once, however many errors arrive
             LOG_WARN(TAG, "Restoring MQTT after failed OTA");
             mqtt->setAutoReconnect(true);
             const auto result = mqtt->connect();

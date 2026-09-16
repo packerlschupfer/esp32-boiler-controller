@@ -30,6 +30,7 @@
 #include "modules/control/BoilerTempController.h" // For BoilerTempController class
 #include "modules/tasks/PersistentStorageTask.h"  // For syslog settings save
 #include "diagnostics/RuntimeDiagnostics.h"        // boiler/cmd/diagnostics
+#include <esp_heap_caps.h>                         // DRAM check before the tasks dump
 #include <RuntimeStorage.h>
 #include <ArduinoJson.h>
 #include <esp_log.h>
@@ -676,6 +677,18 @@ void handleDiagnosticsCommand(const char* payload) {
     if (strcmp(payload, "memory") == 0) {
         cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_MEMORY;
     } else if (strcmp(payload, "tasks") == 0) {
+        // dumpTaskInfo() takes a single pvPortMalloc of taskCount * sizeof(TaskStatus_t)
+        // (~1280 B for 32 tasks). It handles a null return, but taking 1280 B contiguous
+        // while DRAM is tight can push other allocations over: ordinary HA polling was
+        // measured at 576 B free on 2026-09-16. Refuse rather than make it worse.
+        const size_t block = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+        if (block < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
+            LOG_WARN(TAG_CMD, "Refusing tasks dump - largest DRAM block only %u B",
+                     static_cast<unsigned>(block));
+            MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "insufficient_memory", 0, false,
+                              MQTTPriority::PRIORITY_HIGH);
+            return;
+        }
         cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_TASKS;
     } else if (strcmp(payload, "events") == 0) {
         cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_EVENT_GROUPS;
