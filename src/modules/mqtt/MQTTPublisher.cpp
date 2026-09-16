@@ -13,6 +13,8 @@
 #include <ArduinoJson.h>
 #include <esp_log.h>
 #include <Esp.h>
+#include <esp_heap_caps.h>  // real malloc-servable heap, see publishSystemStatus()
+#include <esp_system.h>
 
 static const char* TAG = "MQTTPub";
 
@@ -44,6 +46,18 @@ void publishSystemStatus() {
     doc["heap_free"] = heapFree;
     doc["heap_min"] = ESP.getMinFreeHeap();
     doc["heap_max_blk"] = heapMaxBlock;  // Largest free block (for fragmentation analysis)
+
+    // heap_free/heap_max_blk above are MALLOC_CAP_INTERNAL (Esp.cpp), which counts
+    // IRAM-only memory that malloc() cannot serve, so they read far healthier than the
+    // allocator really is: measured 2026-09-16 on this device, 56.9 kB "free" with a
+    // 47.9 kB "largest block" while byte-addressable DRAM was 7.0 kB with a 4.2 kB
+    // ceiling (93% fragmented). That gap is why an OTA-time malloc(1436) could fail.
+    // Publish the numbers that actually constrain allocation. heap_def is included to
+    // settle what esp_get_free_heap_size() reports - CentralizedFailsafe's low-memory
+    // recovery gate uses it against a 20 kB threshold; drop it once that is known.
+    doc["heap_dram"] = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    doc["heap_dram_blk"] = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    doc["heap_def"] = esp_get_free_heap_size();
 
     // Round 16 Issue #5: Add heap fragmentation percentage
     // Fragmentation = 100 - (max_block * 100 / free_heap)

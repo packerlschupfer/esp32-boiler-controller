@@ -1067,6 +1067,9 @@ There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagno
 
 - `heap_free` / `heap_min`: free heap now / minimum since boot (bytes)
 - `heap_max_blk`: largest free block; `heap_frag`: fragmentation in percent (`100 - heap_max_blk * 100 / heap_free`)
+- **Do not judge memory pressure from `heap_free` / `heap_max_blk` / `heap_frag`.** All three come from `ESP.getFreeHeap()` / `ESP.getMaxAllocHeap()`, which are `MALLOC_CAP_INTERNAL` and include IRAM-only memory that `malloc()` cannot hand out. Measured 2026-09-16: `heap_free` 57404 and `heap_max_blk` 49140 (`heap_frag` 15%) while byte-addressable DRAM was 7.0 kB free with a 4.2 kB largest block, i.e. 93% fragmented
+- `heap_dram`: free byte-addressable DRAM (`MALLOC_CAP_8BIT`); `heap_dram_blk`: largest block `malloc()` can actually return (`MALLOC_CAP_DEFAULT`); `heap_def`: `esp_get_free_heap_size()`. These are the numbers to watch - an allocation larger than `heap_dram_blk` fails regardless of how large `heap_free` looks
+- The same figures are in `boiler/cmd/diagnostics` with payload `memory` (`DRAM (8BIT)`, `malloc (DEFAULT)`, `Largest free block`)
 - `uptime`: seconds (`millis()` based, wraps after 49.7 days)
 - `health.tasks`: number of FreeRTOS tasks; `health.stack_hwm`: stack high water mark of the publishing task
 

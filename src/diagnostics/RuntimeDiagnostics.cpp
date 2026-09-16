@@ -165,10 +165,18 @@ void RuntimeDiagnostics::dumpMemoryInfo(OutputCallback outputCb) {
                (ESP.getFreePsram() * 100UL) / ESP.getPsramSize());
     }
     
-    // Memory capabilities
+    // Memory capabilities.
+    //
+    // These are the numbers that matter: ESP.getFreeHeap()/getMaxAllocHeap() above are
+    // MALLOC_CAP_INTERNAL, which counts IRAM-only memory that malloc() cannot serve. On
+    // 2026-09-16 this device reported 56.9 kB "free" with a 47.9 kB "largest block" while
+    // byte-addressable DRAM was 7.0 kB with a 4.2 kB ceiling - which is why an OTA-time
+    // malloc(1436) could fail. MALLOC_CAP_DEFAULT is what plain malloc() uses.
     output("\nMemory by Type:");
-    output("  DRAM: %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_8BIT)).c_str());
-    output("  IRAM: %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_32BIT)).c_str());
+    output("  DRAM (8BIT): %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_8BIT)).c_str());
+    output("  IRAM (32BIT): %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_32BIT)).c_str());
+    output("  malloc (DEFAULT): %s free", formatBytes(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)).c_str());
+    output("  esp_get_free_heap_size: %s", formatBytes(esp_get_free_heap_size()).c_str());
     output("  Largest free block: %s", formatBytes(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)).c_str());
     
     // Memory fragmentation estimate
