@@ -339,7 +339,13 @@ void MQTTTask::taskFunction(void* parameter) {
             pdFALSE,  // Wait for any bit
             pdMS_TO_TICKS(100)  // 100ms timeout for queue processing
         );
-        
+
+        // Feed at the TOP of the loop as well as at the end. Every reconnect,
+        // subscribe and publish below runs before the end-of-loop feed, so a
+        // single blocking call there could consume the entire 30 s budget - which
+        // is exactly how a failed OTA upload rebooted the controller (2026-09-16).
+        (void)SRP::getTaskManager().feedWatchdog();
+
         // Handle connection events
         if (events & MQTT_TASK_CONNECTED) {
             LOG_INFO(TAG, "MQTT connected");
@@ -873,6 +879,11 @@ void MQTTTask::processPublishQueue() {
             LOG_DEBUG(TAG, "Published high priority to %s", request.topic);
         }
 
+        // Feed per message: this loop may drain up to MAX_ITEMS_PER_ITERATION
+        // publishes, each of which can block on the network. Progress keeps the
+        // task alive; a real hang inside one publish still trips the watchdog.
+        (void)SRP::getTaskManager().feedWatchdog();
+
         processed++;
         highQueueItems--;
 
@@ -909,6 +920,9 @@ void MQTTTask::processPublishQueue() {
             LOG_DEBUG(TAG, "Published normal priority to %s", request.topic);
         }
         
+        // Feed per message - see the high-priority loop above.
+        (void)SRP::getTaskManager().feedWatchdog();
+
         normalProcessed++;
         normalQueueItems--;
 
