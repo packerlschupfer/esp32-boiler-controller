@@ -85,6 +85,18 @@ public:
         uint32_t circuitBreakerTripTime_ = 0;  // Round 14 Issue #15: Track when tripped
 
         bool handleOverflow(const void* item);
+
+        // Each strategy's body lives in its own function so its large locals occupy a
+        // separate stack frame. Xtensa allocates the whole frame at `entry`, so when
+        // these were inline cases of one switch, every caller paid for ALL branches at
+        // once: dummy[512] + MQTTPublishRequest tempMsg (~396 B) + oldestMsg (~396 B) +
+        // a second dummy[512] = a 960 B frame, measured. send() is on the MQTT publish
+        // path used from 12 modules, so that cost landed on the stack of every
+        // publishing task - and both queues in this firmware use DROP_OLDEST, so the
+        // priority-drop locals could never even be reached. noinline is required: if
+        // the compiler inlines these back the frames merge again.
+        __attribute__((noinline)) bool dropOldestItem();
+        __attribute__((noinline)) bool dropLowestPriorityItem();
         void updateMetrics(bool sent, bool dropped);
         void checkCircuitBreakerRecovery();  // Round 14 Issue #15
     };

@@ -131,26 +131,55 @@ bool QueueManager::ManagedQueue::isEmpty() const {
 
 bool QueueManager::ManagedQueue::handleOverflow(const void* item) {
     switch (config_.overflowStrategy) {
-        case OverflowStrategy::DROP_OLDEST: {
-            // Remove oldest item to make space
-            // Use fixed buffer instead of VLA for safety
-            uint8_t dummy[QueueManager::MAX_QUEUE_ITEM_SIZE];
-            if (config_.itemSize > sizeof(dummy)) {
-                LOG_ERROR("QueueManager", "Item size %u exceeds max %zu", config_.itemSize, sizeof(dummy));
-                return false;
-            }
-            if (xQueueReceive(handle_, dummy, 0) == pdTRUE) {
-                metrics_.recordDrop(QueueMetrics::DropReason::QUEUE_FULL);
+        case OverflowStrategy::DROP_OLDEST:
+            if (dropOldestItem()) {
                 return true;  // Space now available
             }
             break;
-        }
-        
+
         case OverflowStrategy::DROP_NEWEST:
             // Just drop the new item
             return false;
             
-        case OverflowStrategy::DROP_LOWEST_PRIORITY: {
+        case OverflowStrategy::DROP_LOWEST_PRIORITY:
+            return dropLowestPriorityItem();
+
+        case OverflowStrategy::BLOCK:
+            // Let the caller block
+            return true;
+
+        case OverflowStrategy::CALLBACK:
+            if (config_.overflowCallback) {
+                config_.overflowCallback(const_cast<void*>(item));
+            }
+            return false;
+    }
+
+    return false;
+}
+
+// Extracted from handleOverflow() so the 512-byte discard buffer only occupies a frame
+// when this strategy actually runs. See the note in QueueManager.h.
+bool QueueManager::ManagedQueue::dropOldestItem() {
+    // Remove oldest item to make space. Fixed buffer rather than a VLA for safety.
+    uint8_t dummy[QueueManager::MAX_QUEUE_ITEM_SIZE];
+    if (config_.itemSize > sizeof(dummy)) {
+        LOG_ERROR("QueueManager", "Item size %u exceeds max %zu", config_.itemSize, sizeof(dummy));
+        return false;
+    }
+    if (xQueueReceive(handle_, dummy, 0) == pdTRUE) {
+        metrics_.recordDrop(QueueMetrics::DropReason::QUEUE_FULL);
+        return true;
+    }
+    return false;
+}
+
+// Extracted from handleOverflow(). Holds the largest locals in this class - two
+// MQTTPublishRequest copies plus a 512-byte fallback buffer - and no queue in this
+// firmware is configured with DROP_LOWEST_PRIORITY, so keeping it inline charged every
+// publishing task for locals that can never be reached.
+bool QueueManager::ManagedQueue::dropLowestPriorityItem() {
+        {
             // Implement priority-based dropping for MQTT messages
             // This assumes the queue contains messages with a priority field
 
@@ -265,19 +294,6 @@ bool QueueManager::ManagedQueue::handleOverflow(const void* item) {
             }
             return false;
         }
-            
-        case OverflowStrategy::BLOCK:
-            // Let the caller block
-            return true;
-            
-        case OverflowStrategy::CALLBACK:
-            if (config_.overflowCallback) {
-                config_.overflowCallback(const_cast<void*>(item));
-            }
-            return false;
-    }
-    
-    return false;
 }
 
 void QueueManager::ManagedQueue::updateMetrics(bool sent, bool dropped) {
