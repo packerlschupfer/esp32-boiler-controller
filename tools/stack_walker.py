@@ -40,11 +40,14 @@ Three bounds are reported per task:
   worst case   every reachable path, including failure handling and one-time
                initialisation - answers "could error handling overflow this task?"
   nominal      failure-only and one-time code removed (tools/stack_walker.excludes)
-  no-float     nominal without float formatting. A call graph cannot see format
-               strings, so every log call is charged _svfprintf_r -> _dtoa_r ->
-               first-use heap allocation; this bound shows how much of the result
-               rests on that. An observed peak above it means the task HAS
-               formatted a float.
+  no-float     nominal without float formatting (_dtoa_r and the heap below it)
+
+Float formatting is charged only to tasks that can actually reach a float format
+string: every literal-pool string is scanned for a %f/%e/%g conversion, and the
+float path is cut per task when none is reachable (so a task that never logs a
+float is not charged 600+ bytes it cannot use). The report names the function and
+string for tasks that do. An observed peak above the no-float bound means the task
+HAS formatted a float - an independent cross-check on the model.
 
 A measured peak (NAME:STACK:FREE) must never exceed the nominal bound. If it does,
 an exclusion removed a path that really ran, or a call edge is missing (exit 2).
@@ -102,6 +105,9 @@ ALIGN_LOSS = (4, 16)
 # cannot be bounded statically, which is why cycles are always reported.
 SCC_EXACT_MAX = 32
 SCC_BUDGET = 500_000
+
+# A printf conversion that pulls in float formatting (_dtoa_r and the heap below it).
+FLOAT_SPEC_RE = re.compile(r"%[-+ #0-9.*]*(?:hh|h|l|ll|L|j|z|t)?[fFeEgGaA]")
 
 FUNC_RE = re.compile(r"^([0-9a-f]{8}) <(.+)>:$")
 INSN_RE = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f]+\s+([a-z0-9_.]+)\s*(.*)$")
@@ -167,6 +173,20 @@ class ElfImage:
                 return struct.unpack_from("<I", self.data, off + (addr - lo))[0]
         return None
 
+    def cstring(self, addr, limit=200):
+        """NUL-terminated string at a virtual address, or None."""
+        for lo, hi, off in self.segments:
+            if lo <= addr < hi:
+                raw = self.data[off + (addr - lo): off + (addr - lo) + limit]
+                end = raw.find(b"\0")
+                if end <= 0:
+                    return None
+                text = raw[:end]
+                if any(b < 9 or (13 < b < 32) for b in text):
+                    return None
+                return text.decode("utf-8", "replace")
+        return None
+
 
 def data_symbols(elf):
     """name -> address for data symbols (vtables live in rodata, not in the listing)."""
@@ -219,6 +239,7 @@ class Image:
         self.rom = ElfImage(rom_elf) if rom_elf else None
         self.funcs = {}           # addr -> Func
         self.by_name = {}         # name -> [addr]
+        self.float_formats = {}   # addr -> {format strings pulling in _dtoa_r}
         self.vtables = {}         # class -> vtable address
         for name, addr in data_symbols(elf).items():
             if name.startswith("vtable for "):
@@ -291,7 +312,15 @@ class Image:
         if mnem == "l32r":
             m = L32R_RE.match(ops)
             if m:
-                regs[m.group(1)] = ("lit", self.read32(int(m.group(2), 16)))
+                value = self.read32(int(m.group(2), 16))
+                regs[m.group(1)] = ("lit", value)
+                # Format strings arrive through the literal pool exactly like
+                # function pointers, so the same load tells us whether this
+                # function can ask printf for a float conversion.
+                if value is not None:
+                    text = self.elf.cstring(value) or (self.rom.cstring(value) if self.rom else None)
+                    if text and FLOAT_SPEC_RE.search(text):
+                        self.float_formats.setdefault(cur.addr, set()).add(text[:80])
             return
 
         call = re.fullmatch(r"call(0|4|8|12)", mnem)
@@ -695,6 +724,10 @@ def analyse(img, spec, excluded, nominal_only, float_cut, failure_cuts,
         "nominal_cuts_reached": reached(set(nominal_only)),
         "manual_edges": manual_edges,
         "conditional_cuts": [{"decision": d, "edge": e} for d, e in applied],
+        "float_formats_reachable": sorted(
+            ({"function": img.name(a), "example": sorted(s)[0]}
+             for a, s in img.float_formats.items() if a in nodes),
+            key=lambda d: d["function"]),
     }
     if stack is not None:
         observed = stack - free
@@ -750,6 +783,12 @@ def print_report(r, show_path, show_unresolved):
     print(f"  {r['reachable_functions']} reachable functions; indirect calls resolved: "
           f"{ri['literal']} literal-pool, {ri['vtable']} vtable; "
           f"{len(r['unresolved_indirect'])} unresolved")
+    ff = r["float_formats_reachable"]
+    if ff:
+        print(f"  {len(ff)} reachable function(s) format a float, e.g. "
+              f"{ff[0]['function'].split('(')[0][:46]}: \"{ff[0]['example'][:44]}\"")
+    else:
+        print("  no reachable function formats a float")
     for decision, edge in ((c["decision"], c["edge"]) for c in r["conditional_cuts"]):
         print(f"  conditional {decision}: {edge}")
     for rec in r["recursion"]:
@@ -926,6 +965,13 @@ def main():
     model = img.model(task_manager_wrapper=not args.no_task_manager_wrapper)
     float_cut = {a for n, addrs in img.by_name.items()
                  if base_name(n.replace("@rom", "")) == "_dtoa_r" for a in addrs}
+    # Float formatting is feasible for a task only if some reachable function
+    # references a float format string. That is a per-task condition, so it is
+    # expressed with the same machinery as the hand-written conditional cuts.
+    float_edges = {(a, t) for a, f in img.funcs.items() for t in f.edges if t in float_cut}
+    if float_edges and img.float_formats:
+        conditional_cuts.append((float_edges, set(img.float_formats),
+                                 "float formatting (-> _dtoa_r), guarded by reachable %f format strings"))
     results = [analyse(img, spec, excluded, nominal_only, float_cut, frozenset(failure_cuts),
                        conditional_cuts, model, manual)
                for spec in args.roots]

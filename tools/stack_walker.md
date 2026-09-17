@@ -46,12 +46,16 @@ is meaningless - an early version of this analysis did exactly that and
 | **nominal** | worst case minus `failure:`/`once:` code from `stack_walker.excludes` |
 | **no-float** | nominal minus float formatting (`_dtoa_r` and below) |
 
-A call graph cannot see format strings, so every log call is charged the float
-path: `_svfprintf_r` (800 B) -> `_dtoa_r` -> first-use `_Balloc` -> `calloc` ->
-heap. That is the *real* peak for tasks that log floats and phantom for tasks
-that do not, so it is reported as a condition rather than silently kept or cut.
+Float formatting is expensive - `_svfprintf_r` (800 B) -> `_dtoa_r` -> first-use
+`_Balloc` -> `calloc` -> heap - so charging it to a task that never formats a
+float produces false alarms. The tool decides this from the binary: it collects
+every format string reached through the literal pool, and charges the float path
+only to tasks whose reachable set contains one with a `%f`/`%e`/`%g` conversion.
+Tasks with none get the no-float bound as their nominal bound, and the report
+names the function and string for those that do.
+
 If a measured peak exceeds the no-float bound, the task **has** formatted a
-float, and the report says so.
+float, and the report says so - an independent cross-check on the model.
 
 Verdicts, in order: `BOUND VIOLATED` (measured > nominal - the analysis is
 missing something) · `fits, including the worst case` · `fits in nominal
@@ -110,39 +114,77 @@ Measured peaks from the post-flash task dump at **64 s uptime**. A high-water
 mark only ever falls, so an early reading is a weaker test than a long-uptime one;
 the pump and BoilerTempCtrl marks were independently identical at 11 h.
 
-| task | measured | no-float | nominal | worst | stack | verdict |
-|---|---|---|---|---|---|---|
-| ANDRTF3 | 1660 | 2272 | 2576 | 2992 | 3584 | fits |
-| BoilerTempCtrl | 2540 | 2928 | 3232 | 3312 | 3584 | fits |
-| BurnerControl | 1768 | 3200 | 3504 | 3504 | 4096 | fits |
-| ControlTask | 1632 | 2208 | 2512 | 2816 | 3584 | fits |
-| HeatingControl | 1604 | 3280 | 3584 | 3584 | 3584 | fits (0 B worst-case headroom) |
-| HeatingPump | 1632 | 2352 | 2656 | 2928 | 2560 | float-conditional |
-| WaterPump | 1632 | 2352 | 2656 | 2928 | 2560 | float-conditional |
-| MB8ART | 1796 | 2256 | 2560 | 3040 | 3584 | fits |
-| MB8ARTProc | 1488 | 2096 | 2400 | 2400 | 3072 | fits |
-| Monitoring | 1732 | 3232 | 3536 | 3536 | 3584 | fits |
-| MQTTTask | 2436 | 3008 | 3312 | 3360 | 3584 | fits |
-| NTPTask | 2784 | 2512 | 2816 | 2816 | 4096 | fits - **formatted a float** |
-| OTATask | 1800 | 3008 | 3312 | 3312 | 3072 | float-conditional |
-| PersistentStorage | 1860 | 4272 | 4576 | 4576 | 5120 | fits |
-| RelayControl | 1696 | 2384 | 2688 | 2992 | 4096 | fits |
-| RYN4Proc | 1688 | 2464 | 2768 | 3072 | 2560 | float-conditional |
-| TimerSched | 1788 | 2832 | 3136 | 3136 | 3072 | float-conditional |
-| WheaterControl | 1684 | 3520 | 3824 | 3824 | 3584 | float-conditional |
-| LogSub (raw `xTaskCreate`) | 812 | 976 | 976 | 976 | 5120 | fits |
+| task | measured | no-float | nominal | worst | stack | floats? | verdict |
+|---|---|---|---|---|---|---|---|
+| ANDRTF3Task | 1660 | 2272 | 2272 | 2688 | 3584 | no | fits |
+| BoilerTempControlTask | 2540 | 2928 | 3232 | 3312 | 3584 | yes | fits |
+| BurnerControlTask | 1768 | 3200 | 3200 | 3200 | 4096 | no | fits |
+| ControlTask | 1632 | 2208 | 2208 | 2512 | 3584 | no | fits |
+| HeatingControlTask | 1604 | 3280 | 3584 | 3584 | 3584 | yes | fits |
+| HeatingPumpTask | 1632 | 2352 | 2352 | 2624 | 2560 | no | fits nominally |
+| WaterPumpTask | 1632 | 2352 | 2352 | 2624 | 2560 | no | fits nominally |
+| MB8ARTTask | 1796 | 2256 | 2256 | 2736 | 3584 | no | fits |
+| MB8ARTProcessingTask | 1488 | 2096 | 2096 | 2096 | 3072 | no | fits |
+| MonitoringTask | 1732 | 3232 | 3536 | 3536 | 3584 | yes | fits |
+| MQTTTask | 2436 | 3008 | 3312 | 3360 | 3584 | yes | fits |
+| NTPTask | 2784 | 2512 | 2816 | 2816 | 4096 | yes | fits |
+| OTATask | 1800 | 3008 | 3008 | 3008 | 3072 | no | fits |
+| PersistentStorageTask | 1860 | 4272 | 4272 | 4272 | 5120 | no | fits |
+| RelayControlTask | 1696 | 2384 | 2384 | 2688 | 4096 | no | fits |
+| RYN4ProcessingTask | 1688 | 2464 | 2464 | 2768 | 2560 | no | fits nominally |
+| TimerSchedulerTask | 1788 | 2832 | 2832 | 2832 | 3072 | no | fits |
+| WheaterControlTask | 1684 | 3520 | 3824 | 3824 | 3584 | yes | float-conditional |
+| LogSub (raw xTaskCreate) | 812 | 976 | 976 | 976 | 5120 | no | fits |
 
 All 19 measured peaks are within their nominal bound. NTPTask is the sharpest
 check both ways: nominal is only 32 B above the measurement, and the measurement
 exceeds the no-float bound - which `NTPClient.cpp` confirms with
 `"Average sync time: %.1fms"`.
 
-"Float-conditional" means the task fits unless a float is formatted on its
-deepest path. For the pump tasks that is almost certainly not the case - the
-pump code formats no floats. **WheaterControl is the one worth checking**: its
-nominal bound is 240 B over its stack, water heating works in temperatures, and
-the `LOG_MODE_DEBUG_FULL` stack comment for this task cites float formatting (the
-active `DEBUG_SELECTIVE` comment does not). Not yet investigated.
+### What the float column resolved
+
+Float formatting is charged only to tasks that can reach a `%f`-style format
+string, detected from the literal pool. That decided five of the six tasks that
+were previously reported as "float-conditional": HeatingPump, WaterPump, OTATask,
+RYN4Proc and TimerSched reference **no** float format string anywhere in their
+reachable set, so they fit.
+
+**WheaterControl** is the only remaining one. It reaches exactly one float
+format - `calculateBoilerTarget()` logging `"Invalid charge delta: %.2f, using
+default"`, a validation-failure message - so the tool conservatively charges the
+float path to its deepest chain (the `publishFallbackModeChange` ->
+`MQTTTask::publish` chain, whose own format strings contain no float) and reports
+3824 B. Attributing the float cost to the call site that can actually produce it
+gives a much smaller number:
+
+```
+WheaterControlTask            48
+processWaterHeatingState     384
+calculateBoilerTarget + tail 1968   (measured by rooting the tool there)
+                            -----
+chain                       2400  + prefix/interrupt 356-368  =  2756-2768 B
+```
+
+So WheaterControl's float-capable chain is ~800 B clear of its 3584 B stack, and
+its real bound is `max(no-float 3520, float-feasible 2768)` = 3520 B. It fits.
+Per-call-site float attribution is not implemented - it needs the float sink to
+be reachable only after a float-formatting function on the same path (a two-state
+product graph). Until then this task reads as float-conditional.
+
+### Worst case above the stack: pumps and RYN4Proc
+
+HeatingPump, WaterPump (2624 B) and RYN4Proc (2768 B) exceed their 2560 B stacks
+in the **worst case** only, and all three are carried by the same `once:` entry -
+`SharedResourceManager::SharedResourceManager()`, reached through `getInstance()`.
+That constructor runs on the boot task: `main.cpp:249` constructs the singleton
+explicitly, and `InitStage::SHARED_RESOURCES` (`SystemInitializer.cpp:113`)
+completes before `initializeTasks()` at `:186`. These tasks therefore never
+execute it, which is what `once:` encodes - the nominal bound applies and they
+fit.
+
+**No task is at risk on this image**: every measured peak is within its nominal
+bound, the three worst-case exceedances are boot-only construction, and
+WheaterControl's float-capable chain is ~800 B clear of its stack.
 
 ## Limits
 
@@ -152,3 +194,11 @@ active `DEBUG_SELECTIVE` comment does not). Not yet investigated.
 - Each recursion cycle is counted once; true recursion depth is not bounded.
 - Unresolved indirect calls can hide depth. A measured peak above the nominal
   bound (exit 2) is the signal that something was missed.
+- Float formatting is attributed per **task**, not per call site: if any reachable
+  function formats a float, the cost is charged to the task's deepest chain even
+  when that chain's own format strings contain none. This is what leaves
+  WheaterControl reading float-conditional. Fixing it needs the float sink to be
+  reachable only after a float-formatting function on the same path - a two-state
+  product graph over (node, seen-a-float-formatter).
+- Float format strings are found through the literal pool, so a format string
+  built at run time or passed in as a parameter is not seen.
