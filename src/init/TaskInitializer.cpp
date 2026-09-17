@@ -634,7 +634,29 @@ void TaskInitializer::initializeBoilerTempControlTask(SystemInitializer* initial
     }
 
     // Stack size for boiler temp control task
-    constexpr uint32_t STACK_SIZE_BOILER_TEMP_TASK = 3072;
+    // 2026-09-17: 3072 -> 3584. This is a margin decision, NOT the same defect as the
+    // pump tasks above - this local constant shadows nothing (ProjectConfig has no
+    // STACK_SIZE_BOILER_TEMP_TASK), so 3072 was the intended size.
+    //
+    // Measured: 644 B free at 3072, i.e. 2428 B peak, and that figure is IDENTICAL in
+    // four task dumps across two firmware builds and uptimes of 64 s, 424 s, 5103 s
+    // and 40264 s. So the peak is established at task init and is static, not
+    // load-driven. Frame sizes from the image only partly explain it: the task frame
+    // is 336 B and its callees are small (predictHeatDemand 160, calculateModulating
+    // 112, calculate 112, updateMode 96), so the deepest single-log path is ~1490 B
+    // including _vfprintf_r's 800 B - about 940 B short of the observed peak, which is
+    // not yet accounted for.
+    //
+    // The reason for the increase is what those measurements DO NOT cover: the
+    // autotune-completion branch in BoilerTempControlTask.cpp:388-390 declares a
+    // 160 B local buffer and snprintf()s three %.4f floats, pulling _vfprintf_r plus
+    // _dtoa_r. That is the deepest path in this task, autotune was not running during
+    // any of the dumps, and a water autotune with a cold tank is still planned. 644 B
+    // is therefore a best case that excludes the path most likely to exceed it.
+    //
+    // Cost: +512 B DRAM, taking the observed floor (heap_dram_min 1812 B at 11.2 h)
+    // to roughly 1300 B - still well clear of zero and of MIN_DRAM_BLOCK_WARNING.
+    constexpr uint32_t STACK_SIZE_BOILER_TEMP_TASK = 3584;
     constexpr uint8_t PRIORITY_BOILER_TEMP_TASK = 4;  // Same as BurnerControlTask
 
     // Configure watchdog for non-critical monitoring
