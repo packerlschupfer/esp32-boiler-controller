@@ -116,13 +116,18 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
     if (SRP::getTaskManager().startTask(
         SyslogInitializer::SyslogTask,
         "SyslogTask",
-        // 2026-09-17: 4096 -> 3072, funding the pump stack increase above at zero net
-        // DRAM cost. Measured on the device: 2064 B free of 4096 (~50% unused), and
-        // this mark is trustworthy because syslog runs continuously - unlike the idle
-        // burner/relay tasks, whose high-water marks would be stale and must NOT be
-        // trimmed from. Worst frame in this path is Syslog::sendInternal at 1088 B,
-        // which runs here (async subscriber task), not on the calling task's stack.
-        3072,  // Stack for EthernetUDP + message formatting
+        // Do NOT trim this to fund another task. It was briefly cut to 3072 on
+        // 2026-09-17 on the false premise that it had ~50% spare - that 2064 B figure
+        // actually belonged to LogSub, the Logger library's subscriber task, which is
+        // a different task entirely. SyslogTask does not even appear in a task dump:
+        // syslogEnabled defaults false (SYSLOG_ENABLED_DEFAULT), so this task runs
+        // once, hits the disabled branch in SyslogInitializer::SyslogTask and calls
+        // vTaskDelete(NULL), releasing its stack. Trimming it therefore frees nothing
+        // at steady state - and syslogEnabled is settable at runtime via
+        // boiler/cmd/config/syslog_enabled, at which point the task becomes persistent
+        // and needs the full size for EthernetUDP plus Syslog::sendInternal's 1088 B
+        // frame. Restored to 4096.
+        4096,  // Stack for EthernetUDP + message formatting
         nullptr,
         1,  // Low priority
         syslogWdtConfig)) {
@@ -331,12 +336,23 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     // 160 B, so there is no demand-side saving available short of removing logging
     // from a safety-relevant task.
     //
-    // 2560 rather than the configured 3072 purely for DRAM budget: +1024 B here is
-    // funded exactly by trimming SyslogTask 4096 -> 3072 below, keeping total DRAM
-    // unchanged. Free DRAM was 4608 B with a 476 B floor, so spending a net 1024 B
-    // would push the largest free block under MIN_DRAM_BLOCK_WARNING (2560). Raising
-    // these to the profiled 3072 needs another 1024 B from somewhere - see the OTA
-    // task (3072 B), which is the obvious source if OTA is ever dropped.
+    // 2560 rather than the configured 3072 to limit the DRAM cost: this is +512 B per
+    // pump task, +1024 B total, and it is NOT funded by anything. An attempt to fund
+    // it by trimming SyslogTask below was withdrawn - that task self-deletes when
+    // syslog is disabled, so trimming it frees nothing (see the note there).
+    //
+    // Measured cost on the device, at matched 63-64 s uptime across the two builds:
+    // free DRAM 6380 -> 5668 B and largest free block 5108 -> 3828 B. Still above
+    // MIN_DRAM_BLOCK_WARNING (2560), but the DRAM floor observed on the previous
+    // firmware was 476 B under an ordinary Home Assistant polling burst, so that floor
+    // is now roughly 1 kB tighter. Watch heap_dram_min.
+    //
+    // Deliberate trade: a 288 B stack margin on a task that drives a pump is a worse
+    // failure (overflow, pumps in an arbitrary state) than a tighter heap floor, which
+    // the DRAM gate in HealthMonitor at least reports. Real funding for the remaining
+    // 512 B/task needed to reach the profiled 3072 would have to come from the OTA
+    // task (3072 B, persistent) or from LogSub, whose configured size should be
+    // checked before assuming it has room.
     constexpr uint32_t STACK_SIZE_PUMP_TASK = 2560;
     constexpr uint8_t PRIORITY_PUMP_TASK = 3;  // Same as control tasks
 
