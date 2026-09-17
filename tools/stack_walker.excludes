@@ -1,0 +1,51 @@
+# Project-specific graph adjustments for tools/stack_walker.py.
+#
+# Every entry needs a reason after '#' saying WHY and HOW TO RE-CHECK it - a
+# stale entry silently under-reports stack. Each fact below was verified in the
+# disassembly of the image it was written against, not inferred from names.
+#
+# Kinds:
+#   FUNC                    never runs in this firmware    -> cut from BOTH bounds
+#   cut: CALLER -> CALLEE   that call never happens        -> cut from BOTH bounds
+#   edge: CALLER -> CALLEE  a real call the tool can't see -> added to BOTH bounds
+#   failure: FUNC           only runs after a failure      -> cut from NOMINAL only
+#   once: FUNC              one-time initialisation        -> cut from NOMINAL only
+#
+# The worst-case bound keeps failure/once code, so it still answers "could error
+# handling overflow this task?". No-return panic/abort paths are excluded by the
+# tool itself and are not listed here.
+
+# --- never runs in this firmware ---------------------------------------------
+
+QueueManager::ManagedQueue::dropLowestPriorityItem  # the only two queues (MQTTTask.cpp, mqtt_high_priority / mqtt_normal_priority) are DROP_OLDEST; re-check: grep -rn 'overflowStrategy *=' src/
+
+# --- infeasible call edges ---------------------------------------------------
+
+cut: QueueManager::ManagedQueue::dropOldestItem -> log_write_impl  # LOG_ERROR only when itemSize > MAX_QUEUE_ITEM_SIZE (movi a12,0x200; bltu); both queues pass sizeof(MQTTPublishRequest) = 392 (movi 0x188); re-check if MQTTPublishRequest grows past 512
+
+cut: tlsf_walk_pool -> default_walker  # default_walker is substituted only for a NULL walker (bnez a3; l32r a3); the sole caller multi_heap_get_info_impl passes multi_heap_get_info_tlsf; re-check: callers of tlsf_walk_pool in the resolved graph
+cut: esp_cache_get_alignment -> esp_log  # logged only when the out-pointer is NULL (bnez a3); the sole caller esp_heap_adjust_alignment_to_hw passes a stack local (addi a5, a1, 28; mov.n a11, a5); re-check: callers of esp_cache_get_alignment
+cut: esp_cache_get_alignment -> esp_log_timestamp  # same NULL-pointer error branch as the esp_log call above
+# newlib grows a string stream only for asprintf-family streams: __ssprint_r tests
+# flags & (__SOPT|__SMBF) (movi a8, 0x480; beqz a9 -> plain memmove path) before
+# any allocator call, then bbci bit 10 picks __SOPT -> _malloc_r or __SMBF ->
+# _realloc_r (_free_r only when that realloc returns NULL). vsnprintf into a fixed
+# buffer - how every log call formats - sets neither flag. asprintf is linked but
+# has no resolved caller today; the cut is automatically skipped for any task that
+# can reach it. Re-check: grep the listing for asprintf-family symbols.
+cut-unless-reachable: __ssprint_r -> _realloc_r | asprintf  # dynamic-stream growth only; see block comment above
+cut-unless-reachable: __ssprint_r -> _malloc_r | asprintf  # __SOPT first-allocation branch; see block comment above
+cut-unless-reachable: __ssprint_r -> _free_r | asprintf  # realloc-failure branch; see block comment above
+
+edge: tlsf_walk_pool -> multi_heap_get_info_tlsf  # the walker that really runs, passed by multi_heap_get_info_impl (literal 0x4018de10); the tool attributes the callx to the conditional default instead
+
+# --- failure-only (nominal bound only) ---------------------------------------
+
+failure: MutexRetryHelper::escalateFailure  # called only when consecutiveFailures >= escalationThreshold && !escalated (MutexRetryHelper.cpp); re-check: grep -n 'escalateFailure(' src/utils/MutexRetryHelper.cpp
+failure: ErrorHandler::logError  # all 8 call sites are on error branches (init result.error(), failsafe trigger, sensor failure, relay interlock, NOT_INITIALIZED); re-check: grep -rn 'ErrorHandler::logError(' src/
+
+failure-cut: assert_valid_block -> ets_printf@rom  # heap-corruption assertion: out-of-pool block -> ets_printf then call8 abort (no return); in-bounds blocks retw. assert_valid_block itself runs on every free, so only this edge is failure-only; re-check: disassemble assert_valid_block
+
+# --- one-time initialisation (nominal bound only) ----------------------------
+
+once: SharedResourceManager::SharedResourceManager  # constructed under __cxa_guard_acquire in getInstance(), once system-wide at boot; re-check: disassemble SharedResourceManager::getInstance()
