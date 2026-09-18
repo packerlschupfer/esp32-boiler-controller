@@ -32,16 +32,30 @@ if [[ "${1:-}" == "--header" ]]; then echo "$HEADER"; exit 0; fi
 
 if [[ "${1:-}" == "--report" ]]; then
     [[ -f "$LOG" ]] || { echo "no log at $LOG yet"; exit 1; }
+    # Reports the STEP-DOWNS, not just the minimum. The question this tool exists to answer
+    # is "lazy one-off allocations that plateau, or a slow leak?", and that is visible in
+    # whether heap_dram (current free, not the minimum) keeps stepping down after the first
+    # half hour of boot churn. A reboot resets the baseline, so steps are only compared
+    # within a run - uptime going backwards starts a new one.
     awk -F, 'NR>1 && $5 != "" {
-        n++; if (min == "" || $5+0 < min+0) { min = $5; mt = $1; mu = $2 }
+        if (prev_up != "" && $2+0 < prev_up+0) { printf "  -- reboot --\n"; prev_dram="" }
+        if (prev_dram != "" && $3+0 != prev_dram+0) {
+            d = $3 - prev_dram
+            printf "  %s  up=%-6s heap_dram %s -> %s (%+d)\n", substr($1,1,19), $2, prev_dram, $3, d
+            if (d < 0) { lost += -d; steps++ }
+        }
+        n++; prev_dram=$3; prev_up=$2
+        if (min == "" || $5+0 < min+0) { min = $5; mt = $1; mu = $2 }
         if ($4+0 < 2560) low++
         last = $0
     } END {
         if (!n) { print "no samples"; exit }
-        printf "samples: %d\n", n
+        printf "\nsamples: %d\n", n
         printf "lowest heap_dram_min: %s B  (at %s, uptime %ss)\n", min, mt, mu
+        printf "heap_dram step-downs: %d, totalling %d B\n", steps+0, lost+0
         printf "samples with heap_dram_blk below MIN_DRAM_BLOCK_WARNING (2560): %d\n", low+0
         printf "latest: %s\n", last
+        if (steps+0 > 0) printf "\nNOTE: a step-down AFTER the first ~30 min of boot churn is held memory,\nnot a transient - heap_dram is current free, not a minimum. Steps that stop\narriving = lazy allocation; steps that keep arriving = investigate.\n"
     }' "$LOG"
     exit 0
 fi
