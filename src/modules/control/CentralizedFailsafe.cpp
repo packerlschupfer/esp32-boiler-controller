@@ -255,10 +255,19 @@ void CentralizedFailsafe::defaultBurnerFailsafe(FailsafeLevel level) {
 
 void CentralizedFailsafe::defaultPumpFailsafe(FailsafeLevel level) {
     if (level >= FailsafeLevel::EMERGENCY) {
-        // In emergency, keep pumps running to dissipate heat
+        // In emergency, keep pumps running to dissipate heat.
+        //
+        // F13: this MUST use the emergency setter, exactly as emergencyStop() does. The
+        // ordinary setRelayState() runs the full admission chain, so a pump that was
+        // switched off within the last SafetyConfig pumpProtectionMs (15 s default) has
+        // its ON command REJECTED by checkPumpProtection() - and a toggle inside the
+        // 150 ms rate-limit window is rejected one step earlier still. The refusal is
+        // silent from here: these calls bypass the relay-request event bits, so
+        // pumpRequestResendDue never retries them. The outcome was burner shut down,
+        // residual heat in the block and no circulation.
         LOG_WARN(TAG, "Emergency mode - keeping pumps active for heat dissipation");
-        RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::HEATING_PUMP), true);
-        RelayControlTask::setRelayState(RelayIndex::toPhysical(RelayIndex::WATER_PUMP), true);
+        RelayControlTask::setRelayStateEmergency(RelayIndex::toPhysical(RelayIndex::HEATING_PUMP), true);
+        RelayControlTask::setRelayStateEmergency(RelayIndex::toPhysical(RelayIndex::WATER_PUMP), true);
     } else if (level >= FailsafeLevel::SHUTDOWN) {
         // In shutdown, turn off pumps after delay
         LOG_INFO(TAG, "Shutdown - pumps will stop after cooldown");
