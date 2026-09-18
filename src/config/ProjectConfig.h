@@ -289,6 +289,46 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 #define STACK_SIZE_NETWORK_MONITOR_TASK  2048
 
 // ==========================
+// LOG_MODE_RELEASE is NOT a usable configuration
+// ==========================
+// LOG_MODE_RELEASE IS THE DEFAULT (see the mode block above: an env that defines no
+// log mode gets it), so this is not a dormant unused tier - it is what any new
+// environment silently inherits. esp32_test was compiling against it until 2026-09-18.
+//
+// Measured 2026-09-18. The release stack tier above was never validated on hardware,
+// and it is not merely untested - it is too small on most tasks, by two independent
+// methods that agree:
+//
+// 1. Against the MEASURED high-water marks from the debug_selective image (8ee1446),
+//    which are a GENEROUS lower bound for release: release removes only LOG_DEBUG and
+//    LOG_VERBOSE, while LOG_INFO/WARN/ERROR remain and each costs ~1312 B of stack.
+//    11 of 18 tasks have a release stack BELOW their already-measured peak -
+//    MQTTTask by 900 B, PersistentStorage by 324, OTATask by 264, MB8ART by 260,
+//    TimerSched by 252, BurnerControl by 232, RelayControl by 160, RYN4Proc by 152,
+//    ANDRTF3 by 124, ControlTask by 96, HeatingControl by 68.
+//
+// 2. Against the static worst-case bounds from tools/stack_walker.py run on the
+//    release ELF (--stale-excludes-ok --elf .pio/build/esp32dev_usb_release/firmware.elf):
+//    13 of 18 exceed their stack, including BurnerControl (needs 3952, has 1536),
+//    WheaterControl (4000 vs 2048), PersistentStorage (4256 vs 1536), MQTTTask
+//    (3712 vs 1536), HeatingControl (3760 vs 1536) and RYN4Proc - the task that
+//    writes the relays - at 2944 vs 1536.
+//
+// Sizing the tier properly needs roughly +18 kB of DRAM. The debug build measures
+// about 5 kB free with a 4 kB largest block, so that memory does not exist: release
+// mode's premise, that much smaller stacks are safe because there is less logging, is
+// simply false here. The bounds are driven by the same call chains either way.
+//
+// So this is a hard stop rather than a comment. A release image would overflow the
+// burner, relay and pump-adjacent task stacks on a live gas boiler. Until the tier is
+// re-sized against measurements from a release build that has actually run, do not
+// flash one. Define ALLOW_UNVALIDATED_RELEASE_STACKS to build anyway - for bench work
+// on hardware that is not connected to a boiler, never for the real device.
+#if defined(LOG_MODE_RELEASE) && !defined(ALLOW_UNVALIDATED_RELEASE_STACKS)
+#error "LOG_MODE_RELEASE stacks are measurably too small (11/18 tasks below their measured debug peak; 13/18 above their static bound). See the comment in ProjectConfig.h. Define ALLOW_UNVALIDATED_RELEASE_STACKS for bench-only builds."
+#endif
+
+// ==========================
 // Stack-size floor (compile-time)
 // ==========================
 // TaskManager::startTask()/startTaskPinned() REJECT any request below

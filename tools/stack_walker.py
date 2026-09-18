@@ -667,9 +667,20 @@ def deepest(img, root, excluded, cut_edges=frozenset(),
 
 
 def parse_root(spec):
+    """NAME | NAME:STACK | NAME:STACK:FREE
+
+    NAME:STACK (no measured peak) answers the pre-flash question: does the static
+    bound fit a configured stack? That is the only form available for a build that
+    has never run - a release image, or any change not yet flashed - and passing a
+    fake FREE of 0 instead would read as "measured used == stack" and trip the
+    bound-violated check. Names can contain ':' (C++ scope), so a trailing field is
+    only treated as a number when it is entirely digits."""
     parts = spec.rsplit(":", 2)
     if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
         return parts[0], int(parts[1]), int(parts[2])
+    head, sep, tail = spec.rpartition(":")
+    if sep and tail.isdigit() and not head.endswith(":"):
+        return head, int(tail), None
     return spec, None, None
 
 
@@ -782,11 +793,14 @@ def analyse(img, spec, excluded, nominal_only, float_cut, failure_cuts,
             key=lambda d: d["function"]),
     }
     if stack is not None:
-        observed = stack - free
+        # free is None for the NAME:STACK form - a build that has never run, so there
+        # is no high-water mark to check the bound against. Everything except the
+        # measured-peak comparison still applies.
+        observed = None if free is None else stack - free
         w_hi = worst["predicted_used"][1]
         n_hi = nominal["predicted_used"][1]
         f_hi = float_free["predicted_used"][1]
-        if observed > n_hi:
+        if observed is not None and observed > n_hi:
             verdict = ("BOUND VIOLATED - observed exceeds the nominal bound: a failure/once "
                        "cut removed a path that actually ran, or a call edge is missing")
         elif w_hi <= stack:
@@ -798,10 +812,12 @@ def analyse(img, spec, excluded, nominal_only, float_cut, failure_cuts,
                        "(_dtoa_r) - check this task's %f/%e/%g log calls")
         else:
             verdict = "STATIC BOUND EXCEEDS STACK even without float formatting - inspect the nominal path"
-        result.update(stack_size=stack, observed_used=observed, bound_holds=observed <= n_hi,
+        result.update(stack_size=stack,
                       headroom_worst=stack - w_hi, headroom_nominal=stack - n_hi,
-                      headroom_float_free=stack - f_hi, verdict=verdict,
-                      observed_implies_float=observed > f_hi)
+                      headroom_float_free=stack - f_hi, verdict=verdict)
+        if observed is not None:
+            result.update(observed_used=observed, bound_holds=observed <= n_hi,
+                          observed_implies_float=observed > f_hi)
     return result
 
 
@@ -826,8 +842,12 @@ def print_report(r, show_path, show_unresolved):
         print(f"  worst case runs through {via['kind']} code: {via['function'][:80]}")
     if "observed_used" in r:
         print(f"  observed peak used          {r['observed_used']} B of {r['stack_size']}")
+    if "verdict" in r:
         flag = "** " if r["verdict"].startswith(("BOUND", "STATIC")) else ""
         print(f"  verdict: {flag}{r['verdict']}")
+        if "observed_used" not in r:
+            print("  (static only - this build has no measured peak, so the bound is "
+                  "unchecked against hardware)")
         if r.get("observed_implies_float") and r["bound_holds"]:
             print("  note: the observed peak is above the no-float bound, so this task has "
                   "formatted a float on a deep path")
@@ -866,6 +886,13 @@ def main():
                "to check the bound against a measured peak.")
     ap.add_argument("roots", nargs="*", help="task entry function(s)")
     ap.add_argument("--elf", default=DEFAULT_ELF)
+    ap.add_argument("--stale-excludes-ok", action="store_true",
+        help="downgrade stale stack_walker.excludes entries from a fatal error to a "
+             "listed warning. For validating a DIFFERENT build environment: the "
+             "excludes were verified against esp32dev_usb_debug_selective, and an "
+             "entry can legitimately not apply to another log mode (a cut whose "
+             "LOG_* call compiles away has no edge to cut). Never use this on the "
+             "primary env - there the hard failure is what catches rot.")
     ap.add_argument("--rom-elf", default=os.path.expanduser(
         "~/.platformio/packages/tool-esp-rom-elfs/esp32_rev0_rom.elf"),
         help="ROM image for calls into mask ROM ('' to disable)")
@@ -915,16 +942,30 @@ def main():
     failure_cuts = set()          # (caller, callee) edges cut from the nominal bound only
     conditional_cuts = []         # (edge pairs, guard addrs, description), decided per task
 
+    stale_entries = []            # (lineno, spec, why) tolerated under --stale-excludes-ok
+
+    def stale(lineno, spec, why):
+        """A .excludes entry that does not match this image.
+
+        Fatal by default: a stale entry silently under-reports stack, which is the
+        one failure mode this file must not have. Tolerated only when the caller
+        has said they are deliberately pointing the tool at another build
+        environment, and even then every skipped entry is listed in the report."""
+        if args.stale_excludes_ok:
+            stale_entries.append((lineno, spec, why))
+            return None
+        die(f"{xfile}:{lineno}: {spec!r} {why}")
+
     def edge_pairs(spec, lineno):
         caller, sep, callee = spec.partition("->")
         if not sep:
             die(f"{xfile}:{lineno}: expected CALLER -> CALLEE in {spec!r}")
         ca, cb = img.lookup(caller.strip()), set(img.lookup(callee.strip()))
         if not ca or not cb:
-            die(f"{xfile}:{lineno}: unknown function in {spec!r}")
+            return stale(lineno, spec, "names a function this image does not have")
         pairs = {(a, b) for a in ca for b in img.funcs[a].edges if b in cb}
         if not pairs:
-            die(f"{xfile}:{lineno}: {spec!r} matches no existing call edge - stale entry?")
+            return stale(lineno, spec, "matches no existing call edge - stale entry?")
         return pairs
     xfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stack_walker.excludes")
     if not args.no_project_excludes and os.path.exists(xfile):
@@ -945,7 +986,10 @@ def main():
                 if kind == "failure-cut":
                     # One call that happens only on a failure (e.g. a print right
                     # before abort) inside a function that otherwise runs normally.
-                    failure_cuts |= edge_pairs(body, lineno)
+                    pairs = edge_pairs(body, lineno)
+                    if pairs is None:
+                        continue  # stale under --stale-excludes-ok
+                    failure_cuts |= pairs
                     project_excludes.append((kind, body, reason))
                     continue
                 if kind == "cut-unless-reachable":
@@ -960,7 +1004,10 @@ def main():
                         if not hits:
                             die(f"{xfile}:{lineno}: unknown guard function {g.strip()!r}")
                         guards.update(hits)
-                    conditional_cuts.append((edge_pairs(spec, lineno), guards, body))
+                    pairs = edge_pairs(spec, lineno)
+                    if pairs is None:
+                        continue  # stale under --stale-excludes-ok
+                    conditional_cuts.append((pairs, guards, body))
                     project_excludes.append((kind, body, reason))
                     continue
                 if kind == "edge":
@@ -968,7 +1015,12 @@ def main():
                     # in by the caller). Added to both bounds.
                     caller, sep, callee = body.partition("->")
                     ca, cb = img.lookup(caller.strip()), img.lookup(callee.strip())
-                    if not sep or len(ca) != 1 or len(cb) != 1:
+                    if not sep:
+                        die(f"{xfile}:{lineno}: edge needs one CALLER -> one CALLEE: {body!r}")
+                    if len(ca) != 1 or len(cb) != 1:
+                        if stale(lineno, body,
+                                 "edge endpoints missing or ambiguous in this image") is None:
+                            continue
                         die(f"{xfile}:{lineno}: edge needs one CALLER -> one CALLEE: {body!r}")
                     img.funcs[ca[0]].edges.add(cb[0])
                     project_excludes.append((kind, body, reason))
@@ -979,18 +1031,23 @@ def main():
                         die(f"{xfile}:{lineno}: cut needs CALLER -> CALLEE")
                     ca, cb = img.lookup(caller.strip()), set(img.lookup(callee.strip()))
                     if not ca or not cb:
-                        die(f"{xfile}:{lineno}: unknown function in {body!r}")
+                        if stale(lineno, body, "names a function this image does not have") is None:
+                            continue
                     removed = 0
                     for a in ca:
                         before = len(img.funcs[a].edges)
                         img.funcs[a].edges -= cb
                         removed += before - len(img.funcs[a].edges)
                     if not removed:
-                        die(f"{xfile}:{lineno}: {body!r} matches no existing call edge - stale entry?")
+                        if stale(lineno, body,
+                                 "matches no existing call edge - stale entry?") is None:
+                            continue
                 else:
                     addrs = img.lookup(body)
                     if not addrs:
-                        die(f"{xfile}:{lineno}: no function named {body!r}")
+                        if stale(lineno, body,
+                                 "names a function this image does not have") is None:
+                            continue
                     if kind == "unreachable":
                         excluded.update(addrs)
                     else:
@@ -1025,6 +1082,8 @@ def main():
         json.dump({"model_notes": model["notes"],
                    "project_excludes": [{"kind": k, "entry": b, "reason": r}
                                         for k, b, r in project_excludes],
+                   "skipped_excludes": [{"line": n, "entry": e, "why": w}
+                                        for n, e, w in stale_entries],
                    "command_line_excludes": args.exclude,
                    "tasks": results}, sys.stdout, indent=2)
         print()
@@ -1033,6 +1092,12 @@ def main():
             print(f"note: {note}")
         for kind, body, reason in project_excludes:
             print(f"project {kind}: {body}  -- {reason}")
+        for lineno, spec, why in stale_entries:
+            print(f"SKIPPED stack_walker.excludes:{lineno}: {spec}  -- {why}")
+        if stale_entries:
+            print(f"NOTE: {len(stale_entries)} exclusion(s) skipped via --stale-excludes-ok. "
+                  "Each one makes the bound MORE pessimistic, never less, so a 'fits' "
+                  "verdict still holds - but re-verify any entry you intend to keep.")
         for name in args.exclude:
             print(f"command-line exclude: {name}")
         for r in results:

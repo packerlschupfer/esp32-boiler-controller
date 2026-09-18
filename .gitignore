@@ -25,3 +25,7 @@ __pycache__/
 # Claude AI files
 .claude-commands-config.json
 .claude/
+
+# Device-specific DRAM sampling history from tools/watch_dram.sh - grows over time
+# and is specific to one boiler, so it is evidence, not source.
+tools/monitoring/dram_history.csv
