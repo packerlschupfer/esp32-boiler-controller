@@ -804,8 +804,16 @@ void handleDiagnosticsCommand(const char* payload) {
     flush();
 
     if (truncated) {
+        // PRIORITY_MEDIUM, deliberately NOT LOW. Truncation is usually caused by the
+        // publish queue dropping LOW-priority chunks once utilisation reaches 50%, so
+        // announcing it at LOW made the marker the most likely casualty of the very
+        // condition it reports - the receiver then saw a dump with silent holes and no
+        // way to detect them, because the chunks carry no index. Observed on the device
+        // 2026-09-18: a 32-task dump arrived with 27 tasks, missing both pump tasks and
+        // RYN4Proc, and no "truncated" marker. MEDIUM rather than HIGH so it cannot push
+        // sensor data out of the way; the payload is 9 bytes and only sent on failure.
         MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "truncated", 0, false,
-                          MQTTPriority::PRIORITY_LOW);
+                          MQTTPriority::PRIORITY_MEDIUM);
     }
     LOG_INFO(TAG_CMD, "Diagnostics '%s': %u chunk(s)%s", payload,
              static_cast<unsigned>(chunks), truncated ? " (truncated)" : "");

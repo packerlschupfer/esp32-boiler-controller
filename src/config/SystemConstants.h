@@ -440,6 +440,32 @@ namespace SystemConstants {
         // safely log even once more.
         constexpr size_t LOW_STACK_WARN_BYTES = 512;
 
+        // Tasks whose stack size we do not own. IDLE0/IDLE1, ipc0/ipc1, Tmr Svc and
+        // esp_timer are created by FreeRTOS/ESP-IDF with framework-fixed sizes and run
+        // deliberately tight - IDLE0 sits at ~456 B and ipc1 at ~480 B on this build, both
+        // under LOW_STACK_WARN_BYTES. Warning about them is pure noise: there is no action
+        // to take, and a report that cries wolf about two untouchable tasks is how a real
+        // 288 B margin on a pump task gets scrolled past. Applies to the WARNING only; the
+        // tasks still appear in every listing with their true figures.
+        inline bool isFrameworkOwnedStack(const char* taskName) {
+            if (!taskName) {
+                return false;
+            }
+            static const char* const kFrameworkTasks[] = {
+                "IDLE", "ipc", "Tmr Svc", "esp_timer"
+            };
+            for (const char* prefix : kFrameworkTasks) {
+                size_t i = 0;
+                while (prefix[i] != '\0' && taskName[i] == prefix[i]) {
+                    i++;
+                }
+                if (prefix[i] == '\0') {
+                    return true;  // taskName starts with prefix
+                }
+            }
+            return false;
+        }
+
         // Memory thresholds
         constexpr size_t MIN_FREE_HEAP_CRITICAL = 10000;   // 10KB
         constexpr size_t MIN_FREE_HEAP_WARNING = 20000;    // 20KB

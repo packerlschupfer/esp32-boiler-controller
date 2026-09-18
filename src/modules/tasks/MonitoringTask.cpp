@@ -731,7 +731,8 @@ static void logAllTasks() {
 
         // Check for low stack
         [[maybe_unused]] const char* warning = "";
-        if (stackFreeBytes < SystemConstants::System::LOW_STACK_WARN_BYTES) {
+        if (stackFreeBytes < SystemConstants::System::LOW_STACK_WARN_BYTES &&
+            !SystemConstants::System::isFrameworkOwnedStack(taskStatusArray[i].pcTaskName)) {
             warning = " !LOW!";
             lowStackCount++;
             if (stackFreeBytes < worstStackFree) {

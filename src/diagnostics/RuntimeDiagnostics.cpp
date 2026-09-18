@@ -127,20 +127,32 @@ void RuntimeDiagnostics::dumpTaskInfo(OutputCallback outputCb) {
             default: stateStr = "?"; break;
         }
         
-        int coreId = xTaskGetCoreID(taskStatusArray[i].xHandle);
-        
-        output("%-16s %5s %8d %10d %6d",
+        // tskNO_AFFINITY is INT_MAX, which printed as a raw "2147483647" in the Core
+        // column for every unpinned task (HeatingControl, ControlTask, WheaterControl,
+        // emac_rx, Tmr Svc). MonitoringTask already renders it as "ANY"; match that.
+        const int coreId = xTaskGetCoreID(taskStatusArray[i].xHandle);
+        char coreStr[12];  // worst-case "%d" of an int is 11 chars + NUL
+        if (coreId == tskNO_AFFINITY) {
+            snprintf(coreStr, sizeof(coreStr), "ANY");
+        } else {
+            snprintf(coreStr, sizeof(coreStr), "%d", coreId);
+        }
+
+        output("%-16s %5s %8d %10d %6s",
                taskStatusArray[i].pcTaskName,
                stateStr,
                taskStatusArray[i].uxCurrentPriority,
                taskStatusArray[i].usStackHighWaterMark * sizeof(StackType_t),
-               coreId);
+               coreStr);
                
         // Warn about low stack
         // Same threshold as MonitoringTask::logAllTasks(); this site used 256 B, so a
-        // task could read low in one report and fine in the other.
+        // task could read low in one report and fine in the other. Framework-owned stacks
+        // are excluded from the WARNING for the reason given at isFrameworkOwnedStack();
+        // they are still listed above with their real figures.
         if (taskStatusArray[i].usStackHighWaterMark * sizeof(StackType_t) <
-            SystemConstants::System::LOW_STACK_WARN_BYTES) {
+                SystemConstants::System::LOW_STACK_WARN_BYTES &&
+            !SystemConstants::System::isFrameworkOwnedStack(taskStatusArray[i].pcTaskName)) {
             output("  WARNING: Low stack!");
         }
     }
