@@ -216,7 +216,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
         return;
     }
 
-    LOG_INFO(TAG, "Timers started - Health: %ums, Detailed: %ums",
+    LOG_INFO(TAG, "Timers started - Health: %lums, Detailed: %lums",
              HEALTH_CHECK_INTERVAL_MS, DETAILED_MONITOR_INTERVAL_MS);
 
     // Mark event aggregator as ready - timer callbacks can now safely access it
@@ -270,7 +270,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
         
         // Use ESP_LOG directly for critical messages to bypass custom logger
         if (loopCount < 10) {
-            LOG_DEBUG(TAG, "Loop %u @ %lu ms", loopCount, millis());
+            LOG_DEBUG(TAG, "Loop %lu @ %lu ms", loopCount, millis());
         }
         
         // Wait for any monitoring event with shorter timeout
@@ -321,7 +321,7 @@ void MonitoringTaskEventDriven(void* pvParameters) {
             // H14: Use standardized heap thresholds - warn at 2x warning threshold for early notice
             constexpr uint32_t EARLY_WARNING = SystemConstants::System::MIN_FREE_HEAP_WARNING * 2;
             if (freeHeap < EARLY_WARNING || minFreeHeap < SystemConstants::System::MIN_FREE_HEAP_WARNING) {
-                LOG_WARN(TAG, "Low heap! Free: %u, Min: %u",
+                LOG_WARN(TAG, "Low heap! Free: %lu, Min: %lu",
                          freeHeap, minFreeHeap);
             }
             
@@ -652,7 +652,7 @@ static void logCompactStatus() {
     [[maybe_unused]] uint32_t minutes = (uptimeMs % 3600000) / 60000;
     [[maybe_unused]] uint32_t seconds = (uptimeMs % 60000) / 1000;
 
-    LOG_DEBUG(TAG, "Up %dd %02d:%02d:%02d", days, hours, minutes, seconds);
+    LOG_DEBUG(TAG, "Up %lud %02lu:%02lu:%02lu", days, hours, minutes, seconds);
 
     // Get task count
     [[maybe_unused]] UBaseType_t taskCount = uxTaskGetNumberOfTasks();

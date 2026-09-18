@@ -247,8 +247,8 @@ void RelayControlTask::taskFunction(void* pvParameters) {
         static TickType_t lastLogTime = 0;
         TickType_t now = xTaskGetTickCount();
         if (now - lastLogTime > pdMS_TO_TICKS(10000)) {  // Log every 10 seconds
-            LOG_WARN(TAG, "Still waiting for RYN4 initialization (next check in %d seconds)...",
-                     pdTICKS_TO_MS(waitTime) / 1000);
+            LOG_WARN(TAG, "Still waiting for RYN4 initialization (next check in %lu seconds)...",
+                     static_cast<unsigned long>(pdTICKS_TO_MS(waitTime) / 1000));
             lastLogTime = now;
         }
     }

@@ -107,7 +107,7 @@ bool ErrorHandler::attemptMemoryRecovery() {
     size_t freeHeapAfter = ESP.getFreeHeap();
     int32_t recovered = static_cast<int32_t>(freeHeapAfter) - static_cast<int32_t>(freeHeapBefore);
 
-    LOG_INFO("MEMORY", "After: Free=%d, Recovered=%d bytes", freeHeapAfter, recovered);
+    LOG_INFO("MEMORY", "After: Free=%u, Recovered=%ld bytes", freeHeapAfter, recovered);
 
     // 6. Determine recovery success
     bool success = (freeHeapAfter >= SystemConstants::System::MIN_FREE_HEAP_WARNING);
@@ -175,10 +175,10 @@ void ErrorHandler::logError(const char* tag, SystemError error, const char* cont
     if (!rateLimit) {
         if (context) {
             LOG_ERROR(tag, "%s: %s (code: %d)", context, errorToString(error), 
-                     static_cast<uint32_t>(error));
+                     static_cast<int>(error));
         } else {
             LOG_ERROR(tag, "Error: %s (code: %d)", errorToString(error), 
-                     static_cast<uint32_t>(error));
+                     static_cast<int>(error));
         }
         ErrorLogFRAM::logError(error, nullptr, context);
         return;
@@ -193,21 +193,21 @@ void ErrorHandler::logError(const char* tag, SystemError error, const char* cont
         if (rateLimit->count > 1) {
             if (context) {
                 LOG_ERROR(tag, "%s: %s (code: %d) [occurrence %lu, interval %lu ms]", 
-                         context, errorToString(error), static_cast<uint32_t>(error),
+                         context, errorToString(error), static_cast<int>(error),
                          rateLimit->count, rateLimit->logInterval);
             } else {
                 LOG_ERROR(tag, "Error: %s (code: %d) [occurrence %lu, interval %lu ms]", 
-                         errorToString(error), static_cast<uint32_t>(error),
+                         errorToString(error), static_cast<int>(error),
                          rateLimit->count, rateLimit->logInterval);
             }
         } else {
             // First occurrence - log normally
             if (context) {
                 LOG_ERROR(tag, "%s: %s (code: %d)", context, errorToString(error), 
-                         static_cast<uint32_t>(error));
+                         static_cast<int>(error));
             } else {
                 LOG_ERROR(tag, "Error: %s (code: %d)", errorToString(error), 
-                         static_cast<uint32_t>(error));
+                         static_cast<int>(error));
             }
         }
         
@@ -238,10 +238,10 @@ void ErrorHandler::clearErrorRateLimit(SystemError error) {
 void ErrorHandler::logCriticalError(SystemError error, const char* details) {
     if (details) {
         LOG_ERROR("CRITICAL", "Critical error: %s - %s (code: %d)", 
-                 errorToString(error), details, static_cast<uint32_t>(error));
+                 errorToString(error), details, static_cast<int>(error));
     } else {
         LOG_ERROR("CRITICAL", "Critical error: %s (code: %d)", 
-                 errorToString(error), static_cast<uint32_t>(error));
+                 errorToString(error), static_cast<int>(error));
     }
     
     // Log to persistent storage

@@ -629,12 +629,12 @@ void PersistentStorageTask(void* pvParameters) {
     if (hysteresis_i32 == 0) hysteresis_i32 = 5;    // 0.5°C default (struct default)
     settings.targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
     settings.heating_hysteresis = static_cast<Temperature_t>(hysteresis_i32);
-    LOG_INFO(TAG, "Room control params after load: targetTemp=%d hysteresis=%d",
+    LOG_INFO(TAG, "Room control params after load: targetTemp=%ld hysteresis=%ld",
              targetTemp_i32, hysteresis_i32);
 
-    LOG_INFO(TAG, "Temperature limits after load: burner[%d-%d] heating[%d-%d] water[%d-%d]",
+    LOG_INFO(TAG, "Temperature limits after load: burner[%ld-%ld] heating[%ld-%ld] water[%ld-%ld]",
              burner_low_i32, burner_high_i32, heating_low_i32, heating_high_i32, water_low_i32, water_high_i32);
-    LOG_INFO(TAG, "Wheater tank limits after load: low=%d high=%d safeHigh=%d safeLow=%d",
+    LOG_INFO(TAG, "Wheater tank limits after load: low=%ld high=%ld safeHigh=%ld safeLow=%ld",
              tankLow_i32, tankHigh_i32, tankSafeHigh_i32, tankSafeLow_i32);
 
     parametersLoaded.store(true);
