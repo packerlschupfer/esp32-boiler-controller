@@ -112,11 +112,21 @@ bool BurnerRequestManager::atomicUpdateBits(EventBits_t setBits, EventBits_t cle
         }
 
         // F9: this whole function already runs under requestMutex (see caller),
-        // which serializes writers. The previous function-local portMUX_TYPE
-        // provided NO additional exclusion - a stack-local spinlock excludes no
-        // other task/core - and, worse, wrapped xEventGroupSetBits (which calls
-        // vTaskSuspendAll internally) inside portENTER_CRITICAL, an ESP-IDF
-        // violation that can trip configASSERT. It is removed. The clear-then-set
+        // which serializes writers, so the previous function-local portMUX_TYPE
+        // added nothing on top of that mutex - and, worse, it wrapped
+        // xEventGroupSetBits (which calls vTaskSuspendAll internally) inside
+        // portENTER_CRITICAL, an ESP-IDF violation that can trip configASSERT.
+        // It is removed.
+        //
+        // CORRECTION 2026-09-18: this comment used to justify the removal with
+        // "a stack-local spinlock excludes no other task/core". That premise is
+        // FALSE on this port and must not be reused. portENTER_CRITICAL ->
+        // vPortEnterCritical -> xPortEnterCriticalTimeout MASKS INTERRUPTS on the
+        // calling core before taking the lock (portmacro.h:552,
+        // XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL)), and every task here is pinned to
+        // core 1, so a stack-local mux does suppress preemption by the other
+        // writers. The removal is correct because of requestMutex and the
+        // ESP-IDF violation above, not because the spinlock was a no-op. The clear-then-set
         // window is only observable to the raw-bit readers, and every reachable
         // outcome of a torn read is fail-safe (transient demand-drop -> burner
         // coasts OFF, self-corrects next cycle); the CHANGED edge notification

@@ -310,7 +310,11 @@ void RYN4ProcessingTask(void* parameter) {
 
     ryn4ProcessingTaskHandle = xTaskGetCurrentTaskHandle();
 
-    LOG_INFO(TAG, "Started C%d Stk:%d", xPortGetCoreID(), uxTaskGetStackHighWaterMark(NULL) * 4);
+    // uxTaskGetStackHighWaterMark returns BYTES on ESP32 (portSTACK_TYPE is uint8_t,
+    // so sizeof(StackType_t) == 1). The "* 4" this used to carry reported 4x the real
+    // free stack - a 400 B margin printed as "Stk:1600". Corrected 2026-09-18.
+    LOG_INFO(TAG, "Started C%d Stk:%d", xPortGetCoreID(),
+             uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
 
     // Register with watchdog
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::enabled(

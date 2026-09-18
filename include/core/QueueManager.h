@@ -104,31 +104,16 @@ public:
     // Get singleton instance
     static QueueManager& getInstance();
 
-    #ifdef UNIT_TEST
-    /**
-     * @brief Reset singleton for testing - NOT IMPLEMENTED
-     *
-     * DESIGN NOTE: QueueManager manages FreeRTOS queues used throughout the system
-     * for inter-task communication. Resetting this would be extremely dangerous:
-     *
-     * 1. Managed queues contain active FreeRTOS queue handles
-     * 2. Tasks may be blocked on queue receive/send operations
-     * 3. Queues may contain messages that haven't been consumed
-     * 4. Circuit breakers and metrics track time-sensitive state
-     * 5. Emergency mode affects system-wide queue behavior
-     *
-     * RECOMMENDED APPROACH: Use mocks/test doubles in unit tests:
-     *   - Create mock queues for testing
-     *   - Test components independently without real FreeRTOS queues
-     *   - Use fake/spy patterns to verify queue operations
-     *
-     * For integration tests that need real queues, restart the test process.
-     */
-    static void resetForTesting() {
-        // Intentionally not implemented - see comment above
-        // Use mocks in tests instead
-    }
-    #endif
+    // NO resetForTesting(). QueueManager owns live FreeRTOS queue handles that tasks may
+    // be blocked on, holding unconsumed messages, with time-sensitive circuit-breaker and
+    // metrics state - resetting it is not safely implementable. There used to be an empty
+    // stub here under #ifdef UNIT_TEST, which is worse than nothing: a caller compiles
+    // cleanly, believes the singleton was reset, and gets silence. Removed 2026-09-18 for
+    // the same reason as the ModbusCoordinator and SharedResourceManager stubs in 96b3634,
+    // which missed this byte-identical third copy.
+    //
+    // Use mocks or test doubles instead; for integration tests needing real queues,
+    // restart the test process. See test/README.md's non-resetable singletons table.
 
     // Queue management
     std::shared_ptr<ManagedQueue> createQueue(const std::string& name, const QueueConfig& config);

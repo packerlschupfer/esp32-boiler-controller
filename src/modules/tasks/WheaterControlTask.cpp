@@ -117,7 +117,7 @@ void WheaterControlTask(void *parameter) {
     wheaterTaskHandle = xTaskGetCurrentTaskHandle();
 
     LOG_INFO(TAG, "Started (Event-Driven) - Core: %d", xPortGetCoreID());
-    LOG_INFO(TAG, "Stack high water mark: %d words", uxTaskGetStackHighWaterMark(NULL));
+    LOG_INFO(TAG, "Stack high water mark: %d bytes", uxTaskGetStackHighWaterMark(NULL));
     
     // Watchdog will be registered after initialization
     

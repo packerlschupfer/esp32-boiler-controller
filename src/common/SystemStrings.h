@@ -41,6 +41,6 @@ namespace SystemStrings {
     // Format strings for common patterns
     constexpr const char* FMT_FAILED_TO_CREATE = "Failed to create %s";
     constexpr const char* FMT_FAILED_TO_INIT = "Failed to initialize %s";
-    constexpr const char* FMT_TASK_STACK = "%s stack: %u words";
+    constexpr const char* FMT_TASK_STACK = "%s stack: %u bytes";  // HWM is bytes on ESP32
     constexpr const char* FMT_ERROR_CODE = "Error code: %d";
 }
