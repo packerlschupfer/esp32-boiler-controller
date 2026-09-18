@@ -30,11 +30,11 @@ SharedResourceManager creates 11 named event groups (see [Event Group Organizati
 | 13 | MQTT_COMMAND_ENABLED | MQTT commands enabled |
 | 14 | MQTT_REPORT_ENABLED | MQTT reporting enabled |
 | 15 | MQTT_OPERATIONAL | MQTT fully operational |
-| 16 | BURNER_OFF | Burner is off |
-| 17 | BURNER_HEATING_LOW | Burner on low for heating |
-| 18 | BURNER_HEATING_HIGH | Burner on high for heating |
-| 19 | BURNER_WATER_LOW | Burner on low for water |
-| 20 | BURNER_WATER_HIGH | Burner on high for water |
+| 16 | BURNER_OFF | UNUSED since cce02c8 - never set |
+| 17 | BURNER_HEATING_LOW | UNUSED since cce02c8 - never set |
+| 18 | BURNER_HEATING_HIGH | UNUSED since cce02c8 - never set |
+| 19 | BURNER_WATER_LOW | UNUSED since cce02c8 - never set |
+| 20 | BURNER_WATER_HIGH | UNUSED since cce02c8 - never set |
 | 21 | BURNER_ERROR | Burner in error state |
 | 22 | EMERGENCY_STOP | Emergency stop active |
 | 23 | WARNING | System warning active |
@@ -87,7 +87,7 @@ constexpr EventBits_t ANY_ERROR = ERROR_IGNITION | ERROR_FLAME_LOSS |
                                    ERROR_OVERHEAT | ERROR_PRESSURE;
 ```
 
-**Bits set by current firmware**: only `ERROR_PRESSURE` and `PRESSURE_OK` (MB8ARTTask, pressure alarm check) and `STATE_TIMEOUT` (BurnerControlTask 1 s timer). The other bits are defined but never set, and nothing reads `ERROR_PRESSURE`. The burner state is published in SystemState (`BURNER_ON`, `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH`, `BURNER_OFF`, `BURNER_ERROR`).
+**Bits set by current firmware**: only `ERROR_PRESSURE` and `PRESSURE_OK` (MB8ARTTask, pressure alarm check) and `STATE_TIMEOUT` (BurnerControlTask 1 s timer). The other bits are defined but never set, and nothing reads `ERROR_PRESSURE`. The burner state is published in SystemState as `BURNER_ON` (bit 7) only. `BURNER_OFF` and `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH` (bits 16-20) were removed in `cce02c8`: nothing tested them, and power level and mode are recoverable from the relay word (bit 1 `POWER_BOOST`, bit 2 `WATER_MODE`), which is what `rd`/`ra` on `boiler/error/context` carry. `BURNER_ERROR` (bit 21) survives, written by `BurnerStateMachine` and `CentralizedFailsafe`.
 
 **Usage Example** (BurnerControlTask main loop):
 ```cpp
@@ -360,8 +360,9 @@ EventBits_t bits = xEventGroupWaitBits(group, VALUE_CHANGED, pdTRUE, ...);
 
 3. BurnerStateMachine: IDLE → PRE_PURGE (2 s) → IGNITION → RUNNING_LOW/HIGH
    → Sets SystemState::BURNER_ON on entering RUNNING_LOW/HIGH
-   → BURNER_WATER_LOW/HIGH are set by BurnerControlTask::updateBurnerState(),
-     which only runs on a request change (often still BURNER_OFF at that time)
+   → No power-level or mode bit is set: BURNER_WATER_LOW/HIGH and
+     BURNER_HEATING_LOW/HIGH were removed in cce02c8. Read the power level and
+     mode from the relay word instead (POWER_BOOST, WATER_MODE)
 
 4. WaterPumpTask (PumpControlModule) follows SystemState::WATER_ON
    → Sets RelayRequest::WATER_PUMP_ON and SystemState::WATER_PUMP_ON
@@ -402,10 +403,11 @@ LOG_DEBUG(TAG, "Events received: 0x%06X", bits);
 ### Common Event Combinations
 
 ```cpp
-// Burner active for water heating at high power (SystemState group)
+// Burner active for water heating (SystemState group). There is no
+// BURNER_WATER_HIGH bit any more - cce02c8 removed bits 16-20; check the
+// POWER_BOOST relay for high power.
 EventBits_t expectedBits = SystemState::BURNER_ON |
-                           SystemState::WATER_ON |
-                           SystemState::BURNER_WATER_HIGH;
+                           SystemState::WATER_ON;
 
 // Any heating-related activity
 EventBits_t heatingMask = SystemState::HEATING_ON |

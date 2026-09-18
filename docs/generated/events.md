@@ -3,6 +3,13 @@ Generated: 2026-09-15 23:05:22
 
 Generated from `tools/event_config.yaml` by `tools/generate_events_zero_overhead.py`.
 
+> **This file is edited by hand in practice.** Both generators are print-only - they
+> report "Would write to: include/events/GeneratedEvents.h" and write nothing. That
+> header does not exist; the build uses the hand-maintained
+> `include/events/SystemEventsGenerated.h`. So neither this file nor the header is
+> actually regenerated, and edits here must be mirrored into `tools/event_config.yaml`
+> by hand (and vice versa) until the generator is wired up.
+
 ## Overview
 This system uses zero-overhead namespaced constants for event management.
 All constants compile to the same machine code as traditional #define macros.
@@ -29,12 +36,12 @@ All constants compile to the same machine code as traditional #define macros.
 | 13 | `MQTT_COMMAND_ENABLED` | MQTT commands enabled |
 | 14 | `MQTT_REPORT_ENABLED` | MQTT reporting enabled |
 | 15 | `MQTT_OPERATIONAL` | MQTT fully operational |
-| 16 | `BURNER_OFF` | Burner is off |
-| 17 | `BURNER_HEATING_LOW` | Burner on low for heating |
-| 18 | `BURNER_HEATING_HIGH` | Burner on high for heating |
-| 19 | `BURNER_WATER_LOW` | Burner on low for water |
-| 20 | `BURNER_WATER_HIGH` | Burner on high for water |
-| 21 | `BURNER_ERROR` | Burner in error state |
+| 16 | `BURNER_OFF` | **UNUSED since cce02c8** - never set; burner off = relay `BURNER_ENABLE` clear |
+| 17 | `BURNER_HEATING_LOW` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
+| 18 | `BURNER_HEATING_HIGH` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
+| 19 | `BURNER_WATER_LOW` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
+| 20 | `BURNER_WATER_HIGH` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
+| 21 | `BURNER_ERROR` | Burner in error state - set by `BurnerStateMachine`/`CentralizedFailsafe`, not `BurnerControlTask` |
 | 22 | `EMERGENCY_STOP` | Emergency stop active |
 | 23 | `WARNING` | System warning active |
 

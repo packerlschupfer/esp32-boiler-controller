@@ -375,8 +375,9 @@ BurnerStateMachine::update() (BurnerControlTask)
 │  └─ Current state: RUNNING_HIGH → ERROR (onEnterError() calls
 │     emergencyShutdown() again and records the ERROR entry time)
 ├─ SystemState::EMERGENCY_STOP is NOT set on this path
-├─ SystemState::BURNER_ERROR is set by BurnerControlTask's burner state bit
-│  update (ERROR and LOCKOUT map to BURNER_ERROR)
+├─ SystemState::BURNER_ERROR is set by BurnerStateMachine (onEnterError /
+│  onEnterLockout), not by BurnerControlTask - cce02c8 removed the burner
+│  state bit update, which also removed a periodic clear of this bit
 └─ CentralizedFailsafe::emergencyStop() is not called on this path
    (see Step 4 for the triggers that reach it)
 ```

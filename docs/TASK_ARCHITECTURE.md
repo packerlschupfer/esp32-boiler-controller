@@ -65,7 +65,7 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 - **Sensor Event Group** (waits): `FIRST_READ_COMPLETE`, `DATA_AVAILABLE` at startup; polls `BOILER_RETURN`, `WATER_TANK` and the `BOILER_OUTPUT/BOILER_RETURN/WATER_TANK_ERROR` bits whenever its request-bit wait ends (100 ms while running, 1 s, 3 s when idle), so in idle it can react up to 3 s after a read
 - **Burner Event Group** (sets/waits): `STATE_TIMEOUT`, `FLAME_STATE_CHANGED`, `PRESSURE_CHANGED`, `FLOW_CHANGED`, `SAFETY_EVENT`
 - **Burner Request Event Group** (waits): `HEATING`, `WATER`, `CHANGE_EVENT_BITS`, `TEMPERATURE_MASK`
-- **System State Event Group** (sets): `BURNER_OFF`, `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH`, `BURNER_ERROR`
+- **System State Event Group**: no longer sets any burner status bit. `BURNER_OFF`, `BURNER_HEATING_LOW/HIGH` and `BURNER_WATER_LOW/HIGH` (bits 16-20) were removed in `cce02c8` - they had no reader, and the same information is carried by the relay word (bit 0 `BURNER_ENABLE`, bit 1 `POWER_BOOST`, bit 2 `WATER_MODE`). `BURNER_ERROR` (bit 21) still exists but is written by `BurnerStateMachine` and `CentralizedFailsafe`, not here
 - **Control Requests Event Group** (waits): Various control commands
 
 **Mutexes**:

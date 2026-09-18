@@ -23,12 +23,14 @@ event_groups:
       - { name: MQTT_COMMAND_ENABLED, bit: 13, desc: "MQTT commands enabled" }
       - { name: MQTT_REPORT_ENABLED, bit: 14, desc: "MQTT reporting enabled" }
       - { name: MQTT_OPERATIONAL, bit: 15, desc: "MQTT fully operational" }
-      # Burner states (16-21)
-      - { name: BURNER_OFF, bit: 16, desc: "Burner is off" }
-      - { name: BURNER_HEATING_LOW, bit: 17, desc: "Burner on low for heating" }
-      - { name: BURNER_HEATING_HIGH, bit: 18, desc: "Burner on high for heating" }
-      - { name: BURNER_WATER_LOW, bit: 19, desc: "Burner on low for water" }
-      - { name: BURNER_WATER_HIGH, bit: 20, desc: "Burner on high for water" }
+      # Burner states (16-21). Bits 16-20 are UNUSED: cce02c8 deleted the only
+      # writer. Kept as definitions so bit numbers stay stable. BURNER_ERROR (21)
+      # is still written by BurnerStateMachine and CentralizedFailsafe.
+      - { name: BURNER_OFF, bit: 16, desc: "UNUSED since cce02c8 - never set; burner off = relay BURNER_ENABLE clear" }
+      - { name: BURNER_HEATING_LOW, bit: 17, desc: "UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays" }
+      - { name: BURNER_HEATING_HIGH, bit: 18, desc: "UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays" }
+      - { name: BURNER_WATER_LOW, bit: 19, desc: "UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays" }
+      - { name: BURNER_WATER_HIGH, bit: 20, desc: "UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays" }
       - { name: BURNER_ERROR, bit: 21, desc: "Burner in error state" }
       # System status (22-23)
       - { name: EMERGENCY_STOP, bit: 22, desc: "Emergency stop active" }
