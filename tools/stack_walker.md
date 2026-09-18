@@ -140,7 +140,7 @@ the pump and BoilerTempCtrl marks were independently identical at 11 h.
 | MB8ARTProcessingTask | 1488 | 2096 | 2096 | 2096 | 3072 | no | fits |
 | MonitoringTask | 1732 | 3232 | 3536 | 3536 | 3584 | yes | fits |
 | MQTTTask | 2436 | 3008 | 3312 | 3360 | 3584 | yes | fits |
-| NTPTask | 2784 | 2512 | 2816 | 2816 | 3072 | yes | fits |
+| NTPTask | 2784 | 2512 | 2816 | 2816 | 3584 | yes | fits |
 | OTATask | 1800 | 3008 | 3008 | 3008 | 3072 | no | fits |
 | PersistentStorageTask | 1860 | 4272 | 4272 | 4272 | 5120 | no | fits |
 | RelayControlTask | 1696 | 2384 | 2384 | 2688 | 4096 | no | fits |

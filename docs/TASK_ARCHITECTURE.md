@@ -40,7 +40,7 @@ The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (ta
 | OTATask | 1 | 3072 | 1 | Over-the-air firmware updates |
 | TimerSchedulerTask | 2 | 3072 | 0 | Schedule management |
 | PersistentStorageTask | 2 | 5120 | Any | NVS parameter persistence |
-| NTPTask | 2 | 3072 | 1 | Time synchronization |
+| NTPTask | 2 | 3584 | 1 | Time synchronization |
 | SyslogTask | 1 | 4096 | Any | Remote syslog |
 
 *Only `LOG_MODE_DEBUG_SELECTIVE` is a buildable, hardware-validated configuration as of 2026-09-18: `LOG_MODE_DEBUG_FULL` and `LOG_MODE_RELEASE` raise a `#error` in `ProjectConfig.h` because their task stacks are measurably too small. Treat any DEBUG_FULL or RELEASE figure below as historical, not as a target.*

@@ -242,7 +242,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                  // Re-check with the walker before touching it.
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // H3: Safety-critical +512 (was 3584)
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Dec 2025: was 4096, had 2568 free
-    #define STACK_SIZE_NTP_TASK              3072  // 2026-09-18: was a hardcoded 4096 in main.cpp.
+    #define STACK_SIZE_NTP_TASK              3584  // 2026-09-18: was a hardcoded 4096 in main.cpp.
                                                    // Trimmed to FUND the RYN4Proc raise, which had
                                                    // pushed heap_dram_blk to 2548 - just under
                                                    // MIN_DRAM_BLOCK_WARNING (2560). Safe to trim
@@ -250,7 +250,19 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                    // measured peak 2784 vs static bound 2816, a
                                                    // 32 B gap, so there is no hidden depth here -
                                                    // the opposite of RYN4Proc, whose deep path had
-                                                   // never run. 3072 leaves 256 B above the bound.
+                                                   // never run.
+                                                   //
+                                                   // FIRST TRIED 3072 AND THAT WAS TOO FAR. It
+                                                   // respects the bound (256 B above it) but the
+                                                   // device then reported 360 B FREE, under
+                                                   // LOW_STACK_WARN_BYTES (512), so the live
+                                                   // firmware raised a low-stack warning - a real
+                                                   // one, on a task I had just trimmed. Sizing to
+                                                   // the static bound alone is not enough when a
+                                                   // warning threshold sits above the result.
+                                                   // 3584 leaves 768 B above the bound and ~870 B
+                                                   // free in practice. Net vs the RYN4Proc raise is
+                                                   // now zero, not -512 B.
                                                    // NTPTask is not safety-critical and its failure
                                                    // path is "no time sync", not "no heat".
     #define STACK_SIZE_BOILER_TEMP_TASK      3584  // 2026-09-17: was 3072 with 644 B free;
