@@ -138,11 +138,12 @@ void RuntimeDiagnostics::dumpTaskInfo(OutputCallback outputCb) {
             snprintf(coreStr, sizeof(coreStr), "%d", coreId);
         }
 
-        output("%-16s %5s %8d %10d %6s",
+        output("%-16s %5s %8u %10u %6s",
                taskStatusArray[i].pcTaskName,
                stateStr,
-               taskStatusArray[i].uxCurrentPriority,
-               taskStatusArray[i].usStackHighWaterMark * sizeof(StackType_t),
+               static_cast<unsigned>(taskStatusArray[i].uxCurrentPriority),
+               static_cast<unsigned>(taskStatusArray[i].usStackHighWaterMark *
+                                     sizeof(StackType_t)),
                coreStr);
                
         // Warn about low stack
@@ -158,7 +159,7 @@ void RuntimeDiagnostics::dumpTaskInfo(OutputCallback outputCb) {
     }
     
     vPortFree(taskStatusArray);
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::dumpMemoryInfo(OutputCallback outputCb) {
@@ -206,7 +207,7 @@ void RuntimeDiagnostics::dumpMemoryInfo(OutputCallback outputCb) {
         100 - static_cast<uint32_t>((static_cast<uint64_t>(largestBlock) * 100ULL) / freeHeap) : 0;
     output("  Fragmentation: %lu%%", fragmentation);
     
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::dumpEventGroups(OutputCallback outputCb) {
@@ -234,14 +235,38 @@ void RuntimeDiagnostics::dumpEventGroups(OutputCallback outputCb) {
     for (const auto& eg : eventGroups) {
         if (eg.handle != nullptr) {
             EventBits_t bits = xEventGroupGetBits(eg.handle);
-            output("%-20s: 0x%08X (%s)", eg.name, bits, decodeEventBits(eg.handle, bits).c_str());
+            output("%-20s: 0x%08lX (%s)", eg.name, static_cast<unsigned long>(bits),
+                   decodeEventBits(eg.handle, bits).c_str());
         } else {
             output("%-20s: Not initialized", eg.name);
         }
     }
     
-    output("");
+    output(std::string());
 }
+
+namespace {
+// Temperature_t is int16_t in TENTHS of a degree. The sensor dump used to print these
+// with "%.1f", passing an int where printf expects a double - undefined behaviour in a
+// varargs call, and in practice every temperature printed the same garbage: the live
+// dump read "Boiler Output: 1.8C" for all five sensors while MQTT correctly reported
+// 33.1/23.9/50.8C. A diagnostics tool reporting that every sensor had collapsed.
+//
+// Formatted with integer maths rather than tempToFloat() on purpose: this runs on the
+// MQTT task, and the first %f on a task pulls in _svfprintf_r -> _dtoa_r -> _Balloc ->
+// calloc, ~600 B of stack plus a heap allocation. MQTTTask has 3584 B with a measured
+// 2436 B peak, and there is no reason to spend that on a diagnostic string.
+//
+// Sign is handled before the split because integer division truncates toward zero:
+// -3 tenths would otherwise print as "0.3" instead of "-0.3", which matters for the
+// outside temperature.
+void formatTenths(char* out, size_t n, Temperature_t tenths) {
+    const int value = static_cast<int>(tenths);
+    const char* sign = (value < 0) ? "-" : "";
+    const int mag = (value < 0) ? -value : value;
+    snprintf(out, n, "%s%d.%d", sign, mag / 10, mag % 10);
+}
+}  // namespace
 
 void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
     output("=== Sensor Information ===");
@@ -249,23 +274,27 @@ void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
     // Get sensor readings with mutex
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100)) == pdTRUE) {
         output("Temperature Sensors:");
+        char tempStr[12];  // "-3276.8" worst case for int16_t tenths
         
         // Boiler temperatures
         if (SRP::getSensorReadings().isBoilerTempOutputValid) {
-            output("  Boiler Output: %.1f°C", SRP::getSensorReadings().boilerTempOutput);
+            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().boilerTempOutput);
+            output("  Boiler Output: %s°C", tempStr);
         } else {
             output("  Boiler Output: INVALID");
         }
         
         if (SRP::getSensorReadings().isBoilerTempReturnValid) {
-            output("  Boiler Return: %.1f°C", SRP::getSensorReadings().boilerTempReturn);
+            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().boilerTempReturn);
+            output("  Boiler Return: %s°C", tempStr);
         } else {
             output("  Boiler Return: INVALID");
         }
         
         // Room temperature
         if (SRP::getSensorReadings().isInsideTempValid) {
-            output("  Inside Temp: %.1f°C", SRP::getSensorReadings().insideTemp);
+            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().insideTemp);
+            output("  Inside Temp: %s°C", tempStr);
             output("  Inside Humidity: %.1f%%", SRP::getSensorReadings().insideHumidity);
         } else {
             output("  Inside Temp: INVALID");
@@ -273,14 +302,16 @@ void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
         
         // Outside temperature
         if (SRP::getSensorReadings().isOutsideTempValid) {
-            output("  Outside Temp: %.1f°C", SRP::getSensorReadings().outsideTemp);
+            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().outsideTemp);
+            output("  Outside Temp: %s°C", tempStr);
         } else {
             output("  Outside Temp: INVALID");
         }
         
         // Water temperatures
         if (SRP::getSensorReadings().isWaterHeaterTempTankValid) {
-            output("  Water Heater Tank Temp: %.1f°C", SRP::getSensorReadings().waterHeaterTempTank);
+            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().waterHeaterTempTank);
+            output("  Water Heater Tank Temp: %s°C", tempStr);
         } else {
             output("  Water Heater Tank Temp: INVALID");
         }
@@ -290,7 +321,7 @@ void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
         output("Failed to acquire sensor readings mutex");
     }
     
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::dumpRelayInfo(OutputCallback outputCb) {
@@ -310,7 +341,7 @@ void RuntimeDiagnostics::dumpRelayInfo(OutputCallback outputCb) {
         output("Failed to acquire relay readings mutex");
     }
     
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::dumpNetworkInfo(OutputCallback outputCb) {
@@ -333,13 +364,15 @@ void RuntimeDiagnostics::dumpNetworkInfo(OutputCallback outputCb) {
     if (SRP::getHealthMonitor() != nullptr) {
         auto metrics = SRP::getHealthMonitor()->getNetworkMetrics();
         output("\nNetwork Statistics:");
-        output("  Disconnections: %d", metrics.disconnectCount);
-        output("  Reconnections: %d", metrics.reconnectCount);
+        output("  Disconnections: %lu", static_cast<unsigned long>(metrics.disconnectCount));
+        output("  Reconnections: %lu", static_cast<unsigned long>(metrics.reconnectCount));
         // Convert fixed-point (10000 = 100%) to display: XX.X%
-        output("  Availability: %u.%u%%", metrics.availabilityFP / 100, (metrics.availabilityFP % 100) / 10);
+        output("  Availability: %lu.%lu%%",
+               static_cast<unsigned long>(metrics.availabilityFP / 100),
+               static_cast<unsigned long>((metrics.availabilityFP % 100) / 10));
     }
     
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::enableTracing() {
@@ -452,19 +485,19 @@ std::string RuntimeDiagnostics::decodeEventBits(EventGroupHandle_t handle, Event
 void RuntimeDiagnostics::dumpMutexInfo(OutputCallback outputCb) {
     output("=== Mutex Information ===");
     output("Mutex diagnostics not yet implemented");
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::dumpModbusInfo(OutputCallback outputCb) {
     output("=== Modbus Information ===");
     output("Modbus diagnostics not yet implemented");
-    output("");
+    output(std::string());
 }
 
 void RuntimeDiagnostics::runSelfTest(OutputCallback outputCb) {
     output("=== Running Self-Test ===");
     output("Self-test not yet implemented");
-    output("");
+    output(std::string());
 }
 
 std::string RuntimeDiagnostics::getHelpText() {

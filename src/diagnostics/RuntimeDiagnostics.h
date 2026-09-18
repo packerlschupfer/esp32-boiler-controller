@@ -149,7 +149,13 @@ private:
     
     // Helper to output diagnostic message
     static void output(const std::string& message);
-    static void output(const char* format, ...);
+    // format(printf, 1, 2) - static member, so the format string is argument 1. Without
+    // this the compiler does not type-check these call sites, and it did not: every
+    // temperature in dumpSensorInfo() was printed with %.1f while Temperature_t is an
+    // int16_t of tenths, which is undefined behaviour in a varargs call. The live dump
+    // read "Boiler Output: 1.8C" for every sensor while MQTT correctly reported 33.1C -
+    // a diagnostics tool confidently reporting that every sensor had collapsed.
+    static void output(const char* format, ...) __attribute__((format(printf, 1, 2)));
     
     // Format helpers
     static std::string formatBytes(size_t bytes);
