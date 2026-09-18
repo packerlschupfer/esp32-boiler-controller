@@ -138,7 +138,7 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
         // effect, the task is then persistent and needs the full size for EthernetUDP
         // plus Syslog::sendInternal's 1088 B frame. Revisit as a boot-window DRAM item,
         // not as spare steady-state capacity.
-        4096,  // Stack for EthernetUDP + message formatting
+        STACK_SIZE_SYSLOG_TASK,  // EthernetUDP + message formatting; see ProjectConfig.h
         nullptr,
         1,  // Low priority
         syslogWdtConfig)) {

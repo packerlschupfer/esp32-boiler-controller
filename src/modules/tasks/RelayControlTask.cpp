@@ -370,16 +370,25 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
         relayIndex, desiredState, state, emergencyBypass, limiter, xTaskGetTickCount());
     portEXIT_CRITICAL(&rateLimitMux);
 
-    if (gate == RelayCommandPolicy::ToggleGate::RATE_LIMITED) {
-        LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
-        return false;
-    }
-    if (gate == RelayCommandPolicy::ToggleGate::ALLOWED) {
-        // Deliberately OUTSIDE the critical section: this takes relayStateMutex_.
-        if (!RelayControlTask::checkPumpProtection(relayIndex, state)) {
-            // Pump protection blocks this state change - not an error, just too soon
+    // pumpCheckRequired() gates the CALL, not just its result: checkPumpProtection() takes
+    // relayStateMutex_ for up to 10 ms, and asking it about a no-op or an emergency command
+    // is the F13 hazard. Deliberately outside the critical section for the same reason.
+    const bool pumpAllows = RelayCommandPolicy::pumpCheckRequired(gate)
+                                ? RelayControlTask::checkPumpProtection(relayIndex, state)
+                                : true;
+
+    // No decision is made in this file any more - decide() is header-only and exhaustively
+    // tested natively, which matters because env:native_test cannot compile this .cpp (its
+    // include cone pulls in RYN4, TaskManager, esp_task_wdt, SystemResourceProvider).
+    switch (RelayCommandPolicy::decide(gate, pumpAllows)) {
+        case RelayCommandPolicy::Outcome::REJECT_RATE_LIMITED:
+            LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
             return false;
-        }
+        case RelayCommandPolicy::Outcome::REJECT_PUMP_PROTECTED:
+            // Not an error, just too soon since the last pump state change
+            return false;
+        case RelayCommandPolicy::Outcome::PROCEED:
+            break;
     }
 
     LOG_INFO(TAG, "Queuing relay %d to %s", relayIndex, state ? "ON" : "OFF");

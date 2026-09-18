@@ -129,6 +129,47 @@ namespace RelayCommandPolicy {
                                                            : ToggleGate::RATE_LIMITED;
     }
 
+    enum class Outcome : uint8_t {
+        PROCEED,                 // queue the command
+        REJECT_RATE_LIMITED,     // limiter refused a real change
+        REJECT_PUMP_PROTECTED    // pump motor protection refused it
+    };
+
+    /**
+     * @brief Must pump motor protection be consulted for this gate result?
+     *
+     * Kept separate from decide() so the caller can SKIP the call rather than pass its
+     * result: checkPumpProtection() takes relayStateMutex_ for up to 10 ms, and asking it
+     * about a no-op or an emergency command is the F13 hazard - an emergency pump-ON that
+     * pump protection then refuses. Laziness is part of the contract, not an optimisation.
+     */
+    inline bool pumpCheckRequired(ToggleGate gate) {
+        return gate == ToggleGate::ALLOWED;
+    }
+
+    /**
+     * @brief The whole per-command verdict, given the gate and the pump answer.
+     *
+     * This is the last piece of processSingleRelay()'s decision that used to live in the
+     * .cpp, where no native test could reach it (env:native_test cannot compile
+     * RelayControlTask.cpp - its include cone pulls in RYN4, TaskManager, esp_task_wdt and
+     * SystemResourceProvider). Hoisting it here leaves that function with NO decision of
+     * its own: it locks, calls gateToggle(), optionally calls checkPumpProtection(), and
+     * switches on this. Same pattern as BurnerTransitions::step() and WaterChargePolicy.
+     *
+     * @param pumpAllows result of checkPumpProtection(), or true when
+     *        pumpCheckRequired(gate) is false and it was therefore not called
+     */
+    inline Outcome decide(ToggleGate gate, bool pumpAllows) {
+        if (gate == ToggleGate::RATE_LIMITED) {
+            return Outcome::REJECT_RATE_LIMITED;
+        }
+        if (pumpCheckRequired(gate) && !pumpAllows) {
+            return Outcome::REJECT_PUMP_PROTECTED;
+        }
+        return Outcome::PROCEED;
+    }
+
     /**
      * @brief gateToggle() + the pump-protection step, as one call. NO PRODUCTION CALLER.
      *
@@ -149,19 +190,17 @@ namespace RelayCommandPolicy {
     inline Admission admit(uint8_t relayIndex, bool desiredState, bool requestedState,
                            bool emergencyBypass, const RateLimiter& limiter, uint32_t nowTicks,
                            bool (*pumpProtectionAllows)(uint8_t, bool)) {
-        switch (gateToggle(relayIndex, desiredState, requestedState, emergencyBypass,
-                           limiter, nowTicks)) {
-            case ToggleGate::NOT_APPLICABLE:
-                return Admission::ACCEPTED;
-            case ToggleGate::RATE_LIMITED:
-                return Admission::RATE_LIMITED;
-            case ToggleGate::ALLOWED:
-                break;
+        const ToggleGate gate = gateToggle(relayIndex, desiredState, requestedState,
+                                           emergencyBypass, limiter, nowTicks);
+        const bool pumpAllows = pumpCheckRequired(gate)
+                                    ? pumpProtectionAllows(relayIndex, requestedState)
+                                    : true;
+        switch (decide(gate, pumpAllows)) {
+            case Outcome::REJECT_RATE_LIMITED: return Admission::RATE_LIMITED;
+            case Outcome::REJECT_PUMP_PROTECTED: return Admission::PUMP_PROTECTED;
+            case Outcome::PROCEED: return Admission::ACCEPTED;
         }
-        if (!pumpProtectionAllows(relayIndex, requestedState)) {
-            return Admission::PUMP_PROTECTED;
-        }
-        return Admission::ACCEPTED;
+        return Admission::ACCEPTED;  // unreachable; keeps the compiler quiet
     }
 
     constexpr int8_t NO_PUMP = -1;

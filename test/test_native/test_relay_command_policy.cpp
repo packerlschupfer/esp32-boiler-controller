@@ -140,6 +140,37 @@ void test_relay_policy_gate_toggle_expectations() {
     }
 }
 
+void test_relay_policy_decide_is_exhaustive() {
+    // decide() and pumpCheckRequired() are the LAST piece of processSingleRelay()'s
+    // decision that used to live in RelayControlTask.cpp, where no native test could reach
+    // it - env:native_test cannot compile that file (its include cone pulls in RYN4,
+    // TaskManager, esp_task_wdt and SystemResourceProvider). With them here, that function
+    // makes no decision of its own: it locks, calls gateToggle(), optionally calls
+    // checkPumpProtection(), and switches on decide(). Exhaustive over all 3 x 2 inputs.
+    //
+    // pumpCheckRequired() gating the CALL rather than its result is part of the contract,
+    // not an optimisation: checkPumpProtection() takes relayStateMutex_ for up to 10 ms,
+    // and asking it about a no-op or an emergency command is the F13 hazard - an emergency
+    // pump-ON that pump protection then refuses.
+    TEST_ASSERT_FALSE(pumpCheckRequired(ToggleGate::NOT_APPLICABLE));
+    TEST_ASSERT_FALSE(pumpCheckRequired(ToggleGate::RATE_LIMITED));
+    TEST_ASSERT_TRUE(pumpCheckRequired(ToggleGate::ALLOWED));
+
+    // NOT_APPLICABLE: no-op or emergency. Proceeds regardless of the pump answer, which is
+    // why an emergency pump-ON can never be refused by pump protection.
+    TEST_ASSERT_TRUE(decide(ToggleGate::NOT_APPLICABLE, true)  == Outcome::PROCEED);
+    TEST_ASSERT_TRUE(decide(ToggleGate::NOT_APPLICABLE, false) == Outcome::PROCEED);
+
+    // RATE_LIMITED loses to nothing else, and is reported as rate-limited even if the pump
+    // answer happened to be false.
+    TEST_ASSERT_TRUE(decide(ToggleGate::RATE_LIMITED, true)  == Outcome::REJECT_RATE_LIMITED);
+    TEST_ASSERT_TRUE(decide(ToggleGate::RATE_LIMITED, false) == Outcome::REJECT_RATE_LIMITED);
+
+    // ALLOWED is the only gate where the pump answer decides the outcome.
+    TEST_ASSERT_TRUE(decide(ToggleGate::ALLOWED, true)  == Outcome::PROCEED);
+    TEST_ASSERT_TRUE(decide(ToggleGate::ALLOWED, false) == Outcome::REJECT_PUMP_PROTECTED);
+}
+
 void test_relay_policy_admit_passes_requested_state_to_pump_check() {
     // admit() has no production caller - processSingleRelay() calls gateToggle() directly
     // and then checkPumpProtection() outside the lock. admit() is the testable composition

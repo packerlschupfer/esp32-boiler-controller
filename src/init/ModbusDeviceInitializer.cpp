@@ -609,7 +609,7 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
             vTaskDelete(NULL);
         },
         "ModbusInit",
-        4096,
+        STACK_SIZE_MODBUS_INIT_TASK,  // see ProjectConfig.h
         initState.get(),
         1,
         nullptr

@@ -194,6 +194,7 @@ void test_relay_policy_pump_protection_checked_after_rate_limit();
 void test_relay_policy_pump_timer_only_on_real_change();
 void test_relay_policy_pump_request_resent_until_relay_follows();
 void test_relay_policy_gate_toggle_expectations();
+void test_relay_policy_decide_is_exhaustive();
 void test_relay_policy_admit_passes_requested_state_to_pump_check();
 void test_relay_policy_window_reset_readmits();
 
@@ -672,6 +673,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_relay_policy_pump_timer_only_on_real_change);
     RUN_TEST(test_relay_policy_pump_request_resent_until_relay_follows);
     RUN_TEST(test_relay_policy_gate_toggle_expectations);
+    RUN_TEST(test_relay_policy_decide_is_exhaustive);
     RUN_TEST(test_relay_policy_admit_passes_requested_state_to_pump_check);
     RUN_TEST(test_relay_policy_window_reset_readmits);
 

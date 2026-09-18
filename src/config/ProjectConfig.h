@@ -328,6 +328,22 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // spot as the pump stack. Not mode-tuned: this task only polls link state.
 #define STACK_SIZE_NETWORK_MONITOR_TASK  2048
 
+// SyslogTask and ModbusInit: the last two task stacks that were inline literals, moved
+// here 2026-09-18 so they are visible to the tier system and covered by the
+// configMINIMAL_STACK_SIZE assertions below like everything else. Neither is mode-tuned:
+// both are short-lived boot-path tasks whose work does not change with the log level.
+//
+// SYSLOG: do NOT trim this to fund another task. It was briefly cut to 3072 on 2026-09-17
+// on a false premise - the "2064 B spare" figure belonged to LogSub, a DIFFERENT task.
+// SyslogTask does not appear in a steady-state dump because SYSLOG_ENABLED_DEFAULT is
+// false and it eventually self-deletes, but it does NOT self-delete promptly: it blocks on
+// xEventGroupWaitBits(NETWORK_READY | STORAGE_READY, 30000) first, so it holds all 4096 B
+// across boot - and it is created BEFORE the pumps and MonitoringTask. Kept at 4096
+// because syslog_enabled is runtime-settable (post-reboot) and the task is then
+// persistent, needing EthernetUDP plus Syslog::sendInternal's 1088 B frame.
+#define STACK_SIZE_SYSLOG_TASK           4096
+#define STACK_SIZE_MODBUS_INIT_TASK      4096
+
 // ==========================
 // LOG_MODE_RELEASE is NOT a usable configuration
 // ==========================
@@ -440,6 +456,8 @@ static_assert(STACK_SIZE_TIMER_SCHEDULER_TASK  >= configMINIMAL_STACK_SIZE, "STA
 static_assert(STACK_SIZE_LOOP_TASK             >= configMINIMAL_STACK_SIZE, "STACK_SIZE_LOOP_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_PUMP_CONTROL_TASK     >= configMINIMAL_STACK_SIZE, "STACK_SIZE_PUMP_CONTROL_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_NETWORK_MONITOR_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_NETWORK_MONITOR_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_SYSLOG_TASK           >= configMINIMAL_STACK_SIZE, "STACK_SIZE_SYSLOG_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_MODBUS_INIT_TASK      >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MODBUS_INIT_TASK below configMINIMAL_STACK_SIZE");
 
 // Task priorities (higher number = higher priority)
 // Safety-critical tasks get priority 4 to ensure timely response to safety events
