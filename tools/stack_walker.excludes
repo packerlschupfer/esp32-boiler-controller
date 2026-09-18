@@ -84,3 +84,17 @@ once: SharedResourceManager::SharedResourceManager  # constructed under __cxa_gu
 #    instead of this shortcut.
 edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultBurnerFailsafe  # lambda at CentralizedFailsafe.cpp:61 (Subsystem::BURNER); also called directly at :203,:209 so this adds no depth - kept for change visibility
 edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultPumpFailsafe  # lambdas at CentralizedFailsafe.cpp:65,69 (HEATING_PUMP, WATER_PUMP); chain 1728 B, shallower than the burner branch
+
+# The pointer-keyed fast path in SharedResourceManager falls back to the map on a slot
+# miss, which keeps std::string construction, the global accessMutex_ and the libstdc++
+# throw/unwind tail statically reachable from the hot accessors. No TASK can reach it:
+# SystemInitializer::initializeSharedResources() (SystemInitializer.cpp:108) calls
+# initializeStandardResources() (:213), which creates all 11 event groups and all 4
+# mutexes THROUGH THESE SAME const char* overloads, and that completes at
+# InitStage::SHARED_RESOURCES (:113) - well before initializeTasks() (:186). So every
+# fast slot is populated before any task exists and the miss branch is boot-only.
+# re-check: that every name in SharedResourceManager.h initializeStandardResources()
+# still matches the fastInstall() list in the constructor, and that no accessor is called
+# before InitStage::SHARED_RESOURCES.
+cut: SharedResourceManager::getMutex(char const*) -> SharedResourceManager::getMutex(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)  # boot-only miss branch; see block comment above
+cut: SharedResourceManager::getEventGroup(char const*) -> SharedResourceManager::getEventGroup(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)  # boot-only miss branch; see block comment above

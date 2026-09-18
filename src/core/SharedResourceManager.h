@@ -64,11 +64,81 @@ private:
     std::unordered_map<std::string, ResourceInfo> resources_;
     SemaphoreHandle_t accessMutex_;
 
-    SharedResourceManager() {
+    // ---- Pointer-keyed fast path for the handle accessors ----------------------------
+    //
+    // The map lookups below are not cheap and they run on hot control paths. Every
+    // SystemResourceProvider::takeSensorReadingsMutex() AND giveSensorReadingsMutex()
+    // built a std::string, took this global accessMutex_ with a timeout, hashed 14
+    // characters and probed an unordered_map - to fetch a handle that has not changed
+    // since boot. There are 11 such call sites, including BurnerStateMachine.cpp:411 and
+    // HeatingControlTask.cpp:346/538.
+    //
+    // Every caller passes one of the `static constexpr const char*` constants above, and
+    // identical string literals are merged by the compiler and linker, so the POINTER
+    // identifies the resource: no string has to exist to look one up.
+    //
+    // Concurrency, without taking a lock: `key` is installed once in the constructor and
+    // never written again, and `handle` is only ever written with the value the map
+    // already returned for that same key - a single naturally-aligned pointer store, so a
+    // reader sees either nullptr (and takes the slow path, which is correct) or the
+    // finished handle. Never a torn value. cleanup() zeroes the handles, so callers after
+    // a shutdown fall back to the slow path and recreate exactly as they did before -
+    // which matters because enterFailsafeMode() runs AFTER cleanup() and still uses these.
+    struct FastSlot {
+        const char* key;
+        void* handle;
+        ResourceType type;
+    };
+    static constexpr size_t FAST_SLOTS = 16;
+    FastSlot fast_[FAST_SLOTS];
+    size_t fastUsed_;
+
+    void* fastGet(const char* key, ResourceType type) const {
+        for (size_t i = 0; i < fastUsed_; ++i) {
+            if (fast_[i].key == key && fast_[i].type == type) return fast_[i].handle;
+        }
+        return nullptr;
+    }
+
+    void fastPut(const char* key, ResourceType type, void* handle) {
+        for (size_t i = 0; i < fastUsed_; ++i) {
+            if (fast_[i].key == key && fast_[i].type == type) {
+                fast_[i].handle = handle;      // single aligned store; see note above
+                return;
+            }
+        }
+    }
+
+    void fastInstall(const char* key, ResourceType type) {
+        if (fastUsed_ < FAST_SLOTS) {
+            fast_[fastUsed_++] = {key, nullptr, type};
+        } else {
+            // Not fatal - the overflowing name keeps using the map - but it silently
+            // undoes the optimisation for that resource, so say so.
+            LOG_ERROR("SharedResourceManager", "fast slot table full, %s stays on the "
+                      "map path (raise FAST_SLOTS)", key);
+        }
+    }
+
+    SharedResourceManager() : fastUsed_(0) {
         accessMutex_ = xSemaphoreCreateMutex();
         if (!accessMutex_) {
             ErrorHandler::logError("SharedResourceManager", SystemError::MEMORY_ALLOCATION_FAILED,
                                  "Failed to create access mutex");
+        }
+        // Slots for the resources the hot paths ask for. A name missing here is not a bug,
+        // it just keeps using the map. static_assert below pins the table against FAST_SLOTS.
+        for (const char* n : {EventGroups::GENERAL_SYSTEM, EventGroups::SYSTEM_STATE,
+                              EventGroups::CONTROL_REQUESTS, EventGroups::HEATING,
+                              EventGroups::BURNER, EventGroups::BURNER_REQUEST,
+                              EventGroups::SENSOR, EventGroups::ERROR_NOTIFICATION,
+                              EventGroups::RELAY, EventGroups::RELAY_STATUS,
+                              EventGroups::RELAY_REQUEST}) {
+            fastInstall(n, ResourceType::EVENT_GROUP);
+        }
+        for (const char* n : {Mutexes::SENSOR_READINGS, Mutexes::RELAY_READINGS,
+                              Mutexes::SYSTEM_SETTINGS, Mutexes::MQTT}) {
+            fastInstall(n, ResourceType::MUTEX);
         }
     }
 
@@ -102,6 +172,22 @@ public:
      * @param name Event group name
      * @return EventGroupHandle_t or nullptr on failure
      */
+    /**
+     * @brief Create or get an event group, by well-known name constant
+     *
+     * Overload taken by every caller that passes an EventGroups:: constant. Hits the
+     * pointer-keyed fast path and touches neither std::string nor accessMutex_ once the
+     * handle exists; falls through to the map on a miss, so behaviour is unchanged.
+     */
+    EventGroupHandle_t getEventGroup(const char* name) {
+        if (void* h = fastGet(name, ResourceType::EVENT_GROUP)) {
+            return static_cast<EventGroupHandle_t>(h);
+        }
+        EventGroupHandle_t handle = getEventGroup(std::string(name));
+        if (handle) fastPut(name, ResourceType::EVENT_GROUP, handle);
+        return handle;
+    }
+
     EventGroupHandle_t getEventGroup(const std::string& name) {
         // Use timeout to prevent deadlock during resource lookup
         if (xSemaphoreTake(accessMutex_, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS)) != pdTRUE) {
@@ -134,6 +220,21 @@ public:
      * @param name Mutex name
      * @return SemaphoreHandle_t or nullptr on failure
      */
+    /**
+     * @brief Create or get a mutex, by well-known name constant
+     *
+     * See getEventGroup(const char*). This is the one that matters most: it is on the
+     * take AND the give of every sensor/relay/settings mutex acquisition.
+     */
+    SemaphoreHandle_t getMutex(const char* name) {
+        if (void* h = fastGet(name, ResourceType::MUTEX)) {
+            return static_cast<SemaphoreHandle_t>(h);
+        }
+        SemaphoreHandle_t handle = getMutex(std::string(name));
+        if (handle) fastPut(name, ResourceType::MUTEX, handle);
+        return handle;
+    }
+
     SemaphoreHandle_t getMutex(const std::string& name) {
         // Use timeout to prevent deadlock during resource lookup
         if (xSemaphoreTake(accessMutex_, pdMS_TO_TICKS(SystemConstants::Timing::MUTEX_DEFAULT_TIMEOUT_MS)) != pdTRUE) {
@@ -299,6 +400,12 @@ public:
         }
         
         resources_.clear();
+        // MUST happen with resources_.clear(): these handles have just been deleted, and
+        // ErrorHandler::enterFailsafeMode() runs AFTER SystemInitializer::cleanup() and
+        // still reaches these accessors. Zeroing sends those callers down the map path,
+        // which recreates the primitive - exactly what happened before the fast path
+        // existed. Leaving them set would hand the failsafe path freed handles.
+        for (size_t i = 0; i < fastUsed_; ++i) fast_[i].handle = nullptr;
         xSemaphoreGive(accessMutex_);
     }
 };
