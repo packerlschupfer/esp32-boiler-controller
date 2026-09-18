@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### OTATask was 384 B from its warning threshold during an OTA - measured, and raised to 4096 B
+
+The static bound had put `OTATask` at +96 B headroom on its 3072 B stack, recorded as "an optimistic floor, not a ceiling" because 152 indirect calls go unresolved on that path. That caution was justified. An **OTA auth exchange alone** took `OTATask` from 2144 B free to **384 B** - below this project's own `LOW_STACK_WARN_BYTES` (512) - i.e. 2688 B used of 3072, and the successful-transfer branch (`_runUpdate` -> `client.printf` -> `Update.write`) is deeper and was not measured. Exercised safely with a deliberately wrong OTA password: `ArduinoOTA` invokes `_start_callback` only *after* auth succeeds (`ArduinoOTA.cpp:356`), so a failed auth runs `_onRx` and its `AUTH %s` `printf` (`:251`) while writing no flash, never tearing down MQTT and never triggering the graceful burner shutdown.
+
+The depth is Arduino-core, not ours - `ArduinoOTAClass::_onRx` has an **880 B** frame and calls `Print::printf` -> `_svfprintf_r` (800 B) -> `_malloc_r` - so it does **not** shrink with log mode. That is why `STACK_SIZE_OTA_TASK` was also below measured usage in the other two tiers, **DEBUG_FULL at 2048 and RELEASE at 1536**; latent in both, though both are `#error`-gated today. All three are now **4096**. Re-measured after the raise on the identical exchange: **1408 B free**, exactly the +1024 B. Funded from the DRAM that deferred logging freed.
+
+Two secondary findings while chasing this. The low-stack warning is evaluated on the **30-minute** `DETAILED_MONITOR_INTERVAL_MS` timer, so it is up to half an hour late - it would have fired eventually, since `usStackHighWaterMark` is a persistent minimum, but not during the event. And the `tasks` diagnostic was **refused for hours**: `MIN_DRAM_BLOCK_WARNING` is 2560 B and the largest free DRAM block sat steadily at **2548 B**, 12 B under the gate, making the one diagnostic that could answer this question unavailable exactly when DRAM was tight enough to need it.
+
+### `LOG_DEFERRED_FORMAT` enabled after a hardware test
+
+Formatting now runs on the logger task instead of the caller. Verified on the device, not just in a build:
+
+- **DRAM 4160 -> 9720 B free, largest block 2548 -> 8180 B.** The design predicted +5392 B; measured +5560. This is what un-gated the `tasks` diagnostic above.
+- **470 boot log lines, zero ring drops**, no errors, boot completing to `Task initialization complete`.
+- The ring is `RTC_NOINIT_ATTR` at **0x50000200** - RTC slow memory, so **0 DRAM** - and entries still queued at a crash are replayed on the next boot as `[pre-reset]`. That answers the panic-log-loss objection that had been the main argument against deferral; the logger reported `Reset reason POWERON: no log entries recovered (ring not retained...)` on the first boot, which is the correct result after a USB flash.
+- **Logger task 2160 B free of 5120**, against a 1744 B static chain / 2100-2112 B predicted - close agreement, and the 5120 override is now generous rather than tight. Do not trim it until it is re-measured with syslog *enabled*, which is the case that adds `Syslog::sendInternal`'s 1104 B frame.
+- **Every task bound fell 336-784 B, none worse.** `NTPTask` landed at exactly the **1984 B** predicted after diagnosing the phantom call edge, independently confirming that diagnosis was right and the +800 B "regression" was an artifact.
+
+Net DRAM against the pre-deferral firmware, after paying 1024 B for OTATask: **4160 -> 8520 B free**. Device runs `0.1.0-24b297f`; heating disabled, relays off, sensor mode NORMAL throughout. Still open: with the logger off caller paths, `BoilerTempCtrl` and `MQTTTask` now show 2 formatter frames each from a *direct* `snprintf`, so the `formatTemp` question retracted earlier becomes live again - but only now, and it is worth re-measuring rather than assuming.
+
 ### Library bump: ESP32-Logger 3154898 plus 17 logger_submodule updates (not yet flashed)
 
 `lib_deps` carries bare git URLs with no `#ref`, so each library's pushed `main` *is* what the next build compiles - the version bump below is already in the local build output and will be in the next firmware, whether or not anything else changes. Verified before syncing: ESP32-Logger `main` is at `3154898`, a genuine **fast-forward** from `b924d43` with no history rewritten, and 17 consuming libraries each received a separate `chore: update logger_submodule` commit on top of existing work (`ESP32-PersistentStorage`'s `aceb916`, the formatter removal above, is preserved as an ancestor of `da98448`). The three libraries without a bump - `ESP32-LibraryCommon`, `ESP32-Syslog`, `ESP32-Logger` itself - were checked and carry no `logger_submodule` at all, so the set is complete rather than short. All 20 dev clones are level with their remotes, 0 ahead and 0 behind.
