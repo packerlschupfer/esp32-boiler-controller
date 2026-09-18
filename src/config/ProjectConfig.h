@@ -211,6 +211,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // M1 fix: was 2560 (inverted vs DEBUG_SELECTIVE 4096); DEBUG_FULL needs MORE stack for logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Increased for float formatting in logs
     #define STACK_SIZE_BOILER_TEMP_TASK      4096  // DEBUG_FULL logs more than SELECTIVE
+    #define STACK_SIZE_NTP_TASK              3584  // DEBUG_FULL: more logging than SELECTIVE
     #define STACK_SIZE_RYN4_PROCESSING_TASK  1536  // After fix: relay processing
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 3072  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             3072  // After fix: main loop with debug
@@ -241,6 +242,17 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                  // Re-check with the walker before touching it.
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // H3: Safety-critical +512 (was 3584)
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Dec 2025: was 4096, had 2568 free
+    #define STACK_SIZE_NTP_TASK              3072  // 2026-09-18: was a hardcoded 4096 in main.cpp.
+                                                   // Trimmed to FUND the RYN4Proc raise, which had
+                                                   // pushed heap_dram_blk to 2548 - just under
+                                                   // MIN_DRAM_BLOCK_WARNING (2560). Safe to trim
+                                                   // precisely because this bound is CONFIRMED:
+                                                   // measured peak 2784 vs static bound 2816, a
+                                                   // 32 B gap, so there is no hidden depth here -
+                                                   // the opposite of RYN4Proc, whose deep path had
+                                                   // never run. 3072 leaves 256 B above the bound.
+                                                   // NTPTask is not safety-critical and its failure
+                                                   // path is "no time sync", not "no heat".
     #define STACK_SIZE_BOILER_TEMP_TASK      3584  // 2026-09-17: was 3072 with 644 B free;
                                                    // raised for the autotune-completion branch
                                                    // (BoilerTempControlTask.cpp snprintfs three
@@ -285,6 +297,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 1536  // After fix: JSON operations
     #define STACK_SIZE_BURNER_CONTROL_TASK   1536  // After fix: needs margin for logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 1536  // After fix: increased for logging
+    #define STACK_SIZE_NTP_TASK              3072  // as DEBUG_SELECTIVE; bound is log-mode-insensitive
     #define STACK_SIZE_BOILER_TEMP_TASK      3072  // > the 2540 B peak measured in debug;
                                                    // release peaks are unmeasured
     #define STACK_SIZE_RYN4_PROCESSING_TASK  1536  // >= configMINIMAL_STACK_SIZE (was 768, rejected)
@@ -375,6 +388,7 @@ static_assert(STACK_SIZE_PERSISTENT_STORAGE_TASK >= configMINIMAL_STACK_SIZE, "S
 static_assert(STACK_SIZE_BURNER_CONTROL_TASK   >= configMINIMAL_STACK_SIZE, "STACK_SIZE_BURNER_CONTROL_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_MB8ART_PROCESSING_TASK >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MB8ART_PROCESSING_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_BOILER_TEMP_TASK      >= configMINIMAL_STACK_SIZE, "STACK_SIZE_BOILER_TEMP_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_NTP_TASK              >= configMINIMAL_STACK_SIZE, "STACK_SIZE_NTP_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_RYN4_PROCESSING_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RYN4_PROCESSING_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_TIMER_SCHEDULER_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_TIMER_SCHEDULER_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_LOOP_TASK             >= configMINIMAL_STACK_SIZE, "STACK_SIZE_LOOP_TASK below configMINIMAL_STACK_SIZE");

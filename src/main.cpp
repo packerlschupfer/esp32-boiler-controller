@@ -335,7 +335,7 @@ void setup() {
     if (SRP::getTaskManager().startTaskPinned(
         NTPTask,
         "NTPTask",
-        4096,  // Stack size increased to prevent overflow
+        STACK_SIZE_NTP_TASK,  // see ProjectConfig.h - trimmed from 4096 to fund RYN4Proc
         nullptr,
         2,     // Priority - same as monitoring task
         1,     // Core 1 (avoids Core 0 timing issues)
