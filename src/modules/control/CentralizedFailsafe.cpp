@@ -429,8 +429,9 @@ bool CentralizedFailsafe::attemptRecovery() {
     }
 
     recoveryAttempts++;
-    LOG_INFO(TAG, "Attempting recovery (attempt %d/%d)",
-            recoveryAttempts, MAX_RECOVERY_ATTEMPTS);
+    LOG_INFO(TAG, "Attempting recovery (attempt %lu/%lu)",
+            static_cast<unsigned long>(recoveryAttempts),
+            static_cast<unsigned long>(MAX_RECOVERY_ATTEMPTS));
 
     // IMPORTANT: Verify root cause is resolved before clearing errors
     bool canRecover = true;
@@ -463,7 +464,8 @@ bool CentralizedFailsafe::attemptRecovery() {
     }
 
     if (!canRecover) {
-        LOG_WARN(TAG, "Recovery attempt %d failed - root cause not resolved", recoveryAttempts);
+        LOG_WARN(TAG, "Recovery attempt %lu failed - root cause not resolved",
+                 static_cast<unsigned long>(recoveryAttempts));
         return false;
     }
 

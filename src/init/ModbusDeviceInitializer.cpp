@@ -597,7 +597,7 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
                     LOG_INFO(TAG, "Devices became ready after async wait");
                 } else {
                     // Log error but don't try to recreate - synchronous init should have handled this
-                    LOG_ERROR(TAG, "Device init incomplete - MB8ART:%d RYN4:%d (bits:0x%02X)",
+                    LOG_ERROR(TAG, "Device init incomplete - MB8ART:%d RYN4:%d (bits:0x%02lX)",
                              (readyBits & SystemEvents::DeviceReady::MB8ART_READY) ? 1 : 0,
                              (readyBits & SystemEvents::DeviceReady::RYN4_READY) ? 1 : 0,
                              readyBits);

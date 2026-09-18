@@ -88,7 +88,8 @@ bool ScheduleStorage::loadSchedules(std::vector<TimerSchedule>& schedules) {
     
     // Verify header
     if (header.magic != SCHEDULE_MAGIC) {
-        LOG_ERROR(TAG, "Invalid schedule magic: 0x%08X", header.magic);
+        LOG_ERROR(TAG, "Invalid schedule magic: 0x%08lX",
+                  static_cast<unsigned long>(header.magic));
         return false;
     }
     

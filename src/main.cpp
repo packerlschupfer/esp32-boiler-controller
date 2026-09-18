@@ -251,11 +251,11 @@ void setup() {
     
     // Phase 3: Create and run SystemInitializer
     // Use logger for banner output with proper line endings
-    LOG_INFO(TAG, "");
+    LOG_INFO(TAG, " ");
     LOG_INFO(TAG, "==== ESPlan Boiler Controller ====");
     LOG_INFO(TAG, "%s v%s", PROJECT_NAME, FIRMWARE_VERSION);
     LOG_INFO(TAG, "==================================");
-    LOG_INFO(TAG, "");
+    LOG_INFO(TAG, " ");
     
     LOG_INFO(TAG, "About to create SystemInitializer...");
     
@@ -347,7 +347,7 @@ void setup() {
     
     LOG_INFO(TAG, "==================================");
     LOG_INFO(TAG, "System initialization complete!");
-    LOG_INFO(TAG, "Free heap: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
     LOG_INFO(TAG, "==================================");
     LOG_INFO(TAG, "Ready");
 

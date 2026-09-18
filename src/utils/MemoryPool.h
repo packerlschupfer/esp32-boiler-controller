@@ -90,7 +90,9 @@ public:
         }
         
         xSemaphoreGive(mutex_);
-        LOG_WARN("MemoryPool", "Pool exhausted - %d allocations, %d frees", allocCount_, freeCount_);
+        LOG_WARN("MemoryPool", "Pool exhausted - %lu allocations, %lu frees",
+                 static_cast<unsigned long>(allocCount_),
+                 static_cast<unsigned long>(freeCount_));
         return nullptr;
     }
     

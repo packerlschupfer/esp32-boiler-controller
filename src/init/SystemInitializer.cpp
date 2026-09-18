@@ -193,7 +193,7 @@ Result<void> SystemInitializer::initializeSystem() {
     
     currentStage_ = InitStage::COMPLETE;
     LOG_INFO(TAG, "System initialization complete!");
-    LOG_INFO(TAG, "Free heap: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
     
     return Result<void>();
 }
@@ -559,7 +559,7 @@ Result<void> SystemInitializer::initializeControlModules() {
 
 Result<void> SystemInitializer::initializeMQTT() {
     LOG_INFO(TAG, "Initializing MQTT...");
-    LOG_INFO(TAG, "Free heap before MQTT creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap before MQTT creation: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
 
     #ifdef ENABLE_MQTT
     // Get MQTT manager singleton instance - actual configuration done by MQTTTask

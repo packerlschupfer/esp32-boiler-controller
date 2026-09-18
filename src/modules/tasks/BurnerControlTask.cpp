@@ -165,7 +165,7 @@ void BurnerControlTask(void* parameter) {
     );
     
     if (sensorBits & (SystemEvents::SensorUpdate::FIRST_READ_COMPLETE | SystemEvents::SensorUpdate::DATA_AVAILABLE)) {
-        LOG_INFO(TAG, "Sensor data available (bits: 0x%X)", sensorBits);
+        LOG_INFO(TAG, "Sensor data available (bits: 0x%lX)", static_cast<unsigned long>(sensorBits));
         
         // Verify we have valid readings - use retry helper for robustness
         {
@@ -372,7 +372,7 @@ void BurnerControlTask(void* parameter) {
         // BoilerTempControlTask may not arm until the block is lifted here.
         static uint32_t lastBlockedRetryMs = 0;
         if (requestEvents & SystemEvents::BurnerRequest::CHANGE_EVENT_BITS) {
-            LOG_DEBUG(TAG, "Processing burner request change event (events: 0x%06X)", requestEvents);
+            LOG_DEBUG(TAG, "Processing burner request change event (events: 0x%06lX)", static_cast<unsigned long>(requestEvents));
             processBurnerRequest();
             lastBlockedRetryMs = millis();
         } else if (hasHeatingDemand && !BurnerStateMachine::getDemandPermission().permitted &&

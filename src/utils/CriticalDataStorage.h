@@ -201,11 +201,13 @@ public:
             if (writeToFRAM(ADDR_EMERGENCY_STATE, &state, sizeof(state))) {
                 cachedEmergency_ = state;
                 if (attempt > 0) {
-                    LOG_WARN("CriticalData", "Emergency state saved after %d retries: reason=%d, error=0x%08X",
-                             attempt, reason, errorCode);
+                    LOG_WARN("CriticalData", "Emergency state saved after %d retries: reason=%d, error=0x%08lX",
+                             attempt, static_cast<int>(reason),
+                             static_cast<unsigned long>(errorCode));
                 } else {
-                    LOG_WARN("CriticalData", "Emergency state saved: reason=%d, error=0x%08X",
-                             reason, errorCode);
+                    LOG_WARN("CriticalData", "Emergency state saved: reason=%d, error=0x%08lX",
+                             static_cast<int>(reason),
+                             static_cast<unsigned long>(errorCode));
                 }
                 return true;
             }
@@ -218,8 +220,9 @@ public:
         }
 
         // All retries failed - critical error
-        LOG_ERROR("CriticalData", "CRITICAL: Emergency state save FAILED after %d attempts! reason=%d, error=0x%08X",
-                  EMERGENCY_SAVE_MAX_RETRIES, reason, errorCode);
+        LOG_ERROR("CriticalData", "CRITICAL: Emergency state save FAILED after %d attempts! reason=%d, error=0x%08lX",
+                  static_cast<int>(EMERGENCY_SAVE_MAX_RETRIES), static_cast<int>(reason),
+                  static_cast<unsigned long>(errorCode));
         return false;
     }
     

@@ -120,7 +120,7 @@ ErrorRecovery::RecoveryPlan ErrorRecovery::reportError(
         case Severity::FATAL: severityStr = "FATAL"; break;
     }
     
-    LOG_ERROR(TAG, "[%s] %s: %s (code: 0x%04X, count: %lu)",
+    LOG_ERROR(TAG, "[%s] %s: %s (code: 0x%04lX, count: %lu)",
               severityStr, source, description, errorCode, context.occurrenceCount);
 
     // Update system error bits

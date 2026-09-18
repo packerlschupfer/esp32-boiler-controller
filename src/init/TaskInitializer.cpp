@@ -95,7 +95,8 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
 
     // Persistent Storage task
     LOG_INFO(TAG, "Starting persistent storage task...");
-    LOG_INFO(TAG, "Free heap before persistent storage: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap before persistent storage: %lu bytes",
+             static_cast<unsigned long>(ESP.getFreeHeap()));
 
     TaskManager::WatchdogConfig storageWdtConfig = TaskManager::WatchdogConfig::disabled();
 
@@ -331,7 +332,8 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     // This allows pumps to run while burner is off (coasting for heat distribution)
 
     LOG_INFO(TAG, "=== Pump Control Tasks Initialization ===");
-    LOG_INFO(TAG, "Free heap before pump tasks: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap before pump tasks: %lu bytes",
+             static_cast<unsigned long>(ESP.getFreeHeap()));
 
     // Stack size for pump tasks (lightweight event-driven tasks)
     // 2026-09-17: was 2048, which left WaterPump 288 B and HeatingPump 420 B of free
@@ -417,7 +419,7 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     }
 
     LOG_INFO(TAG, "=== Pump Tasks Initialization Complete ===");
-    LOG_INFO(TAG, "Free heap after pump tasks: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap after pump tasks: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
 }
 
 void TaskInitializer::initializeMonitoringTask() {
@@ -573,7 +575,7 @@ void TaskInitializer::createBurnerControlTask(SystemInitializer* initializer) {
 
 Result<void> TaskInitializer::initializeBurnerControlTask(SystemInitializer* initializer) {
     LOG_INFO(TAG, "=== BurnerControlTask Initialization Started ===");
-    LOG_INFO(TAG, "Free heap before task creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap before task creation: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
 
     // Check if task already exists
     TaskHandle_t existingTask = SRP::getTaskManager().getTaskHandleByName("BurnerControl");
@@ -611,7 +613,7 @@ Result<void> TaskInitializer::initializeBurnerControlTask(SystemInitializer* ini
         1,
         wdtConfig)) {
         LOG_ERROR(TAG, "startTaskPinned FAILED for BurnerControlTask!");
-        LOG_ERROR(TAG, "Free heap after failure: %d bytes", ESP.getFreeHeap());
+        LOG_ERROR(TAG, "Free heap after failure: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
         return Result<void>(SystemError::TASK_CREATE_FAILED, "Failed to start BurnerControlTask");
     }
 
@@ -634,14 +636,14 @@ Result<void> TaskInitializer::initializeBurnerControlTask(SystemInitializer* ini
     LOG_INFO(TAG, "Global task handle updated");
 
     LOG_INFO(TAG, "=== BurnerControlTask Initialization Complete ===");
-    LOG_INFO(TAG, "Free heap after task creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap after task creation: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
 
     return Result<void>();
 }
 
 void TaskInitializer::initializeBoilerTempControlTask(SystemInitializer* initializer) {
     LOG_INFO(TAG, "=== BoilerTempControlTask Initialization Started ===");
-    LOG_INFO(TAG, "Free heap before task creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap before task creation: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
 
     // Check if task already exists
     TaskHandle_t existingTask = SRP::getTaskManager().getTaskHandleByName("BoilerTempCtrl");
@@ -687,8 +689,9 @@ void TaskInitializer::initializeBoilerTempControlTask(SystemInitializer* initial
     );
 
     LOG_INFO(TAG, "Creating BoilerTempControlTask (stack=%lu, priority=%d, WDT=%lums)...",
-             STACK_SIZE_BOILER_TEMP_TASK, PRIORITY_BOILER_TEMP_TASK,
-             SystemConstants::BoilerControl::WDT_TIMEOUT_MS);
+             static_cast<unsigned long>(STACK_SIZE_BOILER_TEMP_TASK),
+             static_cast<int>(PRIORITY_BOILER_TEMP_TASK),
+             static_cast<unsigned long>(SystemConstants::BoilerControl::WDT_TIMEOUT_MS));
 
     if (!SRP::getTaskManager().startTaskPinned(
         BoilerTempControlTask,
@@ -711,5 +714,5 @@ void TaskInitializer::initializeBoilerTempControlTask(SystemInitializer* initial
     }
 
     LOG_INFO(TAG, "=== BoilerTempControlTask Initialization Complete ===");
-    LOG_INFO(TAG, "Free heap after task creation: %d bytes", ESP.getFreeHeap());
+    LOG_INFO(TAG, "Free heap after task creation: %lu bytes", static_cast<unsigned long>(ESP.getFreeHeap()));
 }

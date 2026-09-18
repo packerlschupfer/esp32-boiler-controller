@@ -29,7 +29,7 @@ void RelayCommandProcessor::processRelayRequests(
         return;  // No requests pending
     }
 
-    LOG_DEBUG(TAG, "processRelayRequests: Got request bits: 0x%08X", requestBits);
+    LOG_DEBUG(TAG, "processRelayRequests: Got request bits: 0x%08lX", static_cast<unsigned long>(requestBits));
 
     // Process heating pump requests
     if (requestBits & SystemEvents::RelayRequest::HEATING_PUMP_ON) {

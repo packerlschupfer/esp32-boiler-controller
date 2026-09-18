@@ -72,8 +72,12 @@ void HeatingControlModuleFixedPoint::convertPIDParameters(
     fixedKi = PIDControlModuleFixedPoint::floatToFixed(floatKi);
     fixedKd = PIDControlModuleFixedPoint::floatToFixed(floatKd);
     
-    LOG_DEBUG(TAG, "Converted PID params: Kp=%.3f->%d, Ki=%.3f->%d, Kd=%.3f->%d",
-              floatKp, fixedKp, floatKi, fixedKi, floatKd, fixedKd);
+    // PIDValue_t is a long, so %ld with an explicit cast. Floats promote to double in a
+    // varargs call, which is what %.3f expects.
+    LOG_DEBUG(TAG, "Converted PID params: Kp=%.3f->%ld, Ki=%.3f->%ld, Kd=%.3f->%ld",
+              static_cast<double>(floatKp), static_cast<long>(fixedKp),
+              static_cast<double>(floatKi), static_cast<long>(fixedKi),
+              static_cast<double>(floatKd), static_cast<long>(fixedKd));
 }
 
 int32_t HeatingControlModuleFixedPoint::fixedMultiply(int32_t a, int32_t b, int32_t scale) {

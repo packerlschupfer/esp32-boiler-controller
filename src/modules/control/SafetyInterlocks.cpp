@@ -368,7 +368,7 @@ bool SafetyInterlocks::checkSystemErrors() {
     bool hasErrors = (errorBits & CRITICAL_ERRORS) != 0;
     
     if (hasErrors) {
-        LOG_ERROR(TAG, "Critical system errors detected: 0x%06X", errorBits);
+        LOG_ERROR(TAG, "Critical system errors detected: 0x%06lX", static_cast<unsigned long>(errorBits));
     }
     
     return !hasErrors;

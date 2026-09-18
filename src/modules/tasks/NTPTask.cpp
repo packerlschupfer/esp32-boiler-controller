@@ -131,7 +131,10 @@ static bool tryRTCFallback() {
     time_t rtcTime = mktime(&timeinfo);
 
     if (rtcTime < 1577836800) {  // Jan 1, 2020
-        LOG_WARN(TAG, "RTC epoch invalid: %ld", rtcTime);
+        // time_t is 64-bit on this toolchain - %ld would read half the vararg and
+        // desynchronise any argument after it. Verified with a static_assert against
+        // the real xtensa-esp32-elf toolchain, 2026-09-18.
+        LOG_WARN(TAG, "RTC epoch invalid: %lld", static_cast<long long>(rtcTime));
         return false;
     }
 
@@ -237,11 +240,11 @@ static bool performNTPSync() {
             time_t utcTime = time(nullptr);
             
             // Debug logging - show what we got from NTP
-            LOG_DEBUG(TAG, "NTP provided UTC epoch: %ld", utcTime);
+            LOG_DEBUG(TAG, "NTP provided UTC epoch: %lld", static_cast<long long>(utcTime));
             
             // Check if time looks valid (should be > year 2020)
             if (utcTime < 1577836800) { // Jan 1, 2020
-                LOG_ERROR(TAG, "Invalid epoch time received: %ld", utcTime);
+                LOG_ERROR(TAG, "Invalid epoch time received: %lld", static_cast<long long>(utcTime));
                 LOG_ERROR(TAG, "Server %s returned invalid time!", result.serverUsed);
                 LOG_INFO(TAG, "Marking sync as failed - will retry with different server");
                 ntpEvents.setEvent(NTP_EVENT_SYNC_FAILED);
@@ -250,7 +253,7 @@ static bool performNTPSync() {
             
             // Get system time after NTP sync (should be updated now)
             [[maybe_unused]] time_t systemTime = time(nullptr);
-            LOG_DEBUG(TAG, "System time after NTP sync: %ld", systemTime);
+            LOG_DEBUG(TAG, "System time after NTP sync: %lld", static_cast<long long>(systemTime));
 
             // Don't use NTPClient's timezone - system handles it
             // time_t localTime = ntpClient.getLocalTime();  // This applies offset twice!
@@ -300,8 +303,8 @@ static void logNTPStatus() {
         const char* formattedTime = ntpClient.getFormattedDateTime();
         
         if (formattedTime) {
-            LOG_DEBUG(TAG, "Status: Time=%s, LastSync=%lds ago", 
-                     formattedTime, timeSinceSync);
+            LOG_DEBUG(TAG, "Status: Time=%s, LastSync=%llds ago",
+                     formattedTime, static_cast<long long>(timeSinceSync));
         }
         
         // Check if we need to force a sync (if last sync is too old)
@@ -519,7 +522,8 @@ void NTPTaskEventDriven(void* parameter) {
 
                     // Schedule retry based on failure count
                     uint32_t retryDelay = NTPConstants::RETRY_INTERVAL_MS * (syncFailureCount > 5 ? 5 : syncFailureCount);
-                    LOG_INFO(TAG, "Scheduling NTP retry in %u seconds", retryDelay / 1000);
+                    LOG_INFO(TAG, "Scheduling NTP retry in %lu seconds",
+                          static_cast<unsigned long>(retryDelay / 1000));
 
                     // For long delays, we need a mechanism to keep feeding the watchdog
                     // Instead of a single long timer, we'll set a flag to retry later

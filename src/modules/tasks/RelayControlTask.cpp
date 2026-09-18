@@ -579,7 +579,7 @@ void RelayControlTask::waitForRelayRequests() {
     );
     
     if (bits != 0) {
-        LOG_DEBUG(TAG, "Relay request event received: 0x%08X", bits);
+        LOG_DEBUG(TAG, "Relay request event received: 0x%08lX", static_cast<unsigned long>(bits));
     }
     // If timeout (bits == 0), that's fine - we'll feed watchdog and check again
 }

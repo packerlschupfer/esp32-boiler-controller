@@ -108,7 +108,8 @@ bool BurnerRequestManager::atomicUpdateBits(EventBits_t setBits, EventBits_t cle
                                        SystemEvents::BurnerRequest::TEMPERATURE_MASK;
 
         if (changeEvents != 0) {
-            LOG_DEBUG(TAG, "Setting change event bits: 0x%06X", changeEvents);
+            LOG_DEBUG(TAG, "Setting change event bits: 0x%06lX",
+                      static_cast<unsigned long>(changeEvents));
         }
 
         // F9: this whole function already runs under requestMutex (see caller),
@@ -139,7 +140,9 @@ bool BurnerRequestManager::atomicUpdateBits(EventBits_t setBits, EventBits_t cle
     }
 
     if (changed) {
-        LOG_DEBUG(TAG, "Updated bits: 0x%06X -> 0x%06X (changed)", currentBits, newBits);
+        LOG_DEBUG(TAG, "Updated bits: 0x%06lX -> 0x%06lX (changed)",
+                  static_cast<unsigned long>(currentBits),
+                  static_cast<unsigned long>(newBits));
     }
     return changed;
 }
