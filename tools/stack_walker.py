@@ -306,7 +306,21 @@ class Image:
     def _step(self, cur, regs, site, mnem, ops):
         if mnem == "entry":
             parts = [p.strip() for p in ops.split(",")]
-            if len(parts) == 2 and parts[0] == "a1" and cur.frame is None:
+            # `site == cur.addr` is REQUIRED, not a sanity check. On Xtensa `entry` is always
+            # the FIRST instruction of a windowed function, so an `entry` anywhere else
+            # belongs to a different function - and objdump does sometimes fail to decode a
+            # region, printing raw words with no mnemonic and no new symbol header. Without
+            # this guard the next decodable function's entry is silently attributed to the
+            # preceding symbol.
+            #
+            # Measured cost of not having it: BurnerRequestManager::atomicUpdateBits (real
+            # frame 64 B, hand-decoded from `36 81 00` = entry a1, 8*8) was credited with
+            # 8552 B from a later unsymbolised function, which put BurnerControlTask's bound
+            # at 9112 B against a 4096 B stack - a 5 kB phantom overflow on firmware that
+            # had just run a real burn. It can err the other way too: a smaller stray entry
+            # would UNDER-state a frame, which is the dangerous direction.
+            if len(parts) == 2 and parts[0] == "a1" and cur.frame is None \
+                    and site == cur.addr:
                 cur.frame = int(parts[1], 0)
             return
 
@@ -422,6 +436,42 @@ class Image:
 
     # ------------------------------------------------------------------ lookup
 
+    # GCC clone suffixes ($constprop$N, .isra.N, $part$N). An optimised build emits a
+    # separate copy of a function per specialisation, and objdump's demangler FAILS on the
+    # ones carrying a "$constprop$" suffix, leaving them raw - e.g.
+    # `_ZL14log_write_impl15esp_log_level_tPKcS1_z$constprop$0` beside a perfectly
+    # demangled `log_write_impl(esp_log_level_t, char const*, char const*, ...)`.
+    #
+    # This matters because lookup() returns at the FIRST non-empty strategy. A `static
+    # inline` function like log_write_impl exists ~110 times in the release image; the
+    # demangled copies matched, lookup returned those and stopped, and the clone copies were
+    # never returned. So the verified cut `dropOldestItem -> log_write_impl` matched no edge
+    # on release - dropOldestItem calls a CLONE - which left the whole printf-plus-malloc
+    # tail in several bounds and made release look ~1.5 kB worse per affected task than it is.
+    #
+    # Deliberately conservative: a mangled symbol is only considered when it carries a clone
+    # marker AND contains the Itanium length-prefixed component "<len><name>", so the length
+    # must agree too. That cannot pull in an unrelated function, which matters because these
+    # addresses feed `cut:` - and a cut matching MORE would SHRINK a bound.
+    _CLONE_RE = re.compile(r"\$(?:constprop|part|sra)\$\d+|\.(?:constprop|isra|part|cold)\.\d+")
+
+    def _clone_hits(self, name):
+        bare = name.replace("@rom", "")
+        if bare.startswith("_Z"):
+            return []
+        token = f"{len(bare)}{bare}"
+        out = []
+        for n, addrs in self.by_name.items():
+            raw = n.replace("@rom", "")
+            if not self._CLONE_RE.search(raw):
+                continue
+            if raw.startswith("_Z"):
+                if token in raw:                       # still-mangled clone
+                    out.extend(addrs)
+            elif base_name(self._CLONE_RE.sub("", raw)).rstrip(" []clone") == bare:
+                out.extend(addrs)                      # demangled clone
+        return out
+
     def lookup(self, name):
         if name in self.by_name:
             return self.by_name[name]
@@ -429,6 +479,7 @@ class Image:
         # nested symbols such as "Task(void*)::{lambda()#1}::operator()() const".
         plain = re.compile(re.escape(name) + r"\([^()]*\)(?: const)?(?:@rom)?$")
         hits = [a for n, addrs in self.by_name.items() for a in addrs if plain.match(n)]
+        hits += self._clone_hits(name)
         if hits:
             return hits
         bare = name.replace("@rom", "")
@@ -779,6 +830,13 @@ def analyse(img, spec, excluded, nominal_only, float_cut, failure_cuts,
         "float_free": {k: float_free[k] for k in ("chain_depth", "predicted_used", "path")},
         "worst_exceeds_nominal_via": via,
         "reachable_functions": len(nodes),
+        # Functions on the reachable set whose own `entry` could not be decoded, so their
+        # frame counts as 0. This UNDER-states the bound, which is the dangerous direction,
+        # so it is reported rather than left silent. Normally zero; a non-zero count means
+        # objdump failed to disassemble part of the image.
+        "frameless_functions": sorted(
+            img.name(a) for a in nodes
+            if a in img.funcs and img.funcs[a].frame is None),
         "resolved_indirect": resolved,
         "unresolved_indirect": [{"function": fn, "site": f"{s:#010x}", "reason": r}
                                 for fn, s, r in unresolved],
@@ -852,6 +910,10 @@ def print_report(r, show_path, show_unresolved):
             print("  note: the observed peak is above the no-float bound, so this task has "
                   "formatted a float on a deep path")
     ri = r["resolved_indirect"]
+    if r.get("frameless_functions"):
+        fl = r["frameless_functions"]
+        print(f"  ** {len(fl)} reachable function(s) have NO decodable `entry`, so their "
+              f"frame counts as 0 - the bound is UNDER-stated. First: {fl[0][:70]}")
     print(f"  {r['reachable_functions']} reachable functions; indirect calls resolved: "
           f"{ri['literal']} literal-pool, {ri['vtable']} vtable; "
           f"{len(r['unresolved_indirect'])} unresolved")

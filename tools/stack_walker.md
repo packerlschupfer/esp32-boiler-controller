@@ -207,6 +207,41 @@ fit.
 bound, the remaining worst-case margin is boot-only construction, and
 WheaterControl's float-capable chain is ~800 B clear of its stack.
 
+## Two defects that silently moved bounds (fixed 2026-09-18)
+
+Both are pinned by `tools/test_stack_walker.py` (`python3 tools/test_stack_walker.py`),
+and both were found only by cross-checking one build against another.
+
+**Frames were attributed to the wrong function.** `entry` now sets a frame only when the
+instruction sits at the function's own address. On Xtensa `entry` is always the first
+instruction of a windowed function, so an `entry` seen anywhere else belongs to something
+else - and objdump *does* fail to decode some regions, printing raw words with no mnemonic
+and no new symbol header. Without the guard the next decodable function's frame was
+credited to the preceding symbol: `BurnerRequestManager::atomicUpdateBits`, whose real
+frame is 64 B (hand-decoded from `36 81 00` = `entry a1, 8*8`), was credited **8552 B**,
+putting `BurnerControlTask` at 9112 B against a 4096 B stack. A phantom 5 kB overflow, on
+firmware that had just completed a real burn. It can err the other way too - a smaller
+stray `entry` would *under*-state a frame, which is the dangerous direction.
+
+**Clone symbols were invisible to `lookup()`.** It returns at the first non-empty strategy,
+and a `static inline` function such as `log_write_impl` exists ~110 times in an optimised
+image - some copies demangled, others left raw as
+`_ZL14log_write_impl..$constprop$0` because the `$constprop$` suffix defeats objdump's
+demangler. The demangled copies matched, lookup stopped, and the clones were never
+returned, so the verified cut `dropOldestItem -> log_write_impl` matched no edge on the
+release image. That left a whole printf-plus-malloc tail in four task bounds, overstating
+each by 544 B. Clone matching is deliberately conservative: a mangled symbol counts only
+when it carries a clone marker *and* contains the Itanium length-prefixed component
+(`14log_write_impl`), so the length must agree - these addresses feed `cut:`, and a cut
+matching more would *shrink* a bound.
+
+**A report line now names functions with no decodable `entry`,** whose frame counts as 0 and
+therefore under-states the bound. On the current image 12 appear for BurnerControlTask; most
+are hand-written assembly (`_xt_context_restore`, `xthal_*`, `_frxt_dispatch`) where 0 is
+correct, but `atomicUpdateBits`, `esp_mqtt_client_publish` and `tcp_poll` are ordinary C/C++
+whose `entry` objdump will not render even with `-D`. That is an unresolved objdump/ISA
+limitation - now visible instead of silent.
+
 ## Limits
 
 - Context-insensitive: branches that cannot co-occur can be combined. The
