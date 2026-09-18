@@ -207,6 +207,36 @@ fit.
 bound, the remaining worst-case margin is boot-only construction, and
 WheaterControl's float-capable chain is ~800 B clear of its stack.
 
+## A third defect: phantom call edges from decode desync (2026-09-18)
+
+objdump loses instruction sync on the alignment padding after an unconditional `j` or
+`retw` and then prints instructions that are not there. **13.6% of this image's 7493
+functions contain at least one such spot** (worst: `__ssvfiscanf_r` 121, `_vfprintf_r`
+117, `BoilerTempControlTask` 37). Usually the fiction decodes as something harmless. Once
+measured, it did not: two padding bytes after a `j` at `401ac01f`, objdump decoded from
+`401ac022` over the real branch target `401ac024` and manufactured
+`call4 HealthMonitor::initialize()` at `401ac028` - inside newlib's `__ssvfiscanf_r`.
+The walker believed it, and **NTPTask read 3248 B against a true 1984 B**: 800 B invented
+out of padding, on the task whose stack had been trimmed that same day.
+
+The proof is cheap: on Xtensa every branch target IS an instruction boundary, so an
+instruction that *straddles* a branch target is provably misaligned. Edges whose call
+site sits in such a span and which **carry the reported bound** now print as:
+
+```
+  ** PHANTOM-EDGE SUSPECT carrying this bound: __ssvfiscanf_r -> HealthMonitor::initialize
+```
+
+On the debug_selective image 13 of 19 tasks report zero suspects and the worst reports 3,
+so the list is short enough to check by hand. The test is *semantic*: newlib cannot call a
+project C++ method.
+
+**Labelled, never dropped - deliberately.** The real instructions in a mis-decoded span
+are ones objdump never emitted, so their edges were always missing; and a span can only be
+proven closed where a printed address IS a branch target. Dropping edges on a weaker signal
+would risk discarding a real one and UNDER-stating a bound, which is the only unsafe
+direction on a boiler. Every bound was verified unchanged by this work (all 19 tasks).
+
 ## Two defects that silently moved bounds (fixed 2026-09-18)
 
 Both are pinned by `tools/test_stack_walker.py` (`python3 tools/test_stack_walker.py`),
@@ -267,6 +297,11 @@ silent.
 - Context-insensitive: branches that cannot co-occur can be combined. The
   excludes file removes the verified cases; others make the bound pessimistic.
 - Register tracking is linear, with no control-flow merge.
+- objdump's decode is locally wrong in 13.6% of functions (sync loss after an
+  unconditional branch). Edges from those spans are reported as PHANTOM-EDGE
+  SUSPECTs when they carry the bound, but are not removed, so a bound can still
+  be over-stated until a human checks the suspect list. Blocks reachable only
+  through a jump table are also invisible, which is why spans are not pruned.
 - Each recursion cycle is counted once; true recursion depth is not bounded.
 - Unresolved indirect calls can hide depth. A measured peak above the nominal
   bound (exit 2) is the signal that something was missed.

@@ -128,6 +128,92 @@ def test_entry_decoded_from_elf_bytes():
     check(((0x004236 >> 8) & 0xF) != Img.ENTRY_REG_A1, "entry on a2 is not treated as a1")
 
 
+
+def test_branch_target_extraction():
+    """Only objdump's printed 8-digit addresses count as branch targets.
+
+    The immediates matter: `break 1, 15` and the `-1` in `beqi a8, -1, <addr>` must not be
+    read as addresses, or half the image gains phantom branch targets and every function
+    looks desynced.
+    """
+    bt = sw.Image._branch_target
+    check(bt("j", "401ac068 <__ssvfiscanf_r+0x1da8>") == 0x401ac068, "j target extracted")
+    check(bt("bbsi", "a8, 6, 401ac05d <f+0x1d9d>") == 0x401ac05d, "bbsi target extracted")
+    check(bt("beqi", "a8, -1, 401ac03d <f+0x1d7d>") == 0x401ac03d,
+          "beqi target extracted despite the -1 immediate")
+    check(bt("beqz.n", "a3, 40081f94 <print_str+0x10>") == 0x40081f94, ".n suffix handled")
+    check(bt("break", "1, 15") is None, "break's immediates are not a target")
+    # The two defences above are independent and each masks the other in a mutation test,
+    # so pin them separately. (a) the 8-digit requirement, isolated from the mnemonic filter:
+    check(sw.BRANCH_TARGET_RE.match("15") is None, "a short immediate is not an address")
+    check(sw.BRANCH_TARGET_RE.match("1a2b") is None, "a 4-digit immediate is not an address")
+    check(sw.BRANCH_TARGET_RE.match("40081f94") is not None, "an 8-digit address matches")
+    # (b) the mnemonic filter, isolated from the 8-digit requirement. `break` never prints an
+    # address-shaped operand in practice; this pins that the filter alone would still reject it.
+    check(bt("break", "1, 40081f94") is None,
+          "break is rejected by the mnemonic filter even with an address-shaped operand")
+    check(bt("l32r", "a9, 4018de84 <x+0xa48>") is None, "l32r is not a branch")
+    check(bt("callx8", "a8") is None, "callx8 is not a branch")
+    check(bt("add.n", "a9, a8, a9") is None, "arithmetic is not a branch")
+
+
+def test_fiction_sites_real_print_str():
+    """The hand-verified desync in print_str (IRAM, image 8ee1446).
+
+    objdump prints `excw` at 40081f93 while the real instruction begins one byte later at
+    40081f94, which the `beqz.n` at 40081f89 proves is an instruction boundary. Everything
+    objdump prints from 40081f93 is therefore fiction.
+    """
+    instrs = [
+        (0x40081f84, 3, "entry", "a1, 32"),
+        (0x40081f87, 2, "mov.n", "a10, a2"),
+        (0x40081f89, 2, "beqz.n", "a3, 40081f94 <print_str+0x10>"),
+        (0x40081f8b, 3, "l32r", "a8, 40080588"),
+        (0x40081f8e, 3, "callx8", "a8"),
+        (0x40081f91, 2, "retw.n", ""),
+        (0x40081f93, 3, "excw", ""),          # <- straddles the branch target 40081f94
+        (0x40081f96, 2, "s32i.n", "a15, a0, 56"),
+    ]
+    fic = sw.Image._fiction_sites(instrs, {0x40081f94})
+    check(0x40081f93 in fic, "the instruction straddling a branch target is fiction")
+    check(0x40081f8e not in fic, "the real callx8 before the desync is NOT fiction")
+    check(0x40081f84 not in fic, "the function's own entry is NOT fiction")
+    # A cleanly decoded function must produce nothing, or 13.6% noise becomes 100%.
+    clean = [(0x1000, 3, "entry", "a1, 32"), (0x1003, 3, "call8", "1100 <g>"),
+             (0x1006, 2, "retw.n", "")]
+    check(sw.Image._fiction_sites(clean, {0x1006}) == set(),
+          "a cleanly decoded function yields no fiction sites")
+
+
+def test_fiction_covers_the_ntptask_phantom():
+    """The measured phantom: newlib scanf appearing to call a project C++ method.
+
+    Two padding bytes after the `j` at 401ac01f, objdump decoded from 401ac022 over the
+    real branch target 401ac024 and invented `call4 HealthMonitor::initialize()` at
+    401ac028. That single edge put NTPTask at 3248 B against a true 1984 B. The call site
+    must be reported as fiction, and a later proven boundary must clear the state so the
+    rest of the function is not blamed.
+    """
+    instrs = [
+        (0x401ac01f, 3, "j", "401ac068 <f+0x1da8>"),
+        (0x401ac022, 3, "neg", "a0, a0"),      # <- straddles 401ac024
+        (0x401ac025, 3, "addx2", "a15, a4, a5"),
+        (0x401ac028, 3, "call4", "40134a30 <HealthMonitor::initialize()>"),
+        (0x401ac03d, 3, "movi.n", "a6, 0"),    # a real branch target -> resync
+        (0x401ac040, 3, "call8", "40100000 <real>"),
+    ]
+    targets = {0x401ac024, 0x401ac03d}
+    fic = sw.Image._fiction_sites(instrs, targets)
+    check(0x401ac028 in fic, "the phantom call4 site is flagged as fiction")
+    check(0x401ac01f not in fic, "the j that precedes the padding is not itself fiction")
+    check(0x401ac03d not in fic, "a printed address that IS a branch target resynchronises")
+    check(0x401ac040 not in fic, "a real call after resync is not blamed")
+
+print("branch-target extraction:")
+test_branch_target_extraction()
+print("fiction sites (decode desync):")
+test_fiction_sites_real_print_str()
+test_fiction_covers_the_ntptask_phantom()
 print("ENTRY decoding:")
 test_entry_decoded_from_elf_bytes()
 print("lookup():")

@@ -67,6 +67,16 @@ code can add spurious edges (both err toward over-estimation). Unresolved
 indirect calls can hide real depth - if an observed peak exceeds the bound,
 that is where to look.
 
+objdump also loses instruction sync on alignment padding after an unconditional
+`j`/`retw` and then prints instructions that do not exist, in 13.6% of this
+image's functions. Those can decode as calls to real functions and add an
+arbitrarily deep phantom subtree: one put NTPTask at 3248 B against a true
+1984 B. Any such edge that carries the reported bound is now printed as a
+PHANTOM-EDGE SUSPECT - a branch target that is not an instruction boundary
+proves the desync. They are labelled, never dropped: the real instructions in a
+mis-decoded span are ones objdump never emitted, and a span can only be proven
+closed at a branch target, so dropping would risk UNDER-stating a bound.
+
 Examples:
   tools/stack_walker.py BoilerTempControlTask:3584:1044
   tools/stack_walker.py --list-roots
@@ -111,9 +121,16 @@ SCC_BUDGET = 500_000
 FLOAT_SPEC_RE = re.compile(r"%[-+ #0-9.*]*(?:hh|h|l|ll|L|j|z|t)?[fFeEgGaA]")
 
 FUNC_RE = re.compile(r"^([0-9a-f]{8}) <(.+)>:$")
-INSN_RE = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f]+\s+([a-z0-9_.]+)\s*(.*)$")
+INSN_RE = re.compile(r"^\s*([0-9a-f]+):\s+([0-9a-f]+)\s+([a-z0-9_.]+)\s*(.*)$")
+# Instructions after which control does not fall through, so the following bytes may be
+# alignment padding rather than code - where objdump loses instruction sync.
+UNCONDITIONAL = frozenset(("j", "jx", "ret", "ret.n", "retw", "retw.n", "ill"))
 TARGET_RE = re.compile(r"^([0-9a-f]+)(?:\s+<(.+)>)?$")
 L32R_RE = re.compile(r"^(a\d+),\s*([0-9a-f]+)")
+# The last operand of a branch, when it is a full 8-digit code address rather than an
+# immediate. Requiring 8 digits is what keeps `break 1, 15` and `beqi a8, -1, ...`'s
+# immediates out: only objdump's printed addresses match.
+BRANCH_TARGET_RE = re.compile(r"^([0-9a-f]{8})(?:\s+<.+>)?$")
 GETINSTANCE_RE = re.compile(r"^(.+)::getInstance\(\)$")
 
 # Mnemonics whose first operand is NOT a destination register.
@@ -202,7 +219,8 @@ def data_symbols(elf):
 
 
 class Func:
-    __slots__ = ("addr", "name", "frame", "edges", "unresolved", "resolved", "pending", "insns")
+    __slots__ = ("addr", "name", "frame", "edges", "unresolved", "resolved", "pending",
+                 "insns", "desync", "fiction_edges")
 
     def __init__(self, addr, name):
         self.addr = addr
@@ -213,6 +231,8 @@ class Func:
         self.resolved = []        # (site, how, target_addr)
         self.pending = []         # (site, how, target_addr) - checked after all parsing
         self.insns = None         # kept only for model-extraction functions
+        self.desync = ()          # branch targets that are not instruction boundaries
+        self.fiction_edges = set()  # targets whose call site is in a mis-decoded span
 
 
 def base_name(name):
@@ -312,13 +332,91 @@ class Image:
             v = self.rom.read32(addr)
         return v
 
+    @staticmethod
+    def _branch_target(mnem, ops):
+        """The code address a direct branch/jump transfers to, or None.
+
+        Used only to find decode desync (see _close_function), never to add call edges.
+        """
+        if mnem == "break" or mnem.startswith("break"):
+            return None
+        if not (mnem.startswith("b") or mnem == "j" or mnem.startswith("loop")):
+            return None
+        m = BRANCH_TARGET_RE.match(ops.rsplit(",", 1)[-1].strip())
+        return int(m.group(1), 16) if m else None
+
+    @staticmethod
+    def _fiction_sites(instrs, targets):
+        """Addresses objdump printed that cannot be real instructions.
+
+        On Xtensa every branch target IS an instruction boundary. So when objdump prints
+        an instruction that STRADDLES a branch target, its decode is provably misaligned:
+        it lost instruction sync - typically on alignment padding after an unconditional
+        `j`/`retw` - and everything it prints from there is fiction until it happens to
+        resynchronise, which we can only prove when a printed address IS a branch target.
+
+        Measured, in newlib's __ssvfiscanf_r: two padding bytes after a `j` at 401ac01f,
+        objdump decoded from 401ac022 straight over the real branch target 401ac024 and
+        manufactured `call4 HealthMonitor::initialize()` at 401ac028 plus a `call0` to an
+        address past `_etext`. The walker believed the first one, and NTPTask's bound read
+        3248 B against a true 1984 B - 800 B invented out of padding.
+
+        Real and common: 13.6% of the 7493 functions in this image contain at least one
+        such spot (worst: __ssvfiscanf_r 121, _vfprintf_r 117, BoilerTempControlTask 37).
+        Hand-verified in print_str, where objdump prints `excw` at 40081f93 while the real
+        instruction begins at the branch target 40081f94.
+
+        Returns the set of printed addresses inside such a span. Used to LABEL edges, not
+        to drop them by default: the real instructions in a fiction span are ones objdump
+        never emitted, so their edges were always missing, and a span that resynchronises
+        somewhere other than a branch target cannot be proven closed - dropping there
+        could discard a real edge and UNDER-state a bound, the one unsafe direction.
+        """
+        fiction, out = False, set()
+        for i, (site, length, mnem, _ops) in enumerate(instrs):
+            if fiction:
+                if site in targets:          # proven resynchronised
+                    fiction = False
+                else:
+                    out.add(site)
+                    continue
+            # A printed instruction that steps over a branch target is proof of misalignment.
+            if any(site < t < site + length for t in targets):
+                out.add(site)
+                fiction = True
+        return out
+
+    @classmethod
+    def _close_function(cls, cur, instrs, targets):
+        if not (cur and instrs):
+            return
+        starts = {s for s, _l, _m, _o in instrs}
+        lo, hi = cur.addr, max(starts)
+        cur.desync = tuple(sorted(t for t in targets if lo <= t <= hi and t not in starts))
+        return cls._fiction_sites(instrs, targets)
+
     def _parse(self, listing, suffix):
-        cur = None
-        regs = {}
+        # Instructions are buffered per function rather than stepped as they are read,
+        # because deciding whether a printed instruction is real needs the function's
+        # forward branch targets too - see _fiction_sites.
+        cur, instrs, targets = None, [], set()
+
+        def close():
+            fiction = self._close_function(cur, instrs, targets) or set()
+            if cur is None:
+                return
+            regs = {}
+            for site, _length, mnem, ops in instrs:
+                if cur.insns is not None and len(cur.insns) < 60:
+                    cur.insns.append((mnem, ops))
+                self._step(cur, regs, site, mnem, ops, site in fiction)
+
         with open(listing, errors="replace") as f:
             for line in f:
                 m = FUNC_RE.match(line.rstrip("\n"))
                 if m:
+                    close()
+                    instrs, targets = [], set()
                     addr = int(m.group(1), 16)
                     name = m.group(2) + suffix
                     if addr in self.funcs:        # ROM and app never overlap; be safe
@@ -329,7 +427,6 @@ class Image:
                         cur.insns = []
                     self.funcs[addr] = cur
                     self.by_name.setdefault(name, []).append(addr)
-                    regs = {}
                     continue
                 if cur is None:
                     continue
@@ -337,12 +434,14 @@ class Image:
                 if not m:
                     continue
                 site = int(m.group(1), 16)
-                mnem, ops = m.group(2), m.group(3).strip()
-                if cur.insns is not None and len(cur.insns) < 60:
-                    cur.insns.append((mnem, ops))
-                self._step(cur, regs, site, mnem, ops)
+                mnem, ops = m.group(3), m.group(4).strip()
+                instrs.append((site, len(m.group(2)) // 2, mnem, ops))
+                bt = self._branch_target(mnem, ops)
+                if bt is not None:
+                    targets.add(bt)
+        close()   # last function in the listing
 
-    def _step(self, cur, regs, site, mnem, ops):
+    def _step(self, cur, regs, site, mnem, ops, fiction=False):
         if mnem == "entry":
             parts = [p.strip() for p in ops.split(",")]
             # `site == cur.addr` is REQUIRED, not a sanity check. On Xtensa `entry` is always
@@ -384,7 +483,10 @@ class Image:
             if call:
                 t = TARGET_RE.match(ops)
                 if t:
-                    cur.edges.add(int(t.group(1), 16))
+                    target = int(t.group(1), 16)
+                    cur.edges.add(target)
+                    if fiction:
+                        cur.fiction_edges.add(target)
                     ret_reg = {0: "a2", 4: "a6", 8: "a10", 12: "a14"}[window]
                     name = t.group(2) or ""
                     gi = GETINSTANCE_RE.match(name)
@@ -403,6 +505,8 @@ class Image:
                 target = int(t.group(1), 16)
                 if target != cur.addr:
                     cur.edges.add(target)     # tail call into another function
+                    if fiction:
+                        cur.fiction_edges.add(target)
             return
         if mnem == "jx":
             self._resolve_indirect(cur, regs, site, ops.strip())
@@ -876,6 +980,23 @@ def analyse(img, spec, excluded, nominal_only, float_cut, failure_cuts,
         "frameless_functions": sorted(
             img.name(a) for a in nodes
             if a in img.funcs and img.funcs[a].frame is None),
+        # Functions whose disassembly contains a branch to an address objdump never
+        # decoded as an instruction - proof it lost instruction sync, so the call edges
+        # it reported for them may be fiction. Unlike frameless_functions this OVER-states
+        # (a phantom edge only ever adds depth), but it is what made NTPTask read 3248 B
+        # instead of 1984 B, so any such function ON THE WORST PATH is called out below.
+        "desynced_functions": sorted(
+            {img.name(a) for a in nodes if a in img.funcs and img.funcs[a].desync}),
+        # The actionable unit: an edge ON THE WORST PATH whose call site objdump printed
+        # inside a mis-decoded span. These are the candidates for being pure fiction, and
+        # checking whether each is semantically possible is a one-minute job. 13.6% of
+        # functions contain a desynced span, so reporting at function granularity is noise -
+        # only edges that actually carry the reported bound are listed.
+        "fiction_edges_on_worst_path": [
+            {"from": img.name(a), "to": img.name(b)}
+            for a, b in zip([r["addr"] for r in worst["path"]],
+                            [r["addr"] for r in worst["path"]][1:])
+            if a in img.funcs and b in img.funcs[a].fiction_edges],
         "resolved_indirect": resolved,
         "unresolved_indirect": [{"function": fn, "site": f"{s:#010x}", "reason": r}
                                 for fn, s, r in unresolved],
@@ -953,6 +1074,11 @@ def print_report(r, show_path, show_unresolved):
         fl = r["frameless_functions"]
         print(f"  ** {len(fl)} reachable function(s) have NO decodable `entry`, so their "
               f"frame counts as 0 - the bound is UNDER-stated. First: {fl[0][:70]}")
+    for fe in r.get("fiction_edges_on_worst_path", ()):
+        print(f"  ** PHANTOM-EDGE SUSPECT carrying this bound: "
+              f"{fe['from'].split('(')[0][:44]} -> {fe['to'].split('(')[0][:44]}  "
+              f"(objdump lost instruction sync at the call site, so the edge may not exist; "
+              f"the bound would then be OVER-stated). Verify it is semantically possible.")
     print(f"  {r['reachable_functions']} reachable functions; indirect calls resolved: "
           f"{ri['literal']} literal-pool, {ri['vtable']} vtable; "
           f"{len(r['unresolved_indirect'])} unresolved")
