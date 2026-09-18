@@ -199,7 +199,15 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // Stack sizes (in bytes) - Three-tier optimization based on logging mode
 #if defined(LOG_MODE_DEBUG_FULL)
     // DEBUG FULL MODE - Conservative stack sizes
-    #define STACK_SIZE_OTA_TASK              2048  // After fix: conservative for debug mode
+    #define STACK_SIZE_OTA_TASK              4096  // MEASURED 2026-09-18: 4096, not 3072. An OTA *auth exchange alone* took OTATask from
+                                                   // 2144 B free to 384 B - below LOW_STACK_WARN_BYTES (512) - i.e. 2688 B used on a
+                                                   // 3072 B stack, and the successful-transfer branch (_runUpdate -> client.printf ->
+                                                   // Update.write) is deeper still and was NOT measured. The depth is Arduino-core
+                                                   // (ArduinoOTAClass::_onRx has an 880 B frame and calls Print::printf -> _svfprintf_r),
+                                                   // so it does NOT shrink with log mode: every tier needs this, which is why the
+                                                   // DEBUG_FULL (was 2048) and RELEASE (was 1536) tiers were below measured usage too.
+                                                   // Funded by the ~5.5 kB of DRAM that LOG_DEFERRED_FORMAT freed. Re-check with
+                                                   // 'boiler/cmd/diagnostics' payload 'tasks' after any OTA.
     #define STACK_SIZE_MONITORING_TASK       4096  // Safety: increased for task status array allocation
     #define STACK_SIZE_MODBUS_CONTROL_TASK   1536  // After fix: with debug logging
     #define STACK_SIZE_RELAY_CONTROL_TASK    2560  // After fix: needs more for multiple log messages
@@ -220,7 +228,15 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 #elif defined(LOG_MODE_DEBUG_SELECTIVE)
     // DEBUG SELECTIVE MODE - Optimized based on runtime profiling (Dec 2025)
     // H3: Safety-critical tasks increased by +512 bytes for margin
-    #define STACK_SIZE_OTA_TASK              3072  // Dec 2025: was 2560, had 816 free
+    #define STACK_SIZE_OTA_TASK              4096  // MEASURED 2026-09-18: 4096, not 3072. An OTA *auth exchange alone* took OTATask from
+                                                   // 2144 B free to 384 B - below LOW_STACK_WARN_BYTES (512) - i.e. 2688 B used on a
+                                                   // 3072 B stack, and the successful-transfer branch (_runUpdate -> client.printf ->
+                                                   // Update.write) is deeper still and was NOT measured. The depth is Arduino-core
+                                                   // (ArduinoOTAClass::_onRx has an 880 B frame and calls Print::printf -> _svfprintf_r),
+                                                   // so it does NOT shrink with log mode: every tier needs this, which is why the
+                                                   // DEBUG_FULL (was 2048) and RELEASE (was 1536) tiers were below measured usage too.
+                                                   // Funded by the ~5.5 kB of DRAM that LOG_DEFERRED_FORMAT freed. Re-check with
+                                                   // 'boiler/cmd/diagnostics' payload 'tasks' after any OTA.
     #define STACK_SIZE_MONITORING_TASK       3584  // Dec 2025: was 4096, had 2232 free
     #define STACK_SIZE_MODBUS_CONTROL_TASK   3584  // Increased - was showing only 448 bytes free
     #define STACK_SIZE_RELAY_CONTROL_TASK    4096  // H3: Safety-critical +512 (was 3584)
@@ -298,7 +314,15 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 
 #else  // LOG_MODE_RELEASE
     // RELEASE MODE - Aggressive optimization with SafeLog
-    #define STACK_SIZE_OTA_TASK              1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
+    #define STACK_SIZE_OTA_TASK              4096  // MEASURED 2026-09-18: 4096, not 3072. An OTA *auth exchange alone* took OTATask from
+                                                   // 2144 B free to 384 B - below LOW_STACK_WARN_BYTES (512) - i.e. 2688 B used on a
+                                                   // 3072 B stack, and the successful-transfer branch (_runUpdate -> client.printf ->
+                                                   // Update.write) is deeper still and was NOT measured. The depth is Arduino-core
+                                                   // (ArduinoOTAClass::_onRx has an 880 B frame and calls Print::printf -> _svfprintf_r),
+                                                   // so it does NOT shrink with log mode: every tier needs this, which is why the
+                                                   // DEBUG_FULL (was 2048) and RELEASE (was 1536) tiers were below measured usage too.
+                                                   // Funded by the ~5.5 kB of DRAM that LOG_DEFERRED_FORMAT freed. Re-check with
+                                                   // 'boiler/cmd/diagnostics' payload 'tasks' after any OTA.
     #define STACK_SIZE_MONITORING_TASK       3584  // Dec 2025: increased from 3072 for task status allocation + LOG_DEBUG overhead
     #define STACK_SIZE_MODBUS_CONTROL_TASK   1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
     #define STACK_SIZE_RELAY_CONTROL_TASK    1536  // After fix: needs margin for logging
