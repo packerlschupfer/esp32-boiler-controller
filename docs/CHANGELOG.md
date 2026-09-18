@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Investigated, not resolved: why LOG_MODE_RELEASE misses its stacks
+
+Chosen approach was to attack the demand side - the ~1312 B of stack per `LOG_*` call. Measuring first changed the picture, and the headline number from the earlier review turns out to be **overstated**.
+
+**The deepest release chains are not logging-dominated in the way the estimate assumed.** They run *through* logging and continue into the heap. `BurnerControlTask`'s binding path on the release image:
+
+```
+BurnerControlTask 128 -> processBurnerRequest 256
+  -> TemperatureSensorFallback::canContinueOperation/updateSensorStatus(Locked) 160
+  -> publishFallbackModeChange 368 -> MQTTTask::publish 464
+  -> QueueManager::send 32 -> handleOverflow 48 -> dropOldestItem 560      (cum 2016)
+  -> log_write_impl 80 -> custom_log_write 64 -> Logger::logV 64
+  -> vsnprintf 64 -> _vsnprintf_r 144 -> _svfprintf_r 800                  (cum 3232)
+  -> _malloc_r 32 -> heap_caps_malloc... -> xPortEnterCriticalTimeout      (cum 3584)
+```
+
+So the tail past the formatter is **heap allocation**, not more logging - and for `MQTTTask` it is the heap-corruption assertion path (`verify_allocated_region -> ets_printf@rom -> _cvt@rom`). Reducing per-call logging cost would not have addressed either.
+
+**More importantly, that path is already known to be impossible, and the tool cannot see it on an optimised build.** `tools/stack_walker.excludes:24` cuts `dropOldestItem -> log_write_impl` with a verified reason: the `LOG_ERROR` fires only when `itemSize > MAX_QUEUE_ITEM_SIZE` (512) and both queues pass `sizeof(MQTTPublishRequest)` = 392. That cut applies on the debug image. On the release image it does **not**, because the callee is a GCC clone - `_ZL14log_write_impl15esp_log_level_tPKcS1_z$constprop$0` - and the `$constprop$` suffix defeats objdump's demangler, so the name never matches. The edge is confirmed present in the disassembly (`400f4828 -> 400f4764`), and `--stale-excludes-ok` therefore skipped a conservative cut.
+
+**Consequence: `BurnerControlTask`'s release bound of 3952 B is overstated by roughly 1568 B** - everything past cumulative 2016. The earlier claim that "13 of 18 tasks exceed their stack" in release is pessimistic and should not be used as the measure of how far release is from fitting. A second, smaller source of pessimism sits on the same path: the per-call-site float attribution sets its bit on *entering* a function that holds a `%f` format string, so an ancestor's float format charges `_svfprintf_r -> _malloc_r` to a `dropOldestItem` log line that contains no float.
+
+**Not fixed.** Two attempts at clone-aware symbol matching (strip `$constprop$`/`.isra.` suffixes; then match the Itanium length-prefixed component `14log_write_impl` inside the mangled string) did not make the cut apply, and I reverted both rather than ship an unproven matcher - one that makes a *cut* match more can silently **shrink** a bound, which is the defect class this review round exists to catch.
+
+**Next step, bounded:** make `ElfImage.lookup()` resolve clone symbols, with a test that pins it, then re-measure release. Until then the honest position on `LOG_MODE_RELEASE` is *unknown*, not *18 kB short* - and it stays `#error`-gated either way.
+
 ### Corrected (2026-09-18 second review)
 
 A fresh review of the day's own work found six claims in the entries below to be false. They are corrected here rather than quietly edited, because the commit messages and this file both carried them.
