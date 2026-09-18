@@ -27,23 +27,25 @@ The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (ta
 | RelayControlTask | 4 | 4096 | 1 | Physical relay control, motor protection |
 | HeatingControlTask | 3 | 3584 | Any | Space heating: heating curve target, heating request |
 | WheaterControlTask | 3 | 3584 | Any | Water heating: charge decision, water request |
-| BoilerTempControlTask | 4 | 3072 | 1 | Boiler temperature PID, heat demand, autotune |
+| BoilerTempControlTask | 4 | 3584 | 1 | Boiler temperature PID, heat demand, autotune |
 | MB8ARTTask | 4 | 3584 | 1 | MB8ART temperature data acquisition |
 | MB8ARTProcessingTask | 3 | 3072 | 1 | Temperature sensor data processing |
 | ANDRTF3Task | 3 | 3584 | 1 | Room temperature sensor (only if the device is present) |
-| RYN4ProcessingTask | 3 | 2560 | 1 | Relay module data processing |
+| RYN4ProcessingTask | 3 | 3072 | 1 | Relay module data processing |
 | ControlTask | 3 | 3584 | Any | Remote control command handler |
 | MQTTTask | 2 | 3584 | 1 | MQTT communication & queuing |
 | MonitoringTask | 2 | 3584 | 0 | System health & diagnostics |
-| HeatingPumpTask | 3 | 2048 | Any | Heating circulation pump control |
-| WaterPumpTask | 3 | 2048 | Any | Hot water loading pump control |
+| HeatingPumpTask | 3 | 2560 | Any | Heating circulation pump control |
+| WaterPumpTask | 3 | 2560 | Any | Hot water loading pump control |
 | OTATask | 1 | 3072 | 1 | Over-the-air firmware updates |
 | TimerSchedulerTask | 2 | 3072 | 0 | Schedule management |
 | PersistentStorageTask | 2 | 5120 | Any | NVS parameter persistence |
-| NTPTask | 2 | 4096 | 1 | Time synchronization |
+| NTPTask | 2 | 3072 | 1 | Time synchronization |
 | SyslogTask | 1 | 4096 | Any | Remote syslog |
 
-*Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Fixed in all modes: HeatingPump/WaterPump 2048, BoilerTempCtrl 3072, NTPTask 4096, SyslogTask 4096 (literals in the start calls). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
+*Only `LOG_MODE_DEBUG_SELECTIVE` is a buildable, hardware-validated configuration as of 2026-09-18: `LOG_MODE_DEBUG_FULL` and `LOG_MODE_RELEASE` raise a `#error` in `ProjectConfig.h` because their task stacks are measurably too small. Treat any DEBUG_FULL or RELEASE figure below as historical, not as a target.*
+
+*Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Only two stacks are still literals in their start calls and therefore fixed in all modes: SyslogTask 4096 (`TaskInitializer.cpp`) and ModbusInit 4096 (`ModbusDeviceInitializer.cpp`). Everything else - including the pumps, BoilerTempCtrl, NTPTask and NetworkMonitor - now comes from a `STACK_SIZE_*` macro and is covered by the `configMINIMAL_STACK_SIZE` assertions in ProjectConfig.h (2026-09-18). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
 
 Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task. (The never-started "MQTTDiagnostics" and "TaskHealthMonitor" tasks were removed with their modules on 2026-09-16.)
 
@@ -461,7 +463,7 @@ boiler/params/save                           - Save all to NVS
 
 **File**: `src/modules/control/PumpControlModule.cpp`
 **Priority**: 3 (`PRIORITY_PUMP_TASK`, local constant in `TaskInitializer::initializePumpTasks()`)
-**Stack**: 2048 (all modes, local `STACK_SIZE_PUMP_TASK`; the `STACK_SIZE_PUMP_CONTROL_TASK` / `PRIORITY_PUMP_CONTROL_TASK` macros in `ProjectConfig.h` are not used)
+**Stack**: 2560, from `STACK_SIZE_PUMP_CONTROL_TASK` / `PRIORITY_PUMP_CONTROL_TASK` (2026-09-18: the local `STACK_SIZE_PUMP_TASK` that used to shadow those macros is gone; measured 928-940 B free, peak ~1640 B)
 **Core**: Any (not pinned)
 **Watchdog**: 10000ms (TaskManager, critical)
 
@@ -549,7 +551,7 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 
 **File**: `src/modules/tasks/RYN4ProcessingTask.cpp`
 **Priority**: 3
-**Stack**: 1536 (DEBUG_FULL) | 2560 (DEBUG_SELECTIVE) | 768 (RELEASE)
+**Stack**: 3072 (DEBUG_SELECTIVE). DEBUG_FULL (1536) and RELEASE (1536) both exceed their static bounds and those tiers now refuse to build - see the `#error` blocks in ProjectConfig.h
 **Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
 **Watchdog**: WDT_SENSOR_PROCESSING_MS (30s, non-critical)
 

@@ -130,12 +130,19 @@ namespace RelayCommandPolicy {
     }
 
     /**
-     * @brief processSingleRelay(): may a command for a valid relay (1-8) be queued?
+     * @brief gateToggle() + the pump-protection step, as one call. NO PRODUCTION CALLER.
      *
-     * No-op and emergency commands skip both protections. The no-op check comes
-     * first so an unchanged relay never counts as a toggle. A real change is counted
-     * by the rate limiter before pump motor protection is asked (also when that
-     * then refuses it).
+     * processSingleRelay() does not use this: it calls gateToggle() inside the
+     * rate-limiter critical section and then checkPumpProtection() outside it, because
+     * that function takes relayStateMutex_ and must not block inside
+     * portENTER_CRITICAL. admit() exists so the two-step decision can be asserted
+     * against a stated expectation table in the native tests, which cannot compile
+     * RelayControlTask.cpp. Both paths share gateToggle(), so that part cannot drift;
+     * the pump step here mirrors production by inspection only.
+     *
+     * No-op and emergency commands skip both protections. The no-op check comes first
+     * so an unchanged relay never counts as a toggle. A real change is counted by the
+     * rate limiter before pump motor protection is asked (also when that then refuses).
      *
      * @param pumpProtectionAllows (relayIndex, requestedState), not null
      */

@@ -40,6 +40,7 @@
 #include <cerrno>  // M2: For errno in strtoul validation
 #include <cstdlib> // M2: For strtoul
 #include <ctype.h>
+#include "core/QueueManager.h"  // drop counter, to detect evicted diagnostics chunks
 
 
 static const char* TAG_CMD = "MQTTCmd";
@@ -659,26 +660,11 @@ void handleErrorCommand(const char* topic, const char* payload) {
 // the pacing short regardless - this task also runs the MQTT protocol itself. The
 // chunk count is capped because LOW priority lands in the 5-slot normal queue with
 // drop-oldest, which discards the OLDEST entry silently.
-// 12, raised from 8 on 2026-09-18. A 32-task dump needs about 7 chunks (32 lines of
-// ~52 chars plus headers against a 320-byte payload), so 8 left no headroom at all:
-// every refused chunk still consumed one of the 8, and a dump that hit a moment of
-// queue pressure ran out of budget before it ran out of content. Observed on the
-// device: 27 of 32 tasks delivered, missing both pump tasks and RYN4Proc. This is a
-// safety stop on total output, not a target - 12 * 320 = 3840 B of text.
-static constexpr size_t DIAG_MAX_CHUNKS = 12;
+// 8, restored from 12 on 2026-09-18 after review. Raising it made things WORSE: the
+// chunks are not being refused, they are being EVICTED (see flush() below), so a higher
+// cap simply produces more evictions of earlier chunks.
+static constexpr size_t DIAG_MAX_CHUNKS = 8;
 static constexpr uint32_t DIAG_CHUNK_PACING_MS = 25;
-
-// A refused chunk is now retried instead of being lost. MQTTTask::publish() refuses a
-// LOW-priority message via shouldThrottle() once queue utilisation reaches 50% - on a
-// 5-slot queue that is 3 pending entries - and it refuses BEFORE enqueueing, so nothing
-// is evicted and the content is simply dropped on the floor. Waiting works here because
-// this function runs in the esp-mqtt task (priority 5) while MQTTTask (priority 2)
-// drains the queue: vTaskDelay() blocks the higher-priority producer and lets the
-// consumer run. Retrying would be useless - or a self-deadlock - if this ran on
-// MQTTTask itself, so re-verify the task context before changing it
-// (ESP32MQTTClient.cpp invokes the subscribe callback straight from MQTT_EVENT_DATA).
-static constexpr unsigned DIAG_CHUNK_RETRIES = 5;
-static constexpr uint32_t DIAG_CHUNK_RETRY_MS = 50;
 
 void handleDiagnosticsCommand(const char* payload) {
     if (!payload || payload[0] == '\0') {
@@ -768,27 +754,44 @@ void handleDiagnosticsCommand(const char* payload) {
     size_t chunks = 0;
     bool truncated = false;
 
+    // Baseline for eviction detection. A LOW publish that lands in a full queue is not
+    // refused - QueueManager's DROP_OLDEST strategy silently discards the OLDEST entry and
+    // xQueueSend succeeds, so publish() returns true and the chunk we already "sent" is the
+    // one that disappears. The only way to notice from here is that the queue's drop
+    // counter moved while we were publishing.
+    size_t qBefore = 0, msgBefore = 0, dropBefore = 0;
+    QueueManager::getInstance().getGlobalMetrics(qBefore, msgBefore, dropBefore);
+
     auto flush = [&]() {
         if (used == 0) return;
         chunk[used] = '\0';
-        // Check the return AND retry: a LOW-priority publish is refused once queue
-        // utilisation reaches 50%, and the refusal happens before enqueueing, so the
-        // chunk's content is lost rather than displacing anything. Counting a refused
-        // chunk as sent produced a dump with silent holes, and since the payloads carry
-        // no index the receiver could not tell. Give the consumer time to drain and try
-        // again; only report truncation once the retries are exhausted.
-        bool sent = false;
-        for (unsigned attempt = 0; attempt < DIAG_CHUNK_RETRIES && !sent; attempt++) {
-            sent = MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_REPORT, chunk, 0, false,
-                                     MQTTPriority::PRIORITY_LOW);
-            if (!sent) {
-                vTaskDelay(pdMS_TO_TICKS(DIAG_CHUNK_RETRY_MS));
-            }
-        }
-        if (!sent) {
+        // ONE attempt, deliberately. A retry loop was added here on 2026-09-18 and removed
+        // the same day: it cannot work from this task, and the reasoning behind it was
+        // wrong in two ways.
+        //
+        // (a) The refusal it retried essentially never happens. shouldThrottle() drops a
+        //     LOW publish at 50% of getQueueUtilization(), which is a WEIGHTED BLEND -
+        //     0.6*(high/5) + 0.4*(normal/5) (MQTTTask.cpp:755-769). With the high queue
+        //     empty, a COMPLETELY FULL normal queue is 40%, below the threshold. Three
+        //     pending chunks is 24%. The earlier comment here claiming "50% = 3 pending
+        //     entries" simply misread the formula.
+        // (b) Waiting cannot drain the queue anyway. This handler runs inline from
+        //     esp-mqtt's MQTT_EVENT_DATA, i.e. inside mqtt_process_receive() while the
+        //     esp-mqtt API lock is held; esp_mqtt_client_publish() takes that same lock.
+        //     So MQTTTask dequeues at most one request and then blocks until this whole
+        //     function returns. vTaskDelay here buys nothing and, at 5 retries x 50 ms x
+        //     12 chunks, cost up to ~3.3 s of blocked MQTT with the lock held.
+        //
+        // What actually loses chunks: the normal queue fills, QueueManager takes its
+        // DROP_OLDEST overflow path, xQueueSend then SUCCEEDS and publish() returns true.
+        // So a per-call return check cannot see it - which is why the dump arrived with
+        // holes and no marker even after the marker priority was fixed. It is detected
+        // instead by comparing the queue drop counter across the whole dump, below.
+        if (!MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_REPORT, chunk, 0, false,
+                               MQTTPriority::PRIORITY_LOW)) {
             truncated = true;
-            LOG_WARN(TAG_CMD, "Diagnostics chunk %u lost after %u attempts",
-                     static_cast<unsigned>(chunks), DIAG_CHUNK_RETRIES);
+            LOG_WARN(TAG_CMD, "Diagnostics chunk %u refused by the publish queue",
+                     static_cast<unsigned>(chunks));
         }
         used = 0;
         chunks++;
@@ -828,6 +831,14 @@ void handleDiagnosticsCommand(const char* payload) {
     });
 
     flush();
+
+    size_t qAfter = 0, msgAfter = 0, dropAfter = 0;
+    QueueManager::getInstance().getGlobalMetrics(qAfter, msgAfter, dropAfter);
+    if (dropAfter > dropBefore) {
+        truncated = true;
+        LOG_WARN(TAG_CMD, "Diagnostics dump lost %u chunk(s) to queue eviction",
+                 static_cast<unsigned>(dropAfter - dropBefore));
+    }
 
     if (truncated) {
         // PRIORITY_MEDIUM, deliberately NOT LOW. Truncation is usually caused by the

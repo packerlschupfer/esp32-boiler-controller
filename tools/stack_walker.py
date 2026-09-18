@@ -1017,11 +1017,19 @@ def main():
                     ca, cb = img.lookup(caller.strip()), img.lookup(callee.strip())
                     if not sep:
                         die(f"{xfile}:{lineno}: edge needs one CALLER -> one CALLEE: {body!r}")
+                    # NOT routed through stale(): an `edge:` is the one kind that ADDS a
+                    # call edge, so skipping it makes the bound SMALLER, not larger. It is
+                    # fatal even under --stale-excludes-ok. Demonstrated cost of getting
+                    # this wrong: -1760 B and a verdict flip from "STATIC BOUND EXCEEDS
+                    # STACK" to "fits" on RYN4Proc, while the tool printed a note claiming
+                    # skips are always conservative. An ambiguous endpoint (a .constprop/
+                    # .isra clone in another build) is fatal for the same reason - it is
+                    # never "a cut whose LOG_* call compiled away".
                     if len(ca) != 1 or len(cb) != 1:
-                        if stale(lineno, body,
-                                 "edge endpoints missing or ambiguous in this image") is None:
-                            continue
-                        die(f"{xfile}:{lineno}: edge needs one CALLER -> one CALLEE: {body!r}")
+                        die(f"{xfile}:{lineno}: edge needs one CALLER -> one CALLEE "
+                            f"(found {len(ca)} and {len(cb)}): {body!r}. `edge:` is fatal "
+                            f"even under --stale-excludes-ok, because skipping an added "
+                            f"edge REDUCES the bound.")
                     img.funcs[ca[0]].edges.add(cb[0])
                     project_excludes.append((kind, body, reason))
                     continue
@@ -1096,8 +1104,11 @@ def main():
             print(f"SKIPPED stack_walker.excludes:{lineno}: {spec}  -- {why}")
         if stale_entries:
             print(f"NOTE: {len(stale_entries)} exclusion(s) skipped via --stale-excludes-ok. "
-                  "Each one makes the bound MORE pessimistic, never less, so a 'fits' "
-                  "verdict still holds - but re-verify any entry you intend to keep.")
+                  "Skipping any of these kinds - FUNC/unreachable, cut, cut-unless-reachable, "
+                  "failure, failure-cut, once - retains an edge or retains a function in the "
+                  "nominal bound, so it makes the bound MORE pessimistic and a 'fits' verdict "
+                  "still holds. `edge:` is NOT in that set and is never skipped: it ADDS an "
+                  "edge, so skipping one would SHRINK the bound, and it stays fatal.")
         for name in args.exclude:
             print(f"command-line exclude: {name}")
         for r in results:

@@ -11,6 +11,12 @@ tools/stack_walker.py --list-roots
 tools/stack_walker.py --no-task-manager-wrapper Logger::subscriberTaskFunc:5120:4308
 ```
 
+`NAME`, `NAME:STACK` or `NAME:STACK:FREE`. The two-field form asks "does the static
+bound fit this configured stack?" with no measured peak - the only form available for a
+build that has never run, such as another log mode; passing a fake free of 0 instead would
+read as "measured used == stack" and trip the bound-violated check. `--stale-excludes-ok`
+tolerates exclusions that do not apply to a foreign ELF (see below).
+
 `NAME:STACK:FREE` takes the configured stack size and the free bytes reported by
 `boiler/cmd/diagnostics` payload `tasks` (the "Stack Free" column, already in
 bytes). Without `:STACK:FREE` only the bounds are printed. `--json` gives
@@ -92,7 +98,13 @@ counted in every report. They are where missing depth would hide.
 
 Every entry needs a reason after `#` that says **why and how to re-check it**,
 and every fact must be verified in the disassembly - not inferred from a
-function name. A stale entry fails loudly (`matches no existing call edge`).
+function name. A stale entry fails loudly (`matches no existing call edge`). `--stale-excludes-ok`
+downgrades that to a listed warning for cross-environment runs, because an entry verified
+against `esp32dev_usb_debug_selective` can legitimately not apply to another log mode - a
+`cut:` whose `LOG_*` call compiles away has no edge to cut. **`edge:` is exempt and stays
+fatal**: it is the one kind that *adds* depth, so skipping it would make the bound
+*smaller*. Getting that wrong was measured at -1760 B and a verdict flip from `STATIC
+BOUND EXCEEDS STACK` to `fits`.
 
 | kind | meaning | applies to |
 |---|---|---|
@@ -122,13 +134,13 @@ the pump and BoilerTempCtrl marks were independently identical at 11 h.
 | BurnerControlTask | 1768 | 3200 | 3200 | 3200 | 4096 | no | fits |
 | ControlTask | 1632 | 2208 | 2208 | 2512 | 3584 | no | fits |
 | HeatingControlTask | 1604 | 3280 | 3280 | 3280 | 3584 | yes | fits |
-| HeatingPumpTask | 1632 | 2352 | 2352 | 2624 | 2560 | no | fits nominally |
-| WaterPumpTask | 1632 | 2352 | 2352 | 2624 | 2560 | no | fits nominally |
+| HeatingPumpTask | 1632 | 2320 | 2320 | 2544 | 2560 | no | fits |
+| WaterPumpTask | 1632 | 2320 | 2320 | 2544 | 2560 | no | fits |
 | MB8ARTTask | 1796 | 2256 | 2256 | 2736 | 3584 | no | fits |
 | MB8ARTProcessingTask | 1488 | 2096 | 2096 | 2096 | 3072 | no | fits |
 | MonitoringTask | 1732 | 3232 | 3536 | 3536 | 3584 | yes | fits |
 | MQTTTask | 2436 | 3008 | 3312 | 3360 | 3584 | yes | fits |
-| NTPTask | 2784 | 2512 | 2816 | 2816 | 4096 | yes | fits |
+| NTPTask | 2784 | 2512 | 2816 | 2816 | 3072 | yes | fits |
 | OTATask | 1800 | 3008 | 3008 | 3008 | 3072 | no | fits |
 | PersistentStorageTask | 1860 | 4272 | 4272 | 4272 | 5120 | no | fits |
 | RelayControlTask | 1696 | 2384 | 2384 | 2688 | 4096 | no | fits |
@@ -180,9 +192,9 @@ This is the concrete example of what the "unresolved indirect calls can hide dep
 limit below actually costs: ~1.9 kB, on the deepest path of the task that writes the
 relays, found only by reading the source.
 
-### Worst case above the stack: pumps and RYN4Proc
+### Worst case above the stack: nobody, as of 2026-09-18
 
-HeatingPump and WaterPump (2624 B) exceed their 2560 B stacks
+This section used to list HeatingPump, WaterPump and RYN4Proc. On the current image none of them exceeds its stack: RYN4Proc was raised to 3072 and both pumps now measure a 2544 B worst case against 2560 B. The mechanism is still worth recording, because it is what a future `once:`-carried exceedance will look like. The pumps (2544 B) come within 16 B of their 2560 B stacks
 in the **worst case** only, and all three are carried by the same `once:` entry -
 `SharedResourceManager::SharedResourceManager()`, reached through `getInstance()`.
 That constructor runs on the boot task: `main.cpp:249` constructs the singleton
@@ -192,7 +204,7 @@ execute it, which is what `once:` encodes - the nominal bound applies and they
 fit.
 
 **No task is at risk on this image**: every measured peak is within its nominal
-bound, the three worst-case exceedances are boot-only construction, and
+bound, the remaining worst-case margin is boot-only construction, and
 WheaterControl's float-capable chain is ~800 B clear of its stack.
 
 ## Limits

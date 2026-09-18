@@ -52,13 +52,35 @@ once: SharedResourceManager::SharedResourceManager  # constructed under __cxa_gu
 
 # --- failsafe callback dispatch (invisible to static analysis) -----------------
 # CentralizedFailsafe::executeFailsafeActions() invokes the registered subsystem
-# callbacks as callback.second(level, reason) - a call through a container of
-# callables (CentralizedFailsafe.cpp:181-185), which no call-graph walk can follow.
-# Without these edges the tool reported "[1 unresolved indirect]" there and silently
-# omitted the deepest thing the failsafe path does, on a chain that RYN4ProcessingTask
-# (the task that writes the relays) and RelayControlTask both reach via
-# RelayVerificationManager::checkRelayHealthAndEscalate -> triggerFailsafe.
-# The registered callbacks are the three lambdas at CentralizedFailsafe.cpp:61-71,
-# which call these two functions directly; re-check that list if a subsystem is added.
-edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultBurnerFailsafe  # lambda at CentralizedFailsafe.cpp:61 (Subsystem::BURNER); chain measured 1872 B
-edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultPumpFailsafe  # lambdas at CentralizedFailsafe.cpp:65,69 (HEATING_PUMP, WATER_PUMP); chain measured 1728 B
+# callbacks as callback.second(level, reason) where FailsafeCallback is a
+# std::function<void(FailsafeLevel, SystemError)> held in a std::vector
+# (CentralizedFailsafe.cpp:33,181-185). No call-graph walk can follow that, so the tool
+# reported "[1 unresolved indirect]" there. RYN4ProcessingTask and RelayControlTask both
+# reach it via RelayVerificationManager::checkRelayHealthAndEscalate -> triggerFailsafe.
+#
+# The registered callbacks are the three lambdas at CentralizedFailsafe.cpp:61-71, which
+# call exactly these two functions; registerSubsystem() has no other caller in the tree,
+# so the list is complete. Re-check if a subsystem is added.
+#
+# TWO CORRECTIONS from a 2026-09-18 review of the commit that added these (read before
+# trusting any margin figure derived from them):
+#
+# 1. These entries recovered NO depth. defaultBurnerFailsafe is ALREADY called directly
+#    from executeFailsafeActions at CentralizedFailsafe.cpp:203 (DEGRADED) and :209
+#    (CRITICAL), so its 1872 B chain was in both bounds all along; only
+#    defaultPumpFailsafe was unreachable, and its branch is SHALLOWER. Verified by making
+#    the pump edge stale - bounds came back bit-identical. The claim in commit 0bca0e4
+#    that this dispatch was "hiding ~1.9 kB" is WRONG. The entries are still worth
+#    keeping: they make a future change to either callback visible instead of invisible.
+#
+# 2. These edges SHORTCUT the dispatch. They jump straight to the callback, skipping the
+#    std::function trampoline frames that are really on the stack
+#    (operator() -> _Function_handler::_M_invoke). Those symbols are inlined away in the
+#    current debug_selective image so the hop cannot be modelled here, but a reviewer
+#    measured 48 + 32 = 80 B of them in a build where they survive. Treat every margin
+#    figure on this path as up to ~80 B OPTIMISTIC: RYN4Proc's pre-raise nominal margin
+#    was more likely 16 B than the 96 B quoted in 0bca0e4, which makes that raise better
+#    justified, not worse. If those thunks ever appear as symbols, model the real hop
+#    instead of this shortcut.
+edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultBurnerFailsafe  # lambda at CentralizedFailsafe.cpp:61 (Subsystem::BURNER); also called directly at :203,:209 so this adds no depth - kept for change visibility
+edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultPumpFailsafe  # lambdas at CentralizedFailsafe.cpp:65,69 (HEATING_PUMP, WATER_PUMP); chain 1728 B, shallower than the burner branch

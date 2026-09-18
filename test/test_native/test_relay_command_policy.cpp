@@ -70,123 +70,97 @@ bool sendRelay(uint8_t& desiredMask, uint8_t relayIndex, bool state, uint32_t no
     return true;
 }
 
-// processSingleRelay()'s composition, built from the SAME RelayCommandPolicy::gateToggle()
-// the production path calls - not a retyped copy of admit()'s body. Before 2026-09-18 this
-// was a third hand-written copy of the decision, so it could not detect drift in either
-// real caller. The residual limit is unchanged and worth stating: the native build does not
-// compile RelayControlTask.cpp, so this pins the SHARED GATE, not the statement order in
-// processSingleRelay().
-Admission decomposedAdmit(uint8_t relayIndex, bool desiredState, bool requestedState,
-                          bool emergencyBypass, const RateLimiter& limiter,
-                          uint32_t nowTicks, bool (*pumpProtectionAllows)(uint8_t, bool)) {
-    switch (gateToggle(relayIndex, desiredState, requestedState, emergencyBypass,
-                       limiter, nowTicks)) {
-        case ToggleGate::NOT_APPLICABLE:
-            return Admission::ACCEPTED;
-        case ToggleGate::RATE_LIMITED:
-            return Admission::RATE_LIMITED;
-        case ToggleGate::ALLOWED:
-            break;
-    }
-    if (!pumpProtectionAllows(relayIndex, requestedState)) {
-        return Admission::PUMP_PROTECTED;
-    }
-    return Admission::ACCEPTED;
-}
 
 #define ASSERT_ADMISSION(expected, actual) \
     TEST_ASSERT_EQUAL_INT(static_cast<int>(expected), static_cast<int>(actual))
 
 }  // namespace
 
-void test_relay_policy_decomposed_matches_admit() {
-    // processSingleRelay() no longer calls admit(): the rate-limiter lock must cover
-    // consumeToggle() alone, because checkPumpProtection() takes a mutex and cannot run
-    // inside portENTER_CRITICAL. That leaves two copies of the same decision, which is
-    // exactly the "limiter re-implemented" trap (io-6). Pin them together: for every
-    // input combination the decomposed sequence must return the same Admission AND
-    // leave the same side effects in the limiter arrays.
-    const bool values[2] = {false, true};
-
-    // Limiter pre-state matters: with a zeroed limiter consumeToggle() ALWAYS succeeds,
-    // so a loop over a single nowTicks never produces RATE_LIMITED for a valid relay -
-    // precisely the case the rate-limiter lock exists for. Seed the three reachable
-    // shapes: fresh, a toggle inside the 150 tick minimum interval, and the per-window
-    // cap already reached.
-    enum PreState { FRESH, WITHIN_MIN_INTERVAL, AT_WINDOW_CAP, PRE_STATE_COUNT };
-    const uint32_t nowTicks = 5000;
-
-    auto seed = [&](PreState pre, uint8_t relayIndex) {
-        resetRelayState();
-        if (relayIndex < 1 || relayIndex > 8) {
-            return;
-        }
-        const uint8_t idx = static_cast<uint8_t>(relayIndex - 1);
-        if (pre == WITHIN_MIN_INTERVAL) {
-            lastToggle[idx] = nowTicks - 100;  // 100 < 150 tick minimum
-        } else if (pre == AT_WINDOW_CAP) {
-            lastToggle[idx] = nowTicks - 10000;  // interval fine, cap is what refuses
-            toggles[idx] = 30;                   // maxTogglesPerWindow
-        }
+void test_relay_policy_gate_toggle_expectations() {
+    // A HAND-WRITTEN table, not a comparison against another copy of the implementation.
+    //
+    // This replaces test_relay_policy_decomposed_matches_admit, which compared admit() to
+    // a local decomposedAdmit() that was a character-for-character copy of admit()'s body.
+    // Any change to gateToggle moved both sides together, so it could not fail. Two real
+    // regressions were shown to pass it: gateToggle returning ALLOWED instead of
+    // NOT_APPLICABLE (which sends no-op AND EMERGENCY commands to pump protection - the F13
+    // hazard), and evaluating consumeToggle before appliesProtection (the 2026-09-14
+    // emergency-stop regression). Both are caught below by stated expectations.
+    //
+    // KNOWN GAP, stated rather than implied: env:native_test sets no test_build_src, so
+    // src/ is not compiled here at all. Nothing in this file constrains
+    // RelayControlTask::processSingleRelay() - not its statement order, not its handling of
+    // each ToggleGate value, not the placement of portENTER_CRITICAL. What is pinned is
+    // gateToggle(), which processSingleRelay() and admit() both call.
+    struct Case {
+        const char* what;
+        uint8_t relay; bool desired, requested, emergency;
+        uint32_t lastToggle; uint32_t count;      // limiter pre-state for this relay
+        uint32_t now;
+        ToggleGate expect;
+    };
+    const Case cases[] = {
+        // A command that does not change the desired state is not a toggle, emergency or
+        // not. If this ever returns ALLOWED, pump protection starts seeing no-ops.
+        {"no-op OFF->OFF",            4, false, false, false,    0,  0, 5000, ToggleGate::NOT_APPLICABLE},
+        {"no-op ON->ON",              4, true,  true,  false,    0,  0, 5000, ToggleGate::NOT_APPLICABLE},
+        {"no-op, emergency",          4, true,  true,  true,     0,  0, 5000, ToggleGate::NOT_APPLICABLE},
+        // Emergency bypasses both protections even for a real change - F13.
+        {"real change, emergency",    4, false, true,  true,     0,  0, 5000, ToggleGate::NOT_APPLICABLE},
+        // Ordinary real change on a fresh limiter.
+        {"real change, fresh",        4, false, true,  false,    0,  0, 5000, ToggleGate::ALLOWED},
+        // Minimum interval is 150 ticks: 149 refuses, 150 allows.
+        {"inside min interval",       4, false, true,  false, 4851,  0, 5000, ToggleGate::RATE_LIMITED},
+        {"exactly min interval",      4, false, true,  false, 4850,  0, 5000, ToggleGate::ALLOWED},
+        // Per-window cap is 30.
+        {"at window cap",             4, false, true,  false, 1000, 30, 5000, ToggleGate::RATE_LIMITED},
+        {"one below window cap",      4, false, true,  false, 1000, 29, 5000, ToggleGate::ALLOWED},
+        // Invalid indices are never allowed, and must not be reported as "not applicable".
+        {"relay 0 invalid",           0, false, true,  false,    0,  0, 5000, ToggleGate::RATE_LIMITED},
+        {"relay 9 invalid",           9, false, true,  false,    0,  0, 5000, ToggleGate::RATE_LIMITED},
     };
 
-    bool sawRateLimitedOnValidRelay = false;
-    bool sawPumpProtected = false;
-
-    for (uint8_t relayIndex = 0; relayIndex <= 9; relayIndex++) {
-        for (int pre = 0; pre < PRE_STATE_COUNT; pre++) {
-            for (int d = 0; d < 2; d++) {
-                for (int r = 0; r < 2; r++) {
-                    for (int e = 0; e < 2; e++) {
-                        for (int p = 0; p < 2; p++) {
-                            seed(static_cast<PreState>(pre), relayIndex);
-                            pumpAllows = values[p];
-                            const Admission viaAdmit =
-                                admit(relayIndex, values[d], values[r], values[e],
-                                      makeLimiter(), nowTicks, &pumpProtection);
-                            uint32_t admitLastToggle[8];
-                            uint32_t admitToggles[8];
-                            std::memcpy(admitLastToggle, lastToggle, sizeof(lastToggle));
-                            std::memcpy(admitToggles, toggles, sizeof(toggles));
-                            const unsigned admitPumpChecks = pumpChecks;
-                            const uint8_t admitPumpRelay = pumpCheckRelay;
-                            const bool admitPumpState = pumpCheckState;
-
-                            seed(static_cast<PreState>(pre), relayIndex);
-                            pumpAllows = values[p];
-                            const Admission viaSteps =
-                                decomposedAdmit(relayIndex, values[d], values[r], values[e],
-                                                makeLimiter(), nowTicks, &pumpProtection);
-
-                            ASSERT_ADMISSION(viaAdmit, viaSteps);
-                            TEST_ASSERT_EQUAL_UINT(admitPumpChecks, pumpChecks);
-                            // The ARGUMENTS passed to pump protection must match too, not
-                            // just the call count: swapping requestedState for desiredState
-                            // leaves count, return value and limiter arrays identical.
-                            TEST_ASSERT_EQUAL_UINT8(admitPumpRelay, pumpCheckRelay);
-                            TEST_ASSERT_EQUAL(admitPumpState, pumpCheckState);
-                            TEST_ASSERT_EQUAL_MEMORY(admitLastToggle, lastToggle,
-                                                     sizeof(lastToggle));
-                            TEST_ASSERT_EQUAL_MEMORY(admitToggles, toggles, sizeof(toggles));
-
-                            if (viaAdmit == Admission::RATE_LIMITED && relayIndex >= 1 &&
-                                relayIndex <= 8) {
-                                sawRateLimitedOnValidRelay = true;
-                            }
-                            if (viaAdmit == Admission::PUMP_PROTECTED) {
-                                sawPumpProtected = true;
-                            }
-                        }
-                    }
-                }
-            }
+    for (const Case& c : cases) {
+        resetRelayState();
+        if (c.relay >= 1 && c.relay <= 8) {
+            lastToggle[c.relay - 1] = c.lastToggle;
+            toggles[c.relay - 1] = c.count;
+        }
+        const ToggleGate got = gateToggle(c.relay, c.desired, c.requested, c.emergency,
+                                          makeLimiter(), c.now);
+        if (got != c.expect) {
+            TEST_FAIL_MESSAGE(c.what);
+        }
+        // A NOT_APPLICABLE outcome must leave the limiter untouched - that is what makes a
+        // batch of unchanged relays free.
+        if (c.expect == ToggleGate::NOT_APPLICABLE && c.relay >= 1 && c.relay <= 8) {
+            TEST_ASSERT_EQUAL_UINT32(c.count, toggles[c.relay - 1]);
+            TEST_ASSERT_EQUAL_UINT32(c.lastToggle, lastToggle[c.relay - 1]);
         }
     }
+}
 
-    // Guard against the equivalence check silently degenerating to the ACCEPTED path.
-    TEST_ASSERT_TRUE_MESSAGE(sawRateLimitedOnValidRelay,
-                             "no RATE_LIMITED case generated for a valid relay");
-    TEST_ASSERT_TRUE_MESSAGE(sawPumpProtected, "no PUMP_PROTECTED case generated");
+void test_relay_policy_admit_passes_requested_state_to_pump_check() {
+    // admit() has no production caller - processSingleRelay() calls gateToggle() directly
+    // and then checkPumpProtection() outside the lock. admit() is the testable composition
+    // of those two steps. Pin the ARGUMENTS it forwards, not just the call count: swapping
+    // requestedState for desiredState leaves the count, the return value and the limiter
+    // arrays all identical, so a count-only assertion cannot see it.
+    resetRelayState();
+    pumpAllows = true;
+    ASSERT_ADMISSION(Admission::ACCEPTED,
+                     admit(5, false, true, false, makeLimiter(), 5000, &pumpProtection));
+    TEST_ASSERT_EQUAL_UINT(1, pumpChecks);
+    TEST_ASSERT_EQUAL_UINT8(5, pumpCheckRelay);
+    TEST_ASSERT_TRUE(pumpCheckState);          // requestedState, not desiredState
+
+    resetRelayState();
+    pumpAllows = true;
+    ASSERT_ADMISSION(Admission::ACCEPTED,
+                     admit(6, true, false, false, makeLimiter(), 5000, &pumpProtection));
+    TEST_ASSERT_EQUAL_UINT(1, pumpChecks);
+    TEST_ASSERT_EQUAL_UINT8(6, pumpCheckRelay);
+    TEST_ASSERT_FALSE(pumpCheckState);         // would be true if desiredState leaked through
 }
 
 void test_relay_policy_window_reset_readmits() {
@@ -211,10 +185,14 @@ void test_relay_policy_window_reset_readmits() {
     TEST_ASSERT_FALSE(consumeToggle(limiter, relayIndex, now));
     TEST_ASSERT_EQUAL_UINT32(30, toggles[idx]);
 
-    // The minute rollover clears the counter, and only the counter.
+    // Simulate the minute rollover. NOTE: this is the TEST's own memset, not production's -
+    // updateRateLimitCounters() lives in RelayControlTask.cpp, which native tests do not
+    // compile, so the 60 s threshold, the wrap arithmetic and "only toggleCount is cleared"
+    // are NOT pinned here. An earlier version asserted that memset-ing `toggles` left
+    // `lastToggle` unchanged, which is two different arrays and cannot fail. What is worth
+    // pinning is consumeToggle's behaviour once the counter is cleared, below.
     const uint32_t lastToggleBeforeReset = lastToggle[idx];
     std::memset(toggles, 0, sizeof(toggles));
-    TEST_ASSERT_EQUAL_UINT32(lastToggleBeforeReset, lastToggle[idx]);
 
     // Re-admitted, and the minimum interval still applies across the boundary.
     TEST_ASSERT_FALSE(consumeToggle(limiter, relayIndex, lastToggleBeforeReset + 100));

@@ -245,94 +245,70 @@ void RuntimeDiagnostics::dumpEventGroups(OutputCallback outputCb) {
     output(std::string());
 }
 
-namespace {
-// Temperature_t is int16_t in TENTHS of a degree. The sensor dump used to print these
-// with "%.1f", passing an int where printf expects a double - undefined behaviour in a
-// varargs call, and in practice every temperature printed the same garbage: the live
-// dump read "Boiler Output: 1.8C" for all five sensors while MQTT correctly reported
-// 33.1/23.9/50.8C. A diagnostics tool reporting that every sensor had collapsed.
-//
-// Formatted with integer maths rather than tempToFloat() on purpose: this runs on the
-// MQTT task, and the first %f on a task pulls in _svfprintf_r -> _dtoa_r -> _Balloc ->
-// calloc, ~600 B of stack plus a heap allocation. MQTTTask has 3584 B with a measured
-// 2436 B peak, and there is no reason to spend that on a diagnostic string.
-//
-// Sign is handled before the split because integer division truncates toward zero:
-// -3 tenths would otherwise print as "0.3" instead of "-0.3", which matters for the
-// outside temperature.
-void formatTenths(char* out, size_t n, Temperature_t tenths) {
-    const int value = static_cast<int>(tenths);
-    const char* sign = (value < 0) ? "-" : "";
-    const int mag = (value < 0) ? -value : value;
-    snprintf(out, n, "%s%d.%d", sign, mag / 10, mag % 10);
-}
-}  // namespace
-
 void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
     output("=== Sensor Information ===");
-    
-    // Get sensor readings with mutex
-    if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100)) == pdTRUE) {
-        output("Temperature Sensors:");
-        char tempStr[12];  // "-3276.8" worst case for int16_t tenths
-        
-        // Boiler temperatures
-        if (SRP::getSensorReadings().isBoilerTempOutputValid) {
-            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().boilerTempOutput);
-            output("  Boiler Output: %s°C", tempStr);
-        } else {
-            output("  Boiler Output: INVALID");
-        }
-        
-        if (SRP::getSensorReadings().isBoilerTempReturnValid) {
-            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().boilerTempReturn);
-            output("  Boiler Return: %s°C", tempStr);
-        } else {
-            output("  Boiler Return: INVALID");
-        }
-        
-        // Room temperature
-        if (SRP::getSensorReadings().isInsideTempValid) {
-            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().insideTemp);
-            output("  Inside Temp: %s°C", tempStr);
-            // Honour the validity flag. This printed unconditionally and so always read
-            // "Inside Humidity: 0.0%" - a value that does not exist being presented as a
-            // measurement. ANDRTF3 provides no humidity channel (ANDRTF3Task.cpp sets
-            // isInsideHumidityValid = false), nothing ever writes through
-            // SensorBindings' insideHumidityPtr, and the member keeps its 0.0f
-            // initialiser. Same family as the temperatures above: a diagnostic inventing
-            // data is worse than one admitting it has none.
-            if (SRP::getSensorReadings().isInsideHumidityValid) {
-                output("  Inside Humidity: %.1f%%",
-                       static_cast<double>(SRP::getSensorReadings().insideHumidity));
-            } else {
-                output("  Inside Humidity: N/A (no humidity sensor)");
-            }
-        } else {
-            output("  Inside Temp: INVALID");
-        }
-        
-        // Outside temperature
-        if (SRP::getSensorReadings().isOutsideTempValid) {
-            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().outsideTemp);
-            output("  Outside Temp: %s°C", tempStr);
-        } else {
-            output("  Outside Temp: INVALID");
-        }
-        
-        // Water temperatures
-        if (SRP::getSensorReadings().isWaterHeaterTempTankValid) {
-            formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().waterHeaterTempTank);
-            output("  Water Heater Tank Temp: %s°C", tempStr);
-        } else {
-            output("  Water Heater Tank Temp: INVALID");
-        }
-        
-        SRP::giveSensorReadingsMutex();
-    } else {
+
+    // Snapshot under the mutex, then format and publish OUTSIDE it.
+    //
+    // The previous version held sensorReadingsMutex across every output() call. output()
+    // can trigger flush(), which publishes and then paces with vTaskDelay - so a dump that
+    // grew past one 320-byte chunk would put a delay inside a mutex that control tasks
+    // acquire with a 100 ms timeout. The sensors text measured ~223 B of 320, i.e. one
+    // extra sensor line away from that. dumpRelayInfo has the same shape.
+    struct Snap {
+        Temperature_t boilerOut, boilerRet, inside, outside, tank;
+        float humidity;
+        bool boilerOutOk, boilerRetOk, insideOk, outsideOk, tankOk, humidityOk;
+    } snap{};
+
+    if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100)) != pdTRUE) {
         output("Failed to acquire sensor readings mutex");
+        output(std::string());
+        return;
     }
-    
+    {
+        const SharedSensorReadings& r = SRP::getSensorReadings();
+        snap = {r.boilerTempOutput, r.boilerTempReturn, r.insideTemp, r.outsideTemp,
+                r.waterHeaterTempTank, r.insideHumidity,
+                r.isBoilerTempOutputValid, r.isBoilerTempReturnValid, r.isInsideTempValid,
+                r.isOutsideTempValid, r.isWaterHeaterTempTankValid, r.isInsideHumidityValid};
+    }
+    SRP::giveSensorReadingsMutex();
+
+    output("Temperature Sensors:");
+    // formatTemp() from shared/Temperature.h, not a local helper: it does the same integer
+    // tenths formatting (no %f, so no _dtoa_r/_Balloc on this task) AND maps TEMP_INVALID
+    // to "N/A". A local copy of it here printed TEMP_INVALID as "-3276.8" - inventing a
+    // precise-looking reading, the exact failure this dump was being fixed for.
+    char t[12];
+    auto emit = [&](const char* label, Temperature_t v, bool valid) {
+        if (!valid) {
+            output("  %s: INVALID", label);
+            return;
+        }
+        formatTemp(t, sizeof(t), v);
+        output("  %s: %s°C", label, t);
+    };
+
+    emit("Boiler Output", snap.boilerOut, snap.boilerOutOk);
+    emit("Boiler Return", snap.boilerRet, snap.boilerRetOk);
+    emit("Inside Temp", snap.inside, snap.insideOk);
+    if (snap.insideOk) {
+        // ANDRTF3 has no humidity channel (ANDRTF3Task sets isInsideHumidityValid = false)
+        // and nothing writes through SensorBindings' insideHumidityPtr, so this reported a
+        // fabricated 0.0% until the flag was honoured. Kept integer-formatted for the same
+        // reason as the temperatures.
+        if (snap.humidityOk) {
+            const int whole = static_cast<int>(snap.humidity);
+            const int frac = static_cast<int>((snap.humidity - whole) * 10.0f + 0.5f);
+            output("  Inside Humidity: %d.%d%%", whole, frac);
+        } else {
+            output("  Inside Humidity: N/A (no humidity sensor)");
+        }
+    }
+    emit("Outside Temp", snap.outside, snap.outsideOk);
+    emit("Water Heater Tank Temp", snap.tank, snap.tankOk);
+
     output(std::string());
 }
 
