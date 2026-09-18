@@ -295,7 +295,19 @@ void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
         if (SRP::getSensorReadings().isInsideTempValid) {
             formatTenths(tempStr, sizeof(tempStr), SRP::getSensorReadings().insideTemp);
             output("  Inside Temp: %s°C", tempStr);
-            output("  Inside Humidity: %.1f%%", SRP::getSensorReadings().insideHumidity);
+            // Honour the validity flag. This printed unconditionally and so always read
+            // "Inside Humidity: 0.0%" - a value that does not exist being presented as a
+            // measurement. ANDRTF3 provides no humidity channel (ANDRTF3Task.cpp sets
+            // isInsideHumidityValid = false), nothing ever writes through
+            // SensorBindings' insideHumidityPtr, and the member keeps its 0.0f
+            // initialiser. Same family as the temperatures above: a diagnostic inventing
+            // data is worse than one admitting it has none.
+            if (SRP::getSensorReadings().isInsideHumidityValid) {
+                output("  Inside Humidity: %.1f%%",
+                       static_cast<double>(SRP::getSensorReadings().insideHumidity));
+            } else {
+                output("  Inside Humidity: N/A (no humidity sensor)");
+            }
         } else {
             output("  Inside Temp: INVALID");
         }
