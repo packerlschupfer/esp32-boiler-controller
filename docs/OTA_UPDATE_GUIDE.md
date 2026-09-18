@@ -1,5 +1,19 @@
 # OTA (Over-The-Air) Update Guide
 
+
+> **The `*_release` and `*_debug_full` OTA environments do not build, deliberately.**
+> `src/config/ProjectConfig.h` raises a `#error` for both `LOG_MODE_RELEASE` and
+> `LOG_MODE_DEBUG_FULL` because their task stacks are measurably too small - in the
+> DEBUG_FULL tier, nine of seventeen are *below* the DEBUG_SELECTIVE values despite
+> logging more, and `RYN4ProcessingTask` (the task that writes the relays) sits at
+> 1536 B against a ~2464 B static bound. Sizing either tier properly needs 11-18 kB of
+> DRAM that does not exist on this device. `esp32dev_ota_debug_full` is the sharpest
+> trap: it points `espota` at 192.168.20.40, the boiler itself.
+>
+> **Use `esp32dev_ota_debug_selective`, or `prod_ota_debug_selective` for the production
+> flags.** Those are the only OTA environments that build, and DEBUG_SELECTIVE is the
+> only tier validated on hardware. Measured 2026-09-18.
+
 ## Overview
 The ESPlan Boiler Controller supports Over-The-Air firmware updates via Ethernet connection (ArduinoOTA / espota). This allows remote firmware updates without physical access to the device.
 
@@ -22,10 +36,10 @@ The ESPlan Boiler Controller supports Over-The-Air firmware updates via Ethernet
 
 ### PlatformIO Configuration
 OTA environments (`upload_protocol = espota`):
-- `esp32dev_ota_release` - Production firmware (smallest size)
+- `esp32dev_ota_debug_selective` - the OTA env to use
 - `esp32dev_ota_debug_selective` - Selective debug logging
 - `esp32dev_ota_debug_full` - Full debug logging (largest)
-- `prod_ota` - Release build with `[base_prod]` flags (device 192.168.20.40)
+- `prod_ota_debug_selective` - `[base_prod]` flags (device 192.168.20.40)
 - `prod_ota_debug_selective` - Selective debug build with `[base_prod]` flags (device 192.168.20.40)
 - `dev_ota` - Release build with `[base_dev]` flags (`upload_port = 192.168.20.41`)
 
@@ -36,24 +50,24 @@ The `esp32dev_ota_*` and `prod_ota*` envs have `upload_port = 192.168.20.40` (de
 ### Method 1: Using PlatformIO (Recommended)
 
 ```bash
-pio run -e esp32dev_ota_release -t upload
+pio run -e esp32dev_ota_debug_selective -t upload
 
 # Other device IP
-pio run -e esp32dev_ota_release -t upload --upload-port 192.168.20.40
+pio run -e esp32dev_ota_debug_selective -t upload --upload-port 192.168.20.40
 ```
 
 ### Method 2: Manual with espota.py
 
 ```bash
 # Build firmware
-pio run -e esp32dev_ota_release
+pio run -e esp32dev_ota_debug_selective
 
 # Upload using espota.py
 python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py \
   -i 192.168.20.40 \
   -p 3232 \
   -a YOUR_OTA_PASSWORD \
-  -f .pio/build/esp32dev_ota_release/firmware.bin \
+  -f .pio/build/esp32dev_ota_debug_selective/firmware.bin \
   --progress
 ```
 
@@ -226,10 +240,10 @@ ota_password = your-secure-password   ; upload auth, must be the same value
 ```yaml
 # Example GitHub Actions
 - name: Build OTA Firmware
-  run: pio run -e esp32dev_ota_release
+  run: pio run -e esp32dev_ota_debug_selective
 
 - name: Deploy to Device
-  run: pio run -e esp32dev_ota_release -t upload --upload-port ${{ secrets.DEVICE_IP }}
+  run: pio run -e esp32dev_ota_debug_selective -t upload --upload-port ${{ secrets.DEVICE_IP }}
 ```
 
 ### MQTT and OTA

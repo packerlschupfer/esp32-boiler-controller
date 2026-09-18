@@ -352,6 +352,40 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // re-sized against measurements from a release build that has actually run, do not
 // flash one. Define ALLOW_UNVALIDATED_RELEASE_STACKS to build anyway - for bench work
 // on hardware that is not connected to a boiler, never for the real device.
+// LOG_MODE_DEBUG_FULL IS IN THE SAME STATE, and it is FLASHABLE at the boiler.
+// Found 2026-09-18 by a review of the commit that added the release gate below: gating
+// release alone was half a fix. DEBUG_FULL logs strictly MORE than DEBUG_SELECTIVE, so
+// it cannot need less stack - yet NINE of seventeen macros are smaller:
+//
+//   macro                    DEBUG_FULL   SELECTIVE   static bound
+//   RYN4_PROCESSING              1536        3072      ~2464   <- writes the relays
+//   MODBUS_CONTROL               1536        3584
+//   SENSOR                       2048        3584
+//   CONTROL                      2048        3584      ~3280 (HeatingControl)
+//   RELAY_CONTROL                2560        4096
+//   OTA                          2048        3072
+//   MQTT                         3072        3584
+//   WHEATER_CONTROL              3072        3584      ~3520
+//   LOOP                         3072        4096
+//
+// tools/stack_walker.py on a DEBUG_FULL build reports "STATIC BOUND EXCEEDS STACK even
+// without float formatting" for RYN4ProcessingTask and HeatingControlTask. Bringing the
+// tier up to mere parity with SELECTIVE costs +11264 B of DRAM; the device measures
+// ~5 kB free. So, exactly as with release, this tier cannot be made safe within the
+// budget and must not be flashed.
+//
+// This one is worse than release in one respect: esp32dev_ota_debug_full sets
+// upload_protocol = espota with upload_port = 192.168.20.40, the boiler's own address.
+// A single `pio run -e esp32dev_ota_debug_full -t upload` would put a 1536 B
+// RYN4ProcessingTask on the live device over the air.
+//
+// Note for whoever reads this next: "builds with 0 warnings" is NOT validation. Every
+// commit in the 2026-09-18 batch cited a clean debug_full build as evidence while this
+// was true of it.
+#if defined(LOG_MODE_DEBUG_FULL) && !defined(ALLOW_UNVALIDATED_DEBUG_FULL_STACKS)
+#error "LOG_MODE_DEBUG_FULL stacks are measurably too small: 9 of 17 are BELOW the DEBUG_SELECTIVE values despite logging more, and RYN4ProcessingTask (1536) / HeatingControlTask (2048) exceed their static bounds. See the comment in ProjectConfig.h. Define ALLOW_UNVALIDATED_DEBUG_FULL_STACKS for bench-only builds."
+#endif
+
 #if defined(LOG_MODE_RELEASE) && !defined(ALLOW_UNVALIDATED_RELEASE_STACKS)
 #error "LOG_MODE_RELEASE stacks are measurably too small (11/18 tasks below their measured debug peak; 13/18 above their static bound). See the comment in ProjectConfig.h. Define ALLOW_UNVALIDATED_RELEASE_STACKS for bench-only builds."
 #endif
