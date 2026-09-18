@@ -235,12 +235,32 @@ when it carries a clone marker *and* contains the Itanium length-prefixed compon
 (`14log_write_impl`), so the length must agree - these addresses feed `cut:`, and a cut
 matching more would *shrink* a bound.
 
-**A report line now names functions with no decodable `entry`,** whose frame counts as 0 and
-therefore under-states the bound. On the current image 12 appear for BurnerControlTask; most
-are hand-written assembly (`_xt_context_restore`, `xthal_*`, `_frxt_dispatch`) where 0 is
-correct, but `atomicUpdateBits`, `esp_mqtt_client_publish` and `tcp_poll` are ordinary C/C++
-whose `entry` objdump will not render even with `-D`. That is an unresolved objdump/ISA
-limitation - now visible instead of silent.
+**Frames are no longer taken from objdump alone.** The reason objdump renders some functions
+as data is not a decode failure: it classifies code vs data from the Xtensa `.xt.prop`
+property table (present in these images, section 36), and that table has gaps. Past a
+certain address objdump prints 4-byte words with no mnemonic and never resyncs - yet the
+instructions are there. `atomicUpdateBits` printed as `7d008136`, whose low three bytes are
+`008136`, byte-identical to an `entry a1, 64` objdump decodes correctly 200 kB earlier.
+
+So `entry` is now decoded straight from the image for any function objdump left frameless:
+
+```
+36 41 00  ->  0x004136  ->  entry a1, 32
+36 81 00  ->  0x008136  ->  entry a1, 64
+low byte 0x36 = opcode | bits 8-11 = base register (1 = a1) | bits 12-23 = frame / 8
+```
+
+That recovered **1517 frames** on the debug image - mostly mbedtls/TLS, largest
+`block_cipher_df` at 608 B - each of which had been counted as 0, i.e. under-stating any
+bound that reached them. None of them turned out to sit on a measured task's deepest path,
+so no verdict changed, but the pessimism was not free: an under-statement is the dangerous
+direction.
+
+Six functions still report no `entry`, and for them 0 is correct: `_frxt_dispatch`,
+`_frxt_task_coproc_state`, `_xt_context_restore`, `_xt_coproc_savecs`,
+`xthal_restore_extra_nw`, `xthal_window_spill_nw` - hand-written assembly that is not
+windowed. The report still names whatever remains, so a future gap is visible rather than
+silent.
 
 ## Limits
 

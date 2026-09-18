@@ -252,6 +252,45 @@ class Image:
             self._parse(disassemble(rom_elf), suffix="@rom")
         self._parse(disassemble(elf), suffix="")
         self._resolve_pending()
+        self._recover_missing_frames()
+
+    # Xtensa ENTRY, decoded straight from the ELF bytes.
+    #   36 41 00  ->  0x004136  ->  entry a1, 32
+    #   36 81 00  ->  0x008136  ->  entry a1, 64
+    # low byte 0x36 is the opcode, bits 8-11 are the base register (1 = a1), and bits
+    # 12-23 are the frame size in 8-byte units.
+    ENTRY_OPCODE = 0x36
+    ENTRY_REG_A1 = 1
+
+    def _recover_missing_frames(self):
+        """Read `entry` from the image for functions objdump rendered as data.
+
+        objdump classifies code vs data on this target using the `.xt.prop` property
+        table, and that table has gaps: from one address onward it prints 4-byte words with
+        no mnemonic and never resyncs, so those functions get no frame at all. The
+        instructions are present - the low three bytes of the word objdump prints ARE the
+        `entry` - so decode them directly rather than trusting the classification.
+
+        Frame 0 UNDER-states a bound, which is the dangerous direction, and on the current
+        debug image this recovers BurnerRequestManager::atomicUpdateBits (64 B),
+        getBurnerRequestEventGroup, esp_mqtt_client_publish and tcp_poll among others.
+        Functions that legitimately have no `entry` - hand-written assembly such as
+        _xt_context_restore, xthal_* and _frxt_dispatch, which are not windowed - keep a
+        None frame, which is correct for them and still reported.
+        """
+        self.recovered_frames = {}
+        for addr, f in self.funcs.items():
+            if f.frame is not None or "@rom" in f.name:
+                continue
+            word = self.elf.read32(addr)
+            if word is None:
+                continue
+            if (word & 0xFF) != self.ENTRY_OPCODE:
+                continue
+            if ((word >> 8) & 0xF) != self.ENTRY_REG_A1:
+                continue
+            f.frame = ((word >> 12) & 0xFFF) * 8
+            self.recovered_frames[addr] = f.frame
 
     def _resolve_pending(self):
         # Indirect targets are only checked once every function is registered. A

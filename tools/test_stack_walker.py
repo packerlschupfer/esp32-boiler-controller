@@ -95,6 +95,41 @@ def test_entry_must_be_at_function_start():
           "a stray entry from a later function does NOT become this function's frame")
 
 
+def test_entry_decoded_from_elf_bytes():
+    """The ENTRY decode used to recover frames objdump renders as data.
+
+    objdump classifies code vs data on this target from the `.xt.prop` property table, and
+    that table has gaps: past a certain address it prints 4-byte words with no mnemonic and
+    never resyncs. The instructions are still there - the low three bytes of the word ARE
+    the `entry` - so frames are decoded from the image instead. On the real debug image this
+    recovers 1517 frames that previously counted as 0, which UNDER-states a bound.
+
+    Encoding, confirmed against objdump's own output on decodable regions:
+        36 41 00 -> 0x004136 -> entry a1, 32
+        36 81 00 -> 0x008136 -> entry a1, 64
+    low byte 0x36 = opcode, bits 8-11 = base register (1 = a1), bits 12-23 = frame/8.
+    """
+    Img = sw.Image
+    check((0x004136 & 0xFF) == Img.ENTRY_OPCODE, "0x004136 carries the ENTRY opcode")
+    check(((0x004136 >> 8) & 0xF) == Img.ENTRY_REG_A1, "0x004136 uses a1 as the base")
+    check(((0x004136 >> 12) & 0xFFF) * 8 == 32, "0x004136 decodes to entry a1, 32")
+    check(((0x008136 >> 12) & 0xFFF) * 8 == 64, "0x008136 decodes to entry a1, 64")
+
+    # The real-world case: objdump printed 7d008136 as a data word for atomicUpdateBits.
+    # The trailing 0x7d is the NEXT instruction's first byte and must be ignored.
+    word = 0x7D008136
+    check((word & 0xFF) == Img.ENTRY_OPCODE, "the data word's low byte is still the opcode")
+    check(((word >> 12) & 0xFFF) * 8 == 64,
+          "atomicUpdateBits decodes to its real 64 B, not the phantom 8552 B")
+
+    # Something that is NOT an entry must be rejected, or every data word becomes a frame.
+    check((0x12345678 & 0xFF) != Img.ENTRY_OPCODE, "a non-entry word is rejected")
+    # An entry against a register other than a1 is not a stack frame.
+    check(((0x004236 >> 8) & 0xF) != Img.ENTRY_REG_A1, "entry on a2 is not treated as a1")
+
+
+print("ENTRY decoding:")
+test_entry_decoded_from_elf_bytes()
 print("lookup():")
 test_lookup_returns_clones()
 print("entry/frame attribution:")
