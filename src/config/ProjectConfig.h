@@ -246,7 +246,22 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                    // (BoilerTempControlTask.cpp snprintfs three
                                                    // %.4f into char[160]), which no measurement
                                                    // has ever exercised. Measured peak 2540 B.
-    #define STACK_SIZE_RYN4_PROCESSING_TASK  2560  // Restored to original size
+    #define STACK_SIZE_RYN4_PROCESSING_TASK  3072  // 2026-09-18: was 2560, which left only
+                                                 // 96 B above the static bound (2464). This task
+                                                 // WRITES THE RELAYS and its deepest runtime path
+                                                 // is an emergency chain that has never executed:
+                                                 // handleReadTick -> checkRelayHealthAndEscalate
+                                                 // -> triggerFailsafe -> executeFailsafeActions
+                                                 // -> emergencyStop -> emergencyShutdown. Measured
+                                                 // peak is only 1640 B, so none of that depth is
+                                                 // empirically confirmed. The decisive point: an
+                                                 // UNRESOLVED INDIRECT on this very path was hiding
+                                                 // ~1.9 kB of failsafe-callback depth until it was
+                                                 // modelled by hand (see the edge: entries in
+                                                 // tools/stack_walker.excludes), and 69 unresolved
+                                                 // indirects remain on this task. 96 B cannot
+                                                 // absorb one more such discovery, nor a single
+                                                 // added frame on that chain. Costs +512 B DRAM.
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 3072  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             4096  // After fix: needs more for initialization
     #define STACK_SIZE_PUMP_CONTROL_TASK     2560  // 2026-09-17 MEASURED: 2560 gives 928 B free

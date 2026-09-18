@@ -132,7 +132,7 @@ the pump and BoilerTempCtrl marks were independently identical at 11 h.
 | OTATask | 1800 | 3008 | 3008 | 3008 | 3072 | no | fits |
 | PersistentStorageTask | 1860 | 4272 | 4272 | 4272 | 5120 | no | fits |
 | RelayControlTask | 1696 | 2384 | 2384 | 2688 | 4096 | no | fits |
-| RYN4ProcessingTask | 1688 | 2464 | 2464 | 2768 | 2560 | no | fits nominally |
+| RYN4ProcessingTask | 1688 | 2464 | 2464 | 2768 | 3072 | no | fits |
 | TimerSchedulerTask | 1788 | 2832 | 2832 | 2832 | 3072 | no | fits |
 | WheaterControlTask | 1684 | 3520 | 3520 | 3520 | 3584 | yes | fits |
 | LogSub (raw xTaskCreate) | 812 | 976 | 976 | 976 | 5120 | no | fits |
@@ -164,9 +164,25 @@ Tightest bound headroom now: Monitoring +48 B, OTATask +64 B, WheaterControl +64
 These are upper bounds - the measured peaks are 1732, 1800 and 1684 B - so none of
 them justifies spending DRAM on a bigger stack today.
 
+### The failsafe callback dispatch had to be added by hand
+
+`CentralizedFailsafe::executeFailsafeActions()` invokes its registered subsystem
+callbacks as `callback.second(level, reason)` - a call through a container of
+callables, which no call-graph walk can follow. The tool reported it as
+`[1 unresolved indirect]` and silently omitted the deepest thing the failsafe path
+does. Two `edge:` entries in `stack_walker.excludes` now model it
+(`defaultBurnerFailsafe`, chain 1872 B; `defaultPumpFailsafe`, 1728 B).
+
+The bounds did not move - the callback branch reaches 224 + 1872 = 2096 B, exactly
+matching the already-modelled `emergencyStop` branch - but that was luck, not design,
+and the edges make a future change to those callbacks visible instead of invisible.
+This is the concrete example of what the "unresolved indirect calls can hide depth"
+limit below actually costs: ~1.9 kB, on the deepest path of the task that writes the
+relays, found only by reading the source.
+
 ### Worst case above the stack: pumps and RYN4Proc
 
-HeatingPump, WaterPump (2624 B) and RYN4Proc (2768 B) exceed their 2560 B stacks
+HeatingPump and WaterPump (2624 B) exceed their 2560 B stacks
 in the **worst case** only, and all three are carried by the same `once:` entry -
 `SharedResourceManager::SharedResourceManager()`, reached through `getInstance()`.
 That constructor runs on the boot task: `main.cpp:249` constructs the singleton
