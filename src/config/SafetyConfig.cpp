@@ -1,4 +1,5 @@
 #include "config/SafetyConfig.h"
+#include "config/SystemConstants.h"
 #include "LoggingMacros.h"
 #include <Preferences.h>
 
@@ -147,11 +148,17 @@ namespace SafetyConfig {
             return false;
         }
 
-        // NEW: Cross-validation with burner anti-flapping
-        constexpr uint32_t MIN_OFF_TIME_MS = 20000;  // From BurnerAntiFlapping
-        if (ms < MIN_OFF_TIME_MS) {
+        // Cross-validation with burner anti-flapping. Reads the CENTRAL constant, not a
+        // local copy: this used to duplicate the value as `constexpr uint32_t
+        // MIN_OFF_TIME_MS = 20000; // From BurnerAntiFlapping`, while BurnerAntiFlapping
+        // itself uses SystemConstants::Burner::MIN_OFF_TIME_MS throughout. Raising the
+        // central constant would have left this validator checking against the stale 20 s
+        // and admitting an error-recovery delay SHORTER than the real anti-flap hold -
+        // i.e. it would have permitted exactly the rapid burner cycling it exists to
+        // prevent. Same shape as the pump stack shadow.
+        if (ms < SystemConstants::Burner::MIN_OFF_TIME_MS) {
             LOG_ERROR(TAG, "Error recovery %lu ms < anti-flapping minimum %lu ms - RISK: rapid cycling",
-                      ms, MIN_OFF_TIME_MS);
+                      ms, (unsigned long)SystemConstants::Burner::MIN_OFF_TIME_MS);
             return false;
         }
 

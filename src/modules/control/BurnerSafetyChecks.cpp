@@ -9,7 +9,9 @@
 #include <esp_log.h>
 #include <atomic>
 
-static const char* TAG = "BurnerSafety";
+// [[maybe_unused]]: the only reader is a LOG_DEBUG, which is ((void)0) under
+// LOG_MODE_RELEASE, so this is an unused-variable warning in release builds only.
+[[maybe_unused]] static const char* TAG = "BurnerSafety";
 
 bool BurnerSafetyChecks::isFlameDetected() {
     // WARNING: No flame detection hardware installed

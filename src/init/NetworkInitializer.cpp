@@ -49,7 +49,7 @@ Result<void> NetworkInitializer::initializeAsync() {
     xTaskCreate(
         networkMonitorTask,
         "NetworkMonitor",
-        2048,  // Minimal stack - only monitors connection
+        STACK_SIZE_NETWORK_MONITOR_TASK,  // Minimal - only monitors link state
         nullptr,
         1,  // Low priority
         nullptr

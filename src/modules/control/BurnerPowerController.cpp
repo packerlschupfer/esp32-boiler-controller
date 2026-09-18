@@ -3,6 +3,7 @@
 #include "core/SystemResourceProvider.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"
+#include "config/SystemConstants.h"
 #include "utils/MutexRetryHelper.h"
 #include <esp_log.h>
 
@@ -10,8 +11,10 @@ static const char* TAG = "BurnerPower";
 
 bool BurnerPowerController::shouldIncreasePower(bool requestedHighPower) {
     // SAFETY CHECK: Block high power if temperature already near limit
-    // This prevents overshoot when PID requests high power but boiler is already hot
-    constexpr Temperature_t HIGH_POWER_LIMIT_TEMP = 800;  // 80.0°C - above this, LOW power only
+    // This prevents overshoot when PID requests high power but boiler is already hot.
+    // Threshold lives in SystemConstants::Temperature beside MAX/CRITICAL_BOILER_TEMP_C.
+    constexpr Temperature_t HIGH_POWER_LIMIT_TEMP =
+        SystemConstants::Temperature::HIGH_POWER_LIMIT_TEMP_C;
 
     auto guard = MutexRetryHelper::acquireGuard(
         SRP::getSensorReadingsMutex(),

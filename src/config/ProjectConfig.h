@@ -202,10 +202,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_OTA_TASK              2048  // After fix: conservative for debug mode
     #define STACK_SIZE_MONITORING_TASK       4096  // Safety: increased for task status array allocation
     #define STACK_SIZE_MODBUS_CONTROL_TASK   1536  // After fix: with debug logging
-    #define STACK_SIZE_MODBUS_STATUS_TASK    1536  // After fix: status polling
     #define STACK_SIZE_RELAY_CONTROL_TASK    2560  // After fix: needs more for multiple log messages
-    #define STACK_SIZE_RELAY_STATUS_TASK     1536  // After fix: status reading
-    #define STACK_SIZE_DEBUG_TASK            2048  // After fix: debug output
     #define STACK_SIZE_SENSOR_TASK           2048  // After fix: sensor processing
     #define STACK_SIZE_CONTROL_TASK          2048  // After fix: needs more for logging
     #define STACK_SIZE_WHEATER_CONTROL_TASK  3072  // After fix: needs significant stack for float formatting
@@ -213,6 +210,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // Optimized publishGroupedCategory() reduces stack usage
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // M1 fix: was 2560 (inverted vs DEBUG_SELECTIVE 4096); DEBUG_FULL needs MORE stack for logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Increased for float formatting in logs
+    #define STACK_SIZE_BOILER_TEMP_TASK      4096  // DEBUG_FULL logs more than SELECTIVE
     #define STACK_SIZE_RYN4_PROCESSING_TASK  1536  // After fix: relay processing
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 3072  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             3072  // After fix: main loop with debug
@@ -224,17 +222,30 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_OTA_TASK              3072  // Dec 2025: was 2560, had 816 free
     #define STACK_SIZE_MONITORING_TASK       3584  // Dec 2025: was 4096, had 2232 free
     #define STACK_SIZE_MODBUS_CONTROL_TASK   3584  // Increased - was showing only 448 bytes free
-    #define STACK_SIZE_MODBUS_STATUS_TASK    2560  // Restored to original size
     #define STACK_SIZE_RELAY_CONTROL_TASK    4096  // H3: Safety-critical +512 (was 3584)
-    #define STACK_SIZE_RELAY_STATUS_TASK     2048  // Restored to original size
-    #define STACK_SIZE_DEBUG_TASK            2560  // Restored to original size
     #define STACK_SIZE_SENSOR_TASK           3584  // Dec 2025: was 4096, ANDRTF3 had 2272 free
     #define STACK_SIZE_CONTROL_TASK          3584  // H3: Safety-critical +512 (was 3072)
     #define STACK_SIZE_WHEATER_CONTROL_TASK  3584  // Dec 2025: was 4096, had 2344 free
     #define STACK_SIZE_MQTT_TASK             3584  // Dec 2025: was 3072, had 712 free
-    #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // Keep - not stress tested yet
+    #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // DO NOT TRIM. Measured peak is only
+                                                 // 1860 B, which makes this look like 3 kB of
+                                                 // spare DRAM - it is not. tools/stack_walker.py
+                                                 // puts the worst-case bound at 4272 B (chain
+                                                 // 3904 + prefix + interrupt frame), i.e. only
+                                                 // 848 B of real headroom; processCommandQueue
+                                                 // alone has a 1328 B frame, the largest in the
+                                                 // image. A 2026-09-18 review proposed trimming
+                                                 // 1536 B from here to fund the pump and
+                                                 // BoilerTempCtrl increases; that would have put
+                                                 // the stack ~690 B BELOW its own static bound.
+                                                 // Re-check with the walker before touching it.
     #define STACK_SIZE_BURNER_CONTROL_TASK   4096  // H3: Safety-critical +512 (was 3584)
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 3072  // Dec 2025: was 4096, had 2568 free
+    #define STACK_SIZE_BOILER_TEMP_TASK      3584  // 2026-09-17: was 3072 with 644 B free;
+                                                   // raised for the autotune-completion branch
+                                                   // (BoilerTempControlTask.cpp snprintfs three
+                                                   // %.4f into char[160]), which no measurement
+                                                   // has ever exercised. Measured peak 2540 B.
     #define STACK_SIZE_RYN4_PROCESSING_TASK  2560  // Restored to original size
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 3072  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             4096  // After fix: needs more for initialization
@@ -251,10 +262,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_OTA_TASK              1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
     #define STACK_SIZE_MONITORING_TASK       3584  // Dec 2025: increased from 3072 for task status allocation + LOG_DEBUG overhead
     #define STACK_SIZE_MODBUS_CONTROL_TASK   1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
-    #define STACK_SIZE_MODBUS_STATUS_TASK    1536  // >= configMINIMAL_STACK_SIZE (was 768); macro currently unused
     #define STACK_SIZE_RELAY_CONTROL_TASK    1536  // After fix: needs margin for logging
-    #define STACK_SIZE_RELAY_STATUS_TASK     1536  // >= configMINIMAL_STACK_SIZE (was 768); macro currently unused
-    #define STACK_SIZE_DEBUG_TASK            1536  // >= configMINIMAL_STACK_SIZE (was 1024); macro currently unused
     #define STACK_SIZE_SENSOR_TASK           1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
     #define STACK_SIZE_CONTROL_TASK          1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
     #define STACK_SIZE_WHEATER_CONTROL_TASK  2048  // After fix: needs margin for float ops in release
@@ -262,6 +270,8 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 1536  // After fix: JSON operations
     #define STACK_SIZE_BURNER_CONTROL_TASK   1536  // After fix: needs margin for logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 1536  // After fix: increased for logging
+    #define STACK_SIZE_BOILER_TEMP_TASK      3072  // > the 2540 B peak measured in debug;
+                                                   // release peaks are unmeasured
     #define STACK_SIZE_RYN4_PROCESSING_TASK  1536  // >= configMINIMAL_STACK_SIZE (was 768, rejected)
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 1536  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             1536  // After fix: main loop minimal
@@ -270,6 +280,13 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                  // observed high-water mark. Release peaks are
                                                  // unmeasured - do not trim without measuring.
 #endif
+
+// NetworkMonitor is created with a raw xTaskCreate in NetworkInitializer (it runs
+// before the TaskManager-supervised tasks and the network is explicitly non-critical),
+// so it gets no watchdog registration and no restart supervision. Its size was an
+// inline literal, invisible to the tiers and to the assertions below - the same blind
+// spot as the pump stack. Not mode-tuned: this task only polls link state.
+#define STACK_SIZE_NETWORK_MONITOR_TASK  2048
 
 // ==========================
 // Stack-size floor (compile-time)
@@ -294,10 +311,7 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 static_assert(STACK_SIZE_OTA_TASK              >= configMINIMAL_STACK_SIZE, "STACK_SIZE_OTA_TASK below configMINIMAL_STACK_SIZE - task would be silently rejected");
 static_assert(STACK_SIZE_MONITORING_TASK       >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MONITORING_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_MODBUS_CONTROL_TASK   >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MODBUS_CONTROL_TASK below configMINIMAL_STACK_SIZE");
-static_assert(STACK_SIZE_MODBUS_STATUS_TASK    >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MODBUS_STATUS_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_RELAY_CONTROL_TASK    >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RELAY_CONTROL_TASK below configMINIMAL_STACK_SIZE");
-static_assert(STACK_SIZE_RELAY_STATUS_TASK     >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RELAY_STATUS_TASK below configMINIMAL_STACK_SIZE");
-static_assert(STACK_SIZE_DEBUG_TASK            >= configMINIMAL_STACK_SIZE, "STACK_SIZE_DEBUG_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_SENSOR_TASK           >= configMINIMAL_STACK_SIZE, "STACK_SIZE_SENSOR_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_CONTROL_TASK          >= configMINIMAL_STACK_SIZE, "STACK_SIZE_CONTROL_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_WHEATER_CONTROL_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_WHEATER_CONTROL_TASK below configMINIMAL_STACK_SIZE");
@@ -305,10 +319,12 @@ static_assert(STACK_SIZE_MQTT_TASK             >= configMINIMAL_STACK_SIZE, "STA
 static_assert(STACK_SIZE_PERSISTENT_STORAGE_TASK >= configMINIMAL_STACK_SIZE, "STACK_SIZE_PERSISTENT_STORAGE_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_BURNER_CONTROL_TASK   >= configMINIMAL_STACK_SIZE, "STACK_SIZE_BURNER_CONTROL_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_MB8ART_PROCESSING_TASK >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MB8ART_PROCESSING_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_BOILER_TEMP_TASK      >= configMINIMAL_STACK_SIZE, "STACK_SIZE_BOILER_TEMP_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_RYN4_PROCESSING_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RYN4_PROCESSING_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_TIMER_SCHEDULER_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_TIMER_SCHEDULER_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_LOOP_TASK             >= configMINIMAL_STACK_SIZE, "STACK_SIZE_LOOP_TASK below configMINIMAL_STACK_SIZE");
 static_assert(STACK_SIZE_PUMP_CONTROL_TASK     >= configMINIMAL_STACK_SIZE, "STACK_SIZE_PUMP_CONTROL_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_NETWORK_MONITOR_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_NETWORK_MONITOR_TASK below configMINIMAL_STACK_SIZE");
 
 // Task priorities (higher number = higher priority)
 // Safety-critical tasks get priority 4 to ensure timely response to safety events

@@ -177,6 +177,12 @@ namespace SystemConstants {
         constexpr Temperature_t MAX_BOILER_TEMP_C = 1100;       // 110.0°C - Operational ceiling
         constexpr Temperature_t MIN_BOILER_TEMP_C = 200;        // 20.0°C - Operational floor
         constexpr Temperature_t CRITICAL_BOILER_TEMP_C = 1150;  // 115.0°C - Emergency shutdown (5°C margin above max)
+        // Above this, BurnerPowerController forces LOW power regardless of what the PID
+        // asks for, to stop HIGH power overshooting into the limits above. Moved here from
+        // a function-local constexpr inside BurnerPowerController::shouldIncreasePower()
+        // on 2026-09-18: a hard burner safety threshold has to sit beside the other boiler
+        // limits, where anyone adjusting MAX/CRITICAL can see it, not buried in a .cpp.
+        constexpr Temperature_t HIGH_POWER_LIMIT_TEMP_C = 800;  // 80.0°C - LOW power only above this
         constexpr Temperature_t FREEZE_PROTECTION_TEMP_C = 50;  // 5.0°C - Anti-freeze activation
         
         // Hysteresis values (in tenths of degrees Celsius)
@@ -423,6 +429,17 @@ namespace SystemConstants {
     // System Thresholds
     // ===========================
     namespace System {
+        // Task stack margin below which a task is reported as low. One source for both
+        // reporting paths: MonitoringTask::logAllTasks() used 512 while
+        // RuntimeDiagnostics used 256, so the same task could be "low" in one report and
+        // fine in the other - which is how the pump tasks at 288 B free read as alarming
+        // in the detailed monitor and silent in the diagnostics dump.
+        //
+        // 512 B is roughly a third of the ~1312 B that a single LOG_* call costs on this
+        // firmware (measured via objdump frame sums), so a task under this line cannot
+        // safely log even once more.
+        constexpr size_t LOW_STACK_WARN_BYTES = 512;
+
         // Memory thresholds
         constexpr size_t MIN_FREE_HEAP_CRITICAL = 10000;   // 10KB
         constexpr size_t MIN_FREE_HEAP_WARNING = 20000;    // 20KB

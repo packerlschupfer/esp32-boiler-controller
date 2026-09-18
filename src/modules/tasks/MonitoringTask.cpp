@@ -679,6 +679,14 @@ static void logAllTasks() {
     int lowStackCount = 0;
     int blockedCount = 0;
     int suspendedCount = 0;
+
+    // Worst offender, so the warning below can name it. Until 2026-09-18 lowStackCount
+    // fed nothing but a LOG_DEBUG, and LOG_DEBUG is ((void)0) in LOG_MODE_RELEASE - so
+    // the entire low-stack monitor was inert in release and merely buried in debug. Both
+    // pump tasks sat under this threshold for months (288 B and 420 B free) printing
+    // " !LOW!" into a debug stream nobody reads.
+    size_t worstStackFree = SIZE_MAX;
+    char worstStackTask[13] = {0};
     
     // Log header
     LOG_DEBUG(TAG, "Name          St Pri Stack Core");
@@ -716,17 +724,21 @@ static void logAllTasks() {
             snprintf(coreStr, sizeof(coreStr), "%d", coreId);
         }
 
-        // Check for low stack
-        [[maybe_unused]] const char* warning = "";
-        if (stackFreeBytes < 512) {
-            warning = " !LOW!";
-            lowStackCount++;
-        }
-
         // Truncate task name to 12 chars
         char shortName[13];
         strncpy(shortName, taskStatusArray[i].pcTaskName, 12);
         shortName[12] = '\0';
+
+        // Check for low stack
+        [[maybe_unused]] const char* warning = "";
+        if (stackFreeBytes < SystemConstants::System::LOW_STACK_WARN_BYTES) {
+            warning = " !LOW!";
+            lowStackCount++;
+            if (stackFreeBytes < worstStackFree) {
+                worstStackFree = stackFreeBytes;
+                memcpy(worstStackTask, shortName, sizeof(worstStackTask));
+            }
+        }
 
         LOG_DEBUG(TAG, "%-12s %3s %2d %5u %3s%s",
                  shortName,
@@ -747,6 +759,18 @@ static void logAllTasks() {
     // Log issues summary
     LOG_DEBUG(TAG, "Issues: L%d B%d S%d",
              lowStackCount, blockedCount, suspendedCount);
+
+    // A task within LOW_STACK_WARN_BYTES of overflow is a real hazard on this device -
+    // an overflow in a pump or relay task leaves actuators in an arbitrary state. Warn at
+    // a level that survives every build mode, and name the offender and its margin so the
+    // report is actionable without a debug build. Deliberately re-warned on every detailed
+    // cycle: the condition is persistent, not an edge, and staying quiet about it is what
+    // let the pump tasks run at 288 B for months.
+    if (lowStackCount > 0) {
+        LOG_WARN(TAG, "LOW STACK: %d task(s) below %u B; worst %s at %u B free",
+                 lowStackCount, (unsigned)SystemConstants::System::LOW_STACK_WARN_BYTES,
+                 worstStackTask, (unsigned)worstStackFree);
+    }
 
     // Free memory
     vPortFree(taskStatusArray);

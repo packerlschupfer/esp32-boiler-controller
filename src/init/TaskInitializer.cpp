@@ -673,7 +673,11 @@ void TaskInitializer::initializeBoilerTempControlTask(SystemInitializer* initial
     //
     // Cost: +512 B DRAM, taking the observed floor (heap_dram_min 1812 B at 11.2 h)
     // to roughly 1300 B - still well clear of zero and of MIN_DRAM_BLOCK_WARNING.
-    constexpr uint32_t STACK_SIZE_BOILER_TEMP_TASK = 3584;
+    // 2026-09-18: the local constant that used to sit here is GONE. It shadowed nothing
+    // when written (no ProjectConfig macro existed), but it made the size invisible to
+    // the build-mode tiers and to the configMINIMAL_STACK_SIZE assertions - the same
+    // blind spot that hid the pump stack at 2048. STACK_SIZE_BOILER_TEMP_TASK now lives
+    // in ProjectConfig.h and still resolves to 3584 under LOG_MODE_DEBUG_SELECTIVE.
     constexpr uint8_t PRIORITY_BOILER_TEMP_TASK = 4;  // Same as BurnerControlTask
 
     // Configure watchdog for non-critical monitoring

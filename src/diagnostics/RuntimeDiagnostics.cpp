@@ -12,6 +12,7 @@
 #include "EthernetManager.h"
 #include "monitoring/HealthMonitor.h"
 #include "core/SystemResourceProvider.h"
+#include "config/SystemConstants.h"
 
 // No external declarations needed - using SRP methods
 
@@ -136,7 +137,10 @@ void RuntimeDiagnostics::dumpTaskInfo(OutputCallback outputCb) {
                coreId);
                
         // Warn about low stack
-        if (taskStatusArray[i].usStackHighWaterMark < 256 / sizeof(StackType_t)) {
+        // Same threshold as MonitoringTask::logAllTasks(); this site used 256 B, so a
+        // task could read low in one report and fine in the other.
+        if (taskStatusArray[i].usStackHighWaterMark * sizeof(StackType_t) <
+            SystemConstants::System::LOW_STACK_WARN_BYTES) {
             output("  WARNING: Low stack!");
         }
     }
