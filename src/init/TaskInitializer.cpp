@@ -119,14 +119,24 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
         // Do NOT trim this to fund another task. It was briefly cut to 3072 on
         // 2026-09-17 on the false premise that it had ~50% spare - that 2064 B figure
         // actually belonged to LogSub, the Logger library's subscriber task, which is
-        // a different task entirely. SyslogTask does not even appear in a task dump:
-        // syslogEnabled defaults false (SYSLOG_ENABLED_DEFAULT), so this task runs
-        // once, hits the disabled branch in SyslogInitializer::SyslogTask and calls
-        // vTaskDelete(NULL), releasing its stack. Trimming it therefore frees nothing
-        // at steady state - and syslogEnabled is settable at runtime via
-        // boiler/cmd/config/syslog_enabled, at which point the task becomes persistent
-        // and needs the full size for EthernetUDP plus Syslog::sendInternal's 1088 B
-        // frame. Restored to 4096.
+        // a different task entirely. SyslogTask does not appear in a steady-state task
+        // dump: syslogEnabled defaults false (SYSLOG_ENABLED_DEFAULT), so this task
+        // eventually hits the disabled branch in SyslogInitializer::SyslogTask and calls
+        // vTaskDelete(NULL), releasing its stack. Trimming it therefore frees nothing at
+        // steady state.
+        //
+        // CORRECTED 2026-09-18 - it does NOT self-delete promptly. SyslogInitializer.cpp
+        // blocks on xEventGroupWaitBits(NETWORK_READY | STORAGE_READY, ..., 30000) BEFORE
+        // reaching that branch, so all 4096 B are held until those bits arrive, or for a
+        // full 30 s if Ethernet never comes up. This task is created here, i.e. BEFORE
+        // the pumps and MonitoringTask in this same function, so the allocation overlaps
+        // theirs during boot. 4096 also exceeds the 3828 B largest free block measured
+        // after the pump increase, so startTask can simply fail (LOG_WARN below, nothing
+        // else). Kept at 4096 anyway: syslogEnabled is runtime-settable via
+        // boiler/cmd/config/syslog_enabled, and although that requires a reboot to take
+        // effect, the task is then persistent and needs the full size for EthernetUDP
+        // plus Syslog::sendInternal's 1088 B frame. Revisit as a boot-window DRAM item,
+        // not as spare steady-state capacity.
         4096,  // Stack for EthernetUDP + message formatting
         nullptr,
         1,  // Low priority
@@ -336,10 +346,12 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     // 160 B, so there is no demand-side saving available short of removing logging
     // from a safety-relevant task.
     //
-    // 2560 rather than the configured 3072 to limit the DRAM cost: this is +512 B per
+    // 2560 rather than the aspirational 3072 to limit the DRAM cost: this is +512 B per
     // pump task, +1024 B total, and it is NOT funded by anything. An attempt to fund
-    // it by trimming SyslogTask below was withdrawn - that task self-deletes when
-    // syslog is disabled, so trimming it frees nothing (see the note there).
+    // it by trimming SyslogTask below was withdrawn - that task eventually self-deletes
+    // when syslog is disabled, so trimming it frees nothing at steady state. (It does
+    // NOT self-delete promptly, though: it blocks on NETWORK_READY|STORAGE_READY with a
+    // 30 s timeout first, so it holds its full stack across boot - see the note there.)
     //
     // Measured cost on the device, at matched 63-64 s uptime across the two builds:
     // free DRAM 6380 -> 5668 B and largest free block 5108 -> 3828 B. Still above
@@ -353,8 +365,13 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     // 512 B/task needed to reach the profiled 3072 would have to come from the OTA
     // task (3072 B, persistent) or from LogSub, whose configured size should be
     // checked before assuming it has room.
-    constexpr uint32_t STACK_SIZE_PUMP_TASK = 2560;
-    constexpr uint8_t PRIORITY_PUMP_TASK = 3;  // Same as control tasks
+    //
+    // 2026-09-18: the local constants that used to sit here are GONE. Raising the local
+    // from 2048 to 2560 fixed the symptom but froze the shadow - ProjectConfig kept
+    // tuning STACK_SIZE_PUMP_CONTROL_TASK per build mode and all three values stayed
+    // dead, so the next profiling pass would have missed the pumps exactly as the last
+    // one did. The macro is now the single source and carries the measured 2560; do not
+    // reintroduce a local override here.
 
     // Heating pump task
     TaskManager::WatchdogConfig pumpWdtConfig = TaskManager::WatchdogConfig::enabled(
@@ -366,9 +383,9 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     if (SRP::getTaskManager().startTask(
         PumpControlModule::HeatingPumpTask,
         "HeatingPump",
-        STACK_SIZE_PUMP_TASK,
+        STACK_SIZE_PUMP_CONTROL_TASK,
         nullptr,
-        PRIORITY_PUMP_TASK,
+        PRIORITY_PUMP_CONTROL_TASK,
         pumpWdtConfig)) {
 
         TaskHandle_t handle = SRP::getTaskManager().getTaskHandleByName("HeatingPump");
@@ -385,9 +402,9 @@ void TaskInitializer::initializePumpTasks(SystemInitializer* initializer) {
     if (SRP::getTaskManager().startTask(
         PumpControlModule::WaterPumpTask,
         "WaterPump",
-        STACK_SIZE_PUMP_TASK,
+        STACK_SIZE_PUMP_CONTROL_TASK,
         nullptr,
-        PRIORITY_PUMP_TASK,
+        PRIORITY_PUMP_CONTROL_TASK,
         pumpWdtConfig)) {
 
         TaskHandle_t handle = SRP::getTaskManager().getTaskHandleByName("WaterPump");

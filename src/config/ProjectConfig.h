@@ -238,29 +238,77 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
     #define STACK_SIZE_RYN4_PROCESSING_TASK  2560  // Restored to original size
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 3072  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             4096  // After fix: needs more for initialization
-    #define STACK_SIZE_PUMP_CONTROL_TASK     3072  // Dec 2025: was 2560, had 700-768 free
+    #define STACK_SIZE_PUMP_CONTROL_TASK     2560  // 2026-09-17 MEASURED: 2560 gives 928 B free
+                                                 // (peak 1840 B, static from boot, verified at 11.2 h
+                                                 // through a full water cycle). Was 3072 aspirationally,
+                                                 // but TaskInitializer shadowed this macro with a local
+                                                 // 2048 so the pumps never saw either value. 2560 is what
+                                                 // is actually validated; the extra 512 B/task is not
+                                                 // funded against a 1812 B DRAM floor.
 
 #else  // LOG_MODE_RELEASE
     // RELEASE MODE - Aggressive optimization with SafeLog
-    #define STACK_SIZE_OTA_TASK              1024  // After fix: minimal for release
+    #define STACK_SIZE_OTA_TASK              1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
     #define STACK_SIZE_MONITORING_TASK       3584  // Dec 2025: increased from 3072 for task status allocation + LOG_DEBUG overhead
-    #define STACK_SIZE_MODBUS_CONTROL_TASK   1024  // After fix: modbus control
-    #define STACK_SIZE_MODBUS_STATUS_TASK    768   // After fix: status only
+    #define STACK_SIZE_MODBUS_CONTROL_TASK   1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
+    #define STACK_SIZE_MODBUS_STATUS_TASK    1536  // >= configMINIMAL_STACK_SIZE (was 768); macro currently unused
     #define STACK_SIZE_RELAY_CONTROL_TASK    1536  // After fix: needs margin for logging
-    #define STACK_SIZE_RELAY_STATUS_TASK     768   // After fix: status only
-    #define STACK_SIZE_DEBUG_TASK            1024  // After fix: minimal debug
-    #define STACK_SIZE_SENSOR_TASK           1024  // After fix: sensor reading
-    #define STACK_SIZE_CONTROL_TASK          1024  // After fix: needs margin for control tasks
+    #define STACK_SIZE_RELAY_STATUS_TASK     1536  // >= configMINIMAL_STACK_SIZE (was 768); macro currently unused
+    #define STACK_SIZE_DEBUG_TASK            1536  // >= configMINIMAL_STACK_SIZE (was 1024); macro currently unused
+    #define STACK_SIZE_SENSOR_TASK           1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
+    #define STACK_SIZE_CONTROL_TASK          1536  // >= configMINIMAL_STACK_SIZE (was 1024, rejected)
     #define STACK_SIZE_WHEATER_CONTROL_TASK  2048  // After fix: needs margin for float ops in release
     #define STACK_SIZE_MQTT_TASK             1536  // After fix: MQTT operations
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 1536  // After fix: JSON operations
     #define STACK_SIZE_BURNER_CONTROL_TASK   1536  // After fix: needs margin for logging
     #define STACK_SIZE_MB8ART_PROCESSING_TASK 1536  // After fix: increased for logging
-    #define STACK_SIZE_RYN4_PROCESSING_TASK  768   // After fix: relay processing
+    #define STACK_SIZE_RYN4_PROCESSING_TASK  1536  // >= configMINIMAL_STACK_SIZE (was 768, rejected)
     #define STACK_SIZE_TIMER_SCHEDULER_TASK 1536  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             1536  // After fix: main loop minimal
-    #define STACK_SIZE_PUMP_CONTROL_TASK     1536  // After fix: pump control minimal
+    #define STACK_SIZE_PUMP_CONTROL_TASK     2560  // NOT "minimal": the measured pump peak is
+                                                 // 1840 B (debug build), so 1536 was below the
+                                                 // observed high-water mark. Release peaks are
+                                                 // unmeasured - do not trim without measuring.
 #endif
+
+// ==========================
+// Stack-size floor (compile-time)
+// ==========================
+// TaskManager::startTask()/startTaskPinned() REJECT any request below
+// configMINIMAL_STACK_SIZE and return false (TaskManager.cpp:124, :217). Nothing
+// aborts the boot on that path - TaskInitializer logs a LOG_WARN/LOG_ERROR and
+// carries on - so an under-sized stack means the task SILENTLY DOES NOT EXIST.
+//
+// On this framework configMINIMAL_STACK_SIZE = CONFIG_FREERTOS_IDLE_TASK_STACKSIZE
+// (1024) + configSTACK_OVERHEAD_TOTAL, and CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK
+// is 1, contributing 60 -> 1084 B. The LOG_MODE_RELEASE tier above used to set
+// eight macros below that line, five of them on tasks that are actually created:
+// RYN4_PROCESSING (768, the task that WRITES THE RELAYS), CONTROL (1024, used
+// twice), SENSOR (1024), MODBUS_CONTROL (1024) and OTA (1024). A release image
+// would have booted with no relay writer, no control tasks, no sensor acquisition
+// and no OTA, reporting only two log lines. Found by review 2026-09-18; no release
+// env has been flashed.
+//
+// These assertions make that a BUILD failure instead of a silent runtime one.
+// Never "fix" a failure here by lowering the floor - raise the stack.
+static_assert(STACK_SIZE_OTA_TASK              >= configMINIMAL_STACK_SIZE, "STACK_SIZE_OTA_TASK below configMINIMAL_STACK_SIZE - task would be silently rejected");
+static_assert(STACK_SIZE_MONITORING_TASK       >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MONITORING_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_MODBUS_CONTROL_TASK   >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MODBUS_CONTROL_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_MODBUS_STATUS_TASK    >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MODBUS_STATUS_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_RELAY_CONTROL_TASK    >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RELAY_CONTROL_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_RELAY_STATUS_TASK     >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RELAY_STATUS_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_DEBUG_TASK            >= configMINIMAL_STACK_SIZE, "STACK_SIZE_DEBUG_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_SENSOR_TASK           >= configMINIMAL_STACK_SIZE, "STACK_SIZE_SENSOR_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_CONTROL_TASK          >= configMINIMAL_STACK_SIZE, "STACK_SIZE_CONTROL_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_WHEATER_CONTROL_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_WHEATER_CONTROL_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_MQTT_TASK             >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MQTT_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_PERSISTENT_STORAGE_TASK >= configMINIMAL_STACK_SIZE, "STACK_SIZE_PERSISTENT_STORAGE_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_BURNER_CONTROL_TASK   >= configMINIMAL_STACK_SIZE, "STACK_SIZE_BURNER_CONTROL_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_MB8ART_PROCESSING_TASK >= configMINIMAL_STACK_SIZE, "STACK_SIZE_MB8ART_PROCESSING_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_RYN4_PROCESSING_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_RYN4_PROCESSING_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_TIMER_SCHEDULER_TASK  >= configMINIMAL_STACK_SIZE, "STACK_SIZE_TIMER_SCHEDULER_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_LOOP_TASK             >= configMINIMAL_STACK_SIZE, "STACK_SIZE_LOOP_TASK below configMINIMAL_STACK_SIZE");
+static_assert(STACK_SIZE_PUMP_CONTROL_TASK     >= configMINIMAL_STACK_SIZE, "STACK_SIZE_PUMP_CONTROL_TASK below configMINIMAL_STACK_SIZE");
 
 // Task priorities (higher number = higher priority)
 // Safety-critical tasks get priority 4 to ensure timely response to safety events
