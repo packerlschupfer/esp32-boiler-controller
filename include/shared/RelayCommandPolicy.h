@@ -98,6 +98,37 @@ namespace RelayCommandPolicy {
         PUMP_PROTECTED
     };
 
+    enum class ToggleGate : uint8_t {
+        NOT_APPLICABLE,  // no-op or emergency: neither protection applies
+        ALLOWED,         // real change, counted by the rate limiter; ask pump protection next
+        RATE_LIMITED     // real change, refused by the rate limiter
+    };
+
+    /**
+     * @brief The protection decision that must run under the rate-limiter lock.
+     *
+     * Split out of admit() because processSingleRelay() cannot hold its critical
+     * section across the whole admission: checkPumpProtection() takes
+     * relayStateMutex_ for up to 10 ms and blocking on a mutex inside
+     * portENTER_CRITICAL is illegal. Production calls THIS between
+     * portENTER_CRITICAL/portEXIT_CRITICAL and then does the pump step outside;
+     * admit() below is written in terms of the same function, so the gate cannot
+     * differ between the two paths - previously the sequence was retyped in
+     * processSingleRelay() and again in the test, i.e. three copies of one
+     * decision.
+     *
+     * Touches limiter state, so callers must serialise it.
+     */
+    inline ToggleGate gateToggle(uint8_t relayIndex, bool desiredState, bool requestedState,
+                                 bool emergencyBypass, const RateLimiter& limiter,
+                                 uint32_t nowTicks) {
+        if (!appliesProtection(desiredState, requestedState, emergencyBypass)) {
+            return ToggleGate::NOT_APPLICABLE;
+        }
+        return consumeToggle(limiter, relayIndex, nowTicks) ? ToggleGate::ALLOWED
+                                                           : ToggleGate::RATE_LIMITED;
+    }
+
     /**
      * @brief processSingleRelay(): may a command for a valid relay (1-8) be queued?
      *
@@ -111,11 +142,14 @@ namespace RelayCommandPolicy {
     inline Admission admit(uint8_t relayIndex, bool desiredState, bool requestedState,
                            bool emergencyBypass, const RateLimiter& limiter, uint32_t nowTicks,
                            bool (*pumpProtectionAllows)(uint8_t, bool)) {
-        if (!appliesProtection(desiredState, requestedState, emergencyBypass)) {
-            return Admission::ACCEPTED;
-        }
-        if (!consumeToggle(limiter, relayIndex, nowTicks)) {
-            return Admission::RATE_LIMITED;
+        switch (gateToggle(relayIndex, desiredState, requestedState, emergencyBypass,
+                           limiter, nowTicks)) {
+            case ToggleGate::NOT_APPLICABLE:
+                return Admission::ACCEPTED;
+            case ToggleGate::RATE_LIMITED:
+                return Admission::RATE_LIMITED;
+            case ToggleGate::ALLOWED:
+                break;
         }
         if (!pumpProtectionAllows(relayIndex, requestedState)) {
             return Admission::PUMP_PROTECTED;

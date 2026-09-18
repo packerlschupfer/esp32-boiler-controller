@@ -267,13 +267,13 @@ void RelayControlTask::taskFunction(void* pvParameters) {
     
     // Log stack usage before getData call
     UBaseType_t stackHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-    LOG_INFO(TAG, "Stack high water mark before getData: %d words", stackHighWaterMark);
+    LOG_INFO(TAG, "Stack high water mark before getData: %d bytes", stackHighWaterMark);
     
     auto stateResult = ryn4Device->getData(IDeviceInstance::DeviceDataType::RELAY_STATE);
     
     // Log stack usage after getData call
     stackHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-    LOG_INFO(TAG, "Stack high water mark after getData: %d words", stackHighWaterMark);
+    LOG_INFO(TAG, "Stack high water mark after getData: %d bytes", stackHighWaterMark);
     
     if (stateResult.isOk() && stateResult.value().size() >= 8) {
         // Round 20 Issue #6: Protect state array access with mutex
@@ -355,23 +355,26 @@ bool RelayControlTask::processSingleRelay(uint8_t relayIndex, bool state, bool e
         toggleTimestamps,
         toggleCount
     };
-    // RelayCommandPolicy::admit() is decomposed here so the critical section covers
-    // ONLY consumeToggle(). It cannot wrap the whole call: checkPumpProtection() takes
-    // relayStateMutex_ for up to 10 ms, and blocking on a mutex inside
-    // portENTER_CRITICAL is illegal. Step order and semantics are identical to
-    // admit(); test_relay_policy_decomposed_matches_admit pins that equivalence so the
-    // two cannot drift apart.
-    if (RelayCommandPolicy::appliesProtection(desiredState, state, emergencyBypass)) {
-        portENTER_CRITICAL(&rateLimitMux);
-        const bool toggleAllowed =
-            RelayCommandPolicy::consumeToggle(limiter, relayIndex, xTaskGetTickCount());
-        portEXIT_CRITICAL(&rateLimitMux);
+    // The admission is split because the critical section must cover ONLY the
+    // rate-limiter state: checkPumpProtection() takes relayStateMutex_ for up to 10 ms,
+    // and blocking on a mutex inside portENTER_CRITICAL is illegal.
+    //
+    // The lock-side decision is RelayCommandPolicy::gateToggle(), the SAME function
+    // admit() is built from, so the two paths cannot diverge on whether a command is a
+    // real change or whether it passes the limiter. Until 2026-09-18 this sequence was
+    // retyped here and a third time inside the test, and the comment claimed a test
+    // pinned the equivalence - it did not, because the native build never compiles this
+    // file. What is shared now is the function itself.
+    portENTER_CRITICAL(&rateLimitMux);
+    const RelayCommandPolicy::ToggleGate gate = RelayCommandPolicy::gateToggle(
+        relayIndex, desiredState, state, emergencyBypass, limiter, xTaskGetTickCount());
+    portEXIT_CRITICAL(&rateLimitMux);
 
-        if (!toggleAllowed) {
-            LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
-            return false;
-        }
-
+    if (gate == RelayCommandPolicy::ToggleGate::RATE_LIMITED) {
+        LOG_WARN(TAG, "Rate limit exceeded for relay %d", relayIndex);
+        return false;
+    }
+    if (gate == RelayCommandPolicy::ToggleGate::ALLOWED) {
         // Deliberately OUTSIDE the critical section: this takes relayStateMutex_.
         if (!RelayControlTask::checkPumpProtection(relayIndex, state)) {
             // Pump protection blocks this state change - not an error, just too soon
@@ -490,17 +493,24 @@ bool RelayControlTask::processToggleAllRelays() {
 
 // NEW METHOD: Update rate limit counters (from v2)
 void RelayControlTask::updateRateLimitCounters() {
-    TickType_t now = xTaskGetTickCount();
-    TickType_t elapsed = now - rateWindowStart;
+    const TickType_t now = xTaskGetTickCount();
 
-    // Reset counters every minute
-    if (elapsed >= pdMS_TO_TICKS(60000)) {
-        // Same guard as consumeToggle(): this clears all eight counters from the relay
-        // task while other tasks may be mid-increment. Logging stays outside.
-        portENTER_CRITICAL(&rateLimitMux);
+    // Same guard as consumeToggle(): this clears all eight counters from the relay task
+    // while other tasks may be mid-increment. The window test is INSIDE the section too -
+    // reading rateWindowStart outside it while writing it inside was safe only because
+    // this function has exactly one caller (the relay task loop), an invariant nothing
+    // asserted. A second caller could see elapsed >= 60 s twice and reset the window
+    // twice, under-limiting for one window. Logging stays outside.
+    bool windowExpired = false;
+    portENTER_CRITICAL(&rateLimitMux);
+    if (static_cast<TickType_t>(now - rateWindowStart) >= pdMS_TO_TICKS(60000)) {
         memset(toggleCount, 0, sizeof(toggleCount));
         rateWindowStart = now;
-        portEXIT_CRITICAL(&rateLimitMux);
+        windowExpired = true;
+    }
+    portEXIT_CRITICAL(&rateLimitMux);
+
+    if (windowExpired) {
         #if defined(LOG_MODE_DEBUG_FULL)
         LOG_DEBUG(TAG, "Rate limit counters reset");
         #endif

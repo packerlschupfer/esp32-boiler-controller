@@ -53,15 +53,15 @@ bool sendRelay(uint8_t& desiredMask, uint8_t relayIndex, bool state, uint32_t no
     if (skipDuplicate(relayIndex, desiredState, state)) {
         return true;
     }
-    // Mirrors processSingleRelay() since the rate-limiter lock was added: admit() is
-    // decomposed there so only consumeToggle() sits inside the critical section.
-    if (appliesProtection(desiredState, state, false)) {
-        if (!consumeToggle(makeLimiter(), relayIndex, nowTicks)) {
-            return false;
-        }
-        if (!pumpProtection(relayIndex, state)) {
-            return false;
-        }
+    // Mirrors processSingleRelay(): gateToggle() is the shared lock-side decision, and
+    // the pump check runs outside the critical section.
+    const ToggleGate gate = gateToggle(relayIndex, desiredState, state, false,
+                                       makeLimiter(), nowTicks);
+    if (gate == ToggleGate::RATE_LIMITED) {
+        return false;
+    }
+    if (gate == ToggleGate::ALLOWED && !pumpProtection(relayIndex, state)) {
+        return false;
     }
     const uint8_t mask = static_cast<uint8_t>(1u << (relayIndex - 1));
     desiredMask = state ? static_cast<uint8_t>(desiredMask | mask)
@@ -70,16 +70,23 @@ bool sendRelay(uint8_t& desiredMask, uint8_t relayIndex, bool state, uint32_t no
     return true;
 }
 
-// The exact step sequence processSingleRelay() runs instead of calling admit(), so the
-// production decomposition can be compared against admit() directly.
+// processSingleRelay()'s composition, built from the SAME RelayCommandPolicy::gateToggle()
+// the production path calls - not a retyped copy of admit()'s body. Before 2026-09-18 this
+// was a third hand-written copy of the decision, so it could not detect drift in either
+// real caller. The residual limit is unchanged and worth stating: the native build does not
+// compile RelayControlTask.cpp, so this pins the SHARED GATE, not the statement order in
+// processSingleRelay().
 Admission decomposedAdmit(uint8_t relayIndex, bool desiredState, bool requestedState,
                           bool emergencyBypass, const RateLimiter& limiter,
                           uint32_t nowTicks, bool (*pumpProtectionAllows)(uint8_t, bool)) {
-    if (!appliesProtection(desiredState, requestedState, emergencyBypass)) {
-        return Admission::ACCEPTED;
-    }
-    if (!consumeToggle(limiter, relayIndex, nowTicks)) {
-        return Admission::RATE_LIMITED;
+    switch (gateToggle(relayIndex, desiredState, requestedState, emergencyBypass,
+                       limiter, nowTicks)) {
+        case ToggleGate::NOT_APPLICABLE:
+            return Admission::ACCEPTED;
+        case ToggleGate::RATE_LIMITED:
+            return Admission::RATE_LIMITED;
+        case ToggleGate::ALLOWED:
+            break;
     }
     if (!pumpProtectionAllows(relayIndex, requestedState)) {
         return Admission::PUMP_PROTECTED;
@@ -101,38 +108,119 @@ void test_relay_policy_decomposed_matches_admit() {
     // leave the same side effects in the limiter arrays.
     const bool values[2] = {false, true};
 
+    // Limiter pre-state matters: with a zeroed limiter consumeToggle() ALWAYS succeeds,
+    // so a loop over a single nowTicks never produces RATE_LIMITED for a valid relay -
+    // precisely the case the rate-limiter lock exists for. Seed the three reachable
+    // shapes: fresh, a toggle inside the 150 tick minimum interval, and the per-window
+    // cap already reached.
+    enum PreState { FRESH, WITHIN_MIN_INTERVAL, AT_WINDOW_CAP, PRE_STATE_COUNT };
+    const uint32_t nowTicks = 5000;
+
+    auto seed = [&](PreState pre, uint8_t relayIndex) {
+        resetRelayState();
+        if (relayIndex < 1 || relayIndex > 8) {
+            return;
+        }
+        const uint8_t idx = static_cast<uint8_t>(relayIndex - 1);
+        if (pre == WITHIN_MIN_INTERVAL) {
+            lastToggle[idx] = nowTicks - 100;  // 100 < 150 tick minimum
+        } else if (pre == AT_WINDOW_CAP) {
+            lastToggle[idx] = nowTicks - 10000;  // interval fine, cap is what refuses
+            toggles[idx] = 30;                   // maxTogglesPerWindow
+        }
+    };
+
+    bool sawRateLimitedOnValidRelay = false;
+    bool sawPumpProtected = false;
+
     for (uint8_t relayIndex = 0; relayIndex <= 9; relayIndex++) {
-        for (int d = 0; d < 2; d++) {
-            for (int r = 0; r < 2; r++) {
-                for (int e = 0; e < 2; e++) {
-                    for (int p = 0; p < 2; p++) {
-                        resetRelayState();
-                        pumpAllows = values[p];
-                        const Admission viaAdmit =
-                            admit(relayIndex, values[d], values[r], values[e],
-                                  makeLimiter(), 5000, &pumpProtection);
-                        uint32_t admitLastToggle[8];
-                        uint32_t admitToggles[8];
-                        std::memcpy(admitLastToggle, lastToggle, sizeof(lastToggle));
-                        std::memcpy(admitToggles, toggles, sizeof(toggles));
-                        const unsigned admitPumpChecks = pumpChecks;
+        for (int pre = 0; pre < PRE_STATE_COUNT; pre++) {
+            for (int d = 0; d < 2; d++) {
+                for (int r = 0; r < 2; r++) {
+                    for (int e = 0; e < 2; e++) {
+                        for (int p = 0; p < 2; p++) {
+                            seed(static_cast<PreState>(pre), relayIndex);
+                            pumpAllows = values[p];
+                            const Admission viaAdmit =
+                                admit(relayIndex, values[d], values[r], values[e],
+                                      makeLimiter(), nowTicks, &pumpProtection);
+                            uint32_t admitLastToggle[8];
+                            uint32_t admitToggles[8];
+                            std::memcpy(admitLastToggle, lastToggle, sizeof(lastToggle));
+                            std::memcpy(admitToggles, toggles, sizeof(toggles));
+                            const unsigned admitPumpChecks = pumpChecks;
+                            const uint8_t admitPumpRelay = pumpCheckRelay;
+                            const bool admitPumpState = pumpCheckState;
 
-                        resetRelayState();
-                        pumpAllows = values[p];
-                        const Admission viaSteps =
-                            decomposedAdmit(relayIndex, values[d], values[r], values[e],
-                                            makeLimiter(), 5000, &pumpProtection);
+                            seed(static_cast<PreState>(pre), relayIndex);
+                            pumpAllows = values[p];
+                            const Admission viaSteps =
+                                decomposedAdmit(relayIndex, values[d], values[r], values[e],
+                                                makeLimiter(), nowTicks, &pumpProtection);
 
-                        ASSERT_ADMISSION(viaAdmit, viaSteps);
-                        TEST_ASSERT_EQUAL_UINT(admitPumpChecks, pumpChecks);
-                        TEST_ASSERT_EQUAL_MEMORY(admitLastToggle, lastToggle,
-                                                 sizeof(lastToggle));
-                        TEST_ASSERT_EQUAL_MEMORY(admitToggles, toggles, sizeof(toggles));
+                            ASSERT_ADMISSION(viaAdmit, viaSteps);
+                            TEST_ASSERT_EQUAL_UINT(admitPumpChecks, pumpChecks);
+                            // The ARGUMENTS passed to pump protection must match too, not
+                            // just the call count: swapping requestedState for desiredState
+                            // leaves count, return value and limiter arrays identical.
+                            TEST_ASSERT_EQUAL_UINT8(admitPumpRelay, pumpCheckRelay);
+                            TEST_ASSERT_EQUAL(admitPumpState, pumpCheckState);
+                            TEST_ASSERT_EQUAL_MEMORY(admitLastToggle, lastToggle,
+                                                     sizeof(lastToggle));
+                            TEST_ASSERT_EQUAL_MEMORY(admitToggles, toggles, sizeof(toggles));
+
+                            if (viaAdmit == Admission::RATE_LIMITED && relayIndex >= 1 &&
+                                relayIndex <= 8) {
+                                sawRateLimitedOnValidRelay = true;
+                            }
+                            if (viaAdmit == Admission::PUMP_PROTECTED) {
+                                sawPumpProtected = true;
+                            }
+                        }
                     }
                 }
             }
         }
     }
+
+    // Guard against the equivalence check silently degenerating to the ACCEPTED path.
+    TEST_ASSERT_TRUE_MESSAGE(sawRateLimitedOnValidRelay,
+                             "no RATE_LIMITED case generated for a valid relay");
+    TEST_ASSERT_TRUE_MESSAGE(sawPumpProtected, "no PUMP_PROTECTED case generated");
+}
+
+void test_relay_policy_window_reset_readmits() {
+    // updateRateLimitCounters() memsets toggleCount every minute (one of the three things
+    // rateLimitMux guards). Nothing exercised the limiter's response to that clear, so a
+    // change that stopped re-admitting after a window rollover would not have been caught.
+    resetRelayState();
+    RateLimiter limiter = makeLimiter();
+    const uint8_t relayIndex = 3;
+    const uint8_t idx = relayIndex - 1;
+
+    // Reach the cap, spacing toggles past the 150 tick minimum interval.
+    uint32_t now = 1000;
+    for (uint32_t i = 0; i < 30; i++) {
+        TEST_ASSERT_TRUE(consumeToggle(limiter, relayIndex, now));
+        now += 200;
+    }
+    TEST_ASSERT_EQUAL_UINT32(30, toggles[idx]);
+
+    // At the cap: refused even though the interval is satisfied.
+    now += 200;
+    TEST_ASSERT_FALSE(consumeToggle(limiter, relayIndex, now));
+    TEST_ASSERT_EQUAL_UINT32(30, toggles[idx]);
+
+    // The minute rollover clears the counter, and only the counter.
+    const uint32_t lastToggleBeforeReset = lastToggle[idx];
+    std::memset(toggles, 0, sizeof(toggles));
+    TEST_ASSERT_EQUAL_UINT32(lastToggleBeforeReset, lastToggle[idx]);
+
+    // Re-admitted, and the minimum interval still applies across the boundary.
+    TEST_ASSERT_FALSE(consumeToggle(limiter, relayIndex, lastToggleBeforeReset + 100));
+    now = lastToggleBeforeReset + 200;
+    TEST_ASSERT_TRUE(consumeToggle(limiter, relayIndex, now));
+    TEST_ASSERT_EQUAL_UINT32(1, toggles[idx]);
 }
 
 void test_relay_policy_noop_commands_skip_protection() {
