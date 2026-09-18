@@ -42,12 +42,13 @@ Three bounds are reported per task:
   nominal      failure-only and one-time code removed (tools/stack_walker.excludes)
   no-float     nominal without float formatting (_dtoa_r and the heap below it)
 
-Float formatting is charged only to tasks that can actually reach a float format
-string: every literal-pool string is scanned for a %f/%e/%g conversion, and the
-float path is cut per task when none is reachable (so a task that never logs a
-float is not charged 600+ bytes it cannot use). The report names the function and
-string for tasks that do. An observed peak above the no-float bound means the task
-HAS formatted a float - an independent cross-check on the model.
+Float formatting is charged per CALL SITE, not per task. Every literal-pool string
+is scanned for a %f/%e/%g conversion, and the search runs over a product graph of
+(function, a-float-formatter-is-already-on-this-path); _dtoa_r may only be entered
+once that bit is set. So a deep chain whose own format strings hold no float is not
+charged the 600+ bytes of float formatting, even when the task formats floats
+elsewhere. An observed peak above the no-float bound means the task HAS formatted a
+float - an independent cross-check on the model.
 
 A measured peak (NAME:STACK:FREE) must never exceed the nominal bound. If it does,
 an exclusion removed a path that really ran, or a call edge is missing (exit 2).
@@ -494,6 +495,7 @@ class Image:
 # ---------------------------------------------------------------------- walk
 
 def reachable(img, root, excluded, cut_edges=frozenset()):
+    """Plain address reachability - used for guard conditions and reporting."""
     seen, todo = set(), [root]
     while todo:
         a = todo.pop()
@@ -545,21 +547,33 @@ def tarjan(nodes, succ):
     return sccs   # reverse topological order: callees before callers
 
 
-def deepest(img, root, excluded, cut_edges=frozenset()):
-    nodes = reachable(img, root, excluded, cut_edges)
+def longest_path(succ, frame_of, root):
+    """Longest frame-sum path from `root` over any directed graph.
 
-    def succ(a):
-        f = img.funcs.get(a)
-        return [w for w in f.edges if w in nodes and (a, w) not in cut_edges] if f else []
+    Node ids are arbitrary hashables, which is what lets the caller walk a
+    product graph (function, state) rather than plain addresses. Cycles are
+    searched exactly inside small SCCs and summed conservatively in large ones;
+    either way a cycle is counted once.
+    """
+    seen, todo = set(), [root]
+    while todo:
+        n = todo.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        todo.extend(succ(n))
+
+    def succ_in(n):
+        return [m for m in succ(n) if m in seen]
 
     val, cont, recursion = {}, {}, []
-    for comp in tarjan([root], succ):
+    for comp in tarjan([root], succ_in):
         members = set(comp)
-        cyclic = len(comp) > 1 or comp[0] in succ(comp[0])
+        cyclic = len(comp) > 1 or comp[0] in succ_in(comp[0])
 
         def exit_of(m):
             best, node = 0, None
-            for w in succ(m):
+            for w in succ_in(m):
                 if w not in members and val[w] > best:
                     best, node = val[w], w
             return best, node
@@ -567,47 +581,46 @@ def deepest(img, root, excluded, cut_edges=frozenset()):
         if not cyclic:
             n = comp[0]
             b, node = exit_of(n)
-            val[n] = img.frame(n) + b
+            val[n] = frame_of(n) + b
             cont[n] = ([node] if node is not None else [], node)
             continue
 
         exact = None
         if len(comp) <= SCC_EXACT_MAX:
             exits = {m: exit_of(m) for m in comp}
-            inner = {m: [w for w in succ(m) if w in members] for m in comp}
+            inner = {m: [w for w in succ_in(m) if w in members] for m in comp}
             budget = SCC_BUDGET
             exact = {}
             for start in comp:
                 best = (-1, (start,), None)
-                todo = [(start, (start,), img.frame(start))]
-                while todo:
+                stack = [(start, (start,), frame_of(start))]
+                while stack:
                     budget -= 1
                     if budget < 0:
                         exact = None
                         break
-                    m, path, s = todo.pop()
-                    total = s + exits[m][0]
+                    m, p, acc = stack.pop()
+                    total = acc + exits[m][0]
                     if total > best[0]:
-                        best = (total, path, exits[m][1])
+                        best = (total, p, exits[m][1])
                     for w in inner[m]:
-                        if w not in path:
-                            todo.append((w, path + (w,), s + img.frame(w)))
+                        if w not in p:
+                            stack.append((w, p + (w,), acc + frame_of(w)))
                 if exact is None:
                     break
                 exact[start] = best
         if exact is not None:
-            for start, (total, path, exit_node) in exact.items():
-                seq = list(path[1:]) + ([exit_node] if exit_node is not None else [])
+            for start, (total, p, exit_node) in exact.items():
                 val[start] = total
-                cont[start] = (seq, exit_node)
-            recursion.append((sorted(img.name(m) for m in comp), "exact"))
+                cont[start] = (list(p[1:]) + ([exit_node] if exit_node is not None else []), exit_node)
+            recursion.append((comp, "exact"))
         else:
-            total = sum(img.frame(m) for m in comp)
+            total = sum(frame_of(m) for m in comp)
             best, node = max((exit_of(m) for m in comp), key=lambda e: e[0])
             for m in comp:
                 val[m] = total + best
                 cont[m] = ([("scc", len(comp), total)] + ([node] if node is not None else []), node)
-            recursion.append((sorted(img.name(m) for m in comp), "conservative"))
+            recursion.append((comp, "conservative"))
 
     path, cur = [root], root
     while True:
@@ -616,10 +629,42 @@ def deepest(img, root, excluded, cut_edges=frozenset()):
         if nxt is None or nxt == cur:
             break
         cur = nxt
-    return val.get(root, 0), path, nodes, recursion
+    return val.get(root, 0), path, seen, recursion
 
 
-# -------------------------------------------------------------------- report
+def deepest(img, root, excluded, cut_edges=frozenset(),
+            float_sinks=frozenset(), float_formatters=frozenset()):
+    """Deepest chain from `root`, attributing float formatting per call site.
+
+    Walks the product graph (function, seen-a-float-formatter). Entering a float
+    sink (_dtoa_r and below) is only allowed once some function holding a %f-style
+    format string is already on the path, so a deep chain whose own format strings
+    contain no float is not charged for float formatting. Passing an empty
+    `float_formatters` makes the bit unreachable, which yields the no-float bound.
+    """
+    def out_edges(a):
+        f = img.funcs.get(a)
+        if not f:
+            return ()
+        return [t for t in f.edges if t not in excluded and (a, t) not in cut_edges]
+
+    def succ(node):
+        a, seen_float = node
+        nxt = []
+        for m in out_edges(a):
+            flag = seen_float or (m in float_formatters)
+            if m in float_sinks and not flag:
+                continue
+            nxt.append((m, flag))
+        return nxt
+
+    root_node = (root, root in float_formatters)
+    depth, path, prod_nodes, recursion = longest_path(
+        succ, lambda n: img.frame(n[0]), root_node)
+    nodes = {n[0] for n in prod_nodes}
+    recursion = [([img.name(m[0]) for m in comp], kind) for comp, kind in recursion]
+    return depth, path, nodes, recursion
+
 
 def parse_root(spec):
     parts = spec.rsplit(":", 2)
@@ -628,22 +673,26 @@ def parse_root(spec):
     return spec, None, None
 
 
-def summarise(img, root, excluded, model, cut_edges=frozenset()):
-    depth, path, nodes, recursion = deepest(img, root, excluded, cut_edges)
+def summarise(img, root, excluded, model, cut_edges=frozenset(),
+              float_sinks=frozenset(), float_formatters=frozenset()):
+    depth, path, nodes, recursion = deepest(img, root, excluded, cut_edges,
+                                            float_sinks, float_formatters)
     fixed = model["coprocessor"] + sum(fr for _, fr in model["wrappers"])
     lo = depth + fixed + model["align"][0] + model["irq"]
     hi = depth + fixed + model["align"][1] + model["irq"]
     rows, cum = [], 0
     for step in path:
-        if isinstance(step, tuple):
+        if step and step[0] == "scc":                 # conservative recursion marker
             cum += step[2]
             rows.append({"frame": step[2], "cumulative": cum, "addr": None,
                          "function": f"[recursive group of {step[1]} functions, conservative]"})
             continue
-        fr = img.frame(step)
+        addr = step[0]
+        fr = img.frame(addr)
         cum += fr
-        f = img.funcs.get(step)
-        rows.append({"frame": fr, "cumulative": cum, "addr": step, "function": img.name(step),
+        f = img.funcs.get(addr)
+        rows.append({"frame": fr, "cumulative": cum, "addr": addr, "function": img.name(addr),
+                     "float": bool(step[1]),
                      "unresolved_indirect": len(f.unresolved) if f else 0})
     return {"chain_depth": depth, "predicted_used": [lo, hi], "path": rows,
             "nodes": nodes, "recursion": recursion}
@@ -673,13 +722,16 @@ def analyse(img, spec, excluded, nominal_only, float_cut, failure_cuts,
     hard_cut = frozenset(hard_cut)
     soft_cut = hard_cut | failure_cuts
 
-    worst = summarise(img, root, excluded, model, hard_cut)
-    nominal = summarise(img, root, excluded | set(nominal_only), model, soft_cut)
-    # A call graph cannot see format strings, so every log call is charged the
-    # float path (_svfprintf_r -> _dtoa_r -> first-use _Balloc/calloc -> heap).
-    # That path is real for tasks that format floats and phantom for those that
-    # do not, so it is reported as a condition rather than cut or kept silently.
-    float_free = summarise(img, root, excluded | set(nominal_only) | float_cut, model, soft_cut)
+    # Float formatting is attributed per call site: the walk carries a "a float
+    # formatter is already on this path" bit, and _dtoa_r may only be entered once
+    # it is set. A deep chain whose own format strings hold no float is therefore
+    # not charged for float formatting. float_free forces the bit to stay clear.
+    formatters = frozenset(img.float_formats)
+    worst = summarise(img, root, excluded, model, hard_cut, float_cut, formatters)
+    nominal = summarise(img, root, excluded | set(nominal_only), model, soft_cut,
+                        float_cut, formatters)
+    float_free = summarise(img, root, excluded | set(nominal_only), model, soft_cut,
+                           float_cut, frozenset())
 
     # The first failure/once function on the worst path is what carries the
     # worst case above the nominal bound - the actionable part of the report.
@@ -965,13 +1017,6 @@ def main():
     model = img.model(task_manager_wrapper=not args.no_task_manager_wrapper)
     float_cut = {a for n, addrs in img.by_name.items()
                  if base_name(n.replace("@rom", "")) == "_dtoa_r" for a in addrs}
-    # Float formatting is feasible for a task only if some reachable function
-    # references a float format string. That is a per-task condition, so it is
-    # expressed with the same machinery as the hand-written conditional cuts.
-    float_edges = {(a, t) for a, f in img.funcs.items() for t in f.edges if t in float_cut}
-    if float_edges and img.float_formats:
-        conditional_cuts.append((float_edges, set(img.float_formats),
-                                 "float formatting (-> _dtoa_r), guarded by reachable %f format strings"))
     results = [analyse(img, spec, excluded, nominal_only, float_cut, frozenset(failure_cuts),
                        conditional_cuts, model, manual)
                for spec in args.roots]
