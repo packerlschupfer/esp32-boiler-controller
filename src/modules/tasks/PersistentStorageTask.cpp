@@ -758,8 +758,33 @@ void PersistentStorageTask(void* pvParameters) {
     // This prevents unnecessary flash wear from periodic writes
     LOG_INFO(TAG, "No periodic saves - saved on parameter set, boiler/params/save and enable/priority/override commands");
     
+    // Re-sync the int32 shadows FROM settings, which are the source of truth once boot has
+    // applied the loaded values.
+    //
+    // Why this is needed: registerInt() cannot bind a Temperature_t, so those parameters are
+    // registered against an int32 shadow and setOnChange() copies shadow -> setting. That is
+    // one-way. A write from anywhere else leaves the shadow behind - and the shadow is BOTH
+    // what PersistentStorage publishes on boiler/params/status/* AND what it writes to NVS.
+    // A stale shadow therefore misreports the value and then silently reverts it on the next
+    // boot, because loadAll() applies shadow -> setting again (see "BUG FIX (C2)" above).
+    //
+    // Measured 2026-10-15: the room target read 20.0 live and 18.0 in the params dump, after
+    // being set through boiler/cmd (MQTTCommandHandlers.cpp:193, :223). 18.0 was not even a
+    // saved value - it is the struct default this function substitutes for an empty NVS key.
+    //
+    // targetTemperatureInside is the ONLY shadowed setting with writers outside its own
+    // callback: the two command handlers above and the scheduler
+    // (SpaceHeatingScheduleAction.cpp:201). The other 11 shadows were each checked and have
+    // none, so they are deliberately NOT synced here - a blanket settings -> shadow copy
+    // would clobber a loaded NVS value for any parameter whose apply-after-load path is
+    // missing. If another setting gains an external writer, add it here and verify its
+    // apply-after-load first.
+    auto syncShadowsFromSettings = [&settings]() {
+        targetTemp_i32 = static_cast<int32_t>(settings.targetTemperatureInside);
+    };
+
     // Main event-driven loop
-    
+
     while (true) {
         // Wait for events with timeout for periodic checks
         EventBits_t bits = xEventGroupWaitBits(
@@ -796,6 +821,10 @@ void PersistentStorageTask(void* pvParameters) {
             subscribeBackoffMs = 1000;
         }
 
+        // Before the queue is processed, so a boiler/params/get publishes the live values
+        // rather than a shadow left behind by a boiler/cmd or scheduler write.
+        syncShadowsFromSettings();
+
         // Process MQTT command queue - this is required for commands like save, get, set to work
         storage->processCommandQueue();
 
@@ -803,6 +832,10 @@ void PersistentStorageTask(void* pvParameters) {
         // enable/priority/override changes)
         if (bits & STORAGE_SAVE_REQUEST_BIT) {
             LOG_INFO(TAG, "Parameter save requested");
+            // Repeated here, not just at the top of the loop: another task can write a
+            // setting after the sync above and before this save, and what NVS keeps is
+            // whatever the shadow holds at this instant.
+            syncShadowsFromSettings();
             storage->saveAll();
             
             // Update temperature shadows if needed
@@ -817,6 +850,14 @@ void PersistentStorageTask(void* pvParameters) {
             LOG_INFO(TAG, "Reloading parameters...");
             storage->loadAll();
             temperatureShadows.applyToSettings(settings);
+            // A reload is the one case where the SHADOW is newer than the setting, so the
+            // copy has to run the other way - and it must happen here, or the sync at the
+            // top of the next iteration would write the pre-reload setting straight back
+            // over the value just read from NVS. Mirrors the apply-after-load that the
+            // init path already does for this parameter ("BUG FIX (C2)" above); the loop
+            // path never had it, so a runtime reload never reached live settings.
+            settings.targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
+            settings.heating_hysteresis = static_cast<Temperature_t>(hysteresis_i32);
             // Settings changed - no direct equivalent in new system, notify via control request
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
         }
