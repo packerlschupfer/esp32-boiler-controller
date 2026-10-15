@@ -16,6 +16,7 @@
 #include <PersistentStorage.h>
 #include "MQTTTask.h"
 #include "modules/mqtt/MQTTCommandHandlers.h"
+#include "MQTTTopics.h"  // MQTT_STATUS_HEATING for the room-target status republish
 #include "utils/ErrorLogFRAM.h"
 #include "utils/TemperatureParameterWrapper.h"
 #include "core/StateManager.h"
@@ -24,6 +25,41 @@
 
 // Global temperature shadows for SystemSettings
 static SystemSettingsTemperatureShadows temperatureShadows;
+
+/// Formats tenths of a degree as "<whole>.<tenth>", e.g. 192 -> "19.2".
+///
+/// Hand-rolled rather than calling formatTemp(), which reaches snprintf("%d.%d") and so
+/// pulls newlib's ~800 B _svfprintf_r frame onto whichever task formats. (Integer
+/// conversions only - no float formatting - but the frame is the same.) Whether that
+/// costs any stack BOUND here depends on processCommandQueue, 1328 B, staying the
+/// deepest path on this task: today it is, so the honest saving is 0 B, and the point is
+/// not to depend on that. Same reasoning as buildStatusTopic()/buildHashKey() in
+/// ESP32-PersistentStorage.
+///
+/// Precondition: the room target is validated to 100..300 tenths by every writer, so
+/// TEMP_INVALID is not handled. Truncates and always NUL-terminates. Needs 8 bytes for
+/// the widest output of interest (sign + 3 digits + '.' + digit + NUL).
+static void formatTenths(char* out, size_t size, int32_t tenths) {
+    if (size == 0) return;
+    if (size < 8) { out[0] = '\0'; return; }  // caller's buffer is too small to be safe
+    size_t len = 0;
+    if (tenths < 0) {
+        out[len++] = '-';
+        tenths = -tenths;
+    }
+    int32_t whole = tenths / 10;
+    const int32_t frac = tenths % 10;
+    char digits[10];
+    size_t n = 0;
+    do {
+        digits[n++] = static_cast<char>('0' + (whole % 10));
+        whole /= 10;
+    } while (whole != 0 && n < sizeof(digits));
+    while (n > 0) out[len++] = digits[--n];
+    out[len++] = '.';
+    out[len++] = static_cast<char>('0' + frac);
+    out[len] = '\0';
+}
 
 // Syslog configuration shadows (int32_t shadows for uint8_t/uint16_t fields)
 static int32_t syslog_serverIP0 = 192;
@@ -779,8 +815,33 @@ void PersistentStorageTask(void* pvParameters) {
     // would clobber a loaded NVS value for any parameter whose apply-after-load path is
     // missing. If another setting gains an external writer, add it here and verify its
     // apply-after-load first.
+    //
+    // The retained boiler/status/heating/target topic is republished from here for the same
+    // reason the shadow is synced here: this is the one place that sees every writer. It used
+    // to be published ONLY by handleRoomTargetCommand() (MQTTCommandHandlers.cpp:210), so the
+    // parameter path, the boiler/cmd/heating <number> path (:193, which publishes
+    // "target:19.2" on boiler/status/heating instead) and the scheduler (which publishes
+    // nothing) all left it stale. Measured 2026-10-15: the broker served 19.8 for an hour
+    // while the device ran 19.2, so anything reading that topic - the HA target display
+    // included - showed the wrong setpoint. This is the mirror image of 57d6456, where the
+    // cmd path published but did not persist.
+    //
+    // Publishing on change only: this lambda runs on every pass of the loop below.
+    // A failed publish leaves lastPublishedTarget alone so the next pass retries, which also
+    // means the retained topic gets a correct value once MQTT comes up after a boot - it
+    // previously kept whatever the last boiler/cmd/room_target had written, possibly reboots
+    // ago.
+    static int32_t lastPublishedTarget = -1;  // no real target is negative
     auto syncShadowsFromSettings = [&settings]() {
         targetTemp_i32 = static_cast<int32_t>(settings.targetTemperatureInside);
+        if (targetTemp_i32 != lastPublishedTarget) {
+            char targetBuf[8];
+            formatTenths(targetBuf, sizeof(targetBuf), targetTemp_i32);
+            if (MQTTTask::publish(MQTT_STATUS_HEATING "/target", targetBuf, 0, true,
+                                  MQTTPriority::PRIORITY_LOW)) {
+                lastPublishedTarget = targetTemp_i32;
+            }
+        }
     };
 
     // Main event-driven loop
