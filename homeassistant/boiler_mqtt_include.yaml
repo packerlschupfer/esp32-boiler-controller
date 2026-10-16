@@ -1,5 +1,5 @@
-# MQTT Configuration for ESPlan Boiler Controller (firmware v2.2.0+)
-# Updated: 2025-12-11
+# MQTT Configuration for ESPlan Boiler Controller
+# Updated: 2026-03-31
 #
 # IMPORTANT: Parameter SET topics require "set/" prefix!
 #   Read:  boiler/params/wheater/tempLimitHigh  (returns current value)
@@ -17,6 +17,7 @@
 #   config/pump_protection_ms  - 5000-60000 (pump motor protection delay)
 #   config/sensor_stale_ms     - 30000-300000 (sensor staleness timeout)
 #   config/post_purge_ms       - 30000-180000 (post-purge duration)
+#   config/thermal_shock_c     - 100-600 tenths °C (output-return differential limit, default 450=45°C)
 #
 # Scheduler Commands (boiler/cmd/scheduler/...):
 #   add    - JSON: {"name":"...", "type":"water_heating|space_heating", "start_hour":6, ...}
@@ -37,13 +38,15 @@
 # Status Topics (boiler/status/...):
 #   sensors       - Sensor data JSON (every 10s)
 #   online        - {"online": true/false} (retained)
-#   safety_config - {"pump_prot":15000, "sensor_stale":60000, "post_purge":90000}
+#   safety_config - {"pump_prot":15000, "sensor_stale":60000, "post_purge":90000, "thermal_shock_c":450}
 #   health        - {"heap_free":..., "uptime":...}
 #   fram/counters - {"b":123, "h":456, "w":789, "e":0}
 #   fram/runtime  - {"t":1234, "b":567}
 #
-# Diagnostics Topics (boiler/diagnostics/...):
-#   burner        - {"state":"IDLE", "active":false, "power_level":0}
+# Device Topics (boiler/status/device/...):
+#   firmware      - "0.1.0-f8b6112"
+#   ip            - "192.168.20.40"
+#   hostname      - "ESPlan-Boiler"
 #
 # Sensor JSON format: {"t":{"bo":254,"br":253,"wt":220,"o":50,"i":233,"bt":650},"p":150,"r":21,"s":59,"sf":1}
 #   t.bo = boiler output (tenths °C)
@@ -193,12 +196,31 @@ sensor:
         payload_not_available: "offline"
         value_template: "{{ 'online' if value_json.online else 'offline' }}"
 
-  # System health diagnostics
+  # System health diagnostics. Use heap_dram* (real byte-addressable DRAM), NOT heap_free/
+  # heap_max_blk which include IRAM the allocator can't hand out (~58kB vs ~7kB real).
+  # heap_dram_blk = largest allocatable block, the figure that determines allocation success.
   - name: "Boiler Heap Free"
     unique_id: boiler_diag_heap
     state_topic: "boiler/status/health"
     unit_of_measurement: "bytes"
-    value_template: "{{ value_json.heap_free }}"
+    value_template: "{{ value_json.heap_dram | default(value_json.heap_free) }}"
+    entity_category: diagnostic
+
+  - name: "Boiler Heap Largest Block"
+    unique_id: boiler_diag_heap_blk
+    state_topic: "boiler/status/health"
+    unit_of_measurement: "bytes"
+    value_template: "{{ value_json.heap_dram_blk | default(value_json.heap_max_blk) }}"
+    entity_category: diagnostic
+
+  # Lowest TOTAL FREE DRAM since boot (monotonic, never recovers) - diagnostic only, NOT a
+  # block size and NOT an alert source. It shrinks on any long uptime, so alerting on it would
+  # false-fire; the live heap_dram_blk / Boiler Low Memory binary_sensors are the alert path.
+  - name: "Boiler Min Free DRAM (since boot)"
+    unique_id: boiler_diag_heap_min
+    state_topic: "boiler/status/health"
+    unit_of_measurement: "bytes"
+    value_template: "{{ value_json.heap_dram_min | default(value_json.heap_min) }}"
     entity_category: diagnostic
 
   - name: "Boiler Uptime"
@@ -220,22 +242,95 @@ sensor:
       {% else %}Unknown{% endif %}
     entity_category: diagnostic
 
-  # Burner state machine status (from diagnostics)
+  # Burner status derived from relay bitmap "r" (boiler/status/sensors)
+  # bit0(1)=burner enable HEATING mode, bit3(8)=power boost/FULL, bit4(16)=water mode relay.
+  # In WATER mode the burner fires with bit0=0 and bit4=1, so ON = (r&1) or (r&16).
   - name: "Burner State"
     unique_id: boiler_burner_state
-    state_topic: "boiler/diagnostics/burner"
-    value_template: "{{ value_json.state | default('UNKNOWN') }}"
-    entity_category: diagnostic
+    state_topic: "boiler/status/sensors"
+    value_template: >
+      {% set r = value_json.r | default(0) | int %}
+      {% if (r | bitwise_and(1)) or (r | bitwise_and(16)) %}
+        {% if r | bitwise_and(8) %}RUNNING_HIGH{% else %}RUNNING_LOW{% endif %}
+      {% else %}OFF{% endif %}
+    json_attributes_topic: "boiler/status/sensors"
+    json_attributes_template: >-
+      {{ {'mode': ('Heating' if (value_json.r | default(0) | int) | bitwise_and(1)
+                   else 'Water' if (value_json.r | default(0) | int) | bitwise_and(16)
+                   else 'Idle')} | tojson }}
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
 
   - name: "Burner Power Level"
     unique_id: boiler_burner_power
-    state_topic: "boiler/diagnostics/burner"
+    state_topic: "boiler/status/sensors"
     value_template: >
-      {% set level = value_json.power_level | default(0) %}
-      {% if level == 0 %}Off
-      {% elif level == 1 %}Low
-      {% elif level == 2 %}High
-      {% else %}Unknown{% endif %}
+      {% set r = value_json.r | default(0) | int %}
+      {% if not ((r | bitwise_and(1)) or (r | bitwise_and(16))) %}Off
+      {% elif r | bitwise_and(8) %}High
+      {% else %}Low{% endif %}
+    entity_category: diagnostic
+
+  # Burner mode from relay bitmap "r": Heating (bit0) / Water (bit4) / Idle.
+  # State-based (not an attribute) so every mode flip is recorded in history,
+  # incl. seamless HEATING<->WATER handovers where burner_state stays RUNNING_HIGH.
+  - name: "Burner Mode"
+    unique_id: boiler_burner_mode
+    state_topic: "boiler/status/sensors"
+    value_template: >
+      {% set r = value_json.r | default(0) | int %}
+      {% if r | bitwise_and(1) %}Heating
+      {% elif r | bitwise_and(16) %}Water
+      {% else %}Idle{% endif %}
+    entity_category: diagnostic
+
+  # Sensor fallback mode (retained): STARTUP / NORMAL / SHUTDOWN. Since 2026-09-15 SHUTDOWN
+  # no longer implies an emergency stop - a missing room/tank/return reading is degraded
+  # operation (burner stopped normally); only a missing boiler_output stops the burner within
+  # ~5s. Attributes carry the fallback detail (mode_id, previous_mode, missing[], timestamp).
+  - name: "Sensor Mode"
+    unique_id: boiler_sensor_mode
+    state_topic: "boiler/status/sensor_mode"
+    icon: mdi:thermometer-alert
+    entity_category: diagnostic
+    json_attributes_topic: "boiler/status/sensor_fallback"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  # Missing sensors as a readable string ("None" when all present). Derived from the 10s
+  # sensors payload (sf mode + sm missing-bitmask) which republishes every 10s - so it is
+  # reliable, unlike the retained sensor_fallback topic. sf: 0=STARTUP 1=NORMAL 2=SHUTDOWN;
+  # sm present only when sf!=1. sm bits: 1=boiler_output 2=boiler_return 4=water_tank 8=room_temp.
+  - name: "Missing Sensors"
+    unique_id: boiler_missing_sensors
+    state_topic: "boiler/status/sensors"
+    icon: mdi:thermometer-off
+    entity_category: diagnostic
+    value_template: >-
+      {% set sm = value_json.sm | default(0) | int %}
+      {%- set ns = [] %}
+      {%- if sm | bitwise_and(1) %}{% set ns = ns + ['boiler output'] %}{% endif %}
+      {%- if sm | bitwise_and(2) %}{% set ns = ns + ['boiler return'] %}{% endif %}
+      {%- if sm | bitwise_and(4) %}{% set ns = ns + ['water tank'] %}{% endif %}
+      {%- if sm | bitwise_and(8) %}{% set ns = ns + ['room temp'] %}{% endif %}
+      {{- ns | join(', ') if ns else 'OK' }}
+
+  # Firmware version
+  - name: "Firmware Version"
+    unique_id: boiler_firmware
+    state_topic: "boiler/status/device/firmware"
+    entity_category: diagnostic
+
+  # Device IP
+  - name: "Device IP"
+    unique_id: boiler_device_ip
+    state_topic: "boiler/status/device/ip"
     entity_category: diagnostic
 
   # FRAM counters (from boiler/cmd/fram -> counters)
@@ -287,6 +382,44 @@ sensor:
     entity_category: diagnostic
 
 binary_sensor:
+  # Low free memory: largest allocatable DRAM block below 2560 B (warn). Threshold is
+  # measurement-derived (real-world floor ~3572 B under polling; critical 1536 B ~ one network
+  # RX buffer of 1436 B). NOTE: the firmware does NOT act on these itself (its HealthMonitor is
+  # dead code, never instantiated) - this HA-side check is the ONLY low-memory detection in the
+  # system. Uses real DRAM (heap_dram_blk), not the misleading heap_free.
+  - name: "Boiler Low Memory"
+    unique_id: boiler_low_memory
+    state_topic: "boiler/status/health"
+    value_template: "{{ 'ON' if (value_json.heap_dram_blk | default(9999) | int) < 2560 else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    device_class: problem
+    entity_category: diagnostic
+
+  # Critical: allocations about to fail (a network RX buffer needs ~1436 B). NOTE: an OTA
+  # update legitimately drops the largest block to ~1.5 KB (Update.begin takes a 4096 B
+  # sector buffer) until the MQTT client is torn down - expect this ON during any OTA.
+  - name: "Boiler Memory Critical"
+    unique_id: boiler_memory_critical
+    state_topic: "boiler/status/health"
+    value_template: "{{ 'ON' if (value_json.heap_dram_blk | default(9999) | int) < 1536 else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    device_class: problem
+    entity_category: diagnostic
+
+  # Safety-critical sensor fault: a missing boiler-output reading stops the burner within
+  # ~5s (the severe case). Other missing sensors are degraded-only; use sensor.Missing Sensors
+  # / Sensor Mode for those. 'missing' key is only present when mode != NORMAL.
+  - name: "Boiler Output Sensor Fault"
+    unique_id: boiler_output_sensor_fault
+    state_topic: "boiler/status/sensors"
+    value_template: "{{ 'ON' if (value_json.sm | default(0) | int) | bitwise_and(1) else 'OFF' }}"
+    payload_on: "ON"
+    payload_off: "OFF"
+    device_class: problem
+    entity_category: diagnostic
+
   # Relay states from bitmap
   # Note: No device_class so they show "On/Off" text instead of "Running/Not running"
   # Relay status sensors - read-only hardware state indicators
@@ -806,6 +939,17 @@ number:
     max: 180000
     step: 5000
     unit_of_measurement: "ms"
+    entity_category: config
+
+  - name: "Thermal Shock Limit"
+    unique_id: boiler_safety_thermal_shock
+    command_topic: "boiler/cmd/config/thermal_shock_c"
+    state_topic: "boiler/status/safety_config"
+    value_template: "{{ value_json.thermal_shock_c }}"
+    min: 100
+    max: 600
+    step: 10
+    unit_of_measurement: "0.1°C"
     entity_category: config
 
   # Sensor Calibration Offsets (in tenths of °C or hundredths of BAR)
