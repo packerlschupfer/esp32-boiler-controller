@@ -716,15 +716,35 @@ void handleDiagnosticsCommand(const char* payload) {
     if (strcmp(payload, "memory") == 0) {
         cmd = RuntimeDiagnostics::DiagnosticCommand::DUMP_MEMORY;
     } else if (strcmp(payload, "tasks") == 0) {
-        // dumpTaskInfo() takes a single pvPortMalloc of taskCount * sizeof(TaskStatus_t)
-        // (~1280 B for 32 tasks). It handles a null return, but taking 1280 B contiguous
-        // while DRAM is tight can push other allocations over: ordinary HA polling was
-        // measured at 576 B free on 2026-09-16. Refuse rather than make it worse.
+        // dumpTaskInfo() takes a single pvPortMalloc of taskCount * sizeof(TaskStatus_t).
+        // It handles a null return, but taking that much contiguous DRAM while memory is
+        // tight can push other allocations over: ordinary HA polling was measured at
+        // 576 B free on 2026-09-16. So gate it - but gate it on what the dump actually
+        // needs, not on the blanket MIN_DRAM_BLOCK_WARNING (2560 B) used before.
+        //
+        // 2026-10-16: that blanket threshold refused the dump at a 1652 B largest block,
+        // i.e. exactly when a stack/heap dump was the thing being asked for, even though
+        // the allocation needed well under half of it. Deriving the requirement from the
+        // live task count makes the gate proportional, and the refusal now reports the
+        // numbers so a refusal is itself a measurement rather than a dead end.
+        //
+        // The margin is MIN_DRAM_BLOCK_CRITICAL, so the test is "after this allocation
+        // there is still a contiguous block above the point where allocations start
+        // failing" - not a number picked to let the dump through. At a 1652 B block with
+        // ~30 tasks this still refuses, and that refusal is correct: the fix there was
+        // reclaiming DRAM (syslog off), not loosening the gate.
+        const size_t needed = uxTaskGetNumberOfTasks() * sizeof(TaskStatus_t);
+        const size_t required = needed + SystemConstants::System::MIN_DRAM_BLOCK_CRITICAL;
         const size_t block = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
-        if (block < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
-            LOG_WARN(TAG_CMD, "Refusing tasks dump - largest DRAM block only %u B",
-                     static_cast<unsigned>(block));
-            MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, "insufficient_memory", 0, false,
+        if (block < required) {
+            LOG_WARN(TAG_CMD, "Refusing tasks dump - largest DRAM block %u B, need %u B",
+                     static_cast<unsigned>(block), static_cast<unsigned>(required));
+            char errBuf[96];
+            snprintf(errBuf, sizeof(errBuf),
+                     "insufficient_memory block=%u need=%u tasks=%u",
+                     static_cast<unsigned>(block), static_cast<unsigned>(required),
+                     static_cast<unsigned>(uxTaskGetNumberOfTasks()));
+            MQTTTask::publish(MQTT_STATUS_DIAGNOSTICS_ERROR, errBuf, 0, false,
                               MQTTPriority::PRIORITY_HIGH);
             return;
         }
