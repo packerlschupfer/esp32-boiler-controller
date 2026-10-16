@@ -1,257 +1,214 @@
 #!/usr/bin/env python3
-"""
-Test script for burner anti-flapping functionality
+"""Observe burner anti-flapping behaviour from the live relay bitmap.
 
-This script tests the anti-flapping mechanisms by:
-1. Rapidly toggling heating on/off
-2. Monitoring burner state transitions
-3. Verifying minimum on/off times are enforced
+Rewritten 2026-10-16. The previous version had never worked: every topic was
+written with the prefix inverted ("status/boiler/state/burner" instead of
+"boiler/status/state/burner"), so it neither received nor commanded anything,
+and it read a "power_level" field from a topic the firmware does not publish.
+It also rapid-toggled a real gas boiler under its default --test all.
+
+What the firmware actually publishes is boiler/status/sensors every 10 s, with
+the relays packed into one byte (MQTTPublisher.cpp:168):
+
+    bit 0 (0x01)  burner enable      bit 3 (0x08)  power boost (FULL)
+    bit 1 (0x02)  heating pump       bit 4 (0x10)  water mode
+    bit 2 (0x04)  water pump
+
+The burner fires in two distinct relay modes (BurnerSystemController truth
+table): HEATING is bit0 set with bit4 clear, WATER is bit0 *clear* with bit4
+set. So burner-on is bit0 OR bit4 - watching bit0 alone silently misses every
+hot-water charge.
+
+Default mode is observe-only: it commands nothing and simply reports whether
+the anti-flapping floors are respected over the sampling window. The 10 s
+publish interval bounds timing resolution, so only violations larger than one
+sample are trustworthy; a reported on-time of 20 s may be anywhere in 10-30 s.
+
+Credentials come from MQTT_USERNAME / MQTT_PASSWORD in the environment.
 """
 
-import paho.mqtt.client as mqtt
-import json
-import time
-import sys
 import argparse
+import json
+import os
+import sys
+import time
 from datetime import datetime
 
-# MQTT broker settings
-MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
-MQTT_KEEPALIVE = 60
+import paho.mqtt.client as mqtt
 
-# Topics
-TOPIC_HEATING_CMD = "cmd/boiler/heating"
-TOPIC_WATER_CMD = "cmd/boiler/water"
-TOPIC_BURNER_STATUS = "status/boiler/state/burner"
-TOPIC_SYSTEM_STATUS = "status/boiler/state/system"
-TOPIC_DIAGNOSTICS = "status/boiler/diagnostics/burner"
+TOPIC_SENSORS = "boiler/status/sensors"
+TOPIC_HEATING_CMD = "boiler/cmd/heating"
 
-# State tracking
-burner_state = "OFF"
-burner_on_time = None
-burner_off_time = None
-power_level = "OFF"
-last_power_change = None
-test_results = []
+# Mirrors SystemConstants.h:373-375. Kept in sync by hand - the firmware does
+# not publish these, so a mismatch here reports phantom violations.
+MIN_ON_TIME_S = 120.0
+MIN_OFF_TIME_S = 20.0
+MIN_POWER_CHANGE_INTERVAL_S = 15.0
 
-def log_event(message):
-    """Log event with timestamp"""
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    print(f"[{timestamp}] {message}")
-    test_results.append(f"[{timestamp}] {message}")
+RELAY_BURNER_ENABLE = 0x01
+RELAY_POWER_BOOST = 0x08
+RELAY_WATER_MODE = 0x10
 
-def on_connect(client, userdata, flags, rc):
-    """Callback for when the client receives a CONNACK response from the server."""
-    log_event(f"Connected with result code {rc}")
-    
-    # Subscribe to status topics
-    client.subscribe(TOPIC_BURNER_STATUS)
-    client.subscribe(TOPIC_SYSTEM_STATUS)
-    client.subscribe(TOPIC_DIAGNOSTICS)
-    
-    log_event("Subscribed to status topics")
 
-def on_message(client, userdata, msg):
-    """Callback for when a PUBLISH message is received from the server."""
-    global burner_state, burner_on_time, burner_off_time, power_level, last_power_change
-    
-    topic = msg.topic
-    payload = msg.payload.decode('utf-8')
-    
-    if topic == TOPIC_BURNER_STATUS:
-        try:
-            data = json.loads(payload)
-            new_state = data.get('state', 'UNKNOWN')
-            new_power = data.get('power_level', 'OFF')
-            
-            # Check for state changes
-            if new_state != burner_state:
-                if burner_state == "OFF" and new_state != "OFF":
-                    # Burner turned on
-                    burner_on_time = time.time()
-                    if burner_off_time:
-                        off_duration = burner_on_time - burner_off_time
-                        log_event(f"Burner ON after {off_duration:.1f}s off (min: 60s)")
-                        if off_duration < 60:
-                            log_event("⚠️  VIOLATION: Burner turned on too quickly!")
-                elif burner_state != "OFF" and new_state == "OFF":
-                    # Burner turned off
-                    burner_off_time = time.time()
-                    if burner_on_time:
-                        on_duration = burner_off_time - burner_on_time
-                        log_event(f"Burner OFF after {on_duration:.1f}s on (min: 120s)")
-                        if on_duration < 120:
-                            log_event("⚠️  VIOLATION: Burner turned off too quickly!")
-                
-                log_event(f"State: {burner_state} -> {new_state}")
-                burner_state = new_state
-            
-            # Check for power level changes
-            if new_power != power_level and new_power != "OFF" and power_level != "OFF":
-                now = time.time()
-                if last_power_change:
-                    change_interval = now - last_power_change
-                    log_event(f"Power: {power_level} -> {new_power} after {change_interval:.1f}s (min: 30s)")
-                    if change_interval < 30:
-                        log_event("⚠️  VIOLATION: Power level changed too quickly!")
-                else:
-                    log_event(f"Power: {power_level} -> {new_power}")
-                
-                last_power_change = now
-                power_level = new_power
-            elif new_power != power_level:
-                power_level = new_power
-                
-        except json.JSONDecodeError:
-            pass
-    
-    elif topic == TOPIC_DIAGNOSTICS:
-        # Can parse additional diagnostics if needed
-        pass
+def log(message):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
 
-def rapid_toggle_test(client, cycles=5, interval=10):
-    """Test rapid on/off toggling"""
-    log_event(f"\n=== RAPID TOGGLE TEST ({cycles} cycles, {interval}s interval) ===")
-    
-    for i in range(cycles):
-        # Turn heating on
-        log_event(f"\nCycle {i+1}: Requesting heating ON")
-        client.publish(TOPIC_HEATING_CMD, "on")
-        time.sleep(interval)
-        
-        # Turn heating off
-        log_event(f"Cycle {i+1}: Requesting heating OFF")
-        client.publish(TOPIC_HEATING_CMD, "off")
-        time.sleep(interval)
-    
-    log_event("\nRapid toggle test complete")
 
-def power_change_test(client):
-    """Test power level changes"""
-    log_event("\n=== POWER CHANGE TEST ===")
-    
-    # Ensure heating is on
-    log_event("Ensuring heating is ON")
-    client.publish(TOPIC_HEATING_CMD, "on")
-    time.sleep(5)
-    
-    # Wait for burner to stabilize
-    log_event("Waiting for burner to start...")
-    time.sleep(30)
-    
-    # Try to force power changes by toggling water heating
-    log_event("\nToggling water heating to force power changes")
-    for i in range(3):
-        log_event(f"\nCycle {i+1}: Water heating ON (should increase power)")
-        client.publish(TOPIC_WATER_CMD, "on")
-        time.sleep(15)
-        
-        log_event(f"Cycle {i+1}: Water heating OFF (should decrease power)")
-        client.publish(TOPIC_WATER_CMD, "off")
-        time.sleep(15)
-    
-    # Turn everything off
-    log_event("\nTurning everything OFF")
-    client.publish(TOPIC_HEATING_CMD, "off")
-    client.publish(TOPIC_WATER_CMD, "off")
-    
-    log_event("\nPower change test complete")
+class FlapMonitor:
+    """Tracks burner on/off and power-level dwell times against the floors."""
 
-def minimum_runtime_test(client):
-    """Test minimum runtime enforcement"""
-    log_event("\n=== MINIMUM RUNTIME TEST ===")
-    
-    # Turn on and try to turn off quickly
-    log_event("Turning heating ON")
-    client.publish(TOPIC_HEATING_CMD, "on")
-    
-    # Try to turn off after 30 seconds (should be blocked)
-    time.sleep(30)
-    log_event("Attempting to turn OFF after 30s (should be delayed)")
-    client.publish(TOPIC_HEATING_CMD, "off")
-    
-    # Wait and observe
-    time.sleep(100)
-    
-    log_event("\nMinimum runtime test complete")
+    def __init__(self):
+        self.burner_on = None
+        self.full_power = None
+        self.last_burner_change = None
+        self.last_power_change = None
+        self.violations = []
+        self.samples = 0
+        self.transitions = 0
 
-def generate_report():
-    """Generate test report"""
-    log_event("\n" + "="*50)
-    log_event("TEST REPORT")
-    log_event("="*50)
-    
-    violations = [r for r in test_results if "VIOLATION" in r]
-    if violations:
-        log_event(f"\n⚠️  Found {len(violations)} violations:")
-        for v in violations:
-            print(v)
-    else:
-        log_event("\n✅ No violations detected - anti-flapping working correctly")
-    
-    log_event("\nTest complete!")
+    def observe(self, relay_bits, now):
+        self.samples += 1
+        burner_on = bool(relay_bits & (RELAY_BURNER_ENABLE | RELAY_WATER_MODE))
+        mode = "WATER" if relay_bits & RELAY_WATER_MODE else "HEATING"
+        full_power = bool(relay_bits & RELAY_POWER_BOOST)
+
+        if self.burner_on is None:
+            self.burner_on = burner_on
+            self.full_power = full_power
+            self.last_burner_change = now
+            self.last_power_change = now
+            log(f"Initial state: burner {'ON' if burner_on else 'OFF'}"
+                f"{' (' + mode + ')' if burner_on else ''}"
+                f", power {'FULL' if full_power else 'HALF'}, r=0x{relay_bits:02x}")
+            return
+
+        if burner_on != self.burner_on:
+            self.transitions += 1
+            dwell = now - self.last_burner_change
+            # The floor that applies is the one for the state being LEFT.
+            floor = MIN_ON_TIME_S if self.burner_on else MIN_OFF_TIME_S
+            leaving = "ON" if self.burner_on else "OFF"
+            detail = (f"Burner {leaving} -> {'ON' if burner_on else 'OFF'} "
+                      f"after {dwell:.0f}s (floor {floor:.0f}s)")
+            if dwell + 10.0 < floor:
+                # +10 s: one publish interval of measurement slack.
+                self.violations.append(f"min {leaving.lower()} time: {detail}")
+                log(f"VIOLATION {detail}")
+            else:
+                log(detail + (f" [{mode}]" if burner_on else ""))
+            self.burner_on = burner_on
+            self.last_burner_change = now
+
+        if full_power != self.full_power:
+            dwell = now - self.last_power_change
+            detail = (f"Power {'HALF' if self.full_power else 'FULL'} -> "
+                      f"{'FULL' if full_power else 'HALF'} after {dwell:.0f}s "
+                      f"(floor {MIN_POWER_CHANGE_INTERVAL_S:.0f}s)")
+            if dwell + 10.0 < MIN_POWER_CHANGE_INTERVAL_S:
+                self.violations.append(f"min power interval: {detail}")
+                log(f"VIOLATION {detail}")
+            else:
+                log(detail)
+            self.full_power = full_power
+            self.last_power_change = now
+
+    def report(self):
+        print("=" * 60)
+        print(f"Samples: {self.samples}   burner transitions: {self.transitions}")
+        if not self.samples:
+            print("No samples received - is boiler/status/sensors publishing?")
+        elif self.violations:
+            print(f"{len(self.violations)} violation(s):")
+            for v in self.violations:
+                print(f"  - {v}")
+        else:
+            print("No anti-flapping violations observed.")
+        print("=" * 60)
+        return 1 if self.violations else 0
+
 
 def main():
-    parser = argparse.ArgumentParser(description='Test burner anti-flapping mechanisms')
-    parser.add_argument('--broker', default=MQTT_BROKER, help='MQTT broker address')
-    parser.add_argument('--port', type=int, default=MQTT_PORT, help='MQTT broker port')
-    parser.add_argument('--test', choices=['rapid', 'power', 'runtime', 'all'], 
-                        default='all', help='Test to run')
-    
+    parser = argparse.ArgumentParser(
+        description="Observe burner anti-flapping from the relay bitmap")
+    parser.add_argument("--broker", default="192.168.20.27")
+    parser.add_argument("--port", type=int, default=1883)
+    parser.add_argument("--duration", type=int, default=1800,
+                        help="observation window in seconds (default 1800)")
+    parser.add_argument("--active", action="store_true",
+                        help="also COMMAND the boiler: toggle the room target to "
+                             "provoke transitions. Fires a real gas boiler - "
+                             "requires --i-know-this-runs-the-boiler.")
+    parser.add_argument("--i-know-this-runs-the-boiler", action="store_true",
+                        dest="confirmed")
+    parser.add_argument("--cycles", type=int, default=3,
+                        help="toggle cycles when --active (default 3)")
     args = parser.parse_args()
-    
-    # Create MQTT client
+
+    if args.active and not args.confirmed:
+        parser.error("--active needs --i-know-this-runs-the-boiler")
+
+    user = os.environ.get("MQTT_USERNAME")
+    password = os.environ.get("MQTT_PASSWORD")
+    if not user or not password:
+        print("Set MQTT_USERNAME and MQTT_PASSWORD in the environment.",
+              file=sys.stderr)
+        return 2
+
+    monitor = FlapMonitor()
+
+    def on_connect(client, userdata, flags, rc):
+        if rc != 0:
+            log(f"Connect failed, rc={rc}")
+            return
+        client.subscribe(TOPIC_SENSORS)
+        log(f"Connected, subscribed to {TOPIC_SENSORS}")
+
+    def on_message(client, userdata, msg):
+        try:
+            data = json.loads(msg.payload.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return
+        relay_bits = data.get("r")
+        if isinstance(relay_bits, int):
+            monitor.observe(relay_bits, time.monotonic())
+
     client = mqtt.Client()
+    client.username_pw_set(user, password)
     client.on_connect = on_connect
     client.on_message = on_message
-    
-    # Connect to broker
-    log_event(f"Connecting to MQTT broker at {args.broker}:{args.port}...")
     try:
-        client.connect(args.broker, args.port, MQTT_KEEPALIVE)
-    except Exception as e:
-        log_event(f"Failed to connect: {e}")
-        sys.exit(1)
-    
-    # Start the network loop
+        client.connect(args.broker, args.port, 60)
+    except OSError as exc:
+        log(f"Failed to connect: {exc}")
+        return 2
     client.loop_start()
-    
-    # Wait for connection
-    time.sleep(2)
-    
-    # Ensure system is enabled
-    log_event("Enabling boiler system")
-    client.publish("cmd/boiler/enable", "on")
-    time.sleep(2)
-    
-    # Run selected tests
+
     try:
-        if args.test == 'rapid' or args.test == 'all':
-            rapid_toggle_test(client)
-            if args.test == 'all':
-                time.sleep(120)  # Wait for system to stabilize
-        
-        if args.test == 'power' or args.test == 'all':
-            power_change_test(client)
-            if args.test == 'all':
-                time.sleep(120)  # Wait for system to stabilize
-        
-        if args.test == 'runtime' or args.test == 'all':
-            minimum_runtime_test(client)
-        
-        # Wait for final messages
-        time.sleep(10)
-        
+        if args.active:
+            # Provoke transitions through the normal demand path rather than
+            # driving relays directly: the controller's own anti-flapping logic
+            # is what is under test, so it must stay in the loop.
+            log(f"Active mode: {args.cycles} room-target toggle cycles")
+            for cycle in range(args.cycles):
+                log(f"Cycle {cycle + 1}: target 23.0 (demand ON)")
+                client.publish(TOPIC_HEATING_CMD, "23.0")
+                time.sleep(180)
+                log(f"Cycle {cycle + 1}: target 15.0 (demand OFF)")
+                client.publish(TOPIC_HEATING_CMD, "15.0")
+                time.sleep(180)
+            log("Active cycles done - restore the room target yourself; this "
+                "script does not know what it was before.")
+        else:
+            log(f"Observing for {args.duration}s (Ctrl-C to stop early)")
+            time.sleep(args.duration)
     except KeyboardInterrupt:
-        log_event("\nTest interrupted by user")
-    
-    # Generate report
-    generate_report()
-    
-    # Cleanup
-    client.loop_stop()
-    client.disconnect()
+        log("Interrupted")
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+    return monitor.report()
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
