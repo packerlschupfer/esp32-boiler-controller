@@ -30,7 +30,7 @@
 #   save                 - Save all parameters to NVS (no set/ prefix)
 #   wheater/priorityEnabled, tempLimitLow, tempLimitHigh, tempChargeDelta,
 #           tempSafeLimitHigh, tempSafeLimitLow, heatingRate
-#   heating/targetTemp, curveShift, curveCoeff, burnerLowLimit, highLimit, hysteresis
+#   heating/targetTemp, curveShift, curveCoeff, hysteresis  (burner min/max: h/bLo, h/bHi)
 #   pid/spaceHeating/kp, ki, kd
 #   pid/waterHeater/kp, ki, kd
 #   sensor/offset/boilerOutput, boilerReturn, waterTank, outside, room, pressure
@@ -725,7 +725,12 @@ button:
 # =============================================================================
 # System Parameters (boiler/params/...)
 # These settings are persisted in NVS and can be configured via MQTT
-# Use boiler/params/get/all to retrieve all current values
+# STATE is read from the GROUPED reply boiler/params/status/<group> (JSON object,
+# one topic feeds every entity of that group). Replies are NOT retained, so the
+# automation "Boiler: refresh parameter groups" requests params/get/<group> on HA
+# start, on boiler online, and after any per-parameter change.
+# Integer params are tenths of degC on the wire: shown /10, sent *10 (command_template).
+# Burner Low/High limit live in group "h" (h/bLo, h/bHi), not heating/*.
 # Use boiler/params/save to persist changes to NVS
 # =============================================================================
 
@@ -735,7 +740,9 @@ number:
   - name: "Water Tank Low Limit"
     unique_id: boiler_param_wheater_temp_low
     command_topic: "boiler/params/set/wheater/tempLimitLow"
-    state_topic: "boiler/params/wheater/tempLimitLow"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/wheater"
+    value_template: "{{ (value_json.tempLimitLow | float) / 10 }}"
     min: 30
     max: 60
     step: 1
@@ -746,7 +753,9 @@ number:
   - name: "Water Tank High Limit"
     unique_id: boiler_param_wheater_temp_high
     command_topic: "boiler/params/set/wheater/tempLimitHigh"
-    state_topic: "boiler/params/wheater/tempLimitHigh"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/wheater"
+    value_template: "{{ (value_json.tempLimitHigh | float) / 10 }}"
     min: 50
     max: 85
     step: 1
@@ -757,7 +766,8 @@ number:
   - name: "Water Charge Delta"
     unique_id: boiler_param_wheater_charge_delta
     command_topic: "boiler/params/set/wheater/tempChargeDelta"
-    state_topic: "boiler/params/wheater/tempChargeDelta"
+    state_topic: "boiler/params/status/wheater"
+    value_template: "{{ value_json.tempChargeDelta }}"
     min: 1
     max: 20
     step: 0.5
@@ -768,7 +778,9 @@ number:
   - name: "Water Safety High Limit"
     unique_id: boiler_param_wheater_safe_high
     command_topic: "boiler/params/set/wheater/tempSafeLimitHigh"
-    state_topic: "boiler/params/wheater/tempSafeLimitHigh"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/wheater"
+    value_template: "{{ (value_json.tempSafeLimitHigh | float) / 10 }}"
     min: 60
     max: 95
     step: 1
@@ -779,7 +791,8 @@ number:
   - name: "Water Heating Rate"
     unique_id: boiler_param_wheater_heating_rate
     command_topic: "boiler/params/set/wheater/heatingRate"
-    state_topic: "boiler/params/wheater/heatingRate"
+    state_topic: "boiler/params/status/wheater"
+    value_template: "{{ value_json.heatingRate }}"
     min: 0.1
     max: 5
     step: 0.1
@@ -790,18 +803,22 @@ number:
   - name: "Room Target Temperature"
     unique_id: boiler_param_heating_target
     command_topic: "boiler/params/set/heating/targetTemp"
-    state_topic: "boiler/params/heating/targetTemp"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ (value_json.targetTemp | float) / 10 }}"
     min: 10
     max: 30
-    step: 0.5
+    step: 0.1
     unit_of_measurement: "°C"
     device_class: temperature
     entity_category: config
 
   - name: "Burner Low Limit"
     unique_id: boiler_param_burner_low
-    command_topic: "boiler/params/set/heating/burnerLowLimit"
-    state_topic: "boiler/params/heating/burnerLowLimit"
+    command_topic: "boiler/params/set/h/bLo"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/h"
+    value_template: "{{ (value_json.bLo | float) / 10 }}"
     min: 20
     max: 70
     step: 1
@@ -811,10 +828,12 @@ number:
 
   - name: "Heating High Limit"
     unique_id: boiler_param_heating_high
-    command_topic: "boiler/params/set/heating/highLimit"
-    state_topic: "boiler/params/heating/highLimit"
-    min: 50
-    max: 90
+    command_topic: "boiler/params/set/h/bHi"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/h"
+    value_template: "{{ (value_json.bHi | float) / 10 }}"
+    min: 70
+    max: 110
     step: 1
     unit_of_measurement: "°C"
     device_class: temperature
@@ -823,7 +842,9 @@ number:
   - name: "Heating Hysteresis"
     unique_id: boiler_param_heating_hysteresis
     command_topic: "boiler/params/set/heating/hysteresis"
-    state_topic: "boiler/params/heating/hysteresis"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ (value_json.hysteresis | float) / 10 }}"
     min: 0.1
     max: 2
     step: 0.1
@@ -834,7 +855,8 @@ number:
   - name: "Heating Curve Shift"
     unique_id: boiler_param_curve_shift
     command_topic: "boiler/params/set/heating/curveShift"
-    state_topic: "boiler/params/heating/curveShift"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ value_json.curveShift }}"
     min: -20
     max: 40
     step: 1
@@ -844,7 +866,8 @@ number:
   - name: "Heating Curve Coefficient"
     unique_id: boiler_param_curve_coeff
     command_topic: "boiler/params/set/heating/curveCoeff"
-    state_topic: "boiler/params/heating/curveCoeff"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ value_json.curveCoeff }}"
     min: 0.5
     max: 4
     step: 0.1
@@ -854,27 +877,30 @@ number:
   - name: "Space Heating PID Kp"
     unique_id: boiler_param_pid_space_kp
     command_topic: "boiler/params/set/pid/spaceHeating/kp"
-    state_topic: "boiler/params/pid/spaceHeating/kp"
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.spaceHeating.kp }}"
     min: 0
-    max: 10
-    step: 0.1
+    max: 100
+    step: 0.01
     entity_category: config
 
   - name: "Space Heating PID Ki"
     unique_id: boiler_param_pid_space_ki
     command_topic: "boiler/params/set/pid/spaceHeating/ki"
-    state_topic: "boiler/params/pid/spaceHeating/ki"
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.spaceHeating.ki }}"
     min: 0
-    max: 5
-    step: 0.01
+    max: 10
+    step: 0.001
     entity_category: config
 
   - name: "Space Heating PID Kd"
     unique_id: boiler_param_pid_space_kd
     command_topic: "boiler/params/set/pid/spaceHeating/kd"
-    state_topic: "boiler/params/pid/spaceHeating/kd"
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.spaceHeating.kd }}"
     min: 0
-    max: 5
+    max: 50
     step: 0.01
     entity_category: config
 
@@ -882,27 +908,30 @@ number:
   - name: "Water Heater PID Kp"
     unique_id: boiler_param_pid_water_kp
     command_topic: "boiler/params/set/pid/waterHeater/kp"
-    state_topic: "boiler/params/pid/waterHeater/kp"
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.waterHeater.kp }}"
     min: 0
-    max: 10
-    step: 0.1
+    max: 100
+    step: 0.01
     entity_category: config
 
   - name: "Water Heater PID Ki"
     unique_id: boiler_param_pid_water_ki
     command_topic: "boiler/params/set/pid/waterHeater/ki"
-    state_topic: "boiler/params/pid/waterHeater/ki"
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.waterHeater.ki }}"
     min: 0
-    max: 5
-    step: 0.01
+    max: 10
+    step: 0.001
     entity_category: config
 
   - name: "Water Heater PID Kd"
     unique_id: boiler_param_pid_water_kd
     command_topic: "boiler/params/set/pid/waterHeater/kd"
-    state_topic: "boiler/params/pid/waterHeater/kd"
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.waterHeater.kd }}"
     min: 0
-    max: 5
+    max: 50
     step: 0.01
     entity_category: config
 
@@ -957,7 +986,8 @@ number:
   - name: "Offset Boiler Output"
     unique_id: boiler_offset_boiler_output
     command_topic: "boiler/params/set/sensor/offset/boilerOutput"
-    state_topic: "boiler/params/sensor/offset/boilerOutput"
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ value_json['offset/boilerOutput'] }}"
     min: -50
     max: 50
     step: 1
@@ -967,7 +997,8 @@ number:
   - name: "Offset Boiler Return"
     unique_id: boiler_offset_boiler_return
     command_topic: "boiler/params/set/sensor/offset/boilerReturn"
-    state_topic: "boiler/params/sensor/offset/boilerReturn"
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ value_json['offset/boilerReturn'] }}"
     min: -50
     max: 50
     step: 1
@@ -977,7 +1008,8 @@ number:
   - name: "Offset Water Tank"
     unique_id: boiler_offset_water_tank
     command_topic: "boiler/params/set/sensor/offset/waterTank"
-    state_topic: "boiler/params/sensor/offset/waterTank"
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ value_json['offset/waterTank'] }}"
     min: -50
     max: 50
     step: 1
@@ -987,7 +1019,8 @@ number:
   - name: "Offset Outside Temp"
     unique_id: boiler_offset_outside
     command_topic: "boiler/params/set/sensor/offset/outside"
-    state_topic: "boiler/params/sensor/offset/outside"
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ value_json['offset/outside'] }}"
     min: -50
     max: 50
     step: 1
@@ -997,7 +1030,8 @@ number:
   - name: "Offset Inside Temp"
     unique_id: boiler_offset_room
     command_topic: "boiler/params/set/sensor/offset/room"
-    state_topic: "boiler/params/sensor/offset/room"
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ value_json['offset/room'] }}"
     min: -50
     max: 50
     step: 1
@@ -1007,7 +1041,8 @@ number:
   - name: "Offset Pressure"
     unique_id: boiler_offset_pressure
     command_topic: "boiler/params/set/sensor/offset/pressure"
-    state_topic: "boiler/params/sensor/offset/pressure"
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ value_json['offset/pressure'] }}"
     min: -50
     max: 50
     step: 1
