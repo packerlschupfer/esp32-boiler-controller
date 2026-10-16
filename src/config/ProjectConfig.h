@@ -228,6 +228,45 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 #elif defined(LOG_MODE_DEBUG_SELECTIVE)
     // DEBUG SELECTIVE MODE - Optimized based on runtime profiling (Dec 2025)
     // H3: Safety-critical tasks increased by +512 bytes for margin
+    //
+    // 2026-10-16: eight macros raised by +512 B each so that EVERY task clears its
+    // static worst-case bound by at least LOW_STACK_WARN_BYTES (512). Before this,
+    // tools/stack_walker.py on the prod_debug_selective ELF put eight tasks below that
+    // line and four of them under 115 B - less than one ordinary function frame:
+    //
+    //   task                 bound   was    margin      now    margin
+    //   WheaterControl        3520   3584       64     4096       576
+    //   Monitoring            3504   3584       80     4096       592
+    //   HeatingPump           2480   2560       80     3072       592
+    //   WaterPump             2480   2560       80     3072       592
+    //   PumpControl           2448   2560      112     3072       624
+    //   TimerSched            2832   3072      240     3584       752
+    //   MQTTTask              3312   3584      272     4096       784
+    //   HeatingControl        3280   3584      304     4096       816
+    //   RYN4Proc              2752   3072      320     3584       832
+    //   BoilerTempCtrl        3232   3584      352     4096       864
+    //
+    // None of this is new information: the comment below on the release tier already
+    // recorded WheaterControl at ~3520 and HeatingControl at ~3280, and
+    // TaskInitializer.cpp:350 records the pumps wanting the profiled 3072 and settling
+    // for 2560. Every one of those deferrals gave the SAME reason - the DRAM did not
+    // exist ("+1024 B total, and it is NOT funded by anything"; "the device measures
+    // ~5 kB free"). One of them even tried to fund itself by trimming SyslogTask and
+    // withdrew because that task self-deletes when syslog is disabled.
+    //
+    // What changed: syslog was switched OFF in NVS on 2026-10-16 and the reboot
+    // reclaimed ~11 kB - malloc DRAM 3.2 -> 14.5 kB free, largest block 1.65 -> 12.9 kB
+    // (boiler/cmd/diagnostics memory). This batch spends 5632 B of that, so the
+    // deferrals are now funded rather than deferred again.
+    //
+    // Note these are STATIC bounds, not measured peaks. Measured peaks sit 900-1900 B
+    // lower (MQTTTask 2400 B used, bound 3312). The bound is still the right criterion:
+    // it is what the release and DEBUG_FULL gates below are written against, and the
+    // deep branches it includes - queue-overflow and backpressure logging - were
+    // observed firing on 2026-10-16, so they are live paths, not theory.
+    //
+    // Measured cost after this change: see the git commit. Re-check with
+    // 'boiler/cmd/diagnostics' payload 'tasks' and 'memory'.
     #define STACK_SIZE_OTA_TASK              4096  // MEASURED 2026-09-18: 4096, not 3072. An OTA *auth exchange alone* took OTATask from
                                                    // 2144 B free to 384 B - below LOW_STACK_WARN_BYTES (512) - i.e. 2688 B used on a
                                                    // 3072 B stack, and the successful-transfer branch (_runUpdate -> client.printf ->
@@ -237,13 +276,13 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                    // DEBUG_FULL (was 2048) and RELEASE (was 1536) tiers were below measured usage too.
                                                    // Funded by the ~5.5 kB of DRAM that LOG_DEFERRED_FORMAT freed. Re-check with
                                                    // 'boiler/cmd/diagnostics' payload 'tasks' after any OTA.
-    #define STACK_SIZE_MONITORING_TASK       3584  // Dec 2025: was 4096, had 2232 free
+    #define STACK_SIZE_MONITORING_TASK       4096  // 2026-10-16: was 3584, bound 3504 -> was 80 B margin  // Dec 2025: was 4096, had 2232 free
     #define STACK_SIZE_MODBUS_CONTROL_TASK   3584  // Increased - was showing only 448 bytes free
     #define STACK_SIZE_RELAY_CONTROL_TASK    4096  // H3: Safety-critical +512 (was 3584)
     #define STACK_SIZE_SENSOR_TASK           3584  // Dec 2025: was 4096, ANDRTF3 had 2272 free
-    #define STACK_SIZE_CONTROL_TASK          3584  // H3: Safety-critical +512 (was 3072)
-    #define STACK_SIZE_WHEATER_CONTROL_TASK  3584  // Dec 2025: was 4096, had 2344 free
-    #define STACK_SIZE_MQTT_TASK             3584  // Dec 2025: was 3072, had 712 free
+    #define STACK_SIZE_CONTROL_TASK          4096  // 2026-10-16: was 3584, bound 3280 (HeatingControl shares this) -> was 304 B  // H3: Safety-critical +512 (was 3072)
+    #define STACK_SIZE_WHEATER_CONTROL_TASK  4096  // 2026-10-16: was 3584, bound 3520 -> was 64 B, the tightest in the system  // Dec 2025: was 4096, had 2344 free
+    #define STACK_SIZE_MQTT_TASK             4096  // 2026-10-16: was 3584, bound 3312 -> was 272 B  // Dec 2025: was 3072, had 712 free
     #define STACK_SIZE_PERSISTENT_STORAGE_TASK 5120  // DO NOT TRIM. Measured peak is only
                                                  // 1860 B, which makes this look like 3 kB of
                                                  // spare DRAM - it is not. tools/stack_walker.py
@@ -281,12 +320,12 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                    // now zero, not -512 B.
                                                    // NTPTask is not safety-critical and its failure
                                                    // path is "no time sync", not "no heat".
-    #define STACK_SIZE_BOILER_TEMP_TASK      3584  // 2026-09-17: was 3072 with 644 B free;
+    #define STACK_SIZE_BOILER_TEMP_TASK      4096  // 2026-10-16: was 3584, bound 3232 -> was 352 B  // 2026-09-17: was 3072 with 644 B free;
                                                    // raised for the autotune-completion branch
                                                    // (BoilerTempControlTask.cpp snprintfs three
                                                    // %.4f into char[160]), which no measurement
                                                    // has ever exercised. Measured peak 2540 B.
-    #define STACK_SIZE_RYN4_PROCESSING_TASK  3072  // 2026-09-18: was 2560, which left only
+    #define STACK_SIZE_RYN4_PROCESSING_TASK  3584  // 2026-10-16: was 3072, bound 2752 -> was 320 B; writes the relays  // 2026-09-18: was 2560, which left only
                                                  // 96 B above the static bound (2464). This task
                                                  // WRITES THE RELAYS and its deepest runtime path
                                                  // is an emergency chain that has never executed:
@@ -302,9 +341,9 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                  // indirects remain on this task. 96 B cannot
                                                  // absorb one more such discovery, nor a single
                                                  // added frame on that chain. Costs +512 B DRAM.
-    #define STACK_SIZE_TIMER_SCHEDULER_TASK 3072  // Generic timer scheduler (replaces HotWaterScheduler)
+    #define STACK_SIZE_TIMER_SCHEDULER_TASK 3584  // 2026-10-16: was 3072, bound 2832 -> was 240 B  // Generic timer scheduler (replaces HotWaterScheduler)
     #define STACK_SIZE_LOOP_TASK             4096  // After fix: needs more for initialization
-    #define STACK_SIZE_PUMP_CONTROL_TASK     2560  // 2026-09-17 MEASURED: 2560 gives 928 B free
+    #define STACK_SIZE_PUMP_CONTROL_TASK     3072  // 2026-10-16: was 2560, bound 2480 x3 tasks -> was 80 B; the profiled 3072 deferred in TaskInitializer.cpp:350  // 2026-09-17 MEASURED: 2560 gives 928 B free
                                                  // (peak 1840 B, static from boot, verified at 11.2 h
                                                  // through a full water cycle). Was 3072 aspirationally,
                                                  // but TaskInitializer shadowed this macro with a local
