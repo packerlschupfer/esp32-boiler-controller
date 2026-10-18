@@ -1,0 +1,1317 @@
+# MQTT API Reference
+
+## Overview
+
+The boiler controller provides a comprehensive MQTT API for monitoring and control. All topics use the `boiler/` prefix (configurable in MQTTTopics.h).
+
+**Broker**: 192.168.20.27:1883
+**Client ID**: `esplan-ESPlan-Boiler` (`esplan-` + DEVICE_HOSTNAME, built in `MQTTTask::initializeMQTT()`)
+**QoS**: 0 (best effort, typical for control systems); exception: `alert/critical` is published with QoS 1, retained
+**Keep-Alive**: 30 seconds (MQTTManager default; `MQTT_KEEP_ALIVE_SECONDS` is not used)
+
+---
+
+## Topic Organization
+
+```
+boiler/
+├── status/           # Published status (read-only)
+│   ├── sensors       # Temperature and pressure data
+│   ├── burner        # Burner state
+│   ├── online        # Connection status (retained)
+│   ├── errors/       # Error log command replies
+│   ├── device/       # Device information
+│   └── scheduler/    # Schedule status
+├── cmd/              # Commands (write)
+│   ├── control       # Control commands
+│   ├── config        # Configuration changes
+│   └── scheduler/    # Schedule management
+└── scheduler/        # Scheduler-specific
+    ├── response      # Command responses
+    └── event         # Schedule events
+```
+
+---
+
+## Status Topics (Published by Device)
+
+### 1. Sensor Data
+**Topic**: `boiler/status/sensors`
+**Frequency**: Every 10 seconds
+**Retained**: No
+
+**Format**: Fixed-point JSON (compact, integer values)
+```json
+{
+  "t": {
+    "bo": 654,    // Boiler output temp (tenths of °C): 654 = 65.4°C
+    "br": 582,    // Boiler return: 58.2°C
+    "wt": 551,    // Water tank: 55.1°C
+    "o": 125,     // Outside: 12.5°C
+    "i": 213,     // Inside/room: 21.3°C (only if valid)
+    "bt": 700     // Burner target: 70.0°C (only while a heat demand state is available)
+  },
+  "p": 152,       // Pressure (hundredths of BAR): 152 = 1.52 BAR (only if valid)
+  "r": 21,        // Relay states (bitmask)
+  "s": 39,        // System state (bitmask)
+  "sf": 1         // Sensor fallback mode
+}
+```
+
+Optional temperature keys, compiled in only with the matching flag in `src/config/ProjectConfig.h` (all commented out by default): `wtt` water tank top (`ENABLE_SENSOR_WATER_TANK_TOP`), `wr` water return (`ENABLE_SENSOR_WATER_RETURN`), `hr` heating return (`ENABLE_SENSOR_HEATING_RETURN`).
+
+`sm` (missing sensors bitmask) is added when `sf` is not 1: bit 0 boiler output, bit 1 boiler return, bit 2 water tank, bit 3 room.
+
+**Relay Bitmask `r`** (byte value):
+- Bit 0 (1): Burner enabled
+- Bit 1 (2): Heating pump ON
+- Bit 2 (4): Water pump ON
+- Bit 3 (8): Half power mode
+- Bit 4 (16): Water mode active
+
+**Example**: `"r": 21` = binary `10101` = burner ON + water pump ON + water mode ON
+
+**System State Bitmask `s`** (byte value):
+- Bit 0 (1): Boiler/system enabled
+- Bit 1 (2): Heating enabled
+- Bit 2 (4): Heating ON (actively heating)
+- Bit 3 (8): Water heating enabled
+- Bit 4 (16): Water heating ON (actively heating)
+- Bit 5 (32): Water priority active
+
+**Example**: `"s": 39` = binary `100111` = system ON + heating enabled + heating ON + water priority
+
+**Sensor Fallback Mode `sf`**:
+- 0 = STARTUP (waiting for sensors to stabilize)
+- 1 = NORMAL (all required sensors operational)
+- 2 = SHUTDOWN (degraded mode - critical sensors missing)
+
+### 2. Online Status
+**Topic**: `boiler/status/online`
+**Frequency**: On connect/disconnect
+**Retained**: Yes (last will)
+
+```json
+{"online": true}
+{"online": false}
+```
+
+### 3. Device Information
+**Topic**: `boiler/status/device/ip`
+**Retained**: Yes
+```
+192.168.20.40
+```
+(`ETH_STATIC_IP`: default in `src/config/ProjectConfig.h`, same in `platformio.ini` `[base_prod]`; the `[base_dev]` build uses 192.168.20.41)
+
+**Topic**: `boiler/status/device/hostname`
+**Retained**: Yes
+```
+ESPlan-Boiler
+```
+
+### 4. Scheduler Events
+**Topic**: `boiler/scheduler/event`
+**Frequency**: On schedule start/end
+**Retained**: No
+
+```json
+{"event":"schedule_start","id":1,"name":"Morning Shower","type":"Water Heating"}
+{"event":"schedule_end","id":1,"name":"Morning Shower","type":"Water Heating"}
+```
+`type` is `Water Heating` or `Space Heating`. There is no timestamp field.
+
+### 5. Error Notifications
+There is no `boiler/status/errors` notification topic. Critical errors publish a snapshot on `boiler/error/context` (see MQTT Topics Reference) and failsafe events on `alert/critical`.
+
+### 6. Other Status Topics
+
+| Topic | Retained | Payload |
+|-------|----------|---------|
+| `boiler/status/system` | Yes | `enabled`, `disabled`, `rebooting`, `nvs_erasing`, `nvs_erased_rebooting`, `nvs_erase_failed` (reply to `boiler/cmd/system`) |
+| `boiler/status/heating` | Yes | `enabled`, `disabled`, `override_on`, `override_off`, `normal`, `target:<°C>` (reply to `boiler/cmd/heating`) |
+| `boiler/status/heating/target` | Yes | Room target in °C, e.g. `21.5` (on connect and after a change); errors `error:invalid_format`, `error:invalid_range`, `error:mutex_timeout` are not retained |
+| `boiler/status/water` | Yes | `enabled`, `disabled`, `override_on`, `override_off`, `normal` |
+| `boiler/status/water/priority` | Yes | `enabled`, `disabled` |
+| `boiler/status/device/firmware` | Yes | Firmware version (on connect) |
+| `boiler/status/pid/params` | Yes | `{"boilerPID":{"kp":..,"ki":..,"kd":..},"note":".."}` (space heating gains; reply to `pid_autotune` `params`) |
+| `boiler/status/sensor_fallback` | Yes | On fallback mode change: `{"mode":"SHUTDOWN","mode_id":2,"previous_mode":"NORMAL","missing":["boiler_output",...],"timestamp":<ms>}` |
+| `boiler/status/sensor_fallback/recovery` | No | `{"recovered":true}` |
+| `boiler/status/sensor_mode` | Yes | `STARTUP`, `NORMAL` or `SHUTDOWN` |
+| `boiler/status/scheduler/info` | No | `{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}` (reply to `boiler/cmd/scheduler/status`) |
+| `boiler/status/error` | No | `unknown_command`, `invalid_numeric_value`, `invalid_config_value` (control/config command errors) |
+| `boiler/status/config/warning` | Yes | JSON warning after `boiler_pid_enabled` or `syslog_enabled` (reboot required) |
+| `boiler/diagnostics/modbus/<addr>` | No | Modbus error counters per device address (hex), every 30 min |
+| `alert/critical` | Yes (QoS 1) | `{"event":"failsafe","reason":"..","code":<SystemError>}` |
+| `alert/warning` | No | `{"event":"memory_recovery","success":..,"free":..,"recovered":..}` |
+
+---
+
+## Command Topics (Subscribe)
+
+### Scheduler Commands
+
+#### Add Schedule
+**Topic**: `boiler/cmd/scheduler/add`
+**Response**: `boiler/scheduler/response`
+
+**Water Heating Schedule**:
+```json
+{
+  "type": "water_heating",
+  "name": "Morning Shower",
+  "start_hour": 6,
+  "start_minute": 30,
+  "end_hour": 8,
+  "end_minute": 0,
+  "days": [1,2,3,4,5],    // Monday-Friday (0=Sun, 1=Mon ... 6=Sat)
+  "target_temp": 55,       // Optional, °C 30-85 (default 55)
+  "enabled": true          // Optional, default true
+}
+```
+A `priority` field is not parsed; water priority is set with `boiler/cmd/water` `priority_on`/`priority_off`.
+
+**Space Heating Schedule**:
+```json
+{
+  "type": "space_heating",
+  "name": "Evening Comfort",
+  "start_hour": 18,
+  "start_minute": 0,
+  "end_hour": 22,
+  "end_minute": 0,
+  "days": [1,2,3,4,5],
+  "mode": 0,               // Optional, default 0: 0=COMFORT, 1=ECO, 2=FROST (other values: invalid_mode)
+  "target_temp": 22,       // Optional, °C 10-30 (default by mode: COMFORT 21, ECO 18, FROST 10)
+  "zones": 1,              // Optional, default 255
+  "enabled": true
+}
+```
+
+`days` may also be a bitmask 0-127 (bit 0 = Sunday); omitted = every day. Schedule IDs start at 1.
+
+**Response**:
+```json
+{"status":"ok","id":3}
+```
+
+**Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 512 bytes), `{"status":"error","msg":"<validation error>","id":0}` (e.g. `missing_name`, `unknown_type`, `invalid_day_number`, `invalid_temperature`), `{"success":false,"error":"max_schedules_reached"}`, `{"success":false,"error":"invalid_water_temp"}`, `{"success":false,"error":"invalid_space_temp"}`, `{"success":false,"error":"invalid_mode"}`, `{"success":false,"error":"mutex_timeout"}`
+
+#### Remove Schedule
+**Topic**: `boiler/cmd/scheduler/remove`
+
+```json
+{
+  "id": 3
+}
+```
+
+**Response**: `{"status":"ok","id":3}`, or `{"status":"error","msg":"not_found"}`
+
+#### List Schedules
+**Topic**: `boiler/cmd/scheduler/list`
+**Payload**: Empty `{}` or any value
+
+**Response**: `boiler/scheduler/response` (lists as many schedules as fit into the 320-byte MQTT payload, usually 2-3; `count` is the number listed, `total` the number stored)
+```json
+{
+  "schedules": [
+    {
+      "id": 1,
+      "name": "Morning Shower",
+      "enabled": true,
+      "type": "water",
+      "days": 31,
+      "start": 1566,
+      "end": 2048
+    }
+  ],
+  "count": 1,
+  "total": 1
+}
+```
+`type` is `water` or `space`, `days` is the day bitmask (bit 0 = Sunday, 31 = Sun-Thu), `start`/`end` are `hour * 256 + minute` (1566 = 06:30). With no schedules: `{"schedules":[],"count":0,"total":0}`.
+
+Scheduler replies were published empty until 2026-09-15 (the formatter returned a pointer into an already released buffer).
+
+#### Scheduler Status
+**Topic**: `boiler/cmd/scheduler/status`
+**Payload**: any
+
+**Response**: `boiler/status/scheduler/info`
+```json
+{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}
+```
+`count` is the number of stored schedules, `activeIds` the IDs of the schedules running now, `disabledIds` the IDs of disabled schedules.
+
+#### Enable/Disable Schedule
+**Topic**: `boiler/cmd/scheduler/enable`
+**Response**: `boiler/scheduler/response`
+
+```json
+{"id": 3, "enabled": false}
+```
+
+**Response**: `{"status":"ok","id":3,"enabled":false}`
+
+A disabled schedule does not start. Disabling a running schedule ends it at once like `remove` (`schedule_end` event, its water request is cleared or space heating is set to frost protection). An enabled schedule inside its time window starts on the next check (immediately). The flag is saved to FRAM and survives a reboot; `list` shows it as `enabled`. Sending the current state again replies `ok` without saving.
+
+**Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 64 bytes), `{"status":"error","msg":"not_found"}` (unknown id), `{"status":"error","msg":"<validation error>","id":0}` (`missing_id`, `invalid_id_type`, `id_out_of_range`, `missing_enabled`, `invalid_enabled_type` - `enabled` must be JSON `true`/`false`), `{"success":false,"error":"mutex_timeout"}`
+
+**Alias**: `boiler/cmd/scheduler/disable` is the same command with the state in the topic, so `{"id": 3}` is a complete payload and replies `{"status":"ok","id":3,"enabled":false}`. `"enabled": false` may be repeated, but `{"id":3,"enabled":true}` (or a non-boolean `enabled`) is rejected with `{"status":"error","msg":"enabled_conflicts_with_topic","id":0}` instead of disabling the schedule - switch a schedule back on with `enable`. Everything else (validation, FRAM save, ending a running schedule) is identical.
+
+#### Clear All Schedules
+**Topic**: `boiler/cmd/scheduler/clear`
+**Payload**: `confirm` (plain text, exactly - not JSON)
+**Response**: `boiler/scheduler/response`
+
+Erases every schedule from RAM and FRAM. Running schedules are ended first like `remove` (`schedule_end` event, their water or heating request is released). Destructive and not undoable, so it needs the explicit payload the same way `boiler/cmd/fram` needs `format_confirm`; new schedules start again at id 1.
+
+**Response**: `{"status":"ok","cleared":3}` (`cleared` is the number of schedules erased)
+
+**Error Responses**: `{"status":"error","msg":"use_confirm","id":0}` (any other payload - nothing is erased), `{"success":false,"error":"mutex_timeout"}`
+
+#### Unknown Scheduler Commands
+The firmware subscribes `boiler/cmd/scheduler/+`, so every sub-topic reaches the scheduler. A command without a handler now always answers on `boiler/scheduler/response` instead of staying silent (until 2026-09-16 it was ignored, which looked like a hung command):
+
+| Command | Response |
+|---------|----------|
+| `update`, `vacation`, `pump_exercise`, `command` | `{"status":"error","msg":"not_implemented","id":0}` |
+| any other sub-topic | `{"status":"error","msg":"unknown_command","id":0}` |
+
+`update` is not implemented (it would have to revalidate and repack the FRAM record): change a schedule with `remove` followed by `add`. These four topics were removed from `include/MQTTTopics.h` on 2026-09-16 - they had a topic macro but never a handler. Before the scheduler task is running, every scheduler command replies `{"status":"error","msg":"not_initialized"}`.
+
+### Control Commands
+
+**Topic Pattern**: `boiler/cmd/{command}`
+
+#### Enable/Disable Boiler
+```bash
+mosquitto_pub -t "boiler/cmd/system" -m "enable"
+mosquitto_pub -t "boiler/cmd/system" -m "disable"
+```
+
+Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`.
+
+Enable/disable of the boiler, heating and water, water `priority_on`/`priority_off` and the heating/water OFF overrides are saved to NVS immediately and survive a reboot (before 2026-09-15 they stayed in RAM until some other parameter save).
+
+#### Enable/Disable Heating
+```bash
+mosquitto_pub -t "boiler/cmd/heating" -m "enable"
+mosquitto_pub -t "boiler/cmd/heating" -m "disable"
+```
+
+#### Enable/Disable Water Heating
+```bash
+mosquitto_pub -t "boiler/cmd/water" -m "enable"
+mosquitto_pub -t "boiler/cmd/water" -m "disable"
+```
+
+**Overrides** (`boiler/cmd/heating` and `boiler/cmd/water`), handled by HeatingControlTask / WheaterControlTask within about 1 s:
+- `override_on`: clears a stored OFF override and starts the mode now. Water charges up to `wheater/tempLimitHigh` even when the tank is above `tempLimitLow`; it does not start while heating runs without water priority. Heating starts and ends when it is no longer needed.
+- `override_off`: stores the OFF override (persisted) and ends the running mode.
+- `normal`: clears the stored OFF override.
+
+The overrides no longer set `HEATING_ON`/`WATER_ON` directly (ControlTask did, without a burner request, which made the burner bounce between RUNNING_LOW and MODE_SWITCHING while the mode task never saw the override).
+
+**Switch-off behaviour**:
+- Disabling the mode the burner is running in, or the boiler, stops the burner at once (post-purge) without waiting for the anti-flapping minimum on-time. Disabling the other mode does not stop the burner.
+- Disabling water heating or the boiler (and the water OFF override) ends a running charge, also when water heating is enabled again within the same control cycle. After re-enabling, a new charge starts only when the tank is below `wheater/tempLimitLow`; the interrupted charge does not resume.
+
+#### Reset Burner Lockout
+```bash
+mosquitto_pub -t "boiler/cmd/burner_reset" -m "lockout"
+```
+
+Payload `lockout` or `reset`. `BurnerStateMachine::resetLockout()` acts only in LOCKOUT (retry counter reset, back to IDLE). Publishes `lockout_reset` (retained) on `boiler/status/burner`. It does not release an emergency stop.
+
+#### Release Emergency Stop
+```bash
+mosquitto_pub -t "boiler/cmd/emergency_reset" -m "reset"
+```
+
+Payload `reset` (other payloads are logged and ignored). Calls `CentralizedFailsafe::clearEmergencyStop()`, which releases the `EMERGENCY_STOP` latch set by `CentralizedFailsafe::emergencyStop()` (critical boiler temperature 115.0°C, stale sensor data during operation, burner request watchdog). Checked in this order; the first failing check is reported on `boiler/status/burner` (not retained):
+
+| Result | Condition |
+|--------|-----------|
+| `emergency_not_active` | `EMERGENCY_STOP` not set |
+| `emergency_release_refused:temperature_high` | Boiler output invalid or >= 110.0°C (`MAX_BOILER_TEMP_C`), or boiler return valid and >= 110.0°C |
+| `emergency_release_refused:sensors_unavailable` | `TemperatureSensorFallback::canContinueOperation()` false or `SENSOR_FAILURE` error bit set |
+| `emergency_release_refused:system_errors` | `SENSOR_FAILURE`, `MODBUS` or `RELAY` error bit set (`SafetyInterlocks::checkSystemErrors()`) |
+| `emergency_released` | All checks passed |
+
+On release `EMERGENCY_STOP` is cleared, `BOILER_ENABLED` is set only if the saved boiler setting (`boilerEnabled`) is enabled, and the failsafe level returns to WARNING. The burner state machine still waits out its ERROR recovery delay (`errorRecoveryMs`, default 5 min) before it can start again.
+
+#### Other Control Commands
+
+| Topic | Payload | Action / Reply |
+|-------|---------|----------------|
+| `boiler/cmd/wheater` | as `boiler/cmd/water` | Alias of `boiler/cmd/water` |
+| `boiler/cmd/heating` | number 15-30 | Sets the room target in °C, reply `target:<°C>` on `boiler/status/heating` |
+| `boiler/cmd/status` | any | Logged only, nothing is published |
+| `boiler/cmd/diagnostics` | `memory`, `tasks`, `events`, `sensors`, `relays`, `network` | Runtime diagnostics text dump on `boiler/status/diagnostics/report`, split into 320-byte chunks (at most 8, newline-separated lines). `mutexes`, `modbus` and `selftest` exist but are stubs and reply `not_implemented`; any other payload replies `unknown_command`; an empty payload replies `missing_payload` - all on `boiler/status/diagnostics/error`. A dump cut off by the chunk cap also publishes `truncated` there. Read-only: no reboot/watchdog/error-injection command is reachable from this topic |
+| `boiler/cmd/diagnostics` | `health` | Compact `HealthMonitor` JSON on `boiler/status/diagnostics/report`, always a single payload (never chunked): `{"st":..,"up":..,"blk":..,"min":..,"nc":..,"nd":..,"na":..,"nt":..,"sub":{..},"n":..}`. `st` overall status (`excellent`/`good`/`warning`/`critical`/`failed`); `up` uptime in seconds; `blk` largest free DRAM block right now and `min` the lowest free DRAM since boot (`heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)`, the same source as `heap_dram_min` on `boiler/status/health`), in bytes - both are real DRAM, deliberately **not** the IRAM-inflated `ESP.getFreeHeap()` family; `af` allocation failures, **omitted when zero**; `nc` network connected 0/1, `nd` disconnect count, `na` availability as fixed point (10000 = 100%); `sub` contains **only** subsystems that are unhealthy or have recorded errors, unhealthy first, each `{"e":<errors>,"r":<error rate, 10000 = 100%>,"h":<healthy 0/1>}`; `nt` is how many subsystems were notable and `n` how many fit the payload, so `n < nt` means the list was trimmed. Replies `unavailable` on `boiler/status/diagnostics/error` if `HealthMonitor` has not initialised yet, `dropped` if the publish queue rejected the report. Task metrics are absent: `HealthMonitor`'s task-monitoring members were removed outright because nothing ever registered a task with it (unrelated to `health.tasks`/`health.stack_hwm` on `boiler/status/health`, which are unaffected) |
+| `boiler/cmd/fram` | `status` | `boiler/status/fram/status`: `{"connected":true,"size":..,"integrity":true}` |
+| `boiler/cmd/fram` | `counters` | `boiler/status/fram/counters`: `{"b":..,"h":..,"w":..,"e":..}` (burner starts, heating pump starts, water pump starts, errors) |
+| `boiler/cmd/fram` | `runtime` | `boiler/status/fram/runtime`: `{"t":..,"h":..,"w":..,"b":..}` (hours total, heating, water, burner) |
+| `boiler/cmd/fram` | `reset_counters` | Clears the four counters, `ok` on `boiler/status/fram/counters_reset` (retained) |
+| `boiler/cmd/fram` | `format` | Does not format; replies `use_format_confirm` on `boiler/status/fram/error` |
+| `boiler/cmd/fram` | `format_confirm` | Erases all FRAM data, `ok` on `boiler/status/fram/formatted` (retained) or `format_failed` |
+| `boiler/cmd/fram` | `save_pid` | Requests a parameter save, `requested` on `boiler/status/fram/pid_save` (retained) |
+| `boiler/cmd/fram_errors` | `stats` | `boiler/status/fram_errors/stats`: same JSON as `errors/stats` |
+| `boiler/cmd/fram_errors` | `clear` | Clears the error log, `ok` on `boiler/status/fram_errors/cleared` (retained) |
+
+Unknown `fram`/`fram_errors` payloads reply `unknown_command` on `boiler/status/fram/error` / `boiler/status/fram_errors/error`; without FRAM the reply is `not_available`. Unknown `boiler/cmd/<command>` topics reply `unknown_command` on `boiler/status/error`. An identical command (same topic and payload) repeated within 2 s is ignored.
+
+### Configuration Commands
+
+`boiler/config/+` is subscribed, but `MQTTSubscriptionManager` only logs incoming messages; no setting is changed. There are no `water_setpoint`, `room_setpoint` or `pid` config commands. Use instead:
+
+- **Room target**: `boiler/cmd/room_target`, plain payload in °C (15-30), confirmed on `boiler/status/heating/target`
+- **Water tank limits**: parameters `wheater/tempLimitLow` / `wheater/tempLimitHigh` (see Water Heating and PID Parameters)
+- **PID gains**: parameters `pid/spaceHeating/kp|ki|kd` and `pid/waterHeater/kp|ki|kd` (same section)
+
+```bash
+mosquitto_pub -t "boiler/cmd/room_target" -m "21.5"
+```
+
+### Safety Configuration Commands
+
+Runtime-configurable safety parameters with validation and NVS persistence.
+
+**Topic**: `boiler/status/safety_config` (Published on startup and after changes)
+**Format**:
+```json
+{
+  "pump_prot": 15000,
+  "sensor_stale": 60000,
+  "post_purge": 90000,
+  "thermal_shock_c": 450
+}
+```
+
+#### Set Pump Protection Delay
+Minimum delay before pump can be switched off after turning on (motor protection).
+
+**Topic**: `boiler/cmd/config/pump_protection_ms`
+**Range**: 5000-60000ms (5-60 seconds)
+**Default**: 15000ms (15 seconds)
+
+```bash
+# Set to 30 seconds
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/pump_protection_ms" -m "30000"
+```
+
+#### Set Sensor Staleness Timeout
+Maximum time before sensor data is considered stale and triggers safety interlock.
+
+**Topic**: `boiler/cmd/config/sensor_stale_ms`
+**Range**: 30000-300000ms (30-300 seconds)
+**Default**: 60000ms (60 seconds)
+
+```bash
+# Set to 120 seconds
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/sensor_stale_ms" -m "120000"
+```
+
+#### Set Post-Purge Duration
+Duration of post-purge cycle after burner shutdown (exhaust gas removal).
+
+**Topic**: `boiler/cmd/config/post_purge_ms`
+**Range**: 30000-180000ms (30-180 seconds)
+**Default**: 90000ms (90 seconds)
+
+```bash
+# Set to 60 seconds
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/post_purge_ms" -m "60000"
+```
+
+#### Set Thermal Shock Differential Limit
+Maximum allowed temperature differential between boiler output and return before triggering thermal shock protection.
+
+**Topic**: `boiler/cmd/config/thermal_shock_c`
+**Range**: 100-600 (tenths of °C, i.e. 10.0-60.0°C)
+**Default**: 450 (45.0°C)
+
+```bash
+# Set to 45°C (default, suitable for cast iron boilers like Vaillant VK 42/4-2)
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/thermal_shock_c" -m "450"
+```
+
+**Notes**:
+- Changes are saved immediately to NVS (persist across reboots)
+- Updated config is published to `boiler/status/safety_config`
+- Invalid values are rejected with error message
+- All timings critical for safety - only modify if you understand the implications
+
+### Return Preheat Configuration (Thermal Shock Mitigation)
+
+When transitioning from water heating to space heating, the heating return line may be cold while the boiler is hot. Starting with a large temperature differential (exceeding the thermal shock limit, default 45°C) risks thermal shock damage to the boiler. The limit is runtime-configurable via `boiler/cmd/config/thermal_shock_c`.
+
+The preheat system cycles the heating pump to gradually warm the return line before allowing the burner to start. Progressive pump cycling pattern:
+- ON durations increase: 3s → 5s → 8s → 12s → 15s (more circulation as system warms)
+- OFF durations decrease: 25s → 20s → 15s → 10s → 5s (less wait as differential reduces)
+- Exits when differential < safe threshold or timeout
+
+#### Enable/Disable Preheating
+**Topic**: `boiler/cmd/config/preheat_enabled`
+**Values**: 0 (disabled), 1 (enabled)
+**Default**: 1 (enabled)
+
+```bash
+# Disable thermal shock preheating
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_enabled" -m "0"
+
+# Enable thermal shock preheating (default)
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_enabled" -m "1"
+```
+
+#### Set OFF Duration Scaling Factor
+Scales the base OFF durations (25s → 20s → 15s → 10s → 5s).
+Value of 5 = 1x (default), 10 = 2x longer, 1 = 0.2x shorter.
+
+**Topic**: `boiler/cmd/config/preheat_off_multiplier`
+**Range**: 1-10
+**Default**: 5 (1x scaling, uses base durations)
+
+```bash
+# Double OFF durations (50s → 40s → 30s → 20s → 10s)
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_off_multiplier" -m "10"
+
+# Halve OFF durations (12.5s → 10s → 7.5s → 5s → 2.5s)
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_off_multiplier" -m "2"
+```
+
+#### Set Maximum Preheat Cycles
+Maximum number of pump ON/OFF cycles before timing out.
+
+**Topic**: `boiler/cmd/config/preheat_max_cycles`
+**Range**: 1-20
+**Default**: 8
+
+```bash
+# Allow up to 12 preheat cycles
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_max_cycles" -m "12"
+```
+
+#### Set Preheat Timeout
+Maximum total time for preheating before timeout (safety limit).
+
+**Topic**: `boiler/cmd/config/preheat_timeout_ms`
+**Range**: 60000-1200000ms (1-20 minutes)
+**Default**: 600000ms (10 minutes)
+
+```bash
+# Set timeout to 15 minutes
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_timeout_ms" -m "900000"
+```
+
+#### Set Pump Minimum State Change Time
+Minimum time between pump state changes during preheating.
+Lower values allow faster cycling but reduce motor protection.
+
+**Topic**: `boiler/cmd/config/preheat_pump_min_ms`
+**Range**: 1000-30000ms (1-30 seconds)
+**Default**: 3000ms (3 seconds)
+
+```bash
+# Set minimum pump state change to 5 seconds
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_pump_min_ms" -m "5000"
+```
+
+**Note**: This is separate from the normal pump protection delay. During preheating,
+shorter cycles are allowed to facilitate faster warming of the return line.
+
+#### Set Safe Differential Threshold
+Temperature differential (boiler output - return) below which preheating completes.
+
+**Topic**: `boiler/cmd/config/preheat_safe_diff`
+**Range**: 100-300 (tenths of °C, i.e., 10.0-30.0°C)
+**Default**: 250 (25.0°C)
+
+```bash
+# Set safe differential to 20°C
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/config/preheat_safe_diff" -m "200"
+```
+
+**Preheat Configuration Summary**:
+
+| Parameter | Topic | Range | Default | Description |
+|-----------|-------|-------|---------|-------------|
+| Enable | `preheat_enabled` | 0-1 | 1 | Enable/disable preheating |
+| OFF Scaling | `preheat_off_multiplier` | 1-10 | 5 | OFF duration scale (5=1x) |
+| Max Cycles | `preheat_max_cycles` | 1-20 | 8 | Maximum pump cycles |
+| Timeout | `preheat_timeout_ms` | 60000-1200000 | 600000 | Total timeout (ms) |
+| Pump Min | `preheat_pump_min_ms` | 1000-30000 | 3000 | Min state change (ms) |
+| Safe Diff | `preheat_safe_diff` | 100-300 | 250 | Safe differential (tenths °C) |
+
+The preheat values are saved as the parameters `preheat/enabled`, `preheat/offMultiplier`, `preheat/maxCycles`, `preheat/timeoutMs`, `preheat/pumpMinMs` and `preheat/safeDiff` and persist across reboots (before 2026-09-15 they were lost on reboot).
+
+### Other Configuration Commands
+
+**Topic Pattern**: `boiler/cmd/config/{name}`, integer payload unless noted. A value out of range replies `invalid_config_value` on `boiler/status/error`; a success republishes `boiler/status/safety_config`.
+
+| Topic | Range | Default | Description |
+|-------|-------|---------|-------------|
+| `pump_cooldown_ms` | 60000-900000 | 300000 | Pump overrun after the burner stops (ms); parameter `pump/cooldownMs` |
+| `weather_control_enabled` | 0-1 | 1 | Weather-compensated heating control; parameter `heating/weatherControl` |
+| `outside_heating_threshold` | 50-250 (tenths °C) | 150 | Same as parameter `heating/outsideThreshold` |
+| `room_overheat_margin` | 10-50 (tenths °C) | 20 | Same as parameter `heating/roomOverheatMargin`: stop heating above room target + margin |
+| `room_curve_shift_factor` | 10-40 (factor x 10) | 20 | Curve shift per 1°C room deviation (20 = 2.0); parameter `heating/roomCurveShiftFactor` |
+| `boiler_pid_enabled` | 0-1 | 1 | Boiler temperature PID mode; parameter `boiler/pidEnabled`, takes effect after a reboot, warning on `boiler/status/config/warning` |
+
+The values marked "parameter" go through the parameter storage (same as `boiler/params/set/<name>`) and are saved immediately; the safety values above (`pump_protection_ms` etc.) are saved in the `safety` NVS namespace.
+| `syslog_enabled` | 0-1 | build flag | Remote syslog; needs a reboot |
+| `syslog_server_ip` | IPv4 string | build flag | Syslog server, e.g. `192.168.20.100` |
+| `syslog_port` | 1-65535 | 514 | Syslog UDP port |
+| `syslog_facility` | 0-23 | 16 | Syslog facility (16 = LOCAL0) |
+| `syslog_min_level` | 0-5 | build flag | ESP log level (0 NONE ... 5 VERBOSE), applied at once |
+
+### Sensor Compensation Offsets
+
+Calibrate temperature and pressure sensors to correct systematic errors.
+All values use **fixed-point integers** matching the internal representation:
+- **Temperature offsets**: Tenths of °C (e.g., `-14` = -1.4°C)
+- **Pressure offset**: Hundredths of BAR (e.g., `-5` = -0.05 BAR)
+
+**Topic Pattern**: `boiler/params/set/sensor/offset/{sensor}`
+
+| Sensor | Topic | Range | Default | Description |
+|--------|-------|-------|---------|-------------|
+| boilerOutput | `sensor/offset/boilerOutput` | ±50 (±5.0°C) | 0 | CH0: Boiler output temp |
+| boilerReturn | `sensor/offset/boilerReturn` | ±50 (±5.0°C) | 0 | CH1: Boiler return temp |
+| waterTank | `sensor/offset/waterTank` | ±50 (±5.0°C) | 0 | CH2: Hot water tank |
+| waterOutput | `sensor/offset/waterOutput` | ±50 (±5.0°C) | 0 | CH3: Hot water output |
+| waterReturn | `sensor/offset/waterReturn` | ±50 (±5.0°C) | 0 | CH4: Hot water return |
+| heatingReturn | `sensor/offset/heatingReturn` | ±50 (±5.0°C) | 0 | CH5: Heating return |
+| outside | `sensor/offset/outside` | ±50 (±5.0°C) | 0 | CH6: Outside temp |
+| room | `sensor/offset/room` | ±50 (±5.0°C) | -14 | ANDRTF3: Room temp |
+| pressure | `sensor/offset/pressure` | ±50 (±0.5 BAR) | 0 | System pressure |
+
+#### Set Sensor Offset
+```bash
+# Room temperature reads 1.4°C too high → subtract 14 tenths
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/set/sensor/offset/room" -m "-14"
+
+# Boiler output reads 0.5°C too low → add 5 tenths
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/set/sensor/offset/boilerOutput" -m "5"
+
+# Pressure sensor reads 0.1 BAR too high → subtract 10 hundredths
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/set/sensor/offset/pressure" -m "-10"
+```
+
+#### Get Current Offsets
+```bash
+# Get all parameter values
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/get/all" -m ""
+```
+
+#### Save Offsets to NVS
+```bash
+# Persist changes to flash (survives reboot)
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/save" -m ""
+```
+
+**Note**: Offsets are applied during sensor data acquisition and immediately affect
+all reported temperatures. Changes take effect on the next sensor read cycle.
+
+### Water Heating and PID Parameters
+
+**Topic Pattern**: `boiler/params/set/{parameter}`
+
+Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscription `boiler/params/#`):
+
+| Topic | Payload | Action |
+|-------|---------|--------|
+| `boiler/params/set/{parameter}` | value (plain or `{"value":...}`) | Set a parameter (range-checked) |
+| `boiler/params/get/{parameter}` | empty | Publish the value to `boiler/params/status/{parameter}`. A bare group name (no slash) publishes the whole group to `boiler/params/status/{group}` - the groups are `wheater`, `heating`, `h`, `w`, `pid`, `sensor`, `syslog`, `preheat`, `pump`, `boiler`, `system`, i.e. the same set `get/all` publishes. A name that is neither a group nor a registered parameter is silently ignored. Note: before ESP32-PersistentStorage fixed this (2026-09-16), only `heating`, `wheater`, `pid`, `sensor` and `system` worked as group reads; the others returned nothing |
+| `boiler/params/get/all` | empty | Publish all parameters grouped (`boiler/params/status/...`, then `boiler/params/status/complete`) |
+| `boiler/params/list` | empty | Publish the parameter names to `boiler/params/list/response` |
+| `boiler/params/save` | empty | Save all parameters to NVS |
+
+| Parameter | Topic | Range | Default | Description |
+|-----------|-------|-------|---------|-------------|
+| Tank start | `wheater/tempLimitLow` | 300-600 (30.0-60.0°C) | 450 | Start a charge below this |
+| Tank stop | `wheater/tempLimitHigh` | 500-850 (50.0-85.0°C) | 650 | Stop a charge above this |
+| Outside threshold | `heating/outsideThreshold` | 50-250 (5.0-25.0°C) | 150 | Weather-compensated heating starts below this and stops at threshold + 1.0°C (hysteresis) |
+| Curve coefficient | `heating/curveCoeff` | 0.5-4.0 | 1.4 | Heating curve slope (float) |
+| Curve shift | `heating/curveShift` | -20.0-40.0 (°C) | 0 | Heating curve parallel shift (float) |
+| Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
+| Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
+| Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |
+| Autotune amplitude | `pid/autotune/amplitude` | 10-100 (%) | 50 | Relay output half-swing used in Ku = 4d/(pi a). The relay test drives OFF <-> FULL (50 %); another value scales the tuned gains by amplitude / 50 |
+| Autotune hysteresis | `pid/autotune/hysteresis` | 0.5-10 (°C) | 1.0 | Relay switching band around the setpoint |
+
+**Notes**:
+- Each tank limit is range-checked on its own. If `tempLimitLow >= tempLimitHigh`, water heating pauses (one WARN in the log) until the pair is consistent. When raising both limits send `tempLimitHigh` first; when lowering both send `tempLimitLow` first.
+- Temperature parameter changes (tank limits, burner/heating/water limits, room target, hysteresis) apply immediately and are no longer reverted by the next save.
+- PID gain changes apply on the next boiler control cycle (the PID is reset when the active gains change); no reboot needed.
+- `heating/outsideThreshold` up to 25°C allows weather-compensated heating on a mild day (e.g. for a space-heating autotune).
+
+```bash
+# Raise tank limits from 45/65°C to 60/75°C: high first, then low
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/set/wheater/tempLimitHigh" -m "750"
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/params/set/wheater/tempLimitLow" -m "600"
+```
+
+### PID Auto-Tuning
+
+**Command Topic**: `boiler/cmd/pid_autotune`
+**Status Topic**: `boiler/status/pid/autotune` (retained)
+**Result Topic**: `boiler/status/pid/autotune/result` (retained)
+
+| Payload | Action |
+|---------|--------|
+| `start` | Start the relay autotune of the boiler PID (status `starting`) |
+| `stop` | Stop the autotune (status `stopping`) |
+| `status` | Publish `idle`, `running`, `complete` or `failed` |
+| `params` | Publish the boiler PID gains to `boiler/status/pid/params` |
+| `method:<name>` | Set and persist the tuning method: `zn_pi`, `zn_pid`, `tyreus`, `cohen`, `lambda` |
+
+**Behaviour**:
+- Setpoint is the boiler target of the active request (55°C if none). A heating or water request must stay active; the autotune stops without one.
+- Start requires a valid, fresh boiler output between 15°C and 75°C, otherwise the result is `{"status":"rejected","reason":"boiler temp"}`.
+- Aborts when the boiler output becomes invalid or stale or exceeds 80°C: the heat demand is withdrawn and the result is `{"status":"aborted"}`.
+- Burner power-on during the relay test requires BurnerControlTask's permission and safety validation.
+- At most 90 minutes (`MAX_TUNING_TIME_SECONDS` = 5400), at least 3 oscillation cycles.
+- On success the gains are stored in the gain set of the active mode (`pid/waterHeater/*` or `pid/spaceHeating/*`), saved to NVS and published, e.g. `{"status":"complete","mode":"water","kp":7.1000,"ki":0.01200,"kd":0.0000}`. If the results cannot be applied the result is `{"status":"failed"}`.
+
+```bash
+mosquitto_pub -h $BROKER -u $USER -P $PASS -t "boiler/cmd/pid_autotune" -m "method:zn_pi"
+mosquitto_pub -h $BROKER -u $USER -P $PASS -t "boiler/cmd/pid_autotune" -m "start"
+```
+
+### Error Log Commands
+
+**Topic Pattern**: `errors/{command}` (bare topic, no `boiler/` prefix)
+
+Both forms work: the bare `errors/<command>` topics, and `boiler/cmd/errors` with the command in the payload (`stats`, `list 20`, `list 20,2`, `critical`, `clear`, `dump`). Replies go to the same `boiler/status/errors/*` topics. (Before 2026-09-15 `boiler/cmd/errors` replied `unknown_command`.)
+
+| Topic | Reply topic |
+|-------|-------------|
+| `errors/list` | `boiler/status/errors/list` (payload `N` or `N,offset`, see below) |
+| `errors/clear` | `boiler/status/errors/cleared` (retained) |
+| `errors/stats` | `boiler/status/errors/stats` |
+| `errors/critical` | `boiler/status/errors/critical`: `{"critical":[{"time":..,"code":..,"msg":..,"ctx":..}],"n":..}` (of the last 5 critical entries, as many as fit the 320-byte payload; `n` = included) |
+| `errors/dump` | `triggered` on `boiler/status/errors/dump`; the error log dump goes to the device log |
+
+#### List Last N Errors
+```bash
+mosquitto_pub -t "errors/list" -m "20"      # up to 20 entries, most recent first
+mosquitto_pub -t "errors/list" -m "20,2"    # up to 20 entries, starting at the 3rd most recent
+```
+
+Payload `N` (1-50, empty = 10) or `N,offset` (offset 0-49, 0 = most recent). The reply holds as many entries as fit the 320-byte MQTT payload, usually two or three: `n` is the number included, `from` the offset, `stored` the entries in the log. Request the rest with `offset` = `from` + `n`.
+
+**Response**: `boiler/status/errors/list`
+```json
+{
+  "errors": [
+    {
+      "time": 1692345678,
+      "code": 504,
+      "count": 1,
+      "msg": "",
+      "ctx": "Pressure sensor disconnected (o"
+    }
+  ],
+  "stats": {"total": 142, "critical": 3, "oldest": 1692000000, "latest": 1692345678},
+  "from": 0,
+  "stored": 12,
+  "n": 1
+}
+```
+`msg` is empty for entries logged through `ErrorHandler::logError()`; `ctx` holds at most 31 characters of the context. `code` is the `SystemError` value (see Error Codes).
+
+#### Clear Error Log
+```bash
+mosquitto_pub -t "errors/clear" -m ""
+```
+
+**Response**: `boiler/status/errors/cleared` with payload `"ok"`
+
+#### Get Error Statistics
+```bash
+mosquitto_pub -t "errors/stats" -m ""
+```
+
+**Response**: `boiler/status/errors/stats`
+```json
+{"total": 142, "critical": 3, "last": 1692345678, "oldest": 1692000000, "unique": 7}
+```
+
+---
+
+## Example Workflows
+
+### Complete Setup Example
+
+```bash
+# Set broker credentials
+BROKER="192.168.20.27"
+USER="YOUR_MQTT_USER"
+PASS="YOUR_MQTT_PASSWORD"
+
+# Monitor all boiler topics
+mosquitto_sub -h $BROKER -u $USER -P $PASS -t "boiler/#" -v &
+
+# Add morning shower schedule
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/scheduler/add" \
+  -m '{
+    "type": "water_heating",
+    "name": "Morning Shower",
+    "start_hour": 6,
+    "start_minute": 30,
+    "end_hour": 8,
+    "end_minute": 0,
+    "days": [1,2,3,4,5],
+    "target_temp": 55,
+    "enabled": true
+  }'
+
+# Add evening heating schedule
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/scheduler/add" \
+  -m '{
+    "type": "space_heating",
+    "name": "Evening Comfort",
+    "start_hour": 18,
+    "start_minute": 0,
+    "end_hour": 22,
+    "end_minute": 0,
+    "days": [1,2,3,4,5],
+    "mode": 0,
+    "enabled": true
+  }'
+
+# List all schedules
+mosquitto_pub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/cmd/scheduler/list" \
+  -m '{}'
+
+# Get sensor data once
+mosquitto_sub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/status/sensors" \
+  -C 1
+```
+
+### Monitoring Script
+
+```bash
+#!/bin/bash
+# Monitor boiler with formatted output
+
+BROKER="192.168.20.27"
+USER="YOUR_MQTT_USER"
+PASS="YOUR_MQTT_PASSWORD"
+
+mosquitto_sub -h $BROKER -u $USER -P $PASS \
+  -t "boiler/status/sensors" \
+  -v | while read topic payload; do
+
+  # Parse JSON and format output
+  echo "$(date '+%H:%M:%S') - Sensor Update:"
+  echo "$payload" | jq -r '
+    "  Boiler Output: \(.t.bo/10)°C",
+    "  Water Tank: \(.t.wt/10)°C",
+    "  Pressure: \(.p/100) BAR",
+    "  Relays: \(.r)"
+  '
+  echo ""
+done
+```
+
+### Testing Commands
+
+```bash
+# Test echo (verify MQTT working)
+mosquitto_pub -t "test/echo" -m "hello"
+# Listen for: test/response with "hello"
+
+# Get current sensor reading
+mosquitto_sub -t "boiler/status/sensors" -C 1 -W 5
+
+# Check if device is online
+mosquitto_sub -t "boiler/status/online" -C 1 -W 2
+
+# View all retained messages
+mosquitto_sub -t "#" --retained-only -W 2
+
+# Clear a retained message
+mosquitto_pub -t "system/status" -r -n
+```
+
+---
+
+## MQTT Topics Reference
+
+### Published Topics (Device → Broker)
+
+| Topic | Frequency | Retained | Priority | Description |
+|-------|-----------|----------|----------|-------------|
+| `boiler/status/sensors` | 10s | No | High | Temperature/pressure data |
+| `boiler/status/online` | On change | Yes | High | Connection status |
+| `boiler/status/safety_config` | On boot/change | Yes | Medium | Safety configuration |
+| `boiler/status/health` | 60s | No | Medium | Heap, uptime, task count |
+| `boiler/status/burner` | Every 30s in ERROR, on `burner_reset`/`emergency_reset` | No (`lockout_reset`: Yes) | Medium/High | Burner ERROR status, reset command results |
+| `boiler/error/context` | On a critical error (failsafe/emergency stop, relay safety interlock, ignition failure, critical temperature, overheat), at most every 30 s | Yes | Critical | Snapshot: `ec` error code, `c` component, `d` description, `ts` uptime ms, `task`/`tp`, heap `hf`/`hm`/`hb`, `ss` system state bits, `rq` burner request bits, `bo`/`br`/`wt` tenths °C (null if invalid), `p` hundredths BAR, relays `rd`/`ra` desired/actual |
+| `boiler/status/pid/autotune` | On command | Yes | High | Autotune status / method response |
+| `boiler/status/pid/autotune/result` | On start reject, abort, completion | Yes | High | Autotune result JSON |
+| `boiler/status/device/ip` | On boot | Yes | Low | IP address |
+| `boiler/status/device/hostname` | On boot | Yes | Low | Device hostname |
+| `boiler/scheduler/event` | On event | No | Medium | Schedule start/end |
+| `boiler/scheduler/response` | On command | No | Medium | Command responses |
+| `boiler/status/scheduler/info` | On `status` command | No | Medium | Scheduler status |
+| `boiler/status/errors/list` | On request | No | Low | Error log dump |
+| `boiler/status/errors/stats` | On request | No | Low | Error statistics |
+| `boiler/status/errors/critical` | On request | No | Low | Critical errors |
+| `boiler/status/errors/cleared` | On request | Yes | High | Error log cleared |
+| `boiler/status/errors/error` | On failure | No | High | `export_failed`, `unknown_command` |
+| `test/response` | On echo | No | Low | Echo test response |
+
+More status topics (system/heating/water replies, sensor fallback, FRAM, alerts): see Status Topics, Other Status Topics, and Other Control Commands.
+
+### Subscribed Topics (Broker → Device)
+
+| Topic | Purpose | Payload Format |
+|-------|---------|----------------|
+| `test/echo` | Echo test | Any string |
+| `boiler/cmd/+` | Control commands (`system`, `heating`, `water`/`wheater`, `room_target`, `pid_autotune`, `burner_reset`, `emergency_reset`, `fram`, `fram_errors`, `status`) | String |
+| `boiler/cmd/config/+` | Configuration commands (see Safety Configuration, Return Preheat, Other Configuration Commands) | Integer (IP string for `syslog_server_ip`) |
+| `boiler/cmd/config/pump_protection_ms` | Pump protection delay | Integer (5000-60000) |
+| `boiler/cmd/config/sensor_stale_ms` | Sensor staleness timeout | Integer (30000-300000) |
+| `boiler/cmd/config/post_purge_ms` | Post-purge duration | Integer (30000-180000) |
+| `boiler/cmd/config/thermal_shock_c` | Thermal shock differential limit | Integer (100-600) |
+| `boiler/cmd/config/preheat_enabled` | Enable/disable preheating | Integer (0-1) |
+| `boiler/cmd/config/preheat_off_multiplier` | OFF duration multiplier | Integer (1-10) |
+| `boiler/cmd/config/preheat_max_cycles` | Max preheat cycles | Integer (1-20) |
+| `boiler/cmd/config/preheat_timeout_ms` | Preheat timeout | Integer (60000-1200000) |
+| `boiler/cmd/config/preheat_pump_min_ms` | Min pump state change | Integer (1000-30000) |
+| `boiler/cmd/config/preheat_safe_diff` | Safe differential | Integer (100-300) tenths °C |
+| `boiler/config/+` | Logged only, no effect | Any |
+| `boiler/cmd/scheduler/+` | Schedule commands (`add`, `remove`, `enable`, `disable`, `clear`, `list`, `status`); any other sub-topic replies `not_implemented` or `unknown_command` | JSON (`clear`: `confirm`) |
+| `boiler/params/#` | Parameter commands (PersistentStorage) | Plain value or `{"value":...}` |
+| `errors/+` | Error log commands (`list`, `clear`, `stats`, `critical`, `dump`); also `boiler/cmd/errors` with the command in the payload | String |
+
+---
+
+## Message Priorities
+
+The system uses 2 priority queues for MQTT publishing:
+
+Sizes: `HIGH_PRIORITY_QUEUE_SIZE` and `NORMAL_PRIORITY_QUEUE_SIZE` in `src/modules/tasks/MQTTTask.h`; item size `sizeof(MQTTPublishRequest)` (64-byte topic, 320-byte payload).
+
+`MQTTTask::publish()` takes a priority: CRITICAL and HIGH go to the high priority queue, MEDIUM and LOW to the normal priority queue.
+
+### High Priority Queue (5 slots)
+- CRITICAL: `boiler/error/context` (published directly, bypassing the queue, while the queues are under pressure)
+- HIGH: sensor data, online status, command replies (`boiler/status/system|heating|water`, `burner` reset results, `pid/autotune`), sensor fallback, error command failures
+
+### Normal Priority Queue (5 slots)
+- MEDIUM: health, safety config, device info, burner ERROR status, scheduler events and responses (default priority)
+- LOW: parameter replies (`boiler/params/...`), error log replies (`list`, `stats`, `critical`), FRAM status replies, Modbus diagnostics, `test/response`
+
+**Overflow Strategy**: `DROP_OLDEST` (both queues, `MQTTTask::init()`)
+- When a queue is full, its oldest message is dropped to make room for the new one
+
+**Backpressure** (`MQTTTask::shouldThrottle()`): combined utilization = 60 % high queue + 40 % normal queue. LOW messages are dropped at >= 50 %, MEDIUM at >= 80 %; CRITICAL and HIGH are never throttled.
+
+---
+
+## Data Format Details
+
+### Temperature Values
+All temperatures use fixed-point representation (tenths of °C):
+- **Storage**: `int16_t` (Temperature_t)
+- **MQTT**: Integer value (divide by 10 for °C)
+- **Range**: -3276.8°C to +3276.7°C
+- **Precision**: 0.1°C
+
+**Examples**:
+- 273 = 27.3°C
+- -50 = -5.0°C
+- 654 = 65.4°C
+
+### Pressure Values
+Pressure uses fixed-point representation (hundredths of BAR):
+- **Storage**: `int16_t` (Pressure_t)
+- **MQTT**: Integer value (divide by 100 for BAR)
+- **Range**: -327.68 to +327.67 BAR
+- **Precision**: 0.01 BAR
+
+**Examples**:
+- 150 = 1.50 BAR
+- 235 = 2.35 BAR
+- 152 = 1.52 BAR
+
+### Schedule Days Array
+Days of week as integers 0-6 (0=Sunday, 1=Monday ... 6=Saturday, RTClib `dayOfTheWeek()`); 7 is rejected with `invalid_day_number`:
+- `[1,2,3,4,5]` = Weekdays
+- `[0,6]` = Weekend
+- `[0,1,2,3,4,5,6]` = Every day
+
+A bitmask 0-127 (bit 0 = Sunday) is accepted as well, e.g. `62` = Monday-Friday.
+
+---
+
+## Error Codes
+
+The `code` field (error log `errors/*` responses, `alert/critical` failsafe message) is the numeric `SystemError` value from `src/utils/ErrorHandler.h`. Ranges: 1-99 general, 100-199 mutex/task, 200-299 network, 300-399 MQTT, 400-449 Modbus, 450-499 device, 500-599 sensor, 600-609 relay, 610-629 pump, 700-799 system, 800-899 configuration.
+
+Common codes:
+
+| Code | Name | Description |
+|------|------|-------------|
+| 6 | MEMORY_ALLOCATION_FAILED | Memory allocation failed |
+| 400 | MODBUS_TIMEOUT | Modbus timeout |
+| 404 | MODBUS_INIT_FAILED | Modbus device initialization failed |
+| 500 | SENSOR_READ_FAILED | Sensor read failed |
+| 502 | SENSOR_OUT_OF_RANGE | Sensor value out of range |
+| 504 | SENSOR_FAILURE | Sensor failure (e.g. pressure sensor open or short circuit) |
+| 600 | RELAY_OPERATION_FAILED | Relay control error |
+| 601 | RELAY_SAFETY_INTERLOCK | Relay command blocked by a safety interlock |
+| 700 | SYSTEM_OVERHEATED | System overheated |
+| 703 | SYSTEM_FAILSAFE_TRIGGERED | Failsafe triggered (also: critical system error bits in the safety check) |
+| 704 | TEMPERATURE_CRITICAL | Temperature limits exceeded |
+| 705 | IGNITION_FAILURE | Failed to ignite |
+| 707 | EMERGENCY_STOP | Emergency stop active |
+
+There is no `SAFETY_CHECK_FAILED` code. A failed `BurnerSystemController::performSafetyCheck()` reports `EMERGENCY_STOP` (707), `TEMPERATURE_CRITICAL` (704) or `SYSTEM_FAILSAFE_TRIGGERED` (703). Codes >= 700 are treated as critical.
+
+---
+
+## Rate Limiting & Throttling
+
+### MQTT Command Rate Limit
+**Current**: No rate limiting (future enhancement recommended)
+
+**Recommended**: 100ms minimum between commands
+
+### Sensor Publishing
+**Rate**: Fixed at 10 seconds
+**Override**: Not currently supported via MQTT
+
+### Error Logging with Exponential Backoff
+Repeated errors are rate-limited:
+- First: Immediate
+- Second: 1 second
+- Third: 2 seconds
+- Fourth: 4 seconds
+- ...exponential...
+- Max: 5 minutes
+
+---
+
+## MQTT Configuration
+
+### Compile-Time Settings
+**File**: `src/config/ProjectConfig.h`
+
+```cpp
+#define MQTT_SERVER "192.168.20.27"  // ProjectConfig.h default; platformio.ini [base_prod] sets the same, [base_dev] 192.168.20.16
+#define MQTT_PORT 1883
+#define MQTT_CLIENT_ID DEVICE_HOSTNAME  // not used: MQTTTask builds "esplan-" DEVICE_HOSTNAME
+#define MQTT_RECONNECT_INTERVAL_MS 5000
+#define MQTT_KEEP_ALIVE_SECONDS 60      // not used: MQTTManager default keep-alive is 30 s
+```
+
+Reconnect uses exponential backoff from 1 s to 30 s (`SystemConstants::Tasks::MQTT`).
+
+### Queue Configuration
+**File**: `src/modules/tasks/MQTTTask.cpp`
+
+```cpp
+// MQTTTask.h: HIGH_PRIORITY_QUEUE_SIZE = 5, NORMAL_PRIORITY_QUEUE_SIZE = 5
+QueueManager::QueueConfig highPriorityConfig;
+highPriorityConfig.length = HIGH_PRIORITY_QUEUE_SIZE;
+highPriorityConfig.itemSize = sizeof(MQTTPublishRequest);
+highPriorityConfig.overflowStrategy = QueueManager::OverflowStrategy::DROP_OLDEST;
+
+QueueManager::QueueConfig normalPriorityConfig;
+normalPriorityConfig.length = NORMAL_PRIORITY_QUEUE_SIZE;
+normalPriorityConfig.itemSize = sizeof(MQTTPublishRequest);
+normalPriorityConfig.overflowStrategy = QueueManager::OverflowStrategy::DROP_OLDEST;
+```
+
+---
+
+## Diagnostic Topics
+
+There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagnostics` module that would have published them was never initialized and was removed on 2026-09-16; the only `boiler/diagnostics/*` topics are the Modbus ones (`boiler/diagnostics/modbus/<addr>`, published by MonitoringTask).
+
+### System Health (memory and task count)
+**Topic**: `boiler/status/health` (not retained)
+
+```json
+{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_hwm":1084}}
+```
+
+- `heap_free` / `heap_min`: free heap now / minimum since boot (bytes)
+- `heap_max_blk`: largest free block; `heap_frag`: fragmentation in percent (`100 - heap_max_blk * 100 / heap_free`)
+- **Do not judge memory pressure from `heap_free` / `heap_max_blk` / `heap_frag`.** All three come from `ESP.getFreeHeap()` / `ESP.getMaxAllocHeap()`, which are `MALLOC_CAP_INTERNAL` and include IRAM-only memory that `malloc()` cannot hand out. Measured 2026-09-16: `heap_free` 57404 and `heap_max_blk` 49140 (`heap_frag` 15%) while byte-addressable DRAM was 7.0 kB free with a 4.2 kB largest block, i.e. 93% fragmented
+- `heap_dram`: free byte-addressable DRAM (`MALLOC_CAP_8BIT`); `heap_dram_blk`: largest block `malloc()` can actually return (`MALLOC_CAP_DEFAULT`); `heap_def`: `esp_get_free_heap_size()`. These are the numbers to watch - an allocation larger than `heap_dram_blk` fails regardless of how large `heap_free` looks
+- The same figures are in `boiler/cmd/diagnostics` with payload `memory` (`DRAM (8BIT)`, `malloc (DEFAULT)`, `Largest free block`)
+- `uptime`: seconds (`millis()` based, wraps after 49.7 days)
+- `health.tasks`: number of FreeRTOS tasks; `health.stack_hwm`: stack high water mark of the publishing task
+
+---
+
+## Testing Utilities
+
+### Check Device Connection
+```bash
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass \
+  -t "boiler/status/online" -C 1 -W 2
+
+# Expected: {"online": true}
+```
+
+### Monitor Sensor Data with jq
+```bash
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass \
+  -t "boiler/status/sensors" | jq '{
+    boiler_out: (.t.bo / 10),
+    water_tank: (.t.wt / 10),
+    pressure: (.p / 100),
+    room_temp: (.t.i / 10)
+  }'
+```
+
+### Wait for Schedule Event
+```bash
+# Wait for next schedule start/end
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P pass \
+  -t "boiler/scheduler/event" -C 1
+
+# Timeout after 5 minutes
+timeout 300 mosquitto_sub -t "boiler/scheduler/event" -C 1
+```
+
+### Subscribe with Pattern Matching
+```bash
+# All sensor and status topics
+mosquitto_sub -t "boiler/status/+" -v
+
+# All commands (for debugging)
+mosquitto_sub -t "boiler/cmd/#" -v
+
+# Everything (including responses)
+mosquitto_sub -t "boiler/#" -v
+```
+
+---
+
+## MQTT Client Libraries
+
+### Python (paho-mqtt)
+```python
+import paho.mqtt.client as mqtt
+import json
+
+def on_message(client, userdata, msg):
+    if msg.topic == "boiler/status/sensors":
+        data = json.loads(msg.payload)
+        boiler_temp = data['t']['bo'] / 10.0
+        pressure = data['p'] / 100.0
+        print(f"Boiler: {boiler_temp}°C, Pressure: {pressure} BAR")
+
+client = mqtt.Client()
+client.username_pw_set("YOUR_MQTT_USER", "YOUR_MQTT_PASSWORD")
+client.on_message = on_message
+client.connect("192.168.20.27", 1883, 60)
+client.subscribe("boiler/status/sensors")
+client.loop_forever()
+```
+
+### Node.js (mqtt.js)
+```javascript
+const mqtt = require('mqtt');
+const client = mqtt.connect('mqtt://192.168.20.27', {
+  username: 'YOUR_MQTT_USER',
+  password: 'YOUR_MQTT_PASSWORD'
+});
+
+client.on('message', (topic, message) => {
+  if (topic === 'boiler/status/sensors') {
+    const data = JSON.parse(message);
+    const boilerTemp = data.t.bo / 10;
+    const pressure = data.p / 100;
+    console.log(`Boiler: ${boilerTemp}°C, Pressure: ${pressure} BAR`);
+  }
+});
+
+client.subscribe('boiler/status/sensors');
+```
+
+### Home Assistant Integration
+```yaml
+# configuration.yaml
+mqtt:
+  sensor:
+    - name: "Boiler Output Temperature"
+      state_topic: "boiler/status/sensors"
+      value_template: "{{ value_json.t.bo | float / 10 }}"
+      unit_of_measurement: "°C"
+      device_class: temperature
+
+    - name: "System Pressure"
+      state_topic: "boiler/status/sensors"
+      value_template: "{{ value_json.p | float / 100 }}"
+      unit_of_measurement: "BAR"
+      device_class: pressure
+
+    - name: "Water Tank Temperature"
+      state_topic: "boiler/status/sensors"
+      value_template: "{{ value_json.t.wt | float / 10 }}"
+      unit_of_measurement: "°C"
+      device_class: temperature
+
+  binary_sensor:
+    - name: "Boiler Online"
+      state_topic: "boiler/status/online"
+      value_template: "{{ value_json.online }}"
+      payload_on: true
+      payload_off: false
+
+  switch:
+    - name: "Water Heating"
+      command_topic: "boiler/cmd/water"
+      payload_on: "enable"
+      payload_off: "disable"
+```
+
+---
+
+## Security Considerations
+
+### Current Implementation
+- Username/password authentication
+- No TLS/SSL (LAN only)
+- No message signing
+- No command authorization
+
+### Recommended for Production
+1. **Enable TLS**: Encrypt MQTT traffic
+2. **ACL**: Restrict topics per user
+3. **Command Validation**: Reject invalid ranges
+4. **Audit Log**: Track all command executions
+
+### Network Security
+- Firewall: Block external access to MQTT port (1883/8883)
+- VLAN: Isolate IoT devices
+- VPN: Remote access only via VPN
+
+---
+
+## Troubleshooting
+
+### Device Not Publishing
+**Check**:
+1. Network connected: `ping 192.168.20.40` (`ETH_STATIC_IP`, see Device Information)
+2. MQTT online status: `mosquitto_sub -t "boiler/status/online" -C 1 -W 5`
+3. Broker logs: Check mosquitto.log for connection attempts
+
+### Commands Not Working
+**Check**:
+1. Topic spelling: Must match exactly
+2. JSON format: Use `jq` to validate
+3. Credentials: Verify username/password
+4. Device logs: Check serial output for command reception
+
+### Sensor Data Not Updating
+**Check**:
+1. Subscribe to correct topic: `boiler/status/sensors`
+2. Wait 10 seconds (publication interval)
+3. Check for Modbus errors in device logs
+
+### Schedules Not Activating
+**Check**:
+1. RTC time correct: Check device logs for "DS3231 initialized"
+2. Schedule enabled: List schedules and verify
+3. Days array correct: 0=Sunday, 1=Monday ... 6=Saturday (7 is rejected)
+4. Time zone: System uses CET/CEST
+
+---
+
+## MQTT Topic Migration
+
+### Old (HotWaterScheduler) vs New (TimerScheduler)
+
+| Old Topic | New Topic | Notes |
+|-----------|-----------|-------|
+| `esp32/boiler/control/hotwater/schedule/add` | `boiler/cmd/scheduler/add` | Different JSON format |
+| `esp32/boiler/status/hotwater/schedule` | `boiler/scheduler/response` | Moved to scheduler namespace |
+| N/A | `boiler/scheduler/event` | New: schedule start/end events |
+
+**Breaking Changes**:
+- Days format: Bitmask → Array of integers
+- Topic prefix: `esp32/boiler/` → `boiler/`
+- Schedule type: Must specify `"type": "water_heating"`
+
+---
+
+## Future MQTT API Extensions
+
+**Planned** (from IMPROVEMENT_OPPORTUNITIES.md):
+- Stack usage monitoring (`boiler/status/diagnostics/stacks`)
+- Pressure trend analysis (`boiler/status/trends/pressure`)
+- Efficiency metrics (`boiler/status/efficiency`)
+- PID tuning history (`boiler/status/pid/history`)
+
+---
+
+## Quick Reference Card
+
+```
+# Read sensor data
+mosquitto_sub -t "boiler/status/sensors" -C 1
+
+# Add water heating schedule (JSON)
+mosquitto_pub -t "boiler/cmd/scheduler/add" -m '{...}'
+
+# Remove schedule
+mosquitto_pub -t "boiler/cmd/scheduler/remove" -m '{"id": 3}'
+
+# Disable / enable schedule
+mosquitto_pub -t "boiler/cmd/scheduler/enable" -m '{"id": 3, "enabled": false}'
+
+# List all schedules
+mosquitto_pub -t "boiler/cmd/scheduler/list" -m '{}'
+
+# Enable/disable heating
+mosquitto_pub -t "boiler/cmd/heating" -m "enable"
+mosquitto_pub -t "boiler/cmd/heating" -m "disable"
+
+# Get error log (last 20)
+mosquitto_pub -t "errors/list" -m "20"
+
+# Clear errors
+mosquitto_pub -t "errors/clear" -m ""
+
+# Test echo
+mosquitto_pub -t "test/echo" -m "hello"
+# Response on: test/response
+
+# Monitor everything
+mosquitto_sub -t "boiler/#" -v
+```

@@ -1,0 +1,84 @@
+@startuml HeatingControlLogic
+!include theme.puml
+
+' File-local: the theme has no activity colours, so stock PlantUML draws light
+' activity boxes and diamonds under the theme's white text.
+skinparam activity {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+    DiamondBackgroundColor #36648B
+    DiamondBorderColor #ffffff
+    DiamondFontColor #ffffff
+}
+
+title Heating Control Logic - HeatingControlTask\nWeather Compensation, Room Mode and Burner Request
+
+start
+
+:HeatingControlTask\n(5 s timer and control events);
+
+if (Boiler and heating enabled?) then (no)
+  :stopHeating() - clear HEATING_ON\nclearRequest(HEATING);
+  stop
+else (yes)
+endif
+
+if (PID autotune running?) then (yes)
+  :Keep heating demand;
+elseif (heatingOverrideOff set?) then (yes)
+  :Heating not needed;
+  stop
+else (no)
+  if (Weather-compensated control?) then (yes)
+    :Needed when outside is below outsideThreshold\n(stops only at threshold + 1.0 °C)\nand the room is not overheated\n(stop above target + overheat margin,\nrestart below that limit - heating_hysteresis);
+  else (room mode)
+    :When off: start when room is below target\nWhen on: stop at room >= target + heating_hysteresis;
+  endif
+endif
+
+if (Heating needed or HEATING_ON_OVERRIDE?) then (no)
+  :If heating: stopHeating()\nclearRequest(HEATING);
+  stop
+else (yes)
+endif
+
+if (Water request active and WATER_PRIORITY set?) then (yes)
+  :Defer heating\n(clear HEATING_ON_OVERRIDE);
+  stop
+else (no)
+endif
+
+:startHeating() - set HEATING_ON;
+
+:Boiler target from the heating curve\n(room deviation shift in weather mode);
+note right
+  HeatingControlModuleFixedPoint:
+  coefficients 1.4347, 0.021, 0.000248
+  shift: heating/curveShift
+  + room deviation x heating/roomCurveShiftFactor
+  clamped to burner_low_limit (default 38 °C)
+  .. heating_high_limit (default 75 °C)
+end note
+
+:BurnerRequestManager::setHeatingRequest(target)\nHEATING + POWER_LOW + target in bits 16-23;
+note right
+  Example: 70 °C = 0x00460001
+  Power level HALF/FULL is decided
+  by BoilerTempControlTask.
+end note
+
+:BurnerControlTask arms the heat demand\n(BurnerDemandGate);
+
+stop
+
+floating note right
+  heating_hysteresis (default 0.5 °C):
+  room mode starts below the target and stops
+  at target + hysteresis; weather mode uses it
+  for the room overheat restart limit.
+  There is no static wasHeating flag - the task
+  uses its current heating state.
+end note
+
+@enduml

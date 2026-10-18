@@ -1,0 +1,9 @@
+---
+description: Analyze external library usage in the project
+---
+
+Please analyze how the external libraries in ~/git/vscode-workspace-libs/ are used in this project. Focus on:
+1. Which libraries are actually imported and used
+2. The dependency relationships between libraries
+3. Any potential conflicts or missing dependencies
+4. Suggestions for better integration

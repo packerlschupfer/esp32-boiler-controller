@@ -1,0 +1,129 @@
+@startuml SystemArchitectureOverview
+!include theme.puml
+
+' File-local: stock PlantUML gives database shapes a light fill, which
+' leaves the theme's white text unreadable.
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
+title System Architecture Overview - High-Level Deployment\nESP32 Boiler Controller Production System
+
+!define HARDWARE #8B4513
+!define CORE #4682B4
+!define SERVICE #52BE80
+
+cloud "External Network" {
+    [MQTT Broker] as Broker
+    [NTP Servers] as NTP
+    [Home Assistant\nno integration code found] as HA
+}
+
+node "LAN8720A\nEthernet PHY" HARDWARE {
+    interface "10/100 Mbps" as ETH
+}
+
+node "ESP32 DevKit" {
+
+    package "Application\n19 FreeRTOS Tasks" {
+        [Burner Control] as Burner
+        [Heating Control] as Heating
+        [Water Control] as Water
+        [Boiler Temp Control\nPID power level] as PID
+        [Sensor Tasks] as Sensors
+        [Service Tasks] as Services
+    }
+
+    package "Core Services" CORE {
+        [SystemResourceProvider\nSRP] as SRP
+        [SharedResourceManager\n11 Event Groups] as SRM
+        [ModbusCoordinator] as ModbusC
+    }
+
+    package "Storage" SERVICE {
+        database "NVS Flash\nconfiguration (esplan)" as NVS
+    }
+}
+
+node "RS485 Bus\nModbus RTU 9600" HARDWARE {
+    [MB8ART\n8-Ch Temp] as MB8ART
+    [RYN4\n8-Ch Relay] as RYN4
+    [ANDRTF3\nRoom Temp] as ANDRTF3
+}
+
+node "I2C Bus\nSDA=21 SCL=22" HARDWARE {
+    [DS3231\nRTC] as RTC
+    [FRAM\n32KB] as FRAM
+}
+
+node "Physical Boiler System" {
+    [Burner] as PhyBurner
+    [Heating Pump] as HPump
+    [Water Pump] as WPump
+    [Temperature Sensors] as TempSensors
+}
+
+' Connections
+Burner --> SRP : use services
+Heating --> SRP : use services
+Water --> SRP : use services
+PID --> SRP : use services
+Sensors --> SRP : use services
+Services --> SRP : use services
+
+SRP --> SRM : manage resources
+SRP --> ModbusC : coordinate
+
+Sensors --> ModbusC : schedule
+ModbusC --> MB8ART : sequential
+ModbusC --> RYN4 : sequential
+ModbusC --> ANDRTF3 : sequential
+
+Burner --> RYN4 : burner relays R1-R3\n(via RelayControlTask)
+Services --> NVS : persist config
+Services --> FRAM : errors, schedules, counters
+Services --> RTC : time
+
+Services --> ETH : network
+ETH --> Broker : MQTT
+ETH --> NTP : time sync
+Broker <--> HA : integration
+
+RYN4 --> PhyBurner : enable/disable
+RYN4 --> HPump : on/off
+RYN4 --> WPump : on/off
+MB8ART <-- TempSensors : PT1000
+ANDRTF3 <-- TempSensors : room
+
+note right of SRP
+  Static accessors:
+  - ServiceContainer removed
+  - device and module getters forward
+    to SystemInitializer
+  - thread safety: not verified
+end note
+
+note right of SRM
+  Resource management:
+  - 11 event groups
+  - 4 standard mutexes
+  - queues created on demand (getQueue)
+  - MutexGuard RAII (ESP32-MutexGuard)
+end note
+
+note bottom of ModbusC
+  Bus arbitration:
+  - 500 ms ticks
+  - ANDRTF3, RYN4 write, MB8ART, RYN4 verify
+end note
+
+note bottom of NVS
+  Storage:
+  NVS: configuration parameters
+  FRAM: runtime data, errors, schedules
+  RTC: time
+end note
+
+@enduml

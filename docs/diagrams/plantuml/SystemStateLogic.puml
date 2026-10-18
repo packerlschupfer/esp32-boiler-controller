@@ -1,0 +1,186 @@
+@startuml SystemStateLogic
+!include theme.puml
+
+title System State Logic - Main Operating Modes\nWith Initialization and Error Handling
+
+[*] --> PowerOn : System Start
+
+state PowerOn {
+    PowerOn : Entry: Boot ESP32
+    PowerOn : Do: Hardware init
+}
+
+PowerOn --> Initialization : Boot complete
+
+state Initialization {
+    [*] --> InitLogging
+    InitLogging --> InitSharedResources : initializeLogging()
+    InitSharedResources --> InitHardware : event groups, mutexes
+    InitHardware --> InitModbus : I2C, FRAM, RTC
+    InitModbus --> InitNetwork : MB8ART, RYN4, ANDRTF3
+    InitNetwork --> InitControlModules : Ethernet (async)
+    InitControlModules --> InitMQTT : control modules
+    InitMQTT --> InitTasks : MQTT
+    InitTasks --> [*] : start tasks (19 in total)
+}
+
+Initialization --> SystemIdle : STARTUP_COMPLETE
+Initialization --> SystemError : Init failed
+
+state SystemIdle {
+    SystemIdle : Entry: All systems ready
+    SystemIdle : Do: Monitor demands
+    SystemIdle : Exit: Check conditions
+}
+
+SystemIdle --> HeatingMode : Heating demand\n& enabled
+SystemIdle --> WaterMode : Water demand\n& enabled
+SystemIdle --> MixedMode : Both demands
+
+state HeatingMode {
+    [*] --> CheckHeatingDemand
+    CheckHeatingDemand --> HeatingActive : room < target\n(room mode)
+    CheckHeatingDemand --> HeatingStandby : Temp OK
+
+    state HeatingActive {
+        HeatingActive : Entry: set HEATING_ON, heating burner request
+        HeatingActive : Heating pump follows HEATING_ON (PumpControlModule)
+        HeatingActive : Power HALF/FULL decided by BoilerTempControlTask
+    }
+
+    state HeatingStandby {
+        HeatingStandby : Entry: Stop burner
+        HeatingStandby : Do: Pump overrun (5 min)
+    }
+
+    HeatingActive --> HeatingStandby : room >= target + heating_hysteresis
+    HeatingStandby --> [*] : Overrun complete
+}
+
+state WaterMode {
+    [*] --> CheckWaterDemand
+    CheckWaterDemand --> WaterActive : tank < tempLimitLow
+    CheckWaterDemand --> WaterStandby : tank >= tempLimitLow
+    CheckWaterDemand --> WaterPaused : limits inverted\n(low >= high)
+
+    state WaterActive {
+        WaterActive : Entry: burner water request
+        WaterActive : Charge until tank > tempLimitHigh
+        WaterActive : Defaults 45 / 65 °C (this boiler: 40 / 50 °C)
+    }
+
+    state WaterStandby {
+        WaterStandby : Burner water request off
+        WaterStandby : Do: Pump overrun (5 min)
+    }
+
+    state WaterPaused {
+        WaterPaused : Water heating paused
+        WaterPaused : until the limits are consistent again
+    }
+
+    WaterActive --> WaterStandby : tank > tempLimitHigh
+    WaterActive --> WaterStandby : water switched off\n(disable, boiler disable, override):\nrunning charge ends
+    WaterStandby --> WaterActive : tank < tempLimitLow\n(an interrupted charge does not resume)
+    WaterStandby --> [*] : Overrun complete
+}
+
+state MixedMode {
+    [*] --> CheckPriority
+    CheckPriority --> WaterPriority : WATER_PRIORITY_BIT
+    CheckPriority --> HeatingPriority : Default
+
+    state WaterPriority {
+        WaterPriority : Entry: Pause heating
+        WaterPriority : Do: Service water first
+    }
+
+    state HeatingPriority {
+        HeatingPriority : Entry: Continue heating
+        HeatingPriority : Do: Water waits
+    }
+
+    WaterPriority --> WaterMode : Switch to water
+    HeatingPriority --> HeatingMode : Continue heating
+}
+
+HeatingMode --> SystemIdle : No demand
+WaterMode --> SystemIdle : No demand
+MixedMode --> SystemIdle : No demand
+
+' Emergency paths
+HeatingMode --> EmergencyStop : EMERGENCY_STOP\nevent
+WaterMode --> EmergencyStop : EMERGENCY_STOP\nevent
+MixedMode --> EmergencyStop : EMERGENCY_STOP\nevent
+SystemIdle --> EmergencyStop : Safety fault
+
+state EmergencyStop {
+    [*] --> BurnerShutdown
+    BurnerShutdown --> BurnerRelaysOff : BurnerSystemController::emergencyShutdown()
+    BurnerRelaysOff --> PumpsOn : R1-R3 OFF
+    PumpsOn --> EmergencyBits : heating + water pumps ON (F13)\nuntil boiler output < 60°C
+    EmergencyBits --> EndWaterCharge : EMERGENCY_STOP set,\nBOILER_ENABLED cleared
+    EndWaterCharge --> LogError : WheaterControlTask ends a running charge
+    LogError --> [*] : ErrorHandler::logError
+}
+
+EmergencyStop --> SystemIdle : EMERGENCY_STOP released\n(MQTT emergency_reset once causes cleared,\nor sensor recovery after a stale-sensor stop)
+
+state SystemError {
+    SystemError : Entry: ErrorHandler::enterFailsafeMode()
+    SystemError : Do: CRITICAL failsafe (burner shut down)
+    SystemError : Do: LED_BUILTIN blinks forever
+    SystemError : No exit in code
+}
+
+SystemError --> [*] : reset or power cycle
+
+note right of Initialization
+  8-Stage Initialization (initializeSystem):
+  1. Logging
+  2. Shared Resources
+  3. Hardware (I2C, FRAM, RTC)
+  4. Modbus Devices
+  5. Network (Ethernet, async)
+  6. Control Modules
+  7. MQTT
+  8. Tasks (19 FreeRTOS tasks in total,
+     some started by main.cpp and modules)
+
+  Duration: not verified
+end note
+
+note right of MixedMode
+  Priority Logic:
+  Water always has priority
+  when WATER_PRIORITY_BIT set
+
+  Heating defers while a water request
+  is active and WATER_PRIORITY is set.
+  The running burner changes mode via
+  MODE_SWITCHING (burner relays R1/R3).
+end note
+
+note bottom of EmergencyStop
+  Safety triggers found in code:
+  - Boiler output above 115 °C (critical safety check)
+  - Safety interlock failure in IGNITION / RUNNING
+  - Temperature sensor failure while heat is demanded
+  - Burner safety check failure
+  - Maximum burner runtime exceeded
+  Not implemented: rate-of-change limit,
+  E-STOP button, MQTT command to trigger an emergency stop
+
+  Recovery:
+  - Burner ERROR: after errorRecoveryMs (default 5 min)
+    once EMERGENCY_STOP is released and safety
+    conditions pass (stays in ERROR while latched)
+  - Burner LOCKOUT: after 5 min or MQTT burner_reset
+  - EMERGENCY_STOP: MQTT boiler/cmd/emergency_reset "reset"
+    (refused while boiler >= 110 °C, sensors unavailable
+    or critical error bits set; restores the saved boiler
+    enable), or cleared by sensor recovery
+    (stale-sensor stop only)
+end note
+
+@enduml

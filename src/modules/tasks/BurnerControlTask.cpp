@@ -1,0 +1,917 @@
+// src/modules/tasks/BurnerControlTask_EventDriven.cpp
+// Burner control task - manages burner state machine and safety
+#include "modules/tasks/BurnerControlTask.h"
+
+#include "config/SystemConstants.h"
+#include "config/SystemSettingsStruct.h"
+#include "modules/control/BurnerSystemController.h"
+#include "modules/control/BurnerStateMachine.h"
+#include "modules/control/TemperatureSensorFallback.h"
+#include "modules/control/BurnerSafetyValidator.h"
+#include "modules/control/BurnerRequestManager.h"
+#include "modules/control/SafetyInterlocks.h"
+#include "modules/control/CentralizedFailsafe.h"
+#include "modules/control/ReturnPreheater.h"
+#include "modules/control/SensorFailureConfirm.h"
+#include "modules/control/SensorErrorBitPolicy.h"
+#include "shared/SharedResources.h"
+#include "events/SystemEventsGenerated.h"
+#include "events/TemperatureEventHelpers.h"
+#include "utils/Utils.h"
+#include "utils/ResourceGuard.h"
+#include "utils/ErrorHandlingStrategy.h"
+#include "utils/MutexRetryHelper.h"
+#include "core/SystemResourceProvider.h"
+#include "core/StateManager.h"
+#include "config/ProjectConfig.h"
+#include "LoggingMacros.h"
+#include "modules/tasks/BoilerTempControlTask.h"  // BurnerDemandGate: latest PID decision
+#include "modules/control/BoilerTempController.h"  // BurnerDemandGate: predicted PID decision
+#include <TaskManager.h>
+#include <atomic>
+#include <climits>
+#include <cmath>
+
+// Timer handle for state machine timeouts only
+static TimerHandle_t stateTimeoutTimer = nullptr;
+
+// BurnerDemandGate permission, read by BoilerTempControlTask (see BurnerDemandGate.h).
+// Kept in BurnerStateMachine so setHeatDemand(true) checks it under demandMutex; a
+// revoke must be published before the matching setHeatDemand(false).
+static void publishDemandPermission(bool permitted, Temperature_t maxTargetTemp, bool highPowerAllowed) {
+    BurnerDemandGate::Permission permission;
+    permission.permitted = permitted;
+    permission.highPowerAllowed = highPowerAllowed;
+    permission.maxTargetTemp = static_cast<int16_t>(maxTargetTemp);
+    BurnerStateMachine::setDemandPermission(permission);
+}
+
+BurnerDemandGate::Permission getBurnerDemandPermission() {
+    return BurnerStateMachine::getDemandPermission();
+}
+
+// State tracking
+static struct {
+    bool initialized = false;
+    bool sensorsReady = false;
+    bool lastHeatDemand = false;
+    Temperature_t lastTargetTemp = 0;
+    bool lastIsWaterMode = false;
+    uint32_t operationStartTime = 0;
+    Temperature_t maxAllowedTemp = 0;
+    float maxPowerFactor = 1.0f;  // Keep as float for power factor (0.0-1.0 range)
+    uint32_t maxRunTime = UINT32_MAX;
+} burnerState;
+
+// Cached event group handles to avoid repeated mutex acquisitions
+static struct {
+    EventGroupHandle_t sensorEventGroup = nullptr;
+    EventGroupHandle_t burnerEventGroup = nullptr;
+    EventGroupHandle_t burnerRequestEventGroup = nullptr;
+    EventGroupHandle_t systemStateEventGroup = nullptr;
+    EventGroupHandle_t controlRequestsEventGroup = nullptr;
+    bool initialized = false;
+} cachedHandles;
+
+// Forward declarations
+static void stateTimeoutCallback(TimerHandle_t xTimer);
+static void processBurnerRequest();
+static void processTemperatureUpdate();
+static void processSafetyEvent(EventBits_t safetyBits);
+static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t targetTemp, bool highPower);
+
+void BurnerControlTask(void* parameter) {
+    (void)parameter;
+    const char* TAG = "BurnerControlTask";
+    
+    LOG_INFO(TAG, "Started (Event-Driven) C%d Stk:%d", xPortGetCoreID(), uxTaskGetStackHighWaterMark(NULL));
+    
+    // Cache event group handles early to avoid mutex contention
+    if (!cachedHandles.initialized) {
+        LOG_INFO(TAG, "Caching event group handles...");
+        cachedHandles.sensorEventGroup = SRP::getSensorEventGroup();
+        cachedHandles.burnerEventGroup = SRP::getBurnerEventGroup();
+        cachedHandles.burnerRequestEventGroup = SRP::getBurnerRequestEventGroup();
+        cachedHandles.systemStateEventGroup = SRP::getSystemStateEventGroup();
+        cachedHandles.controlRequestsEventGroup = SRP::getControlRequestsEventGroup();
+        
+        if (!cachedHandles.sensorEventGroup || !cachedHandles.burnerEventGroup ||
+            !cachedHandles.burnerRequestEventGroup || !cachedHandles.systemStateEventGroup ||
+            !cachedHandles.controlRequestsEventGroup) {
+            LOG_ERROR(TAG, "Failed to cache one or more event groups!");
+            vTaskDelete(NULL);
+            return;
+        }
+        
+        cachedHandles.initialized = true;
+        LOG_INFO(TAG, "Event group handles cached successfully");
+    }
+    
+    // Watchdog will be registered after initialization
+    
+    // Register cleanup handler
+    TaskCleanupHandler::registerCleanup([TAG]() {
+        LOG_WARN(TAG, "BurnerControlTask cleanup - emergency stop");
+        BurnerStateMachine::emergencyStop();
+
+        // Round 19 Issue #6: Stop and delete timer to prevent memory leak and dangling callback
+        if (stateTimeoutTimer != nullptr) {
+            xTimerStop(stateTimeoutTimer, 0);
+            xTimerDelete(stateTimeoutTimer, 0);
+            stateTimeoutTimer = nullptr;
+        }
+
+        if (cachedHandles.initialized && cachedHandles.burnerRequestEventGroup) {
+            xEventGroupClearBits(cachedHandles.burnerRequestEventGroup, SystemEvents::BurnerRequest::ALL_BITS);
+        }
+    });
+    
+    // Initialize the burner state machine
+    BurnerStateMachine::initialize();
+    
+    // Initialize temperature sensor fallback system
+    TemperatureSensorFallback::initialize();
+
+    // Start with NONE mode - only require sensors that are ACTUALLY needed
+    // processBurnerRequest() will set appropriate mode when heating/water is requested
+    // This prevents blocking on room temp sensor when no heating is actually requested
+    TemperatureSensorFallback::setOperationMode(
+        TemperatureSensorFallback::OperationMode::NONE);
+    LOG_INFO(TAG, "Initial operation mode set to NONE (will update on actual request)");
+    
+    // Create state timeout timer for safety updates
+    stateTimeoutTimer = xTimerCreate(
+        "BurnerTimeout",
+        pdMS_TO_TICKS(1000),  // 1 second safety interval
+        pdTRUE,               // Auto-reload
+        nullptr,
+        stateTimeoutCallback
+    );
+
+    if (!stateTimeoutTimer) {
+        LOG_ERROR(TAG, "Failed to create state timeout timer");
+        // No cleanup needed - timer wasn't created
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Wait for initial sensor data
+    LOG_INFO(TAG, "Waiting for sensor initialization...");
+    EventBits_t sensorBits = xEventGroupWaitBits(
+        cachedHandles.sensorEventGroup,
+        SystemEvents::SensorUpdate::FIRST_READ_COMPLETE | SystemEvents::SensorUpdate::DATA_AVAILABLE,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(BURNER_STARTUP_GRACE_PERIOD_MS)
+    );
+    
+    if (sensorBits & (SystemEvents::SensorUpdate::FIRST_READ_COMPLETE | SystemEvents::SensorUpdate::DATA_AVAILABLE)) {
+        LOG_INFO(TAG, "Sensor data available (bits: 0x%lX)", static_cast<unsigned long>(sensorBits));
+        
+        // Verify we have valid readings - use retry helper for robustness
+        {
+            auto guard = MutexRetryHelper::acquireGuard(
+                SRP::getSensorReadingsMutex(),
+                "SensorReadings"
+            );
+            if (guard) {
+                SharedSensorReadings readings = SRP::getSensorReadings();
+                if (readings.isBoilerTempOutputValid || readings.isBoilerTempReturnValid ||
+                    readings.isWaterHeaterTempTankValid || readings.isInsideTempValid) {
+                    burnerState.sensorsReady = true;
+                    LOG_INFO(TAG, "Sensors ready - valid readings available");
+                }
+            }
+            // Mutex auto-released when guard goes out of scope
+        }
+    }
+    
+    if (!burnerState.sensorsReady) {
+        LOG_WARN(TAG, "Sensor initialization timeout - checking fallback status");
+        if (!TemperatureSensorFallback::hasRequiredSensors()) {
+            // Log which sensors are missing with detailed context
+            const auto& status = TemperatureSensorFallback::getStatus();
+            LOG_ERROR(TAG, "Required sensors missing for mode %d: BO=%s BR=%s WT=%s RT=%s",
+                     static_cast<int>(TemperatureSensorFallback::getOperationMode()),
+                     status.boilerOutputValid ? "OK" : "MISS",
+                     status.boilerReturnValid ? "OK" : "MISS",
+                     status.waterTempValid ? "OK" : "MISS",
+                     status.roomTempValid ? "OK" : "MISS");
+
+            // Burner cannot safely operate without required sensors
+            // Set error bit and prevent burner from starting
+            xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
+                              SystemEvents::Error::SENSOR_FAILURE);
+        }
+    }
+
+    burnerState.initialized = true;
+    
+    // Start a safety timer to ensure state machine gets periodic updates
+    // This is a temporary measure until BurnerStateMachine is fully event-based
+    xTimerChangePeriod(stateTimeoutTimer, pdMS_TO_TICKS(1000), 0);  // 1 second safety interval
+    if (xTimerStart(stateTimeoutTimer, pdMS_TO_TICKS(100)) != pdPASS) {
+        LOG_ERROR(TAG, "Failed to start state timeout timer");
+        // Cleanup: delete timer before exiting
+        xTimerDelete(stateTimeoutTimer, 0);
+        stateTimeoutTimer = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    LOG_INFO(TAG, "Event-driven mode activated");
+    
+    // Register with watchdog after initialization is complete
+    TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::enabled(
+        true,   // critical task - will reset system on timeout
+        SystemConstants::System::WDT_BURNER_CONTROL_MS
+    );
+
+    if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("BurnerControlTask", wdtConfig)) {
+        LOG_ERROR(TAG, "WDT reg failed - entering degraded mode");
+        // Critical task without watchdog protection - enter degraded mode
+        CentralizedFailsafe::triggerFailsafe(
+            CentralizedFailsafe::FailsafeLevel::DEGRADED,
+            SystemError::WATCHDOG_INIT_FAILED,
+            "BurnerControlTask watchdog registration failed"
+        );
+    } else {
+        LOG_INFO(TAG, "WDT OK %lums", SystemConstants::System::WDT_BURNER_CONTROL_MS);
+        (void)SRP::getTaskManager().feedWatchdog();  // Feed immediately
+    }
+    
+    // Main task loop - truly event-driven
+    while (true) {
+        // Build event masks
+        // MB8ARTTasks sets each channel's update bit (valid reading) or error bit (invalid)
+        // after every read; these bits were never set before 2026-09-15. BOILER_OUTPUT is left
+        // to BoilerTempControlTask, which waits on it with clear-on-exit; the return/tank update
+        // and the error bits give one wake-up per read even when a channel fails
+        const EventBits_t TEMP_UPDATE_BITS = SystemEvents::SensorUpdate::BOILER_RETURN |
+                                            SystemEvents::SensorUpdate::WATER_TANK |
+                                            SystemEvents::SensorUpdate::BOILER_OUTPUT_ERROR |
+                                            SystemEvents::SensorUpdate::BOILER_RETURN_ERROR |
+                                            SystemEvents::SensorUpdate::WATER_TANK_ERROR;
+        const EventBits_t SAFETY_EVENT_BITS = SystemEvents::Burner::FLAME_STATE_CHANGED | 
+                                             SystemEvents::Burner::PRESSURE_CHANGED |
+                                             SystemEvents::Burner::FLOW_CHANGED | 
+                                             SystemEvents::Burner::SAFETY_EVENT | 
+                                             SystemEvents::Burner::STATE_TIMEOUT;
+        
+        // Round 15 Issue #9: Dynamic timeout tuning rationale
+        //
+        // This task uses dynamic timeouts based on burner state to balance:
+        //   1. SAFETY: Fast response during active combustion (100ms)
+        //   2. CPU EFFICIENCY: Longer sleep when idle (3s)
+        //   3. WATCHDOG: All timeouts maintain >5x margin to 15s hardware watchdog
+        //
+        // Why 100ms during active operation:
+        //   - Gas combustion requires fast fault detection (<1s)
+        //   - Sensor events fire every 100-200ms (Modbus read cycle)
+        //   - 100ms provides 10 checks per second for temperature excursions
+        //   - CPU impact: ~1% per check at priority 4
+        //
+        // Why 3s when idle:
+        //   - No combustion = no urgent safety checks needed
+        //   - Saves ~29 wakeups per second vs 100ms polling
+        //   - Still responds to new heating requests within 3s
+        //
+        uint32_t timeoutMs = 1000;  // Default 1 second
+        BurnerSMState currentState = BurnerStateMachine::getCurrentState();
+
+        // Check if we have any heating demand from the request bits
+        EventBits_t requestBits = xEventGroupGetBits(cachedHandles.burnerRequestEventGroup);
+        bool hasHeatingDemand = (requestBits & (SystemEvents::BurnerRequest::HEATING |
+                                                SystemEvents::BurnerRequest::WATER)) != 0;
+
+        if (currentState == BurnerSMState::IDLE && !hasHeatingDemand) {  // IDLE state and no demand
+            timeoutMs = 3000;  // 3 seconds when idle - save CPU while maintaining 5x margin to 15s watchdog
+        } else if (currentState >= BurnerSMState::IGNITION &&
+                   currentState <= BurnerSMState::RUNNING_HIGH) {  // Active operation
+            timeoutMs = 100;   // 100ms during active operation for faster safety response
+        }
+        
+        // Wait for burner request changes with a timeout
+        // This is the primary event we care about
+        // F10: clear CHANGE_EVENT_BITS ATOMICALLY with the read (clear-on-exit).
+        // Previously the bits were cleared AFTER processBurnerRequest(), so a
+        // request change arriving during the (tens-of-ms) handler was wiped
+        // unprocessed - the burner kept firing on stale demand with the pump off
+        // until the overheat interlock caught it. Clearing here means any change
+        // that lands during processing re-sets the bit and is handled next loop.
+        EventBits_t requestEvents = xEventGroupWaitBits(
+            cachedHandles.burnerRequestEventGroup,
+            SystemEvents::BurnerRequest::CHANGE_EVENT_BITS,
+            pdTRUE,   // Clear on exit (atomic read-and-clear)
+            pdFALSE,  // Wait for any bit
+            pdMS_TO_TICKS(timeoutMs)  // Dynamic timeout based on state
+        );
+        
+        // Process events in priority order
+        // Feed watchdog between each handler to prevent timeout during cascading failures
+
+        // 1. Emergency stop has highest priority
+        // 2026-09-14: EMERGENCY_STOP is a level latch (released by boiler/cmd/emergency_reset,
+        // sensor-fallback recovery or a reboot). It was read-and-cleared here, which ended the
+        // pump heat dissipation within seconds and left the release command nothing to release.
+        // Read without clearing and stop the burner once per onset.
+        static bool emergencyStopWasSet = false;
+        const bool emergencyStopSet =
+            (xEventGroupGetBits(cachedHandles.systemStateEventGroup) & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+        if (EmergencyStopRelease::onsetDetected(emergencyStopSet, emergencyStopWasSet)) {
+            LOG_ERROR(TAG, "Emergency stop initiated");
+            BurnerStateMachine::emergencyStop();
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // 2. Safety events (skip STATE_TIMEOUT as it's handled separately in #5)
+        // Use atomic read-and-clear to prevent race condition where new events
+        // could be lost between reading and clearing
+        EventBits_t safetyOnlyBits = xEventGroupWaitBits(
+            cachedHandles.burnerEventGroup,
+            SAFETY_EVENT_BITS & ~SystemEvents::Burner::STATE_TIMEOUT,
+            pdTRUE,   // Clear bits on exit (atomic with read)
+            pdFALSE,  // Wait for any bit
+            0         // No wait - just check current state
+        );
+        if (safetyOnlyBits) {
+            processSafetyEvent(safetyOnlyBits);
+            // Bits already cleared atomically by xEventGroupWaitBits
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // 2.5. Check for stale/expired burner requests (watchdog)
+        // This prevents runaway burner if a control task crashes
+        if (BurnerRequestManager::checkAndClearExpiredRequests(SystemConstants::Burner::REQUEST_EXPIRATION_MS)) {
+            LOG_ERROR(TAG, "Stale burner request detected and cleared - control task may have crashed");
+            SafetyInterlocks::triggerEmergencyShutdown("Burner request watchdog expired");
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // 3. Temperature updates trigger state machine update
+        // Use atomic read-and-clear to prevent race condition
+        EventBits_t tempUpdateBits = xEventGroupWaitBits(
+            cachedHandles.sensorEventGroup,
+            TEMP_UPDATE_BITS,
+            pdTRUE,   // Clear bits on exit (atomic with read)
+            pdFALSE,  // Wait for any bit
+            0         // No wait - just check current state
+        );
+        if (tempUpdateBits & TEMP_UPDATE_BITS) {
+            processTemperatureUpdate();
+            // Bits already cleared atomically by xEventGroupWaitBits
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // 4. Burner requests - process if we got a change event.
+        // F10: CHANGE_EVENT_BITS were already cleared atomically at the wait
+        // above, so a change arriving during processBurnerRequest() is preserved
+        // for the next iteration rather than being wiped by a late clear here.
+        // A request that is present but not permitted (return preheating, stale
+        // sensors, failed validation, sensor fallback) is re-evaluated every 10 s:
+        // change events only fire when the request bits change, and
+        // BoilerTempControlTask may not arm until the block is lifted here.
+        static uint32_t lastBlockedRetryMs = 0;
+        if (requestEvents & SystemEvents::BurnerRequest::CHANGE_EVENT_BITS) {
+            LOG_DEBUG(TAG, "Processing burner request change event (events: 0x%06lX)", static_cast<unsigned long>(requestEvents));
+            processBurnerRequest();
+            lastBlockedRetryMs = millis();
+        } else if (hasHeatingDemand && !BurnerStateMachine::getDemandPermission().permitted &&
+                   Utils::elapsedMs(lastBlockedRetryMs) >= 10000) {
+            LOG_DEBUG(TAG, "Re-evaluating blocked burner request");
+            burnerState.lastHeatDemand = false;  // force updateBurnerState() to re-run its checks
+            processBurnerRequest();
+            lastBlockedRetryMs = millis();
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // 5. State timeout (timer-generated event for periodic updates)
+        // Use atomic read-and-clear to prevent race condition
+        EventBits_t timeoutBits = xEventGroupWaitBits(
+            cachedHandles.burnerEventGroup,
+            SystemEvents::Burner::STATE_TIMEOUT,
+            pdTRUE,   // Clear bits on exit (atomic with read)
+            pdFALSE,  // Wait for any bit
+            0         // No wait - just check current state
+        );
+        if (timeoutBits & SystemEvents::Burner::STATE_TIMEOUT) {
+            BurnerStateMachine::update();
+            // Bit already cleared atomically by xEventGroupWaitBits
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // Note: Pump control is now handled independently by PumpControlModule tasks
+        // (HeatingPumpTask, WaterPumpTask) which watch HEATING_ON/WATER_ON event bits.
+        // No cooldown handling needed here.
+
+        // Update return preheater state machine (needs continuous updates for pump cycling)
+        // This must be called every iteration, not just on state changes
+        if (ReturnPreheater::getState() == ReturnPreheater::State::PREHEATING) {
+            ReturnPreheater::update();
+        }
+
+        // Final watchdog feed at end of loop
+        (void)SRP::getTaskManager().feedWatchdog();
+    }
+}
+
+static void stateTimeoutCallback(TimerHandle_t xTimer) {
+    (void)xTimer;
+    
+    // Set timeout event bit
+    if (cachedHandles.initialized && cachedHandles.burnerEventGroup) {
+        xEventGroupSetBits(cachedHandles.burnerEventGroup, SystemEvents::Burner::STATE_TIMEOUT);
+    }
+}
+
+// TemperatureSensorFallback's required sensors follow the active burner requests
+static TemperatureSensorFallback::OperationMode operationModeForRequests(EventBits_t requestBits) {
+    const bool heatingRequested = (requestBits & SystemEvents::BurnerRequest::HEATING) != 0;
+    const bool waterRequested = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
+    if (heatingRequested && waterRequested) {
+        return TemperatureSensorFallback::OperationMode::BOTH;
+    }
+    if (heatingRequested) {
+        return TemperatureSensorFallback::OperationMode::SPACE_HEATING;
+    }
+    if (waterRequested) {
+        return TemperatureSensorFallback::OperationMode::WATER_HEATING;
+    }
+    return TemperatureSensorFallback::OperationMode::NONE;
+}
+
+static void processTemperatureUpdate() {
+    const char* TAG = "BurnerTempUpdate";
+
+    // Update state machine when temperatures change (every read, in every state)
+    BurnerStateMachine::update();
+
+    static SensorFailureConfirm::State sensorFailure;
+
+    // The sensor fallback is evaluated only while a mode request is active or the demand
+    // is armed (BurnerDemandGate::sensorFallbackCheckNeeded, review R4-3): this runs on
+    // every MB8ART read, and in idle each single invalid boiler output reading flipped the
+    // fallback NORMAL -> SHUTDOWN -> NORMAL (two retained MQTT publishes, SENSOR_FAILURE set
+    // and cleared, health monitor, emergency release attempt). A new request is checked by
+    // processBurnerRequest() and the heating/water tasks before it can arm.
+    const EventBits_t requestBits = xEventGroupGetBits(cachedHandles.burnerRequestEventGroup);
+    const bool modeRequested =
+        (requestBits & (SystemEvents::BurnerRequest::HEATING | SystemEvents::BurnerRequest::WATER)) != 0;
+    bool demandArmed = false;
+    Temperature_t demandTarget = 0;
+    if (!BurnerStateMachine::getHeatDemandState(demandArmed, demandTarget)) {
+        demandArmed = true;  // unknown (demand mutex timeout): evaluate, assume armed
+    }
+    if (!BurnerDemandGate::sensorFallbackCheckNeeded(modeRequested, demandArmed)) {
+        sensorFailure = SensorFailureConfirm::State();
+        // Idle: refresh the reported mode at most every IDLE_FALLBACK_REFRESH_MS, so the `sf`
+        // field of boiler/status/sensors and the retained boiler/status/sensor_mode match
+        // reality (idle kept the startup value) without the per-read flapping. Reporting only:
+        // nothing arms from here, a new request is checked by processBurnerRequest() first.
+        static constexpr uint32_t IDLE_FALLBACK_REFRESH_MS = 30000;
+        static uint32_t lastIdleRefreshMs = 0;
+        const uint32_t nowMs = millis();
+        if (lastIdleRefreshMs == 0 || (nowMs - lastIdleRefreshMs) >= IDLE_FALLBACK_REFRESH_MS) {
+            lastIdleRefreshMs = nowMs;
+            TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+            (void)TemperatureSensorFallback::canContinueOperation();
+        }
+        return;
+    }
+
+    // Required sensors of the current requests (review R4-1): a mode left at SPACE_HEATING
+    // kept the fallback in SHUTDOWN for a missing room sensor after the heating request ended
+    TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+
+    // Check temperature sensor status. One invalid reading already makes the heating and water
+    // tasks drop their requests; the burner emergency stop (ERROR for errorRecoveryMs) follows
+    // only when the required sensors stay missing with heat demand (SensorFailureConfirm).
+    // Heat demand = armed in the state machine AND a mode request (BurnerDemandGate::
+    // sensorStopDemand). burnerState.lastHeatDemand stayed true after a normal request end
+    // with failing sensors and forced ERROR 10 s later (review R4-1).
+    const bool wasFailing = sensorFailure.failing;
+    const bool sensorsOk = TemperatureSensorFallback::canContinueOperation();
+    const bool heatDemandActive = BurnerDemandGate::sensorStopDemand(modeRequested, demandArmed);
+    if (SensorFailureConfirm::shouldStop(sensorFailure, sensorsOk, heatDemandActive, millis())) {
+        LOG_ERROR(TAG, "Temperature sensor failure for %lu s with heat demand - emergency shutdown",
+                  static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
+        BurnerStateMachine::emergencyStop();
+        burnerState.lastHeatDemand = false;
+        sensorFailure = SensorFailureConfirm::State();
+    } else if (sensorFailure.failing && !wasFailing) {
+        LOG_WARN(TAG, "Temperature sensors missing with heat demand - emergency stop if still missing after %lu s",
+                 static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
+    }
+}
+
+static void processSafetyEvent(EventBits_t safetyBits) {
+    const char* TAG = "BurnerSafety";
+
+    // safetyBits passed from caller (already cleared atomically by xEventGroupWaitBits)
+
+    if (safetyBits & SystemEvents::Burner::FLAME_STATE_CHANGED) {
+        LOG_INFO(TAG, "Flame state changed");
+        // Future: process flame sensor change
+    }
+    
+    if (safetyBits & SystemEvents::Burner::PRESSURE_CHANGED) {
+        LOG_INFO(TAG, "Pressure changed");
+        // Future: process pressure sensor change
+    }
+    
+    if (safetyBits & SystemEvents::Burner::FLOW_CHANGED) {
+        LOG_INFO(TAG, "Flow changed");
+        // Future: process flow sensor change
+    }
+    
+    // Perform safety check via BurnerSystemController
+    BurnerSystemController* controller = SRP::getBurnerSystemController();
+    if (!controller) {
+        LOG_ERROR(TAG, "BurnerSystemController not available - triggering emergency stop");
+        BurnerStateMachine::emergencyStop();
+        burnerState.lastHeatDemand = false;
+        return;
+    }
+    Result<void> safetyResult = controller->performSafetyCheck();
+    if (safetyResult.isError()) {
+        ErrorHandling::TaskErrorHandler::handleTaskError(
+            TAG,
+            safetyResult.error(),
+            safetyResult.message().c_str(),
+            0, 0  // No error bits defined for burner safety
+        );
+        BurnerStateMachine::emergencyStop();
+        burnerState.lastHeatDemand = false;
+    }
+    
+    // Update state machine with new safety inputs
+    BurnerStateMachine::update();
+}
+
+static void processBurnerRequest() {
+    const char* TAG = "BurnerProcess";
+    
+    // Use cached event group handles
+    if (!cachedHandles.initialized) {
+        LOG_ERROR(TAG, "Event group handles not cached!");
+        return;
+    }
+    
+    // Get current request bits using cached handles
+    EventBits_t requestBits = xEventGroupGetBits(cachedHandles.burnerRequestEventGroup);
+    EventBits_t systemStateBits = xEventGroupGetBits(cachedHandles.systemStateEventGroup);
+    
+    // Track if we were previously disabled to reduce log spam
+    static bool wasSystemDisabled = false;
+
+    // Check if boiler is enabled
+    if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED)) {
+        // Always ensure burner is off when system is disabled
+        if (!wasSystemDisabled) {
+            LOG_INFO(TAG, "Boiler disabled - ensuring burner is off");
+            wasSystemDisabled = true;
+
+            // Immediate deactivation when boiler disabled
+            BurnerSystemController* controller = SRP::getBurnerSystemController();
+            if (controller) {
+                // L10: Check deactivate result - system disable is critical
+                auto result = controller->deactivate();
+                if (result.isError()) {
+                    LOG_ERROR(TAG, "SYSTEM DISABLE: Failed to deactivate: %s", result.message().c_str());
+                    // Try emergency shutdown
+                    controller->emergencyShutdown("System disable deactivate failed");
+                }
+            }
+        }
+
+        publishDemandPermission(false, 0, true);
+        BurnerStateMachine::setHeatDemand(false, 0);
+        burnerState.lastHeatDemand = false;
+
+        // The BURNER_OFF / BURNER_*_LOW / BURNER_*_HIGH status bits used to be cleared
+        // and re-set here. Removed 2026-09-17: nothing in the firmware ever tests bits
+        // 16-21 - no condition, no MQTT publish, no consumer outside this file - so
+        // these were writes to a state nobody reads. Burner state reaches Home
+        // Assistant through the `r` (relay) and `s` (state) fields of
+        // boiler/status/sensors instead. BURNER_ON (bit 7), the one burner bit that IS
+        // read (RelayControlTask:618), is owned by BurnerStateMachine and untouched.
+        // The generated header still defines the constants; it is machine-generated
+        // from tools/event_config.yaml and deliberately not edited.
+        return;
+    }
+
+    // Reset flag when system is enabled again
+    wasSystemDisabled = false;
+
+    // Update the operation mode BEFORE the sensor check (review R4-1): the required sensors
+    // follow it, and the former order skipped the update while the check failed, so a mode
+    // stuck at SPACE_HEATING kept a missing room sensor blocking a pure water request
+    TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+
+    // Check temperature sensor status
+    if (!TemperatureSensorFallback::canContinueOperation()) {
+        // Keep BoilerTempControlTask from arming, then write OFF (review R1-3):
+        // BoilerTempControlTask never reaches its disarm without a request or with an
+        // invalid/stale boiler temperature, so the demand stayed armed
+        publishDemandPermission(false, 0, true);
+        BurnerStateMachine::setHeatDemand(false, 0);
+        burnerState.lastHeatDemand = false;
+        return;
+    }
+
+    // Get safe operating parameters
+    TemperatureSensorFallback::getSafeOperatingParams(
+        burnerState.maxAllowedTemp,
+        burnerState.maxPowerFactor,
+        burnerState.maxRunTime
+    );
+
+    // Determine heat demand
+    bool heatingRequested = (requestBits & SystemEvents::BurnerRequest::HEATING) != 0;
+    bool waterRequested = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
+    bool waterPriority = (systemStateBits & SystemEvents::SystemState::WATER_PRIORITY) != 0;
+
+    // Determine actual heat demand
+    bool heatDemand = false;
+    bool isWaterMode = false;
+    Temperature_t targetTemp = 0;
+    bool highPower = false;
+    
+    if (waterRequested && (waterPriority || !heatingRequested)) {
+        heatDemand = true;
+        isWaterMode = true;
+        targetTemp = SystemEvents::BurnerRequest::decode_temperature_t(requestBits);
+        highPower = (requestBits & SystemEvents::BurnerRequest::POWER_HIGH) != 0;
+    } else if (heatingRequested) {
+        heatDemand = true;
+        isWaterMode = false;
+        targetTemp = SystemEvents::BurnerRequest::decode_temperature_t(requestBits);
+        highPower = (requestBits & SystemEvents::BurnerRequest::POWER_HIGH) != 0;
+    }
+    
+    // Validate and update state
+    if (targetTemp < tempFromWhole(20) && heatDemand) {  // 20°C minimum
+        targetTemp = tempFromWhole(70);  // 70°C default
+        char tempBuf[16];
+        formatTemp(tempBuf, sizeof(tempBuf), targetTemp);
+        LOG_WARN(TAG, "Invalid target temperature, using default: %s°C", tempBuf);
+    }
+    
+    // Apply safety limits
+    if (heatDemand && burnerState.maxAllowedTemp > 0) {
+        if (targetTemp > burnerState.maxAllowedTemp) {
+            char targetBuf[16], limitBuf[16];
+            formatTemp(targetBuf, sizeof(targetBuf), targetTemp);
+            formatTemp(limitBuf, sizeof(limitBuf), burnerState.maxAllowedTemp);
+            LOG_WARN(TAG, "Limiting target temp from %s°C to %s°C",
+                    targetBuf, limitBuf);
+            targetTemp = burnerState.maxAllowedTemp;
+        }
+        
+        if (burnerState.maxPowerFactor < 1.0f && highPower) {
+            LOG_WARN(TAG, "Disabling high power due to sensor fallback");
+            highPower = false;
+        }
+        
+        // Check runtime limit
+        if (burnerState.operationStartTime == 0) {
+            burnerState.operationStartTime = millis();
+        } else if (burnerState.maxRunTime < UINT32_MAX) {
+            uint32_t runtime = millis() - burnerState.operationStartTime;
+            if (runtime > burnerState.maxRunTime) {
+                LOG_ERROR(TAG, "Maximum runtime exceeded - shutting down");
+                heatDemand = false;
+                BurnerStateMachine::emergencyStop();
+            }
+        }
+    } else if (!heatDemand) {
+        burnerState.operationStartTime = 0;
+    }
+    
+    // Update state if changed
+    if (heatDemand != burnerState.lastHeatDemand || 
+        (heatDemand && tempAbs(tempSub(targetTemp, burnerState.lastTargetTemp)) > tempFromWhole(1)) ||  // > 1°C difference
+        (heatDemand && isWaterMode != burnerState.lastIsWaterMode)) {
+        
+        updateBurnerState(heatDemand, isWaterMode, targetTemp, highPower);
+    }
+}
+
+static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t targetTemp, bool highPower) {
+    const char* TAG = "BurnerUpdate";
+
+    // Update return preheater state machine (thermal shock mitigation)
+    ReturnPreheater::update();
+
+    // Block heat demand while preheating is in progress
+    if (heatDemand && ReturnPreheater::getState() == ReturnPreheater::State::PREHEATING) {
+        LOG_DEBUG(TAG, "Heat demand blocked - return preheating in progress (cycle %u)",
+                  ReturnPreheater::getCurrentCycle());
+        heatDemand = false;
+    }
+
+    // Reset preheater state once burner turns off (ready for next cycle)
+    if (!heatDemand && ReturnPreheater::isComplete()) {
+        ReturnPreheater::reset();
+    }
+
+    if (heatDemand) {
+        char tempBuf[16];
+        formatTemp(tempBuf, sizeof(tempBuf), targetTemp);
+        if (isWaterMode != burnerState.lastIsWaterMode) {
+            LOG_INFO(TAG, "Switching mode from %s to %s - Target: %s°C, Power: %s",
+                    burnerState.lastIsWaterMode ? "Water" : "Heating",
+                    isWaterMode ? "Water" : "Heating",
+                    tempBuf,
+                    highPower ? "HIGH" : "LOW");
+        } else {
+            LOG_INFO(TAG, "Burner demand changed - Heat: ON, Mode: %s, Target: %s°C, Power: %s",
+                    isWaterMode ? "Water" : "Heating",
+                    tempBuf,
+                    highPower ? "HIGH" : "LOW");
+        }
+    } else {
+        LOG_INFO(TAG, "No heat demand - burner going idle");
+    }
+    
+    burnerState.lastHeatDemand = heatDemand;
+    burnerState.lastTargetTemp = targetTemp;
+    burnerState.lastIsWaterMode = isWaterMode;
+
+    // Note: Relay control is now handled by BurnerStateMachine via BurnerSystemController
+    // The setHeatDemand() call below will trigger state transitions that control relays
+
+    // C2: Moved clear-bits closer to set-bits (line ~720) to minimize race window
+    // The atomic clear-and-set is done in the switch statement below
+
+    // Safety validation using StateManager for staleness detection
+    // (the readings also feed the BurnerDemandGate arming check below)
+    SharedSensorReadings readings = {};
+    bool readingsValid = false;
+    if (heatDemand) {
+
+        // Atomic sensor read: get readings AND staleness in single mutex acquisition
+        // This prevents TOCTOU race between checking staleness and reading data
+        SensorReadingsWithAge sensorResult = StateManager::getSensorReadingsAtomic();
+
+        // H4: Feed watchdog after potentially slow mutex operation
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // Error::SENSOR_FAILURE is SHARED with TemperatureSensorFallback and this task was
+        // the writer without a clear path, so a bit raised here while the sensors were
+        // healthy stayed set forever - and it is in CRITICAL_ERRORS and gates
+        // clearEmergencyStop(), so one 100 ms mutex timeout latched an emergency stop that
+        // only a reboot could clear (measured 2026-10-18). SensorErrorBitPolicy.h has the
+        // full account. Two narrow changes: confirm over SensorFailureConfirm::CONFIRM_MS
+        // before raising, and clear on recovery but ONLY a bit we raised ourselves.
+        //
+        // Safety is unchanged while confirming: heatDemand is still cleared on every
+        // failing cycle below, so the burner stays blocked exactly as before. All that is
+        // delayed is the error-bit escalation.
+        static SensorFailureConfirm::State readFailure;
+        static bool sensorFailureOwnedHere = false;
+
+        const bool readOk = sensorResult.mutexAcquired && !sensorResult.isStale;
+
+        if (!sensorResult.mutexAcquired) {
+            LOG_ERROR(TAG, "Failed to acquire sensor mutex - blocking burner");
+            heatDemand = false;
+        } else if (sensorResult.isStale) {
+            LOG_ERROR(TAG, "Sensor data stale (%lu ms old) - blocking burner operation",
+                      sensorResult.ageMs);
+            heatDemand = false;
+        } else {
+            readings = sensorResult.readings;
+            readingsValid = true;
+        }
+
+        // heatDemand is true throughout this block, so the confirm window tracks read
+        // failures only; it resets itself on the first good read.
+        const bool confirmedReadFailure =
+            SensorFailureConfirm::shouldStop(readFailure, readOk, true, millis());
+
+        switch (SensorErrorBitPolicy::decide(confirmedReadFailure, readOk,
+                                             sensorFailureOwnedHere)) {
+            case SensorErrorBitPolicy::Action::RAISE:
+                if (!sensorFailureOwnedHere) {
+                    LOG_ERROR(TAG, "Sensor reads failing for %lus - raising SENSOR_FAILURE",
+                              static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
+                    sensorFailureOwnedHere = true;
+                }
+                xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
+                                  SystemEvents::Error::SENSOR_FAILURE);
+                break;
+            case SensorErrorBitPolicy::Action::CLEAR:
+                LOG_INFO(TAG, "Sensor reads recovered - clearing SENSOR_FAILURE");
+                xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),
+                                     SystemEvents::Error::SENSOR_FAILURE);
+                sensorFailureOwnedHere = false;
+                break;
+            case SensorErrorBitPolicy::Action::NONE:
+                break;
+        }
+
+        if (heatDemand) {
+            BurnerSafetyValidator::SafetyConfig safetyConfig;
+            safetyConfig.maxBoilerTemp = burnerState.maxAllowedTemp;
+            safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
+
+            auto validationResult = BurnerSafetyValidator::validateBurnerOperation(
+                readings, safetyConfig, isWaterMode);
+
+            // H4: Feed watchdog after safety validation (can involve multiple mutex operations)
+            (void)SRP::getTaskManager().feedWatchdog();
+
+            if (validationResult != BurnerSafetyValidator::ValidationResult::SAFE_TO_OPERATE) {
+                LOG_ERROR(TAG, "Safety validation failed: %s",
+                        BurnerSafetyValidator::getValidationErrorMessage(validationResult));
+
+                BurnerSafetyValidator::logSafetyEvent(validationResult,
+                    isWaterMode ? "Water heating mode" : "Space heating mode");
+
+                // For sensor/pump failures, disable heat demand immediately (fail-safe)
+                // Recovery will happen on subsequent loop iterations when conditions improve
+                heatDemand = false;
+
+                // Special handling for thermal shock - start return preheating
+                if (validationResult == BurnerSafetyValidator::ValidationResult::THERMAL_SHOCK_RISK) {
+                    // Start preheating if not already running
+                    if (ReturnPreheater::getState() == ReturnPreheater::State::IDLE) {
+                        LOG_INFO(TAG, "Starting return preheating to mitigate thermal shock");
+                        ReturnPreheater::start();
+                    }
+                    // Don't trigger emergency stop - preheating will resolve this
+                } else if (validationResult != BurnerSafetyValidator::ValidationResult::SENSOR_FAILURE &&
+                    validationResult != BurnerSafetyValidator::ValidationResult::PUMP_FAILURE) {
+                    // For more severe errors, trigger emergency stop
+                    BurnerStateMachine::emergencyStop();
+                }
+            } else {
+                if (!burnerState.lastHeatDemand) {
+                    burnerState.operationStartTime = millis();
+                }
+                // Validation passed - clear the SAFETY bit set by logSafetyEvent().
+                // Nothing else clears it, so it stayed latched and every later
+                // "Critical system errors" report carried a stale 0x4000.
+                xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),
+                                     SystemEvents::Error::SAFETY);
+            }
+        }
+    }
+    
+    // BurnerDemandGate: publish whether BoilerTempControlTask may arm, and arm here
+    // only when that controller would. It re-asserts OFF one cycle (~2.5 s) later,
+    // after the 2 s pre-purge, so the former unconditional ON ignited above target
+    // (2026-09-14 17:12, boiler 64.4 C vs heating target 47.0 C).
+    publishDemandPermission(heatDemand, burnerState.maxAllowedTemp, burnerState.maxPowerFactor >= 1.0f);
+    if (!heatDemand) {
+        BurnerStateMachine::setHeatDemand(false, targetTemp, highPower);
+    } else {
+        bool decisionWantsHeat = false;
+        Temperature_t decisionTarget = 0;
+        uint32_t decisionAgeMs = 0;
+        const bool decisionFresh =
+            getBoilerTempDecision(decisionWantsHeat, decisionTarget, decisionAgeMs) &&
+            decisionAgeMs <= BurnerDemandGate::DECISION_MAX_AGE_MS;
+        const bool boilerTempValid = readingsValid && readings.isBoilerTempOutputValid;
+        // Without a fresh decision for this target, follow what the controller's next
+        // cycle would decide (PID on-threshold and hysteresis), not "boiler < target"
+        BurnerDemandGate::Prediction prediction = BurnerDemandGate::Prediction::UNKNOWN;
+        BoilerTempController* tempController = getBoilerTempController();
+        bool predictedHeat = false;
+        if (boilerTempValid && tempController != nullptr &&
+            tempController->predictHeatDemand(targetTemp, readings.boilerTempOutput, predictedHeat)) {
+            prediction = predictedHeat ? BurnerDemandGate::Prediction::HEAT : BurnerDemandGate::Prediction::OFF;
+        }
+        if (BurnerDemandGate::controlTaskMayArm(boilerTempValid,
+                                                readings.boilerTempOutput, targetTemp,
+                                                decisionFresh, decisionTarget, decisionWantsHeat,
+                                                prediction)) {
+            BurnerStateMachine::setHeatDemand(true, targetTemp, highPower);
+        } else {
+            char boilerBuf[16], targetBuf[16];
+            formatTemp(boilerBuf, sizeof(boilerBuf), readings.boilerTempOutput);
+            formatTemp(targetBuf, sizeof(targetBuf), targetTemp);
+            LOG_INFO(TAG, "Heat demand not armed - boiler %s°C, target %s°C (BoilerTempCtrl arms when heat is needed)",
+                     boilerBuf, targetBuf);
+        }
+    }
+    
+    // The burner status bits (BURNER_OFF, BURNER_*_LOW/HIGH, BURNER_ERROR) used to be
+    // recomputed from the state machine and published here. Removed 2026-09-17: bits
+    // 16-21 are never tested anywhere in the firmware - no condition, no MQTT publish,
+    // no consumer outside this file - so this whole block wrote a state nobody reads.
+    // Burner state reaches Home Assistant through the `r` (relay) and `s` (state)
+    // fields of boiler/status/sensors.
+    //
+    // This also retires the cross-task BURNER_ERROR clobber noted when the useless
+    // critical section came out: BurnerControlTask was clearing a bit owned and
+    // written by BurnerStateMachine (:343, :702, :786, :811, :922) and
+    // CentralizedFailsafe (:163, :557), with no synchronisation on either side. That
+    // bit now has exactly one set of writers.
+    //
+    // BURNER_ON (bit 7) is unaffected - it is the only burner bit anything reads
+    // (RelayControlTask:618) and BurnerStateMachine owns it. The generated header
+    // still defines all the constants; it is machine-generated from
+    // tools/event_config.yaml and is deliberately not edited.
+}

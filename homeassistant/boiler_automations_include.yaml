@@ -1,0 +1,31 @@
+- id: boiler_refresh_param_groups
+  alias: "Boiler: refresh parameter groups"
+  description: >-
+    Grouped param replies on boiler/params/status/<group> are retained and republished by the
+    firmware on every set (library 315a969), but NOT on boot/MQTT connect, so a retained group can
+    be pre-reboot stale. Re-request each group (paced, to spare the ESP32 mqtt_high_priority queue)
+    on HA start and whenever the boiler comes online. A manual run refreshes too.
+  mode: queued
+  max: 5
+  triggers:
+    - trigger: homeassistant
+      event: start
+      id: all
+    - trigger: mqtt
+      topic: "boiler/status/online"
+      id: all
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger is not defined or trigger.platform != 'mqtt'
+           or 'true' in trigger.payload or trigger.payload == 'online' }}
+  actions:
+    - delay: "{{ 15 if trigger is defined and trigger.id is defined and trigger.id == 'all' else 0 }}"
+    - repeat:
+        for_each: [heating, h, pid, sensor, wheater, w]
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "boiler/params/get/{{ repeat.item }}"
+              payload: ""
+          - delay: 1.5

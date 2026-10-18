@@ -1,0 +1,999 @@
+# FreeRTOS Task Architecture
+
+**Project**: ESP32 Boiler Controller
+**Version**: 0.1.0
+**Last Updated**: December 16, 2025
+
+---
+
+## Overview
+
+The ESP32 Boiler Controller starts **19 FreeRTOS tasks** through TaskManager (table below), managing boiler control, sensors, communication, and monitoring. The architecture is fully **event-driven** with zero polling loops for optimal power efficiency and responsive safety systems.
+
+**Key Characteristics:**
+- Event-driven architecture (no polling)
+- Priority-based scheduling (1-4)
+- Core pinning for time-critical tasks
+- Comprehensive watchdog coverage
+- Thread-safe shared resource access
+
+---
+
+## Task Summary
+
+| Task | Priority | Stack (SEL) | Core | Purpose |
+|------|----------|-------------|------|---------|
+| BurnerControlTask | 4 | 4096 | 1 | Burner state machine, safety-critical |
+| RelayControlTask | 4 | 4096 | 1 | Physical relay control, motor protection |
+| HeatingControlTask | 3 | 3584 | Any | Space heating: heating curve target, heating request |
+| WheaterControlTask | 3 | 3584 | Any | Water heating: charge decision, water request |
+| BoilerTempControlTask | 4 | 3584 | 1 | Boiler temperature PID, heat demand, autotune |
+| MB8ARTTask | 4 | 3584 | 1 | MB8ART temperature data acquisition |
+| MB8ARTProcessingTask | 3 | 3072 | 1 | Temperature sensor data processing |
+| ANDRTF3Task | 3 | 3584 | 1 | Room temperature sensor (only if the device is present) |
+| RYN4ProcessingTask | 3 | 3072 | 1 | Relay module data processing |
+| ControlTask | 3 | 3584 | Any | Remote control command handler |
+| MQTTTask | 2 | 3584 | 1 | MQTT communication & queuing |
+| MonitoringTask | 2 | 3584 | 0 | System health & diagnostics |
+| HeatingPumpTask | 3 | 2560 | Any | Heating circulation pump control |
+| WaterPumpTask | 3 | 2560 | Any | Hot water loading pump control |
+| OTATask | 1 | 3072 | 1 | Over-the-air firmware updates |
+| TimerSchedulerTask | 2 | 3072 | 0 | Schedule management |
+| PersistentStorageTask | 2 | 5120 | Any | NVS parameter persistence |
+| NTPTask | 2 | 3584 | 1 | Time synchronization |
+| SyslogTask | 1 | 4096 | Any | Remote syslog |
+
+*Only `LOG_MODE_DEBUG_SELECTIVE` is a buildable, hardware-validated configuration as of 2026-09-18: `LOG_MODE_DEBUG_FULL` and `LOG_MODE_RELEASE` raise a `#error` in `ProjectConfig.h` because their task stacks are measurably too small. Treat any DEBUG_FULL or RELEASE figure below as historical, not as a target.*
+
+*Stack sizes shown for LOG_MODE_DEBUG_SELECTIVE (default env `esp32dev_usb_debug_selective`), from the `STACK_SIZE_*` macros in `src/config/ProjectConfig.h`, which depend on the log mode build flag (DEBUG_FULL / DEBUG_SELECTIVE / RELEASE). Only two stacks are still literals in their start calls and therefore fixed in all modes: SyslogTask 4096 (`TaskInitializer.cpp`) and ModbusInit 4096 (`ModbusDeviceInitializer.cpp`). Everything else - including the pumps, BoilerTempCtrl, NTPTask and NetworkMonitor - now comes from a `STACK_SIZE_*` macro and is covered by the `configMINIMAL_STACK_SIZE` assertions in ProjectConfig.h (2026-09-18). Priorities (`PRIORITY_*` macros or literals) and cores do not depend on build flags. "Any" = not pinned (`TaskManager::startTask()`, no core affinity). MQTTTask is started only with `ENABLE_MQTT`, MonitoringTask with `ENABLE_MONITORING_TASK` (both set by default), ANDRTF3Task only if the device is present.*
+
+Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer.cpp` (MB8ART, MB8ARTProc, RYN4Proc) and `src/main.cpp` (TimerSched, NTPTask). `SensorTask` exists in `src/modules/tasks/` but is not started. Outside TaskManager, NetworkInitializer creates a small `NetworkMonitor` task and ModbusDeviceInitializer a short-lived background verification task. (The never-started "MQTTDiagnostics" and "TaskHealthMonitor" tasks were removed with their modules on 2026-09-16.)
+
+---
+
+## Detailed Task Documentation
+
+### 1. BurnerControlTask ⚠️ SAFETY-CRITICAL
+
+**File**: `src/modules/tasks/BurnerControlTask.cpp`
+**Priority**: 4 (Highest)
+**Stack**: 4096 (DEBUG_FULL) | 4096 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 1 (pinned)
+**Watchdog**: 15000ms (WDT_BURNER_CONTROL_MS)
+
+**Purpose**: Manages the burner state machine, enforces safety interlocks, coordinates heating/water demand, and handles emergency shutdown.
+
+**Event Groups**:
+- **Sensor Event Group** (waits): `FIRST_READ_COMPLETE`, `DATA_AVAILABLE` at startup; polls `BOILER_RETURN`, `WATER_TANK` and the `BOILER_OUTPUT/BOILER_RETURN/WATER_TANK_ERROR` bits whenever its request-bit wait ends (100 ms while running, 1 s, 3 s when idle), so in idle it can react up to 3 s after a read
+- **Burner Event Group** (sets/waits): `STATE_TIMEOUT`, `FLAME_STATE_CHANGED`, `PRESSURE_CHANGED`, `FLOW_CHANGED`, `SAFETY_EVENT`
+- **Burner Request Event Group** (waits): `HEATING`, `WATER`, `CHANGE_EVENT_BITS`, `TEMPERATURE_MASK`
+- **System State Event Group**: no longer sets any burner status bit. `BURNER_OFF`, `BURNER_HEATING_LOW/HIGH` and `BURNER_WATER_LOW/HIGH` (bits 16-20) were removed in `cce02c8` - they had no reader, and the same information is carried by the relay word (bit 0 `BURNER_ENABLE`, bit 1 `POWER_BOOST`, bit 2 `WATER_MODE`). `BURNER_ERROR` (bit 21) still exists but is written by `BurnerStateMachine` and `CentralizedFailsafe`, not here
+- **Control Requests Event Group** (waits): Various control commands
+
+**Mutexes**:
+- `SensorReadingsMutex` (via MutexRetryHelper)
+- `BurnerSystemController` internal mutex
+
+**State Machine**: See [STATE_MACHINES.md](STATE_MACHINES.md) for details
+
+**Safety Features**:
+- Continuous safety monitoring in IGNITION/RUNNING states
+- Emergency stop with immediate relay shutdown
+- Burner request expiration watchdog (10 minutes)
+- Anti-flapping protection (minimum on-time 2 min, off-time 20s)
+- BurnerDemandGate: publishes the arming permission (`getBurnerDemandPermission()`) and arms a new or changed request only when BoilerTempControlTask would (fresh PID decision wants heat, otherwise boiler below target)
+- Blocked standing requests (return preheating, stale sensors, failed validation, sensor fallback) re-evaluated every 10 s
+- Clears `Error::SAFETY` when burner safety validation passes
+
+---
+
+### 2. RelayControlTask ⚠️ SAFETY-CRITICAL
+
+**File**: `src/modules/tasks/RelayControlTask.cpp`
+**Priority**: 4 (Highest)
+**Stack**: 2560 (DEBUG_FULL) | 4096 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 1 (pinned)
+**Watchdog**: 10000ms (WDT_RELAY_CONTROL_MS, critical)
+
+**Purpose**: Controls 8 physical relays via RYN4 Modbus module, enforces pump motor protection, provides rate limiting, and monitors relay health.
+
+**Event Groups**:
+- **Relay Request Event Group** (waits): All relay request bits (pumps, burner, power, valve, alarm)
+- **System State Event Group** (monitors): `HEATING_ON`, `WATER_ON`, `BURNER_ON`
+- **Relay Status Event Group** (sets): `SYNCHRONIZED`, `COMM_OK`
+- **Error Notification Event Group** (sets): `RELAY` on failures
+
+**Mutexes**:
+- `taskMutex` (task coordination)
+- `relayStateMutex` (Round 20 Issue #6 - relay state protection)
+- `RYN4` device mutex (via MutexRetryHelper)
+- `RelayReadingsMutex` (shared state)
+
+**Equipment Protection**:
+- **Pump motor protection**: `SafetyConfig::pumpProtectionMs` minimum between state changes (default 15 s, prevents motor damage)
+- **Relay rate limiting**: `MIN_RELAY_SWITCH_INTERVAL_MS` (150 ms) and `MAX_RELAY_TOGGLE_RATE_PER_MIN` (30)
+- **Real changes only**: rate limiting and pump protection apply only to commands that change the desired relay state and are not emergency commands (`RelayCommandPolicy`); the pump protection timestamp is updated only on a real change
+- **Health monitoring**: Tracks relay failures and communication errors
+
+**Relay Functions**:
+(`include/config/RelayIndices.h`, array index = relay number - 1)
+1. Burner Enable (Relay 1) - heating mode, half power
+2. Power Boost (Relay 2) - ON=full power, OFF=half power
+3. Water Mode (Relay 3) - water mode, half power
+4. Valve Control (Relay 4)
+5. Heating Pump (Relay 5)
+6. Water Pump (Relay 6)
+7. Spare (Relay 7)
+8. Alarm (Relay 8)
+
+---
+
+### 3. HeatingControlTask
+
+**File**: `src/modules/tasks/HeatingControlTask.cpp`
+**Priority**: 3
+**Stack**: 2048 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1024 (RELEASE)
+**Core**: Not pinned
+**Watchdog**: Dynamic - max(sensorInterval * 4, WDT_HEATING_CONTROL_MS)
+
+**Purpose**: Space heating control: boiler target from the heating curve (`HeatingControlModule::calculateSpaceHeatingTargetTemp()`), burner request management, water priority coordination. Runs on a 5 s process timer.
+
+**Event Groups**:
+- **System State Event Group** (checks/sets): `BOILER_ENABLED`, `HEATING_ENABLED`, `HEATING_ON`
+- **Heating Event Group** (sets): `HeatingEvent::True/False`
+- **Control Requests Event Group** (waits): `HEATING_ON_OVERRIDE`, `HEATING_OFF_OVERRIDE`, `WATER_PRIORITY_RELEASED`
+- **Burner Request Event Group** (waits/checks): `WATER`
+- **System State Event Group** (checks): `WATER_PRIORITY`
+
+**Mutexes**:
+- `SensorReadingsMutex` (via MutexRetryHelper)
+
+**Control Logic**:
+- Heating curve from outside temperature, shifted by the room deviation in weather-compensated mode (no PID in this task; the power level is decided by BoilerTempControlTask)
+- Integrates with TimerSchedulerTask for scheduled heating
+- Yields to water heating when priority flag set
+
+---
+
+### 4. WheaterControlTask (Water Heater)
+
+**File**: `src/modules/tasks/WheaterControlTask.cpp`
+**Priority**: 3
+**Stack**: 3072 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 2048 (RELEASE)
+**Core**: Not pinned
+**Watchdog**: 20000ms (WDT_WHEATER_CONTROL_MS, non-critical)
+
+**Purpose**: Water heating control: tank charge decision, boiler target for the water burner request, water pump request at charge start. There is no PID in this task; the power level (PID with the `pid/waterHeater/*` gains) is decided by BoilerTempControlTask.
+
+**Event Groups**:
+- **System State Event Group** (checks/sets): `BOILER_ENABLED`, `WATER_ENABLED`, `WATER_ON`
+- **Relay Event Group** (sets): `WATER_PUMP_ON`, `WATER_PUMP_OFF`
+- **Control Requests Event Group** (waits/sets): `WATER_ON_OVERRIDE`, `WATER_OFF_OVERRIDE`, `WATER_PRIORITY_RELEASED`
+
+**Mutexes**:
+- `SensorReadingsMutex`
+
+**Control Parameters** (configurable via MQTT):
+- `tempLimitLow`: Start threshold (default 45.0°C, range 30-60°C)
+- `tempLimitHigh`: Stop threshold (default 65.0°C, range 50-85°C)
+- Boiler target: tank temperature + `wHeaterConfTempChargeDelta` (5-20°C, default 10°C; invalid values use 10°C), clamped to `water_heating_low_limit`..`water_heating_high_limit` (default 40-90°C); `BurnerRequestManager::setWaterRequest()` also clamps to 20-110°C
+
+**Charge Logic**:
+- Two-threshold latch in `WaterChargePolicy::nextChargeNeeded()`: start below `tempLimitLow`, stop above `tempLimitHigh`
+- Inverted limits (`low >= high`, `WaterChargePolicy::limitsValid()`) pause water heating with one WARN until the pair is consistent
+- Switching water heating off (water or boiler disable, water OFF override) clears the latch; after re-enable a new charge starts only below `tempLimitLow`. Heating preemption and sensor loss keep the latch (the charge resumes)
+- `notifyWheaterTaskSwitchedOff()` (called by `StateManager::setBoilerEnabled(false)`, `setWaterEnabled(false)`, `setWaterOverrideOff(true)` and `CentralizedFailsafe::emergencyStop()`) wakes the task, which ends a running charge on its next run even if water heating was re-enabled within the same cycle
+
+**Modes**:
+- **On-demand heating**: Activated when tank temp < tempLimitLow
+- **Scheduled heating**: Via TimerSchedulerTask integration
+- **After a charge**: clears WATER_ON and the water request and sets `WATER_PRIORITY_RELEASED` so space heating can resume (there is no separate heat recovery mode)
+
+---
+
+### 5. MQTTTask
+
+**File**: `src/modules/tasks/MQTTTask.cpp`
+**Priority**: 2
+**Stack**: 3072 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 1 (pinned)
+**Watchdog**: 30000ms (WDT_MQTT_TASK_MS)
+
+**Purpose**: MQTT communication, sensor data publishing, health monitoring, command handling, priority-based message queuing with backpressure.
+
+**Event Groups**:
+- **MQTT Task Event Group** (internal): `CONNECTED`, `DISCONNECTED`, `MESSAGE`, `PUBLISH_SENSORS`, `PUBLISH_HEALTH`, `PROCESS_QUEUE`, `RETRY_SUBSCRIPTIONS`
+- **System State Event Group** (sets): `MQTT_OPERATIONAL`
+- **Error Notification Event Group** (sets): `NETWORK` on connection loss
+- **General System Event Group** (sets): `MQTT_QUEUE_PRESSURE` (throttling signal)
+
+**Queues**:
+- **High priority queue**: 5 messages (`HIGH_PRIORITY_QUEUE_SIZE`, `MQTTTask.h`)
+- **Normal priority queue**: 5 messages (`NORMAL_PRIORITY_QUEUE_SIZE`)
+- **Overflow strategy**: DROP_OLDEST with logging
+- **Backpressure**: Sets `MQTT_QUEUE_PRESSURE` bit at 80% utilization
+
+**Mutexes**:
+- `mqttMutex_` (client operations)
+- `SensorReadingsMutex` (read sensor data)
+- `RelayReadingsMutex` (read relay states)
+
+**Publishing Intervals**:
+- Sensor data: 10s (balanced update rate)
+- Health data: 60s (system monitoring)
+- On-demand: Event-driven status updates
+
+**Message Priorities**:
+- `CRITICAL`: Bypasses queue under pressure
+- `HIGH`: Never throttled
+- `MEDIUM`: Throttled at 80% utilization
+- `LOW`: Throttled at 50% utilization
+
+---
+
+### 6. MonitoringTask
+
+**File**: `src/modules/tasks/MonitoringTask.cpp`
+**Priority**: 2
+**Stack**: 4096 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 3584 (RELEASE)
+**Core**: 0 (pinned)
+**Watchdog**: 30000ms (WDT_MONITORING_MS, non-critical)
+
+**Purpose**: System health monitoring, task stack analysis, error log dumping, periodic diagnostics.
+
+**Event Groups**:
+- **Monitoring Event Group** (internal): `HEALTH_CHECK`, `DETAILED`, `ON_DEMAND`, `CRITICAL`
+- **Sensor Event Group** (checks): `FIRST_READ_COMPLETE`
+
+**Mutexes**:
+- `SensorReadingsMutex` (read sensor status)
+- `RelayReadingsMutex` (read relay status)
+
+**Monitoring Intervals**:
+- **Health check**: 5s (basic heap, tasks, connectivity)
+- **Detailed diagnostics**: 30 minutes (`DETAILED_MONITOR_INTERVAL_MS`; stack HWM, error logs)
+- **MQTT health publish**: 60s (via MQTTTask)
+
+**Diagnostics**:
+- FreeRTOS task status (all running tasks)
+- Stack high water mark analysis
+- Heap fragmentation tracking
+- Error log dumping (FRAM circular buffer)
+- Sensor staleness detection
+
+---
+
+### 7. MB8ARTProcessingTask
+
+**File**: `src/modules/tasks/MB8ARTProcessingTask.cpp`
+**Priority**: 3
+**Stack**: 3072 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
+**Watchdog**: 30000ms (WDT_SENSOR_PROCESSING_MS, non-critical)
+
+**Purpose**: Process Modbus packets from MB8ART 8-channel temperature sensor, update SharedSensorReadings.
+
+**Sensor Channels**:
+1. Boiler Output Temperature (critical)
+2. Boiler Return Temperature
+3. Water Tank Temperature
+4. Water Output Temperature
+5. Water Return Temperature
+6. Heating Return Temperature
+7. Pressure Sensor (4-20mA, 0.01 BAR precision)
+8. Exhaust Temperature
+
+**Event Groups**: None (MB8ART v1.2+ handles internally)
+
+**Queues**: MB8ART internal queue (library manages)
+
+**Mutexes**: MB8ART internal mutex
+
+**Reading Interval**: 2.5s (critical boiler temperatures)
+
+**Safety**:
+- Staleness detection (15s threshold)
+- Modbus error detection (0xFFFF, 0x0000, 0x7530)
+- Invalid temperature range filtering
+
+---
+
+### 8. ANDRTF3Task
+
+**File**: `src/modules/tasks/ANDRTF3Task.cpp`
+**Priority**: 3
+**Stack**: 2048 (DEBUG_FULL) | 3584 (DEBUG_SELECTIVE) | 1024 (RELEASE)
+**Core**: 1 (pinned)
+**Watchdog**: 20000ms (ANDRTF3_SENSOR_READ_INTERVAL_MS * 4)
+
+**Purpose**: Read room temperature from ANDRTF3 Modbus sensor via ModbusCoordinator.
+
+**Event Groups**:
+- **Sensor Event Group** (sets): `INSIDE`, `INSIDE_ERROR`
+
+**Queues**: Uses FreeRTOS task notifications from ModbusCoordinator
+
+**Mutexes**:
+- `SensorReadingsMutex`
+
+**Reading Interval**: 5s (room temperature changes slowly)
+
+**Features**:
+- Temperature compensation offset (configurable via MQTT)
+- Direct read fallback on coordinator timeout (30s)
+- Error recovery with exponential backoff
+
+---
+
+### 9. TimerSchedulerTask
+
+**File**: `src/modules/tasks/TimerSchedulerTask.cpp`
+**Priority**: 2 (started in `src/main.cpp`)
+**Stack**: 3072 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: 0 (pinned)
+**Watchdog**: Disabled
+
+**Purpose**: Generic timer scheduler for water/space heating schedules, FRAM persistence, MQTT command interface.
+
+**Event Groups**:
+- **Scheduler Event Group** (internal): `CHECK_SCHEDULE`, `PUBLISH_STATUS`, `SCHEDULE_CHANGED`, `SAVE_SCHEDULES`
+
+**Mutexes**:
+- `schedulesMutex` (Round 14 Issue #5 - schedule array protection)
+
+**Persistence**: RuntimeStorage (FRAM) with CRC32 validation
+
+**MQTT API**:
+- `boiler/cmd/scheduler/add` - Add schedule
+- `boiler/cmd/scheduler/remove` - Remove schedule (by ID)
+- `boiler/cmd/scheduler/list` - List all schedules
+- `boiler/status/scheduler/info` - Active schedule status
+
+**Schedule Types**:
+- **Water heating**: Timed tank heating sessions
+- **Space heating**: Room temperature schedule (future)
+
+**Limits**: MAX_SCHEDULES = 20 (`SchedulerContext.h`, `RuntimeStorageSchedules.h`)
+
+---
+
+### 10. PersistentStorageTask
+
+**File**: `src/modules/tasks/PersistentStorageTask.cpp`
+**Priority**: 2 (`PRIORITY_CONTROL_TASK - 1`)
+**Stack**: 5120 (DEBUG_FULL) | 5120 (DEBUG_SELECTIVE) | 1536 (RELEASE)
+**Core**: Not pinned
+**Watchdog**: Not registered (event-driven)
+
+**Purpose**: NVS parameter persistence, MQTT parameter API, temperature offset management, error logging to FRAM.
+
+**Event Groups**:
+- **Storage Event Group** (internal): `SAVE_REQUEST`, `LOAD_REQUEST`, `MQTT_RECONNECT`
+- **System State Event Group** (checks): `MQTT_OPERATIONAL`
+- **General System Event Group** (sets): `STORAGE_READY`
+- **Control Requests Event Group** (sets): `SAVE_PARAMETERS`
+
+**Queues**: PersistentStorage internal command queue
+
+**MQTT Parameter API**:
+```
+boiler/params/set/wheater/tempLimitLow       - Water start threshold (45.0°C, 300-600 tenths)
+boiler/params/set/wheater/tempLimitHigh      - Water stop threshold (65.0°C, 500-850 tenths)
+boiler/params/set/heating/hysteresis         - Space heating hysteresis (0.5°C, 1-20 tenths)
+boiler/params/set/heating/targetTemp         - Room target temperature (100-300 tenths)
+boiler/params/set/pid/spaceHeating/kp        - PID proportional gain (0-100)
+boiler/params/set/pid/spaceHeating/ki        - PID integral gain (0-10)
+boiler/params/set/pid/spaceHeating/kd        - PID derivative gain (0-50)
+boiler/params/set/pid/waterHeater/kp|ki|kd   - Water PID gains (0-100 / 0-10 / 0-50)
+boiler/params/get/<name>                     - Publish one parameter to boiler/params/status/<name>
+boiler/params/get/all                        - Request all parameters
+boiler/params/list                           - Parameter names to boiler/params/list/response
+boiler/params/save                           - Save all to NVS
+```
+
+**Live Changes**: The int32_t temperature parameters (tank limits, burner/heating/water limits, room target, hysteresis) are applied through their onChange callbacks and once after `loadAll()`. `TemperatureParameterWrapper::applyToSettings()` writes only the sensor offsets, so a save no longer reverts live changes.
+
+**NVS Recovery**: Automatic namespace erase on corruption (Round 7)
+
+---
+
+### 11. NTPTask
+
+**File**: `src/modules/tasks/NTPTask.cpp`
+**Priority**: 2 (started in `src/main.cpp`)
+**Stack**: 4096 (all modes)
+**Core**: 1 (pinned)
+**Watchdog**: 60000ms
+
+**Purpose**: NTP time synchronization, DS3231 RTC fallback, timezone handling, drift tracking.
+
+**Event Groups**:
+- **NTP Event Group** (internal): `SYNC_NOW`, `NETWORK_READY`, `LOG_STATUS`, `UPDATE_CONFIG`, `SYNC_FAILED`
+- **General System Event Group** (sets): `TIME_SYNCED`
+
+**Mutexes**:
+- `ntpMutex`
+
+**NTP Servers** (priority order, IP addresses only, no DNS):
+1. 192.168.20.1 (local gateway)
+2. 216.239.35.0 (time.google.com)
+3. 162.159.200.1 (time.cloudflare.com)
+
+**Sync Intervals**:
+- Initial sync: On network ready
+- Auto sync: 6 hours (21600000ms)
+- Retry: 30s after failure
+
+**RTC Fallback**: Switches to DS3231 after 5 consecutive NTP failures
+
+**Timezone**: Configurable via TZ environment variable (default: CET-1CEST,M3.5.0,M10.5.0/3)
+
+---
+
+### 12. OTATask
+
+**File**: `src/modules/tasks/OTATask.cpp`
+**Priority**: 1 (Lowest)
+**Stack**: 2048 (DEBUG_FULL) | 3072 (DEBUG_SELECTIVE) | 1024 (RELEASE)
+**Core**: 1 (pinned)
+**Watchdog**: Disabled (not registered)
+
+**Purpose**: Over-the-air firmware updates via ArduinoOTA, network state monitoring.
+
+**Event Groups**:
+- **OTA Event Group** (internal): `NETWORK_CONNECTED`, `NETWORK_DISCONNECTED`, `CHECK_UPDATE`, `UPDATE_STARTED`, `UPDATE_COMPLETED`, `UPDATE_ERROR`
+- **System State Event Group** (checks): `NETWORK_READY`
+
+**Mutexes**:
+- `otaStatusMutex`
+
+**Features**:
+- Automatic update checks (30s interval)
+- Password-protected updates
+- Progress tracking via MQTT
+- Safe rollback on failure
+
+**Configuration**:
+- Port: 3232
+- Password: Defined in ProjectConfig.h
+
+---
+
+### 13. HeatingPumpTask
+
+**File**: `src/modules/control/PumpControlModule.cpp`
+**Priority**: 3 (`PRIORITY_PUMP_TASK`, local constant in `TaskInitializer::initializePumpTasks()`)
+**Stack**: 2560, from `STACK_SIZE_PUMP_CONTROL_TASK` / `PRIORITY_PUMP_CONTROL_TASK` (2026-09-18: the local `STACK_SIZE_PUMP_TASK` that used to shadow those macros is gone; measured 928-940 B free, peak ~1640 B)
+**Core**: Any (not pinned)
+**Watchdog**: 10000ms (TaskManager, critical)
+
+**Purpose**: Controls heating circulation pump independently of burner state machine. Provides clean separation between burner operation and pump control, with motor protection enforced at the relay layer.
+
+**Event Groups**:
+- **System State Event Group** (waits): `HEATING_ON` - Heating mode active
+- **System State Event Group** (sets): `HEATING_PUMP_ON` - Pump state indicator
+- **Relay Request Event Group** (requests): `HEATING_PUMP_ON`, `HEATING_PUMP_OFF`
+
+**Architecture**:
+Uses unified `PumpControlModule` with parameterized configuration for code reuse.
+
+**Operation Sequence**:
+1. Wait for `HEATING_ON` event bit (heating mode activated)
+2. Issue relay request via `RelayRequest::HEATING_PUMP_ON`
+3. Set state indicator `HEATING_PUMP_ON`
+4. Increment FRAM counter for pump starts
+5. Monitor for `HEATING_ON` clear (heating mode deactivated)
+6. Issue relay request via `RelayRequest::HEATING_PUMP_OFF`
+7. Clear state indicator
+
+**Motor Protection**:
+- Enforced by RelayControlTask (not PumpControlTask)
+- Configurable via MQTT: `boiler/cmd/config/pump_protection_ms` (5000-60000ms, default 15000ms)
+- Prevents mechanical damage from rapid cycling
+
+**Decoupling Benefits**:
+- Burner state machine doesn't manage pump timing
+- Simplified burner logic (no pump state tracking)
+- Pump control testable independently
+- Motor protection centralized in one location
+
+**FRAM Integration**:
+- Tracks pump start count for maintenance scheduling
+- Counter type: `rtstorage::CounterType::HEATING_PUMP_STARTS`
+
+---
+
+### 14. WaterPumpTask
+
+**File**: `src/modules/control/PumpControlModule.cpp`
+**Priority**: 3 (same start code as HeatingPumpTask)
+**Stack**: 2048 (all modes)
+**Core**: Any (not pinned)
+**Watchdog**: 10000ms (TaskManager, critical)
+
+**Purpose**: Controls hot water tank loading pump during water heating cycles. Operates independently from burner, allowing pump to run before/after burner as needed for heat transfer.
+
+**Event Groups**:
+- **System State Event Group** (waits): `WATER_ON` - Water heating mode active
+- **System State Event Group** (sets): `WATER_PUMP_ON` - Pump state indicator
+- **Relay Request Event Group** (requests): `WATER_PUMP_ON`, `WATER_PUMP_OFF`
+
+**Architecture**:
+Uses same unified `PumpControlModule` with water-specific configuration.
+
+**Operation**: Same event-driven pattern as HeatingPumpTask but for water heating mode
+
+**Tank Loading Strategy**:
+- Pump activates with `WATER_ON` event
+- Burner modulates power (HALF/FULL) while pump circulates
+- Pump may continue briefly after burner stops (heat transfer)
+- Motor protection enforced by RelayControlTask
+
+**FRAM Integration**:
+- Tracks pump start count for wear monitoring
+- Counter type: `rtstorage::CounterType::WATER_PUMP_STARTS`
+
+**Related**: See `src/modules/control/PumpControlModule.h` for unified implementation
+
+---
+
+### 15. SensorTask (Legacy)
+
+**Status**: Not started (no start call in the init code, not counted)
+
+**Purpose**: Minimal task - just waits for sensor data events (actual processing in MB8ARTProcessingTask)
+
+---
+
+### 16. RYN4ProcessingTask
+
+**Purpose**: Process Modbus packets from RYN4 relay controller via ModbusCoordinator scheduling
+
+**File**: `src/modules/tasks/RYN4ProcessingTask.cpp`
+**Priority**: 3
+**Stack**: 3072 (DEBUG_SELECTIVE). DEBUG_FULL (1536) and RELEASE (1536) both exceed their static bounds and those tiers now refuse to build - see the `#error` blocks in ProjectConfig.h
+**Core**: 1 (pinned, started in `ModbusDeviceInitializer`)
+**Watchdog**: WDT_SENSOR_PROCESSING_MS (30s, non-critical)
+
+**Architecture**: Coordinated Modbus operations with relay verification
+
+**Tick Schedule** (via ModbusCoordinator):
+- **SET tick** (ticks 1, 6): Write pending relay changes via `setMultipleRelayStates()`
+- **READ tick** (ticks 3, 8): Verify relay states via `readBitmapStatus()`
+- **Timing**: SET → READ = 1000ms (2 coordinator ticks × 500ms)
+
+**Relay State Tracking**:
+- Uses shared `RelayState` structure (`src/shared/RelayState.h`)
+- `desired`: Target relay states (bitmask)
+- `actual`: Last verified physical states
+- `pendingWrite`: Flag for write scheduling
+- `consecutiveMismatches`: Counter for retry logic
+- `delayMask`: Tracks relays with active hardware DELAY timers
+- `delayExpiry[]`: Timestamp for DELAY expiration
+
+**Verification Logic**:
+1. **DELAY-Aware Verification**: Skip relays with active hardware DELAY countdown
+   ```cpp
+   uint8_t mismatchMask = actual ^ desired;
+   uint8_t realMismatch = mismatchMask & ~delayMask;
+   if (realMismatch == 0) {
+       // All mismatches from DELAY - expected!
+       return;
+   }
+   ```
+
+2. **Mismatch Counting**: Distinguishes timing issues from real failures
+   - First mismatch: DEBUG log (silent retry)
+   - Second+ mismatch: ERROR log (persistent problem)
+   - Reset counter on successful verification
+
+3. **Auto-Retry**: Persistent mismatches re-queue write on next SET tick
+
+**Hardware DELAY Support**:
+- RYN4 module supports hardware timer (0x06XX commands)
+- Physical relay state differs from desired during countdown
+- Verification must skip DELAY relays to avoid false positives
+- See `docs/EQUIPMENT_SPECS.md` for DELAY command details
+
+**Event Groups**:
+- **Relay Status Event Group** (sets): `SYNCHRONIZED`, `COMM_OK`, `COMM_ERROR`
+- **Relay Control Event Group** (sets): `DATA_AVAILABLE`
+
+**Mutexes**:
+- `RelayReadingsMutex` (updates SharedRelayReadings for MQTT)
+- `RelayState.delayMutex` (protects delayExpiry timestamps)
+
+#### ControlTask
+**Purpose**: Remote control command processing, system enable state management via StateManager
+
+---
+
+### 17. BoilerTempControlTask
+
+**File**: `src/modules/tasks/BoilerTempControlTask.cpp`
+**Priority**: 4 (same as BurnerControlTask)
+**Stack**: 3072 bytes
+**Core**: 1 (pinned)
+**Watchdog**: 10000ms (`SystemConstants::BoilerControl::WDT_TIMEOUT_MS`, non-critical)
+
+**Purpose**: Inner boiler temperature loop. Turns the target of the active heating/water request into a burner power level (OFF/HALF/FULL) via `BoilerTempController`, keeps the burner heat demand in line with it, and runs PID autotuning.
+
+**Event Groups**:
+- **Sensor Event Group** (waits): `BOILER_OUTPUT` (timeout 2 x MB8ART read interval)
+- **Control Requests Event Group** (checks/clears): `PID_AUTOTUNE`, `PID_AUTOTUNE_STOP`
+- **Heating Event Group** (sets/clears): `AUTOTUNE_RUNNING`, `AUTOTUNE_COMPLETE`, `AUTOTUNE_FAILED`
+
+**Control Logic** (each cycle with an active request):
+- `BoilerTempController::updateMode()` reads the active mode's gains from SystemSettings every cycle; a mode or gain change is applied with a PID reset
+- Target capped by the sensor fallback limit from `getBurnerDemandPermission()`
+- Publishes its decision (`getBoilerTempDecision()`) for BurnerControlTask's arming check
+- `BurnerDemandGate::decide()` every cycle (level-triggered): arms a missing demand while permitted and the PID wants heat (after `BurnerSafetyValidator`), drops a demand that was re-armed while coasting or is no longer permitted
+
+**Autotune**:
+- Starts only with a valid, fresh boiler output within 15-75°C (`Autotune::MIN_BOILER_TEMP` / `MAX_BOILER_TEMP`), otherwise publishes `{"status":"rejected"}` and sets `AUTOTUNE_FAILED`
+- Aborts on an invalid or stale boiler output or above 80°C (`Autotune::MAX_TEMP_EXCURSION`): withdraws the heat demand, publishes `{"status":"aborted"}`
+- Stops when no heating or water request is active
+- Relay power-on requires BurnerControlTask's permission and safety validation
+
+---
+
+## Priority Hierarchy
+
+### Priority 4 (Safety-Critical)
+Highest priority tasks that must never be blocked:
+- **BurnerControlTask**: State machine, safety interlocks
+- **RelayControlTask**: Physical hardware control
+- **BoilerTempControlTask**: Boiler temperature PID, heat demand arming
+- **MB8ARTTask**: MB8ART data acquisition
+
+### Priority 3 (Control Logic)
+Normal control tasks with sensor coordination:
+- HeatingControlTask, WheaterControlTask
+- MB8ARTProcessingTask, ANDRTF3Task
+- RYN4ProcessingTask, ControlTask
+- **HeatingPumpTask**: Heating circulation pump control
+- **WaterPumpTask**: Hot water loading pump control
+
+### Priority 2 (Non-Critical Communication & Services)
+- **MQTTTask**: Network communication (can tolerate delays)
+- **MonitoringTask**: Diagnostics and logging
+- **TimerSchedulerTask**: Schedule management
+- **NTPTask**: Time synchronization
+- **PersistentStorageTask**: NVS parameters (`PRIORITY_CONTROL_TASK - 1`)
+
+### Priority 1 (Lowest)
+- **OTATask**: Firmware updates (background operation)
+- **SyslogTask**: Remote syslog
+
+---
+
+## Core Affinity
+
+Core numbers are fixed in the start calls (`startTaskPinned()`); tasks started with `TaskManager::startTask()` have no core affinity.
+
+### Not Pinned (either core)
+- HeatingControlTask, WheaterControlTask, ControlTask
+- HeatingPumpTask, WaterPumpTask
+- PersistentStorageTask, SyslogTask
+
+### Core 0 (Explicitly Pinned)
+- **MonitoringTask**
+- **TimerSchedulerTask** (`src/main.cpp`)
+
+### Core 1 (Explicitly Pinned)
+- **BurnerControlTask**, **RelayControlTask**, **BoilerTempControlTask** (`TaskInitializer.cpp`, `RelayControlTask.cpp`)
+- **MB8ARTTask**, **MB8ARTProcessingTask**, **RYN4ProcessingTask** (`ModbusDeviceInitializer.cpp`)
+- **ANDRTF3Task** (`TaskInitializer::initializeSensorTasks()`)
+- **MQTTTask**, **OTATask** (their `start()` functions)
+- **NTPTask** (`src/main.cpp`)
+
+---
+
+## Inter-Task Communication
+
+### Event-Driven Architecture
+All tasks use FreeRTOS event groups for synchronization - **NO polling loops**.
+
+Benefits:
+- Zero CPU usage when idle (power efficiency)
+- Instant response to events (safety)
+- Simplified code (no polling logic)
+
+### Key Event Groups
+
+| Event Group | Tasks Using | Purpose |
+|-------------|-------------|---------|
+| Sensor Event Group | Burner, Heating, Wheater, ANDRTF3, Sensor | Temperature updates |
+| Burner Event Group | BurnerControl | State machine events |
+| Burner Request Event Group | BurnerControl, Heating, Wheater | Demand coordination |
+| System State Event Group | All control tasks, Pump tasks | System-wide enable states |
+| Control Requests Event Group | ControlTask, Heating, Wheater | MQTT commands, overrides |
+| Relay Event Group | RelayControl, Wheater | Relay requests |
+| Task-Specific Groups | MQTT, NTP, OTA, Monitoring, Storage, Scheduler | Internal events |
+
+See [EVENT_SYSTEM.md](EVENT_SYSTEM.md) for complete event bit definitions.
+
+### Queue Usage
+
+**MQTT Queues** (priority-based):
+- High priority: 5 messages
+- Normal priority: 5 messages
+- Overflow: DROP_OLDEST with throttling
+
+**Modbus Queues** (internal):
+- MB8ART library queue
+- RYN4 library queue
+
+**Storage Queue**:
+- PersistentStorage command queue
+
+---
+
+## Safety Features
+
+### Watchdog Protection
+
+**Critical Tasks** (system reset on timeout):
+- BurnerControlTask (15s)
+- RelayControlTask (10s)
+- HeatingPumpTask, WaterPumpTask (10s)
+
+**Non-Critical Tasks** (logged only):
+- All others with appropriate timeouts
+
+**Disabled Watchdog**:
+- OTATask (firmware update in progress)
+- TimerSchedulerTask (event-driven)
+- PersistentStorageTask (NVS operations)
+
+### Equipment Protection
+
+**Pump Motor Protection**:
+- `SafetyConfig::pumpProtectionMs` minimum between real state changes (default 15 s, RelayControlTask)
+- Prevents mechanical damage from rapid cycling
+
+**Burner Anti-Flapping**:
+- Minimum on-time: 2 minutes
+- Minimum off-time: 20 seconds
+- Prevents fuel waste and equipment wear
+
+**Relay Rate Limiting**:
+- Prevents rapid toggling
+- Tracks toggle rate per relay
+- Commands that do not change the relay state, and emergency commands, are not counted
+
+**Burner Request Expiration**:
+- 10-minute watchdog
+- Prevents stuck-on conditions
+
+### Sensor Safety
+
+**Staleness Detection**:
+- Sensor data older than 15s blocks burner operation
+- Enforced in BurnerControlTask safety checks
+
+**Hysteresis** (DISABLED):
+- Sensors are stable and accurate in this installation
+- Previously: 3 valid start / 2 invalid stop (archived Round 4)
+- Code structure preserved for future use
+
+**Fallback Modes**:
+- ANDRTF3: Direct read fallback on coordinator timeout
+- NTP: DS3231 RTC fallback after 5 failures
+- Graceful degradation when sensors fail
+
+---
+
+## Memory Optimization
+
+### Stack Size Tuning (December 2025)
+
+Based on runtime profiling showing only 60-100 bytes free:
+
+**Increased** (safety margin):
+- PIDControlTask: 3072 → 4096 bytes (was showing 60 bytes free; the task was later removed as never started)
+- MonitoringTask: 3072 → 3584 bytes (task status allocation)
+
+**Optimized** (based on HWM profiling):
+- MONITORING_TASK: 4096 → 3584 (had 2232 free)
+- RELAY_CONTROL_TASK: 4096 → 3584 (had 2032 free)
+- SENSOR_TASK: 4096 → 3584 (had 2272 free)
+- WHEATER_CONTROL_TASK: 4096 → 3584 (had 2344 free)
+- MB8ART_PROCESSING_TASK: 4096 → 3072 (had 2568 free)
+
+**Conservative** (debug modes):
+- DEBUG_FULL: Larger stacks for extensive logging
+- DEBUG_SELECTIVE: Optimized based on profiling
+- RELEASE: Aggressive optimization
+
+### Total Stack Memory by Mode
+
+| Mode | Total Stack | Notes |
+|------|-------------|-------|
+| DEBUG_FULL | ~54 KB (54,784 bytes) | Conservative for development |
+| DEBUG_SELECTIVE | ~64 KB (65,536 bytes) | Optimized for active development |
+| RELEASE | ~35 KB (36,096 bytes) | Aggressive optimization for production |
+
+Totals are the sum of the configured stacks of the 19 tasks in the Task Summary (including the fixed-size ones).
+
+### Memory Savings (Rounds 1-7)
+
+| Optimization | Savings |
+|--------------|---------|
+| Stack tuning (Round 2) | 4.5 KB |
+| Float→Fixed-point | 1 KB+ heap |
+| String→char[] buffers | 200+ bytes heap |
+| Buffer size reductions | 1 KB |
+| **Total** | **~6.7 KB+ recovered** |
+
+---
+
+## Task Lifecycle
+
+### Initialization Order
+
+1. **System Init**: Event group creation, shared resource allocation
+2. **Core Services**: SharedResourceManager, ServiceContainer
+3. **Hardware Tasks**: MB8ARTProcessingTask, RYN4ProcessingTask
+4. **Control Tasks**: BurnerControlTask, HeatingControlTask, WheaterControlTask
+5. **Communication Tasks**: MQTTTask, NTPTask, OTATask
+6. **Monitoring Tasks**: MonitoringTask
+7. **Auxiliary Tasks**: TimerSchedulerTask, PersistentStorageTask, ControlTask
+
+### Startup Dependencies
+
+**BurnerControlTask** waits for:
+- Sensor Event Group: `FIRST_READ_COMPLETE`
+- Valid sensor data in SharedSensorReadings
+
+**MQTTTask** waits for:
+- Network connection (Ethernet or WiFi)
+- Broker connection (`MQTT_SERVER`: 192.168.20.27:1883, set in `platformio.ini` `[base_prod]`, same as the default in `src/config/ProjectConfig.h`; the `[base_dev]` build uses 192.168.20.16)
+
+**TimerSchedulerTask** waits for:
+- RuntimeStorage initialization
+- RTC/NTP time sync
+
+**PersistentStorageTask** waits for:
+- NVS partition available
+- MQTT connection for parameter API
+
+### Shutdown/Cleanup
+
+All tasks register cleanup handlers via `TaskCleanupHandler`:
+- Timer deletion
+- Mutex release
+- Queue cleanup
+- Event group clear
+
+**Emergency Shutdown**:
+1. BurnerSystemController emergencyShutdown()
+2. RelayControlTask switches the burner relays OFF (BURNER_ENABLE, POWER_BOOST, WATER_MODE via `setRelayStateEmergency`, rate limit bypassed); the pumps stay with PumpControlModule
+3. CriticalDataStorage saves emergency state to FRAM
+4. System reset or safe idle state
+
+---
+
+## Performance Characteristics
+
+### CPU Utilization (typical)
+
+| Task | CPU % | Notes |
+|------|-------|-------|
+| IDLE | ~85% | Event-driven architecture = low CPU usage |
+| BurnerControlTask | <1% | Only active during state transitions |
+| HeatingControlTask | <1% | PID calculations every 10s |
+| MQTTTask | 2-5% | Network I/O and JSON serialization |
+| MB8ARTProcessingTask | 1-2% | Modbus processing every 2.5s |
+| MonitoringTask | <1% | Periodic diagnostics |
+| Other tasks | <1% each | Event-driven, minimal CPU |
+
+### Memory Footprint (DEBUG_SELECTIVE)
+
+| Resource | Usage | Total Available |
+|----------|-------|-----------------|
+| Heap | ~66-70 KB free | ~120 KB |
+| Stack | ~57 KB allocated | ~80 KB available |
+| FRAM | ~25 KB used | 32 KB (MB85RC256V) |
+| NVS | ~4 KB | 20 KB partition |
+
+**Fragmentation**: 23-28% (acceptable for FreeRTOS heap_4)
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+**Stack Overflow**:
+- Symptom: Task resets, corruption, crashes
+- Detection: Stack HWM < 100 bytes (logged by MonitoringTask)
+- Solution: Increase stack size in ProjectConfig.h
+
+**Mutex Deadlock**:
+- Symptom: Tasks block indefinitely
+- Detection: Watchdog timeout
+- Prevention: Follow mutex hierarchy (see MUTEX_HIERARCHY.md)
+- Recovery: System reset via watchdog
+
+**Queue Overflow**:
+- Symptom: Message loss, `MQTT_QUEUE_PRESSURE` bit set
+- Detection: QueueManager logging
+- Solution: Throttle non-critical messages
+
+**Event Group Saturation**:
+- Symptom: Missed events, spurious triggers
+- Detection: Event bit conflicts logged
+- Solution: Clear event groups on startup (Round 3)
+
+### Debug Tools
+
+**Stack Analysis**:
+```cpp
+MonitoringTask logs task status every 30 minutes
+Check log for "Stack HWM" values
+```
+
+**Heap Monitoring**:
+```cpp
+LOG_INFO shows free heap in health checks
+Watch for fragmentation >30%
+```
+
+**MQTT Diagnostics**:
+```bash
+mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P <pass> -t "boiler/status/health" -v
+```
+
+**Runtime Profiling**:
+```cpp
+Enable DEBUG_TASK_STATISTICS in ProjectConfig.h
+Check CPU utilization per task
+```
+
+---
+
+## Future Improvements
+
+### Planned Enhancements
+
+1. **Dynamic Priority Adjustment**
+   - Boost HeatingControlTask priority when PID active
+   - Reduce MQTTTask priority during critical operations
+
+2. **Advanced Scheduling**
+   - Space heating schedules (currently only water)
+   - Multi-zone control
+   - Weather compensation
+
+3. **Predictive Control**
+   - Machine learning for occupancy prediction
+   - Adaptive PID tuning based on thermal mass
+   - Load balancing between heating and water
+
+4. **Enhanced Diagnostics**
+   - Task execution timing histograms
+   - Event group utilization tracking
+   - Mutex contention analysis
+
+5. **Remote Configuration**
+   - OTA configuration updates
+   - A/B testing for control parameters
+   - Live PID tuning via MQTT
+
+---
+
+## References
+
+- [STATE_MACHINES.md](STATE_MACHINES.md) - Burner and heating state machines
+- [EVENT_SYSTEM.md](EVENT_SYSTEM.md) - Complete event bit reference
+- [MUTEX_HIERARCHY.md](MUTEX_HIERARCHY.md) - Deadlock prevention
+- [SAFETY_SYSTEM.md](SAFETY_SYSTEM.md) - Safety layer documentation
+- [MQTT_API.md](MQTT_API.md) - Complete MQTT topic reference
+- [CHANGELOG.md](CHANGELOG.md) - Change log and development history (improvement rounds)
+
+---
+
+**Document Status**: ✅ Complete
+**Validation**: All information extracted from source code (December 4, 2025)
+**Next Review**: After significant architectural changes

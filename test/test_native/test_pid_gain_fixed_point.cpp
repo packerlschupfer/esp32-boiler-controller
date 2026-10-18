@@ -1,0 +1,90 @@
+/**
+ * @file test_pid_gain_fixed_point.cpp
+ * @brief Unit tests for float -> fixed-point PID gain conversion
+ *
+ * Regression for the boiler PID being inert: float gains were passed to the
+ * fixed-point PID without scaling and truncated (Kp 34.206 -> 34 = 0.034).
+ */
+
+#include <unity.h>
+#include <cstdint>
+#include <cmath>
+
+#include "../../include/modules/control/PIDGainFixedPoint.h"
+#include "../../include/modules/control/FixedPointPIDStep.h"
+
+// setUp and tearDown are defined in test_main.cpp
+
+// First firmware PID step after a reset (FixedPointPIDStep, error in tenths of °C) with
+// only Kp, the boiler PID limits, then the production BoilerTempController power mapping.
+static int32_t pidPowerFromP(int32_t kpFixed, int16_t errorTenths) {
+    const FixedPointPIDStep::Limits limits = {
+        -100000, 100000,
+        static_cast<int16_t>(-PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT),
+        PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT
+    };
+    FixedPointPIDStep::State state = FixedPointPIDStep::resetState();
+    const int16_t adjustment = FixedPointPIDStep::step(state, limits, 470,
+                                                       static_cast<int16_t>(470 - errorTenths),
+                                                       kpFixed, 0, 0, 2500);
+    return PIDGainFixedPoint::powerPercentFromAdjustment(adjustment);
+}
+
+void test_pid_output_limit_matches_power_saturation() {
+    // Review 2026-09-14: anti-windup engaged at +/-1000 while power already saturated
+    // at +/-500, so the integral wound up with the burner at 100 %
+    using PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT;
+    using PIDGainFixedPoint::powerPercentFromAdjustment;
+    TEST_ASSERT_EQUAL_UINT8(50, powerPercentFromAdjustment(0));
+    TEST_ASSERT_EQUAL_UINT8(100, powerPercentFromAdjustment(POWER_ADJUSTMENT_LIMIT));
+    TEST_ASSERT_EQUAL_UINT8(99, powerPercentFromAdjustment(POWER_ADJUSTMENT_LIMIT - 10));
+    TEST_ASSERT_EQUAL_UINT8(0, powerPercentFromAdjustment(-POWER_ADJUSTMENT_LIMIT));
+    TEST_ASSERT_EQUAL_UINT8(1, powerPercentFromAdjustment(-POWER_ADJUSTMENT_LIMIT + 10));
+    TEST_ASSERT_EQUAL_UINT8(100, powerPercentFromAdjustment(1000));
+    TEST_ASSERT_EQUAL_UINT8(0, powerPercentFromAdjustment(-1000));
+}
+
+void test_pid_gain_conversion_scales_by_1000() {
+    TEST_ASSERT_EQUAL_INT32(34206, PIDGainFixedPoint::fromFloat(34.206f));
+    TEST_ASSERT_EQUAL_INT32(189, PIDGainFixedPoint::fromFloat(0.1893f));
+    TEST_ASSERT_EQUAL_INT32(10000, PIDGainFixedPoint::fromFloat(10.0f));
+    TEST_ASSERT_EQUAL_INT32(1000, PIDGainFixedPoint::fromFloat(1.0f));
+    TEST_ASSERT_EQUAL_INT32(500, PIDGainFixedPoint::fromFloat(0.5f));
+    TEST_ASSERT_EQUAL_INT32(100, PIDGainFixedPoint::fromFloat(0.1f));
+}
+
+void test_pid_gain_conversion_rejects_invalid() {
+    TEST_ASSERT_EQUAL_INT32(0, PIDGainFixedPoint::fromFloat(0.0f));
+    TEST_ASSERT_EQUAL_INT32(0, PIDGainFixedPoint::fromFloat(-1.0f));
+    TEST_ASSERT_EQUAL_INT32(0, PIDGainFixedPoint::fromFloat(NAN));
+    TEST_ASSERT_EQUAL_INT32(0, PIDGainFixedPoint::fromFloat(INFINITY));
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, PIDGainFixedPoint::fromFloat(1.0e9f));
+}
+
+void test_pid_scaled_gain_commands_off_above_target() {
+    // Boiler 3°C above target (error -30 tenths) with autotuned Kp 34.206.
+    // OFF threshold is pidOutput < 35 (BoilerTempController offThreshold).
+    int32_t power = pidPowerFromP(PIDGainFixedPoint::fromFloat(34.206f), -30);
+    TEST_ASSERT_TRUE(power < 35);
+
+    // The old implicit truncation (34 instead of 34206) left output at ~50%:
+    // never OFF (needs < 35) and never ON from OFF (needs > 55).
+    TEST_ASSERT_EQUAL_INT32(50, pidPowerFromP(34, -30));
+    int32_t truncatedFarAbove = pidPowerFromP(34, -320);  // even 32°C above target
+    TEST_ASSERT_TRUE(truncatedFarAbove >= 35 && truncatedFarAbove <= 55);
+}
+
+void test_pid_adjustment_clamp_keeps_sign() {
+    // Regression: int32 -44055 narrowed to int16 first became +21481 (FULL).
+    TEST_ASSERT_EQUAL_INT16(-1000, PIDGainFixedPoint::clampToAdjustment(-44055, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(1000, PIDGainFixedPoint::clampToAdjustment(44055, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(-1000, PIDGainFixedPoint::clampToAdjustment(-5000000000LL, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(-123, PIDGainFixedPoint::clampToAdjustment(-123, -1000, 1000));
+    TEST_ASSERT_EQUAL_INT16(0, PIDGainFixedPoint::clampToAdjustment(0, -1000, 1000));
+}
+
+void test_pid_scaled_gain_commands_full_below_target() {
+    // Boiler 3°C below target: must exceed fullThreshold (75) -> FULL power.
+    int32_t power = pidPowerFromP(PIDGainFixedPoint::fromFloat(34.206f), 30);
+    TEST_ASSERT_TRUE(power > 75);
+}

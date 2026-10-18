@@ -1,0 +1,68 @@
+// src/modules/control/HeatingControlModule.h
+#ifndef HEATING_CONTROL_MODULE_H
+#define HEATING_CONTROL_MODULE_H
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+#include <freertos/semphr.h>
+#include "shared/SharedSensorReadings.h"
+#include "shared/Temperature.h"
+#include "config/SystemSettings.h"
+#include "core/SystemResourceProvider.h"
+
+// Note: Access these through SystemResourceProvider (SRP):
+// - SRP::getSystemSettings() for SystemSettings
+
+/**
+ * @brief Heating control module for space heating
+ *
+ * This module handles heating curve calculations and heating on/off control.
+ * Power level control (OFF/HALF/FULL) is handled by BoilerTempControlTask.
+ *
+ * The heating curve calculates target boiler temperature based on:
+ * - Inside (room) temperature
+ * - Outside temperature
+ * - Curve coefficient and shift parameters
+ */
+class HeatingControlModule {
+public:
+    // Constructor
+    HeatingControlModule(EventGroupHandle_t systemEventGroup, SemaphoreHandle_t sensorMutex);
+
+    // Destructor
+    ~HeatingControlModule();
+
+    // Initialize the heating control module
+    void initialize();
+
+    /**
+     * @brief What the curve computed before clamping, for the
+     *        boiler/status/heating/control diagnostics topic (2026-10-18).
+     *
+     * Needed because the clamped result is a flat h/sLo 40.0 in mild weather and so says
+     * nothing about what the curve actually asked for, and because the room-deviation
+     * contribution is otherwise invisible - it is folded into the returned target.
+     */
+    struct CurveDebug {
+        int32_t rawTarget = 0;  // pre-clamp, tenths (can be negative)
+        int32_t shift = 0;      // curveShift*10 + room-deviation term, tenths
+    };
+
+    // Calculate the target temperature for space heating based on shared sensor readings and system settings
+    Temperature_t calculateSpaceHeatingTargetTemp(const SharedSensorReadings& readings,
+                                                  const SystemSettings& settings,
+                                                  CurveDebug* debugOut = nullptr) const;
+
+    // Check if heating conditions are met based on temperature and hysteresis
+    bool checkHeatingConditions(const SharedSensorReadings& readings, Temperature_t targetTemperature, Temperature_t hysteresis) const;
+
+    // Start and stop heating
+    void startHeating();
+    void stopHeating();
+
+private:
+    // Logging tag
+    static constexpr const char* TAG = "HeatingControl";
+};
+
+#endif // HEATING_CONTROL_MODULE_H

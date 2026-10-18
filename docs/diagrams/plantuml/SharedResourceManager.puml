@@ -1,0 +1,175 @@
+@startuml SharedResourceManager
+!include theme.puml
+
+' File-local: one row of resource classes is wider than PlantUML's 4096 px image
+' limit; stack them vertically and keep a scale guard against cropping.
+left to right direction
+scale max 4000 width
+
+title SharedResourceManager - FreeRTOS Resource Management\n11 Event Groups + 4 Standard Mutexes, created by name on first use
+
+class SharedResourceManager <<Singleton>> {
+    + getInstance(): SharedResourceManager&
+    + initializeStandardResources(): Result<void>
+    --
+    + getEventGroup(name): EventGroupHandle_t
+    + getMutex(name): SemaphoreHandle_t
+    + getQueue(name, length, itemSize): QueueHandle_t
+    + getResourceCount(type): size_t
+    + getTotalResourceCount(): size_t
+    + cleanup(): void
+}
+
+package "11 Event Groups (initializeStandardResources)" {
+    class GeneralSystem <<EventGroup>> {
+        STARTUP_COMPLETE, NETWORK_READY, WIFI_CONNECTED
+        MQTT_CONNECTED, TIME_SYNCED, STORAGE_READY
+        SYSTEM_REBOOT, SENSOR_DEGRADED
+        MQTT_QUEUE_PRESSURE, MUTEX_CONTENTION
+    }
+
+    class SystemState <<EventGroup>> {
+        BOILER / HEATING / WATER _ENABLED and _ON
+        WATER_PRIORITY, BURNER_ON
+        HEATING_PUMP_ON, WATER_PUMP_ON
+        MQTT_ENABLED, MQTT_OPERATIONAL
+        BURNER_ERROR, EMERGENCY_STOP, WARNING
+    }
+
+    class ControlRequests <<EventGroup>> {
+        BOILER / HEATING / WATER ENABLE and DISABLE
+        HEATING / WATER ON_OVERRIDE and OFF_OVERRIDE
+        WATER_PRIORITY ENABLE / DISABLE / RELEASED
+        MQTT enable / disable requests
+        PID_SAVE, SAVE_PARAMETERS
+        PID_AUTOTUNE, PID_AUTOTUNE_STOP
+    }
+
+    class BurnerRequest <<EventGroup>> {
+        HEATING, WATER
+        POWER_LOW, POWER_HIGH
+        CHANGED, HEATING_CHANGED, WATER_CHANGED
+        bits 16-23: target temperature
+    }
+
+    class Sensor <<EventGroup>> {
+        per-sensor update and error bits
+        PRESSURE, PRESSURE_ERROR
+        DATA_AVAILABLE, FIRST_READ_COMPLETE
+    }
+
+    class Relay <<EventGroup>> {
+        pump, burner, water mode, boost,
+        valve and alarm ON / OFF
+        UPDATE_REQUIRED, UPDATE_COMPLETE
+        EMERGENCY_STOP, FORCE_UPDATE
+    }
+
+    class RelayRequest <<EventGroup>> {
+        HEATING_PUMP_ON / OFF, WATER_PUMP_ON / OFF
+        BURNER_ENABLE / DISABLE, POWER_HALF / FULL
+        WATER_MODE, VALVE, ALARM requests
+        EMERGENCY_STOP, UPDATE
+    }
+
+    class RelayStatus <<EventGroup>> {
+        SYNCHRONIZED, COMM_OK
+        COMM_ERROR, UPDATE_PENDING
+    }
+
+    class Heating <<EventGroup>> {
+        DEMAND, NO_DEMAND
+        AUTOTUNE_START / STOP / RUNNING
+        AUTOTUNE_COMPLETE / FAILED
+        sensor, pump, overheat, timeout errors
+    }
+
+    class Burner <<EventGroup>> {
+        IDLE, STARTING, RUNNING, STOPPING, LOCKOUT
+        LOW_POWER, HIGH_POWER, PURGE
+        FLAME_DETECTED, SAFETY_OK
+        ignition, flame loss, overheat errors
+    }
+
+    class ErrorNotification <<EventGroup>> {
+        SENSOR_FAILURE, BURNER, PUMP
+        COMMUNICATION, MEMORY, SAFETY
+        OVERHEAT, MODBUS, RELAY, NETWORK
+        with matching _RESOLVED bits
+    }
+}
+
+package "4 Standard Mutexes" {
+    class "SensorReadings" as MxSensor <<Mutex>> {
+        protects SharedSensorReadings
+    }
+    class "RelayReadings" as MxRelay <<Mutex>> {
+        protects SharedRelayReadings
+    }
+    class "SystemSettings" as MxSettings <<Mutex>> {
+        protects SystemSettings
+    }
+    class "MQTT" as MxMqtt <<Mutex>> {
+        MQTT operations
+    }
+}
+
+class MutexGuard <<RAII>> {
+    + MutexGuard(mutex)
+    + hasLock(): bool
+}
+
+class QueueManager {
+    enum OverflowStrategy
+}
+
+class ManagedQueue
+
+SharedResourceManager *-- GeneralSystem
+SharedResourceManager *-- SystemState
+SharedResourceManager *-- ControlRequests
+SharedResourceManager *-- BurnerRequest
+SharedResourceManager *-- Sensor
+SharedResourceManager *-- Relay
+SharedResourceManager *-- RelayRequest
+SharedResourceManager *-- RelayStatus
+SharedResourceManager *-- Heating
+SharedResourceManager *-- Burner
+SharedResourceManager *-- ErrorNotification
+
+SharedResourceManager *-- MxSensor
+SharedResourceManager *-- MxRelay
+SharedResourceManager *-- MxSettings
+SharedResourceManager *-- MxMqtt
+
+MutexGuard ..> MxSensor : locks / unlocks
+QueueManager *-- ManagedQueue
+
+note right of SharedResourceManager
+  getEventGroup / getMutex / getQueue create the
+  resource on first use. Macros: GET_EVENT_GROUP(name),
+  GET_MUTEX(name), GET_QUEUE(name, length, size).
+
+  Not in the standard set:
+  - SensorMiTh event group and mutex (BLE removed)
+  - DeviceMap mutex (exposed by SRP)
+  - ModbusCoordinator keeps its own mutex
+  - DeviceReady bits exist, but no DeviceReady
+    event group is created here
+end note
+
+note right of BurnerRequest
+  Temperature encoding:
+  bits 16-23: target temperature (0-255 °C)
+  Example: 70 °C heating = 0x00460001
+  BurnerRequestManager sets request,
+  power bit and target together.
+end note
+
+note bottom of ManagedQueue
+  QueueManager::OverflowStrategy:
+  DROP_OLDEST (default), DROP_NEWEST,
+  DROP_LOWEST_PRIORITY, BLOCK, CALLBACK
+end note
+
+@enduml

@@ -1,0 +1,98 @@
+@startuml SystemResourceProvider
+!include theme.puml
+
+title SystemResourceProvider (SRP) - Static Accessors\nForwards to SystemInitializer and globals (ServiceContainer removed)
+
+class SystemResourceProvider <<static accessors>> {
+    {static} + getTaskManager(): TaskManager&
+    {static} + getLogger(): Logger&
+    {static} + getHealthMonitor(): HealthMonitor*
+    {static} + getRuntimeStorage(): RuntimeStorage*
+    {static} + getSyslog(): Syslog*
+    ====
+    {static} + getMB8ART(): MB8ART*
+    {static} + getRYN4(): RYN4*
+    {static} + getANDRTF3(): ANDRTF3*
+    {static} + getDS3231(): DS3231Controller*
+    ====
+    {static} + getBurnerSystemController(): BurnerSystemController*
+    {static} + getHeatingControl(): HeatingControlModule*
+    {static} + getWheaterControl(): WheaterControlModule*
+    {static} + getPIDControl(): PIDControlModule*
+    {static} + getMQTTManager(): MQTTManager*
+    {static} + getFlameDetection(): FlameDetection*
+    {static} + getEthernetManager(): EthernetManager*
+    ====
+    {static} + getSensorReadings(): SharedSensorReadings&
+    {static} + getRelayReadings(): SharedRelayReadings&
+    {static} + getSystemSettings(): SystemSettings&
+    ====
+    {static} + event group and event bit getters
+    {static} + getSensorReadingsMutex(), getRelayReadingsMutex()
+    {static} + getSystemSettingsMutex(), getMQTTMutex()
+    {static} + getDeviceMapMutex()
+}
+
+class SystemInitializer {
+    + initializeSystem(): Result<void>
+    --
+    initializeLogging()
+    initializeSharedResources()
+    initializeHardware()
+    initializeModbusDevices()
+    initializeNetworkAsync()
+    initializeControlModules()
+    initializeMQTT()
+    initializeTasks()
+    --
+    + getMB8ART(), getRYN4(), getANDRTF3(), getDS3231()
+    + getBurnerSystemController(), getHeatingControl()
+    + getWheaterControl(), getPIDControl(), getMQTTManager()
+}
+
+class "Globals" as Globals {
+    sharedSensorReadings
+    sharedRelayReadings
+    currentSettings
+    taskManager
+    gHealthMonitor
+    gRuntimeStorage
+    gSystemInitializer
+}
+
+class BurnerControlTask
+class HeatingControlTask
+
+SystemResourceProvider ..> SystemInitializer : device and module getters\nforward to gSystemInitializer
+SystemResourceProvider ..> Globals : shared data, TaskManager,\nHealthMonitor, RuntimeStorage
+
+BurnerControlTask ..> SystemResourceProvider : SRP::getBurnerSystemController()
+HeatingControlTask ..> SystemResourceProvider : SRP::getHeatingControl()\nSRP::getSensorReadings()
+
+note right of SystemInitializer
+  initializeSystem() order:
+  1. Logging
+  2. Shared resources (event groups, mutexes)
+  3. Hardware (I2C, FRAM, RTC)
+  4. Modbus devices
+  5. Network (Ethernet, async)
+  6. Control modules
+  7. MQTT
+  8. Tasks
+  19 FreeRTOS tasks are started in total
+  (TaskInitializer, main.cpp and task modules).
+  On failure main.cpp calls enterFailsafeMode()
+  and blinks LED_BUILTIN.
+end note
+
+note bottom of SystemResourceProvider
+  getFlameDetection() and getEthernetManager()
+  return nullptr; EthernetManager is used via
+  EthernetManager::getInstance().
+  Not present: getSharedResourceManager,
+  getQueueManager, getModbusCoordinator,
+  getPersistentStorage, getWaterControl.
+  Thread safety of the accessors: not verified.
+end note
+
+@enduml

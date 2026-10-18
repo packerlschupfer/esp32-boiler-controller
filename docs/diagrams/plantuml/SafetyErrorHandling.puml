@@ -1,0 +1,225 @@
+@startuml SafetyErrorHandling
+!include theme.puml
+
+' File-local: stock PlantUML gives storage and database a light fill, which
+' leaves the theme's white text unreadable.
+skinparam storage {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
+title Safety and Error Handling - Four-Layer Protection\nCritical Safety Interlocks with FRAM Logging
+
+package "Error Detection Sources" {
+    component [Temperature Sensors\nMB8ART Errors\nTimeouts] as TempSensor
+    component [Relay Module\nRYN4 Errors\nComm Failures] as RelaySensor
+    component [Communication\nModbus Timeouts\nMQTT Disconnect] as CommErrors
+    component [System Errors\nTask Watchdog\nMemory Failures] as SystemErrors
+    component [Safety Sensors\nNo flame sensor: flame = burner relays active\nPressure 4-20mA on CH4, disabled by default\nHardware interlocks: stub (fail-open)] as SafetySensors
+    component [Power Level Relay Fault\non entering RUNNING_LOW/HIGH] as PowerFault
+}
+
+package "Error Classification System" {
+    component [ErrorHandler\nClassify Severity] as ErrorHandler
+
+    storage "CRITICAL / EMERGENCY\nCRITICAL: burner emergencyShutdown()\nEMERGENCY: CentralizedFailsafe::emergencyStop()" as Critical
+
+    storage "DEGRADED\nlogged; half-power limit\nis logged but not implemented" as Major
+
+    storage "WARNING\nlog only" as Minor
+
+    storage "Transient (retry)\nnot a failsafe level\nMQTT reconnect backoff" as Transient
+}
+
+package "Safety Monitors" {
+    component [Temperature Limits (SafetyInterlocks)\nOutput/return above 110°C: burner blocked\nOutput above 115°C: critical safety check fails\nOutput-return above 45°C: thermal shock\n(configurable 10-60°C)\nRate of change: not implemented\nUnder-temperature: not implemented] as TempMon
+
+    component [Task Watchdog (TaskManager)\nPer-task timeouts 10-60 s\nBurner 15 s, Relay 10 s, Heating/Water 20 s\nMQTT 30 s, OTA 60 s\nsome tasks run without watchdog] as Watchdog
+
+    component [Safety Interlocks\nBurner safety chain\nPump protection\n15s sensor staleness] as Interlocks
+
+    component [Memory Monitor\nFree heap and stack high-water marks:\nHealthMonitor / MonitoringTask\n(no failsafe level from heap)] as MemoryCheck
+}
+
+package "Error Actions" {
+    component [Emergency Shutdown\nBurner relays R1-R3 OFF\nPumps stay with PumpControlModule] as EmergencyStop
+
+    component [Degraded Mode\nHalf power operation\nWiden limits\nFallback control\nContinue monitoring] as DegradedMode
+
+    component [Error Logging\nConsole output\nFRAM storage\nMQTT publish\nIncrement counters] as LogError
+}
+
+package "Error Storage (FRAM)" {
+    database "Error Log (ErrorLogFRAM)\n50 entries\nCircular buffer\nCRC-protected stats" as ErrorLog
+
+    database "Error Counters\nBy type\nBy severity\nTotal count" as ErrorCounters
+
+    database "Runtime Data\nOperation hours\nBurner cycles\nPump starts" as RuntimeData
+}
+
+package "Recovery Mechanisms" {
+    component [Auto Recovery\nRetry logic\nSensor reinit\nNetwork reconnect\nBackoff strategy] as AutoRecovery
+
+    component [Manual Reset\nMQTT burner_reset (LOCKOUT only)\nMQTT emergency_reset (EMERGENCY_STOP)\nno physical button] as ManualReset
+
+    component [Burner SM Recovery\nERROR: after errorRecoveryMs\n(default 5 min) once EMERGENCY_STOP\nis released and safe\nLOCKOUT: after 5 min or manual reset] as BurnerRecovery
+
+    component [Factory Reset\nClear all data\nRestore defaults\nFull reinit] as FactoryReset
+}
+
+package "Failsafe States" {
+    storage "Relay Failsafe\nBurner relays OFF\nPumps per PumpControlModule\n(ON during emergency dissipation)" as RelayFailsafe
+
+    storage "Temperature Failsafe\nrequired sensor missing: SHUTDOWN mode\nburner emergency-stopped on heat demand\nEMERGENCY_STOP cleared when sensors recover\n(only a stale-sensor stop)\nor by MQTT emergency_reset" as TempFailsafe
+
+    storage "Communication Failsafe\nLocal control only\nIgnore MQTT\nAutonomous mode" as CommFailsafe
+}
+
+package "Error Reporting" {
+    component [MQTT Report\nJSON Details] as MQTTReport
+    component [FRAM Log\nFull Details] as FRAMLog
+    component [Error Context\nErrorContextCapture snapshot\n(critical errors, 30 s limit)\nMQTTTask: boiler/error/context\nretained] as ErrorContext
+    component [LED_BUILTIN\non = running\nblinking = init failure\nno error codes] as LEDStatus
+}
+
+' Error Flow
+TempSensor --> ErrorHandler : SENSOR_FAILURE\nTIMEOUT\nOUT_OF_RANGE
+RelaySensor --> ErrorHandler : RELAY_NOT_RESPONDING\nCOMM_ERROR
+CommErrors --> ErrorHandler : MODBUS_TIMEOUT\nMQTT_DISCONNECT
+SystemErrors --> ErrorHandler : TASK_WATCHDOG\nMEMORY_LOW
+SafetySensors --> ErrorHandler : FLAME_LOST\nOVERTEMP
+
+' Safety Monitor Flow
+TempMon --> Critical : above 115°C
+TempMon --> Major : above 110°C,\nthermal shock
+Watchdog --> EmergencyStop : Timeout
+Interlocks --> EmergencyStop : Safety chain\nbroken
+MemoryCheck --> SystemErrors : Low memory
+
+' Classification
+ErrorHandler --> Critical : classify
+ErrorHandler --> Major : classify
+ErrorHandler --> Minor : classify
+ErrorHandler --> Transient : classify
+
+' Actions
+Critical --> EmergencyStop
+Major --> DegradedMode
+Minor --> LogError
+Transient --> AutoRecovery
+
+' Logging
+EmergencyStop --> ErrorLog
+DegradedMode --> ErrorLog
+LogError --> ErrorLog
+ErrorLog --> ErrorCounters
+EmergencyStop --> RuntimeData : update
+
+' Degraded Mode Flow
+DegradedMode --> AutoRecovery : monitor\nrecovery
+AutoRecovery --> DegradedMode : still\ndegraded
+AutoRecovery -.-> Critical : worsened
+
+' Recovery Flow
+EmergencyStop --> ManualReset
+Major --> AutoRecovery
+ManualReset -.-> AutoRecovery : reset\nsuccessful
+Critical --> FactoryReset : critical\nfault
+
+' Power level relay fault
+PowerFault --> DegradedMode : DEGRADED failsafe logged,\ngraceful stop via POST_PURGE
+PowerFault --> EmergencyStop : 3rd fault\nwithin 10 min
+
+' Burner state machine recovery
+EmergencyStop --> BurnerRecovery : burner in ERROR
+ManualReset --> BurnerRecovery : burner_reset
+
+' Failsafe
+EmergencyStop --> RelayFailsafe
+TempSensor --> TempFailsafe : on failure
+CommErrors --> CommFailsafe : on failure
+
+' Reporting
+ErrorHandler --> MQTTReport
+ErrorHandler --> FRAMLog
+Critical --> MQTTReport : urgent
+ErrorHandler --> ErrorContext : logError()
+
+note right of ErrorHandler
+  Failsafe levels (CentralizedFailsafe):
+  WARNING: log only
+  DEGRADED: logged; half-power limit not implemented
+  CRITICAL: burner emergencyShutdown()
+  EMERGENCY: emergencyStop() - burner off, pumps ON,
+    EMERGENCY_STOP set, BOILER_ENABLED cleared
+  SHUTDOWN: orderlyShutdown() - no trigger in current code
+
+  Triggers found in code:
+  - ErrorHandler::enterFailsafeMode: CRITICAL
+  - RelayVerificationManager: CRITICAL or WARNING
+  - Power level relay fault: DEGRADED
+  - SafetyInterlocks mutex failures: DEGRADED
+  Levels are never downgraded by triggerFailsafe.
+end note
+
+note right of EmergencyStop
+  Emergency shutdown:
+
+  BurnerSystemController::emergencyShutdown()
+  - burner relays R1-R3 OFF (setRelayStateEmergency)
+  - pumps stay with PumpControlModule
+
+  CentralizedFailsafe::emergencyStop() additionally
+  - forces heating and water pumps ON (F13 dissipation,
+    kept on until boiler output < 60°C)
+  - sets EMERGENCY_STOP (latched until emergency_reset,
+    sensor recovery or reboot)
+  - clears BOILER_ENABLED
+  - tells WheaterControlTask to end a running charge
+
+  Release of EMERGENCY_STOP:
+  - MQTT boiler/cmd/emergency_reset "reset"
+    (CentralizedFailsafe::clearEmergencyStop)
+  - refused while boiler output/return >= 110 °C,
+    sensors unavailable or critical error bits set
+  - restores BOILER_ENABLED from the saved setting
+  - or cleared by TemperatureSensorFallback on
+    sensor recovery (stale-sensor stop only)
+
+  Burner state machine recovery:
+  - ERROR: after errorRecoveryMs (default 5 min)
+    once EMERGENCY_STOP is released and safety
+    conditions pass (stays in ERROR while latched)
+  - LOCKOUT: after 5 min or manual reset
+end note
+
+note bottom of ErrorLog
+  FRAM Error Logging:
+
+  ErrorHandler::logError writes to ErrorLogFRAM
+  (RuntimeStorage library):
+  - circular buffer of 50 entries
+  - timestamp, error code, count
+  - message (64 chars), context (32 chars)
+  - statistics block with CRC
+  - published under boiler/status/fram_errors
+
+  CriticalDataStorage also reserves a 256-entry
+  CRC32-protected log area; current code writes
+  only safety events there.
+end note
+
+note bottom of AutoRecovery
+  Recovery Strategies (active in code):
+  - MQTT reconnect with 1-30 s interval
+  - Memory: ErrorHandler::attemptMemoryRecovery
+    (sets MEMORY error bit, lowers log level)
+end note
+
+@enduml

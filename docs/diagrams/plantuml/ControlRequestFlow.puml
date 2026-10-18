@@ -1,0 +1,113 @@
+@startuml ControlRequestFlow
+!include theme.puml
+
+' File-local: stock PlantUML draws section dividers as a white box, which
+' leaves the theme's white text unreadable.
+skinparam sequenceDividerBackgroundColor #2F4F4F
+skinparam sequenceDividerBorderColor #708090
+skinparam sequenceDividerFontColor #ffffff
+
+title Control Request Flow - Heating vs Water Priority\nDemand Arming (BurnerDemandGate) and Burner Relays
+
+participant "HeatingControlTask\n(5 s timer)" as HCT
+participant "WheaterControlTask\n(5 s timer)" as WCT
+participant "BURNER_REQUEST\nEvent Group" as BRE
+participant "BurnerControlTask\n(1 s safety timer)" as BCT
+participant "BoilerTempControlTask\n(each boiler sensor update, ~2.5 s)" as BTC
+participant "BurnerStateMachine\n(BurnerControlTask context)" as BSM
+participant "RelayControlTask" as RCT
+participant "Hardware\n(RYN4 Relays)" as HW
+
+autonumber
+
+== Heating Request ==
+
+HCT -> HCT : Room below target - hysteresis?\nYes, heating needed
+HCT -> HCT : Set HEATING_ON\n(unless water has priority)
+HCT -> HCT : Boiler target from heating curve
+HCT -> BRE : setHeatingRequest(target)\nHEATING + POWER_LOW + target
+note right of HCT
+  The heating pump follows HEATING_ON
+  in PumpControlModule, not the burner.
+end note
+
+== Water Request (priority) ==
+
+WCT -> WCT : Tank below tempLimitLow?\nYes, charge needed
+WCT -> WCT : Set WATER_ON
+WCT -> WCT : Boiler target =\ntank temp + charge delta
+WCT -> BRE : setWaterRequest(target, high power)\nWATER + POWER_HIGH + target
+
+== Burner Request Processing ==
+
+BCT -> BRE : Read request bits
+BRE --> BCT : HEATING and WATER set
+BCT -> BCT : Select water: requested and\n(WATER_PRIORITY set or no heating request)
+BCT -> BCT : Decode target and POWER_HIGH
+BCT -> BCT : Request present, blocks passed:\npublish demand permission
+BCT -> BSM : setHeatDemand(true, target, high power)\nonly when BoilerTempControlTask would arm
+note right of BCT
+  BurnerControlTask does not start or
+  stop pumps; no make-before-break.
+end note
+
+== Demand Arming and Power Level (every boiler sensor update) ==
+
+BTC -> BCT : getBurnerDemandPermission()
+BCT --> BTC : permitted, highPowerAllowed, maxTargetTemp
+BTC -> BTC : PID output: OFF / HALF / FULL
+BTC -> BSM : setHeatDemand(permitted AND PID wants heat,\ntarget, FULL AND highPowerAllowed)
+
+== Burner Relays (via BurnerSystemController) ==
+
+BSM -> RCT : IGNITION: activateWaterMode()
+RCT -> HW : R3 WATER_MODE: ON\nR2 POWER_BOOST: ON only at full power
+BSM -> RCT : RUNNING_LOW / RUNNING_HIGH:\nsetPowerLevel()
+RCT -> HW : R2 POWER_BOOST: OFF = half, ON = full
+
+== Water Complete, Handover to Heating ==
+
+WCT -> WCT : Tank above tempLimitHigh:\ncharge complete, clear WATER_ON
+WCT -> BRE : clearRequest(WATER)\n+ WATER_PRIORITY_RELEASED
+BSM -> BSM : Running mode changed:\nRUNNING to MODE_SWITCHING
+note right of BSM
+  Waits up to 15 s for the heating
+  request while heating is likely wanted,
+  otherwise POST_PURGE.
+end note
+HCT -> BRE : setHeatingRequest(target)
+BSM -> RCT : switchMode(HEATING)
+RCT -> HW : R3 WATER_MODE: OFF\nR1 BURNER_ENABLE: ON
+BSM -> BSM : MODE_SWITCHING to RUNNING_LOW / RUNNING_HIGH
+
+note over BSM, HW
+  The burner stays on through the handover.
+  Pumps follow WATER_ON / HEATING_ON in
+  PumpControlModule (5 min overrun).
+end note
+
+note over HCT, WCT
+  Heating (room mode): start below target,
+  stop at target + hysteresis (default 0.5 °C).
+  Weather mode: start below outsideThreshold,
+  stop at threshold + 1.0 °C.
+  Water: start below tempLimitLow,
+  stop above tempLimitHigh (defaults 45 / 65 °C).
+end note
+
+note over BRE
+  BURNER_REQUEST bits:
+  Bit 0: HEATING
+  Bit 1: WATER
+  Bit 3: POWER_LOW
+  Bit 4: POWER_HIGH
+  Bit 5: CHANGED
+  Bit 6: HEATING_CHANGED
+  Bit 7: WATER_CHANGED
+  Bits 16-23: target temperature
+
+  BurnerRequestManager sets request,
+  power bit and target together.
+end note
+
+@enduml
