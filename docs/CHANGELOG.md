@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.2.0] - 2026-10-18
+
+Ten months of development on top of v0.1.0, released as a flattened snapshot. The
+safety-relevant items were all verified on the live boiler, not only built - several of
+them were found *because* the device disagreed with the build.
+
+Version choice: MINOR rather than MAJOR, even though two changes touch areas this
+project's own versioning policy flags as MAJOR. `boiler/params/set/...` now rejects
+malformed payloads that it previously coerced (a client sending `13,22` for a PID gain
+used to get a silent `0`), and a pressure-sensor fault now stops the burner where it
+previously continued. Both are corrections toward documented intent rather than breaks of
+a documented contract, and semver permits breaking changes in `0.x` minors. If either
+turns out to break a real consumer, that is a `1.0.0` conversation.
+
 ### New topic `boiler/status/heating/control`: why the heating is off, and what the curve actually wanted
 
 Four things about weather compensation were unobservable from outside the firmware, so Home Assistant could only guess at them with templates: the **pre-clamp** curve output, the **room-deviation shift** on its own, the **active mode**, and whether demand is blocked by the **outside-threshold gate** or the **room backstop**. The last two are indistinguishable from published state, and the first is the one that matters most in mild weather - the clamped target is a flat `h/sLo` 40.0 and says nothing about what the curve asked for.
@@ -543,7 +561,12 @@ Prior development history is preserved in code comments and git history.
 
 ## Quality Metrics (v0.1.0)
 
-From comprehensive 20-run analysis:
+From a 20-run analysis performed for v0.1.0. **Not re-run for v0.2.0** - the scores below
+describe the December release, not the current tree, and are kept for history rather than
+as a current claim. What can be stated for v0.2.0 without re-scoring: 287 native tests
+(up from 269), 251 files in src/ + include/, and the "Testing 7/10" line above remains the
+honest weak spot - a 2026-10-18 review found that roughly 80 of those tests compile no
+firmware at all, exercising only header-only policy code.
 
 | Category | Score |
 |----------|-------|
@@ -560,4 +583,4 @@ From comprehensive 20-run analysis:
 
 ---
 
-*Last updated: 2026-09-15*
+*Last updated: 2026-10-18*
