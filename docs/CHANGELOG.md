@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 The bit is gone from `tools/event_config.yaml` and the header regenerated. Bit numbers in that spec are explicit rather than sequential, so **nothing was renumbered** - the only other change to `SystemEventsGenerated.h` is five `BURNER_*` comments that had been updated in the YAML and never regenerated, plus the dropped `CONTROLREQUEST_SAVE_PARAMETERS_BIT` migration macro, which had no users. `Tasks::Storage::SAVE_INTERVAL_MS` (5 minutes, unused - there are no periodic saves) removed, with a comment where it sat recording that the absence is deliberate.
 
-**Left alone deliberately:** `ControlRequest::PID_SAVE` (bit 19) is the same defect one bit down - never set, never waited on - and is now labelled as such in the spec rather than removed. Bits 20 and 21 are free.
+`ControlRequest::PID_SAVE` (bit 19) was the same defect one bit down and is now removed too, along with its `CONTROLREQUEST_PID_SAVE_BIT` migration macro. Unlike bit 20 it was a clean removal - it had no references at all outside the generated declarations, so there was no inert command behind it. **Bits 19, 20 and 21 are now free** (and bits 24-31 remain reserved by FreeRTOS).
 
 274/274 native tests, both `prod_debug_selective` and `esp32dev_usb_debug_selective` build clean, task bounds unchanged (storage 4308-4320 B of 5120, MQTT 3300-3312 B of 4096).
 

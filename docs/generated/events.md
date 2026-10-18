@@ -1,5 +1,5 @@
 # Event System Documentation
-Generated: 2026-10-18 11:11:10
+Generated: 2026-10-18 11:15:54
 
 Generated from `tools/event_config.yaml` by `tools/generate_events_zero_overhead.py`.
 
@@ -188,7 +188,6 @@ All constants compile to the same machine code as traditional #define macros.
 | 16 | `MQTT_REPORT_ENABLE` | Enable MQTT reporting |
 | 17 | `MQTT_REPORT_DISABLE` | Disable MQTT reporting |
 | 18 | `WATER_PRIORITY_RELEASED` | Water priority was released (notify heating) |
-| 19 | `PID_SAVE` | UNUSED - never set and never waited on |
 | 22 | `PID_AUTOTUNE` | Start PID auto-tuning |
 | 23 | `PID_AUTOTUNE_STOP` | Stop PID auto-tuning |
 
