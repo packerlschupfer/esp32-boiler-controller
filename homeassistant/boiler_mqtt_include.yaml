@@ -153,7 +153,7 @@ sensor:
         payload_not_available: "offline"
         value_template: "{{ 'online' if value_json.online else 'offline' }}"
 
-  - name: "Boiler Target Temp"
+  - name: "Boiler Commanded Setpoint"
     unique_id: boiler_temp_target
     state_topic: "boiler/status/sensors"
     unit_of_measurement: "°C"
@@ -381,6 +381,102 @@ sensor:
     state_class: total_increasing
     entity_category: diagnostic
 
+  # Read-only views of tuning/safety/calibration params (2026-10-18: not writable from HA;
+  # change them in the boiler add-on panel). State from grouped params replies.
+  - name: "Water Safety High Limit"
+    unique_id: boiler_ro_wheater_safe_high
+    state_topic: "boiler/params/status/wheater"
+    value_template: "{{ (value_json.tempSafeLimitHigh | float) / 10 }}"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: diagnostic
+
+  - name: "Burner Low Limit"
+    unique_id: boiler_ro_burner_low
+    state_topic: "boiler/params/status/h"
+    value_template: "{{ (value_json.bLo | float) / 10 }}"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: diagnostic
+
+  - name: "Space Heating PID Kp"
+    unique_id: boiler_ro_pid_space_kp
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.spaceHeating.kp }}"
+    entity_category: diagnostic
+
+  - name: "Space Heating PID Ki"
+    unique_id: boiler_ro_pid_space_ki
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.spaceHeating.ki }}"
+    entity_category: diagnostic
+
+  - name: "Space Heating PID Kd"
+    unique_id: boiler_ro_pid_space_kd
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.spaceHeating.kd }}"
+    entity_category: diagnostic
+
+  - name: "Water Heater PID Kp"
+    unique_id: boiler_ro_pid_water_kp
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.waterHeater.kp }}"
+    entity_category: diagnostic
+
+  - name: "Water Heater PID Ki"
+    unique_id: boiler_ro_pid_water_ki
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.waterHeater.ki }}"
+    entity_category: diagnostic
+
+  - name: "Water Heater PID Kd"
+    unique_id: boiler_ro_pid_water_kd
+    state_topic: "boiler/params/status/pid"
+    value_template: "{{ value_json.waterHeater.kd }}"
+    entity_category: diagnostic
+
+  - name: "Offset Boiler Output"
+    unique_id: boiler_ro_offset_boilerOutput
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ (value_json['offset/boilerOutput'] | float) / 10 }}"
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+
+  - name: "Offset Boiler Return"
+    unique_id: boiler_ro_offset_boilerReturn
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ (value_json['offset/boilerReturn'] | float) / 10 }}"
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+
+  - name: "Offset Water Tank"
+    unique_id: boiler_ro_offset_waterTank
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ (value_json['offset/waterTank'] | float) / 10 }}"
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+
+  - name: "Offset Outside Temp"
+    unique_id: boiler_ro_offset_outside
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ (value_json['offset/outside'] | float) / 10 }}"
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+
+  - name: "Offset Inside Temp"
+    unique_id: boiler_ro_offset_room
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ (value_json['offset/room'] | float) / 10 }}"
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+
+  - name: "Offset Pressure"
+    unique_id: boiler_ro_offset_pressure
+    state_topic: "boiler/params/status/sensor"
+    value_template: "{{ (value_json['offset/pressure'] | float) / 100 }}"
+    unit_of_measurement: "bar"
+    entity_category: diagnostic
+
 binary_sensor:
   # Low free memory: largest allocatable DRAM block below 2560 B (warn). Threshold is
   # measurement-derived (real-world floor ~3572 B under polling; critical 1536 B ~ one network
@@ -598,6 +694,22 @@ switch:
     qos: 0
     retain: false
 
+  # Weather control flag (params path, persisted). State = configured flag, not the active reason.
+  - unique_id: boiler_switch_weather_control
+    name: "Weather Control"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ 'ON' if value_json.weatherControl else 'OFF' }}"
+    state_on: "ON"
+    state_off: "OFF"
+    command_topic: "boiler/params/set/heating/weatherControl"
+    payload_on: "true"
+    payload_off: "false"
+    icon: mdi:weather-snowy-rainy
+    entity_category: config
+    optimistic: false
+    qos: 0
+    retain: false
+
 button:
   # boiler/cmd/status
   - name: "Request Status"
@@ -775,19 +887,6 @@ number:
     device_class: temperature
     entity_category: config
 
-  - name: "Water Safety High Limit"
-    unique_id: boiler_param_wheater_safe_high
-    command_topic: "boiler/params/set/wheater/tempSafeLimitHigh"
-    command_template: "{{ (value * 10) | round(0) | int }}"
-    state_topic: "boiler/params/status/wheater"
-    value_template: "{{ (value_json.tempSafeLimitHigh | float) / 10 }}"
-    min: 60
-    max: 95
-    step: 1
-    unit_of_measurement: "°C"
-    device_class: temperature
-    entity_category: config
-
   - name: "Water Heating Rate"
     unique_id: boiler_param_wheater_heating_rate
     command_topic: "boiler/params/set/wheater/heatingRate"
@@ -800,46 +899,17 @@ number:
     entity_category: config
 
   # Heating Temperature Settings
-  - name: "Room Target Temperature"
+  - name: "Room Target (saved)"
     unique_id: boiler_param_heating_target
     command_topic: "boiler/params/set/heating/targetTemp"
     command_template: "{{ (value * 10) | round(0) | int }}"
-    # Reads the dedicated retained topic, not the grouped params JSON. The grouped
-    # topic is only written on a set or a get/all, so this entity showed a stale
-    # 19.2 for ~12 h on 2026-10-17 after the target was changed through the climate
-    # card. boiler/status/heating/target is republished for EVERY writer from
-    # PersistentStorageTask.cpp:835 (parameter path, boiler/cmd/heating,
-    # boiler/cmd/room_target and the scheduler) and is retained.
+    # State from the retained boiler/status/heating/target (plain degC), republished by
+    # the storage task on EVERY writer (params set, cmd/heating, cmd/room_target, scheduler).
+    # The grouped params reply is only refreshed on param-path sets, so it went stale.
     state_topic: "boiler/status/heating/target"
     min: 10
     max: 30
     step: 0.1
-    unit_of_measurement: "°C"
-    device_class: temperature
-    entity_category: config
-
-  - name: "Burner Low Limit"
-    unique_id: boiler_param_burner_low
-    command_topic: "boiler/params/set/h/bLo"
-    command_template: "{{ (value * 10) | round(0) | int }}"
-    state_topic: "boiler/params/status/h"
-    value_template: "{{ (value_json.bLo | float) / 10 }}"
-    min: 20
-    max: 70
-    step: 1
-    unit_of_measurement: "°C"
-    device_class: temperature
-    entity_category: config
-
-  - name: "Heating High Limit"
-    unique_id: boiler_param_heating_high
-    command_topic: "boiler/params/set/h/bHi"
-    command_template: "{{ (value * 10) | round(0) | int }}"
-    state_topic: "boiler/params/status/h"
-    value_template: "{{ (value_json.bHi | float) / 10 }}"
-    min: 70
-    max: 110
-    step: 1
     unit_of_measurement: "°C"
     device_class: temperature
     entity_category: config
@@ -878,70 +948,73 @@ number:
     step: 0.1
     entity_category: config
 
+  # Weather control (heating group mixes units: *Threshold/*Margin are TENTHS ints,
+  # roomCurveShiftFactor is a WHOLE float). Layer 1 demand: on below outsideThreshold,
+  # off at +1.0C (compile-time); room backstop stops above targetTemp+roomOverheatMargin.
+  # Flow floor/max are h/sLo, h/sHi (tenths). See boiler session spec 2026-10-18.
+  - name: "Outside Cut-off Temperature"
+    unique_id: boiler_param_outside_threshold
+    command_topic: "boiler/params/set/heating/outsideThreshold"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ (value_json.outsideThreshold | float) / 10 }}"
+    min: 5
+    max: 25
+    step: 0.5
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Room Overheat Margin"
+    unique_id: boiler_param_room_overheat_margin
+    command_topic: "boiler/params/set/heating/roomOverheatMargin"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ (value_json.roomOverheatMargin | float) / 10 }}"
+    min: 1
+    max: 5
+    step: 0.1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Room Curve Shift Factor"
+    unique_id: boiler_param_room_curve_shift_factor
+    command_topic: "boiler/params/set/heating/roomCurveShiftFactor"
+    state_topic: "boiler/params/status/heating"
+    value_template: "{{ value_json.roomCurveShiftFactor }}"
+    min: 1
+    max: 4
+    step: 0.1
+    entity_category: config
+
+  - name: "Heating Flow Floor"
+    unique_id: boiler_param_flow_floor
+    command_topic: "boiler/params/set/h/sLo"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/h"
+    value_template: "{{ (value_json.sLo | float) / 10 }}"
+    min: 30
+    max: 60
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
+  - name: "Heating Flow Max"
+    unique_id: boiler_param_flow_max
+    command_topic: "boiler/params/set/h/sHi"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/h"
+    value_template: "{{ (value_json.sHi | float) / 10 }}"
+    min: 50
+    max: 90
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    entity_category: config
+
   # Space Heating PID Parameters
-  - name: "Space Heating PID Kp"
-    unique_id: boiler_param_pid_space_kp
-    command_topic: "boiler/params/set/pid/spaceHeating/kp"
-    state_topic: "boiler/params/status/pid"
-    value_template: "{{ value_json.spaceHeating.kp }}"
-    min: 0
-    max: 100
-    step: 0.01
-    entity_category: config
-
-  - name: "Space Heating PID Ki"
-    unique_id: boiler_param_pid_space_ki
-    command_topic: "boiler/params/set/pid/spaceHeating/ki"
-    state_topic: "boiler/params/status/pid"
-    value_template: "{{ value_json.spaceHeating.ki }}"
-    min: 0
-    max: 10
-    step: 0.001
-    entity_category: config
-
-  - name: "Space Heating PID Kd"
-    unique_id: boiler_param_pid_space_kd
-    command_topic: "boiler/params/set/pid/spaceHeating/kd"
-    state_topic: "boiler/params/status/pid"
-    value_template: "{{ value_json.spaceHeating.kd }}"
-    min: 0
-    max: 50
-    step: 0.01
-    entity_category: config
-
-  # Water Heater PID Parameters
-  - name: "Water Heater PID Kp"
-    unique_id: boiler_param_pid_water_kp
-    command_topic: "boiler/params/set/pid/waterHeater/kp"
-    state_topic: "boiler/params/status/pid"
-    value_template: "{{ value_json.waterHeater.kp }}"
-    min: 0
-    max: 100
-    step: 0.01
-    entity_category: config
-
-  - name: "Water Heater PID Ki"
-    unique_id: boiler_param_pid_water_ki
-    command_topic: "boiler/params/set/pid/waterHeater/ki"
-    state_topic: "boiler/params/status/pid"
-    value_template: "{{ value_json.waterHeater.ki }}"
-    min: 0
-    max: 10
-    step: 0.001
-    entity_category: config
-
-  - name: "Water Heater PID Kd"
-    unique_id: boiler_param_pid_water_kd
-    command_topic: "boiler/params/set/pid/waterHeater/kd"
-    state_topic: "boiler/params/status/pid"
-    value_template: "{{ value_json.waterHeater.kd }}"
-    min: 0
-    max: 50
-    step: 0.01
-    entity_category: config
-
-  # Safety Configuration (milliseconds)
-  # These control safety-critical timing parameters
   - name: "Pump Protection Delay"
     unique_id: boiler_safety_pump_protection
     command_topic: "boiler/cmd/config/pump_protection_ms"
@@ -988,88 +1061,3 @@ number:
 
   # Sensor Calibration Offsets (in tenths of °C or hundredths of BAR)
   # Use boiler/params/get/all to see current values, boiler/params/save to persist
-  - name: "Offset Boiler Output"
-    unique_id: boiler_offset_boiler_output
-    command_topic: "boiler/params/set/sensor/offset/boilerOutput"
-    state_topic: "boiler/params/status/sensor"
-    value_template: "{{ value_json['offset/boilerOutput'] }}"
-    min: -50
-    max: 50
-    step: 1
-    unit_of_measurement: "0.1°C"
-    entity_category: config
-
-  - name: "Offset Boiler Return"
-    unique_id: boiler_offset_boiler_return
-    command_topic: "boiler/params/set/sensor/offset/boilerReturn"
-    state_topic: "boiler/params/status/sensor"
-    value_template: "{{ value_json['offset/boilerReturn'] }}"
-    min: -50
-    max: 50
-    step: 1
-    unit_of_measurement: "0.1°C"
-    entity_category: config
-
-  - name: "Offset Water Tank"
-    unique_id: boiler_offset_water_tank
-    command_topic: "boiler/params/set/sensor/offset/waterTank"
-    state_topic: "boiler/params/status/sensor"
-    value_template: "{{ value_json['offset/waterTank'] }}"
-    min: -50
-    max: 50
-    step: 1
-    unit_of_measurement: "0.1°C"
-    entity_category: config
-
-  - name: "Offset Outside Temp"
-    unique_id: boiler_offset_outside
-    command_topic: "boiler/params/set/sensor/offset/outside"
-    state_topic: "boiler/params/status/sensor"
-    value_template: "{{ value_json['offset/outside'] }}"
-    min: -50
-    max: 50
-    step: 1
-    unit_of_measurement: "0.1°C"
-    entity_category: config
-
-  - name: "Offset Inside Temp"
-    unique_id: boiler_offset_room
-    command_topic: "boiler/params/set/sensor/offset/room"
-    state_topic: "boiler/params/status/sensor"
-    value_template: "{{ value_json['offset/room'] }}"
-    min: -50
-    max: 50
-    step: 1
-    unit_of_measurement: "0.1°C"
-    entity_category: config
-
-  - name: "Offset Pressure"
-    unique_id: boiler_offset_pressure
-    command_topic: "boiler/params/set/sensor/offset/pressure"
-    state_topic: "boiler/params/status/sensor"
-    value_template: "{{ value_json['offset/pressure'] }}"
-    min: -50
-    max: 50
-    step: 1
-    unit_of_measurement: "0.01bar"
-    entity_category: config
-
-# =============================================================================
-# Dashboard Card Examples
-# =============================================================================
-# Relay status - icon only (no text), icons turn colored when on, grey when off
-# type: glance
-# title: Relay Status
-# show_state: false
-# columns: 5
-# entities:
-#   - entity: binary_sensor.boiler_burner
-#     name: Burner
-#   - entity: binary_sensor.boiler_heating_pump
-#     name: H.Pump
-#   - entity: binary_sensor.boiler_water_pump
-#     name: W.Pump
-#   - entity: binary_sensor.boiler_heating_active
-#     name: Heating
-#   - entity: binary_sensor.boiler_water_heating_active
-#     name: Water
