@@ -171,7 +171,7 @@ MQTT, NTP and OTA are not started here. They run as tasks created later (MQTTTas
 5. **WheaterControlModule** (Water heating)
    - Tank heating with scheduling
 
-6. **PIDControlModule**
+6. ~~**PIDControlModule**~~ - NOT created since 2026-10-18; it was never retrieved and its PIDAutoTuner cost ~12.57 kB of DRAM. The live PID is BoilerTempController's own instance
    - PID temperature control
 
 7. **BurnerSystemController**

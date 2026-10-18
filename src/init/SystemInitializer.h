@@ -16,7 +16,6 @@ namespace rtstorage { class RuntimeStorage; }
 class MQTTManager;
 class HeatingControlModule;
 class WheaterControlModule;
-class PIDControlModule;
 
 // Friend class forward declarations
 class ModbusDeviceInitializer;
@@ -85,7 +84,6 @@ public:
     RYN4* getRYN4() const;
     andrtf3::ANDRTF3* getANDRTF3() const;
     MQTTManager* getMQTTManager() const;
-    PIDControlModule* getPIDControl() const;
     HeatingControlModule* getHeatingControl() const;
     WheaterControlModule* getWheaterControl() const;
     class BurnerSystemController* getBurnerSystemController() const;
@@ -132,7 +130,6 @@ private:
     // Control module pointers
     HeatingControlModule* heatingControl_;
     WheaterControlModule* wheaterControl_;
-    PIDControlModule* pidControl_;
 
     // Unified burner system controller (controls only burner relays)
     class BurnerSystemController* burnerSystemController_;

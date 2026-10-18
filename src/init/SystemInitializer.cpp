@@ -33,7 +33,6 @@
 // Control modules
 #include "modules/control/HeatingControlModule.h"
 #include "modules/control/WheaterControlModule.h"
-#include "modules/control/PIDControlModule.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/BurnerRequestManager.h"
@@ -82,7 +81,6 @@ SystemInitializer::SystemInitializer()
       mqttManager_(nullptr),
       heatingControl_(nullptr),
       wheaterControl_(nullptr),
-      pidControl_(nullptr),
       burnerSystemController_(nullptr),
       deviceReadyEventGroup_(nullptr) {
 }
@@ -394,7 +392,6 @@ void SystemInitializer::cleanupControlModules() {
     CentralizedFailsafe::cleanup();
     TemperatureSensorFallback::cleanup();
 
-    delete pidControl_; pidControl_ = nullptr;
     delete wheaterControl_; wheaterControl_ = nullptr;
     delete heatingControl_; heatingControl_ = nullptr;
 }
@@ -520,15 +517,14 @@ Result<void> SystemInitializer::initializeControlModules() {
     }
     wheaterControl_->initialize();
 
-    pidControl_ = new PIDControlModule();
-    if (!pidControl_) {
-        delete heatingControl_;
-        heatingControl_ = nullptr;
-        delete wheaterControl_;
-        wheaterControl_ = nullptr;
-        return Result<void>(SystemError::MEMORY_ALLOCATION_FAILED, "Failed to create PIDControlModule");
-    }
-    
+    // PIDControlModule is deliberately NOT instantiated (2026-10-18). Nothing ever
+    // retrieved it: SystemResourceProvider::getPIDControl() had no callers and no
+    // pidControl_-> call site existed outside this file, so the object was allocated at
+    // boot and never used. It was not cheap - its constructor news a PIDAutoTuner, which
+    // holds CircularBuffer<OscillationPoint, 1000> BY VALUE (1000 x 12 B) plus four
+    // 32-float peak buffers, about 12.57 kB of DRAM, on a device whose steady-state free
+    // DRAM is 7-9 kB. The live PID and its autotuner are BoilerTempController's own
+    // instance (BoilerTempController.cpp:73); this was a second, idle copy.
     // Pump management is now handled by independent PumpControlModule tasks
     // (HeatingPumpTask and WaterPumpTask) which watch HEATING_ON/WATER_ON event bits.
     // This allows pumps to run while burner is off (coasting for heat distribution).
@@ -597,10 +593,6 @@ andrtf3::ANDRTF3* SystemInitializer::getANDRTF3() const {
 
 MQTTManager* SystemInitializer::getMQTTManager() const {
     return mqttManager_;
-}
-
-PIDControlModule* SystemInitializer::getPIDControl() const {
-    return pidControl_;
 }
 
 HeatingControlModule* SystemInitializer::getHeatingControl() const {

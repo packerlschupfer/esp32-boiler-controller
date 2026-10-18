@@ -1,4 +1,19 @@
 // src/modules/control/PIDControlModule.h
+//
+// NOT INSTANTIATED ANYWHERE (as of 2026-10-18) - do not `new` this without reading on.
+//
+// Until 2026-10-18 SystemInitializer allocated one of these at boot and nothing ever
+// retrieved it: SystemResourceProvider::getPIDControl() had no callers and there was no
+// pidControl_-> call site outside SystemInitializer. The cost was not nominal - the
+// constructor news a PIDAutoTuner, which holds CircularBuffer<OscillationPoint, 1000> BY
+// VALUE (1000 x 12 B) plus four 32-float peak buffers, roughly 12.57 kB of DRAM, on a
+// device whose steady-state free DRAM is 7-9 kB.
+//
+// The LIVE PID and autotuner are BoilerTempController's own members
+// (BoilerTempController.cpp:73). If you need PID control, use that; if you genuinely need
+// this class, budget the 12.57 kB first and shrink OSCILLATION_BUFFER_SIZE while you are
+// at it. The files are kept rather than deleted only because several docs still describe
+// the class; with the accessors gone the linker drops it from the image entirely.
 #ifndef PID_CONTROL_MODULE_H
 #define PID_CONTROL_MODULE_H
 

@@ -122,7 +122,6 @@ public:
     static class MB8ART* getMB8ART();
     static class RYN4* getRYN4();
     static class MQTTManager* getMQTTManager();
-    static class PIDControlModule* getPIDControl();
     static class HeatingControlModule* getHeatingControl();
     static class WheaterControlModule* getWheaterControl();
     static class FlameDetection* getFlameDetection();

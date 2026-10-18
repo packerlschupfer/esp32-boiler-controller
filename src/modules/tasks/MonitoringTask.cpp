@@ -4,6 +4,7 @@
 #include "MonitoringTask.h"
 #include "modules/tasks/EventDrivenPatterns.h"
 #include "config/SystemConstants.h"
+#include <esp_heap_caps.h>
 #include "config/ProjectConfig.h"
 #include "LoggingMacros.h"
 
@@ -315,14 +316,17 @@ void MonitoringTaskEventDriven(void* pvParameters) {
             }
 
             // Quick health check - only critical metrics
-            uint32_t freeHeap = ESP.getFreeHeap();
-            uint32_t minFreeHeap = ESP.getMinFreeHeap();
-            
-            // H14: Use standardized heap thresholds - warn at 2x warning threshold for early notice
-            constexpr uint32_t EARLY_WARNING = SystemConstants::System::MIN_FREE_HEAP_WARNING * 2;
-            if (freeHeap < EARLY_WARNING || minFreeHeap < SystemConstants::System::MIN_FREE_HEAP_WARNING) {
-                LOG_WARN(TAG, "Low heap! Free: %lu, Min: %lu",
-                         freeHeap, minFreeHeap);
+            // MALLOC_CAP_DEFAULT: ESP.getFreeHeap() is MALLOC_CAP_INTERNAL (counts IRAM,
+            // ~58 kB here), so the old comparison against MIN_FREE_HEAP_WARNING * 2 could
+            // never be true and this 5-second check never fired (2026-10-18 review).
+            const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+            const size_t freeDram = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+
+            // Early notice at 2x the warning block size, as the old code intended.
+            constexpr size_t EARLY_WARNING = SystemConstants::System::MIN_DRAM_BLOCK_WARNING * 2;
+            if (largestBlock < EARLY_WARNING) {
+                LOG_WARN(TAG, "Low DRAM! free %u B, largest block %u B",
+                         static_cast<unsigned>(freeDram), static_cast<unsigned>(largestBlock));
             }
             
             // Log health check completion every 10th time (50 seconds)

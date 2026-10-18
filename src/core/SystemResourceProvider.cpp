@@ -15,7 +15,6 @@
 class MB8ART;
 class RYN4;
 class MQTTManager;
-class PIDControlModule;
 class HeatingControlModule;
 class WheaterControlModule;
 class BurnerSystemController;
@@ -136,10 +135,6 @@ RYN4* SystemResourceProvider::getRYN4() {
 
 MQTTManager* SystemResourceProvider::getMQTTManager() {
     return gSystemInitializer ? gSystemInitializer->getMQTTManager() : nullptr;
-}
-
-PIDControlModule* SystemResourceProvider::getPIDControl() {
-    return gSystemInitializer ? gSystemInitializer->getPIDControl() : nullptr;
 }
 
 HeatingControlModule* SystemResourceProvider::getHeatingControl() {

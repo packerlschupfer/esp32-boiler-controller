@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "config/ProjectConfig.h"
 #include "config/SystemConstants.h"
+#include <esp_heap_caps.h>
 #include "init/SystemInitializer.h"
 #include "utils/ErrorHandler.h"
 // #include "utils/EarlyLogCapture.h"  // Not needed - monitor connects early
@@ -21,7 +22,6 @@
 #include <esp32ModbusRTU.h>
 #include <unordered_map>
 #include "modules/control/HeatingControlModule.h"
-#include "modules/control/PIDControlModule.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
 // BLE includes removed - using MB8ART channel 7 for inside temperature
@@ -392,26 +392,32 @@ void handleRuntimeTasks() {
         // Memory monitoring every 5 minutes (or immediately if low)
         if (now - lastMemoryReport > SystemConstants::System::MEMORY_REPORT_INTERVAL_MS) {
             lastMemoryReport = now;
-            size_t freeHeap = ESP.getFreeHeap();
-            size_t minFreeHeap = ESP.getMinFreeHeap();
-            
-            // H14: Use standardized heap thresholds
-            if (freeHeap < SystemConstants::System::MIN_FREE_HEAP_WARNING) {
-                LOG_WARN(TAG, "LOW MEMORY WARNING: Free: %d, Min: %d bytes",
-                         freeHeap, minFreeHeap);
+            // MALLOC_CAP_DEFAULT, not ESP.getFreeHeap(). getFreeHeap() is
+            // heap_caps_get_free_size(MALLOC_CAP_INTERNAL), which counts IRAM and reads
+            // ~58 kB on this chip, so every comparison against MIN_FREE_HEAP_* (20000 /
+            // 10000) was true-by-construction and this gate had never fired - not even
+            // when real malloc DRAM was measured at 576 B. SystemConstants.h:485 already
+            // said so; three live sites still used it (2026-10-18 review).
+            const size_t freeDram = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+            const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+
+            if (largestBlock < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
+                LOG_WARN(TAG, "LOW DRAM WARNING: free %u B, largest block %u B",
+                         static_cast<unsigned>(freeDram), static_cast<unsigned>(largestBlock));
             } else {
-                LOG_DEBUG(TAG, "Memory status: Free: %d, Min: %d bytes",
-                          freeHeap, minFreeHeap);
+                LOG_DEBUG(TAG, "DRAM status: free %u B, largest block %u B",
+                          static_cast<unsigned>(freeDram), static_cast<unsigned>(largestBlock));
             }
         }
 
         // Check for critically low memory more frequently
-        size_t currentFreeHeap = ESP.getFreeHeap();
-        if (currentFreeHeap < SystemConstants::System::MIN_FREE_HEAP_CRITICAL) {
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT) <
+            SystemConstants::System::MIN_DRAM_BLOCK_CRITICAL) {
             static uint32_t lastLowMemoryWarning = 0;
             if (now - lastLowMemoryWarning > 10000) {  // Warn every 10s when memory is low
                 lastLowMemoryWarning = now;
-                LOG_WARN(TAG, "LOW MEMORY WARNING: Free: %d bytes", currentFreeHeap);
+                LOG_WARN(TAG, "CRITICAL DRAM: largest block %u B",
+                         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
             }
         }
     }

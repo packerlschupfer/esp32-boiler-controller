@@ -680,6 +680,23 @@ bool MQTTTask::publish(const char* topic, const char* payload, int qos, bool ret
     }
 
     MQTTPublishRequest request;
+    // Refuse rather than silently cut. strncpy truncated at 319 bytes with no check, no
+    // log and a true return, so an oversized payload went out as a fragment and the caller
+    // was told it succeeded. Live case found 2026-10-18: boiler/params/list builds a JSON
+    // array of all 60 registered parameter names - 1288 bytes - which the library first
+    // cut to its own 1024 buffer and this then cut to 319, so the reply on
+    // boiler/params/list/response was ALWAYS malformed JSON (no closing bracket) while
+    // docs/MQTT_API.md documented the command as working. Truncating a JSON payload is
+    // worse than dropping it: a subscriber cannot tell a fragment from a short message.
+    const size_t topicLen = strlen(topic);
+    const size_t payloadLen = strlen(payload);
+    if (topicLen >= sizeof(request.topic) || payloadLen >= sizeof(request.payload)) {
+        LOG_ERROR(TAG, "Refusing oversized publish: topic %u/%u B, payload %u/%u B",
+                  static_cast<unsigned>(topicLen), static_cast<unsigned>(sizeof(request.topic) - 1),
+                  static_cast<unsigned>(payloadLen), static_cast<unsigned>(sizeof(request.payload) - 1));
+        return false;
+    }
+
     strncpy(request.topic, topic, sizeof(request.topic) - 1);
     request.topic[sizeof(request.topic) - 1] = '\0';
     strncpy(request.payload, payload, sizeof(request.payload) - 1);

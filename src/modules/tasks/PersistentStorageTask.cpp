@@ -10,6 +10,7 @@
 #include "shared/SharedRelayReadings.h"
 #include "config/SystemSettings.h"
 #include "config/SystemConstants.h"
+#include <esp_heap_caps.h>
 #include "modules/tasks/ParameterSavePolicy.h"
 #include "config/SafetyConfig.h"
 #include <MQTTManager.h>
@@ -527,7 +528,57 @@ void PersistentStorageTask(void* pvParameters) {
     storage->setOnChange("pid/waterHeater/ki", floatParamCallback);
     storage->setOnChange("pid/waterHeater/kd", floatParamCallback);
     // Water heater parameters (floats only - int32 callbacks set inline)
-    storage->setOnChange("wheater/priorityEnabled", boolParamCallback);
+    // The enable/priority/override bools below used to write their settings field (and
+    // NVS) and nothing else - wheater/priorityEnabled got a log-only callback and the five
+    // system/* ones had NO callback at all. But the control path reads the EVENT BIT, and
+    // the bits are synced from settings only at boot: syncEnableStatesToEventBits() has
+    // two callers, both on the init path, and its inverse syncEventBitsToSettings() has
+    // none. So a parameter set left the two stores disagreeing until the next reboot.
+    //
+    // For water priority that is worse than merely ineffective, because the two stores
+    // have different readers: HeatingControlTask.cpp:250 reads the FIELD while
+    // BurnerStateMachine.cpp:376/507/754 read the BIT. One set from the add-on's Water tab
+    // therefore put those two tasks on opposite answers about whether water has priority.
+    //
+    // Routed through the same StateManager setters boiler/cmd/* already uses, so field and
+    // bit move together and the side effects run (setBoilerEnabled(false) ends a running
+    // water charge; the override setters also move the HEATING/WATER_*_OVERRIDE control
+    // bits). persist=false because PersistentStorage::setJson() has already written the
+    // key - markSettingsDirty() here would only queue a redundant save.
+    //
+    // The override pair worked before this change (their consumers read the field:
+    // BurnerStateMachine.cpp:403, HeatingControlTask.cpp:519, WheaterControlTask.cpp:525)
+    // and is routed the same way for one write path rather than two.
+    storage->setOnChange("wheater/priorityEnabled", [](const std::string&, const void* v) {
+        StateManager::setWaterPriorityEnabled(*static_cast<const bool*>(v), false);
+        parametersChanged = true;
+        lastChangeTime = millis();
+    });
+    storage->setOnChange("system/boilerEnabled", [](const std::string&, const void* v) {
+        StateManager::setBoilerEnabled(*static_cast<const bool*>(v), false);
+        parametersChanged = true;
+        lastChangeTime = millis();
+    });
+    storage->setOnChange("system/heatingEnabled", [](const std::string&, const void* v) {
+        StateManager::setHeatingEnabled(*static_cast<const bool*>(v), false);
+        parametersChanged = true;
+        lastChangeTime = millis();
+    });
+    storage->setOnChange("system/waterEnabled", [](const std::string&, const void* v) {
+        StateManager::setWaterEnabled(*static_cast<const bool*>(v), false);
+        parametersChanged = true;
+        lastChangeTime = millis();
+    });
+    storage->setOnChange("system/heatingOverrideOff", [](const std::string&, const void* v) {
+        StateManager::setHeatingOverrideOff(*static_cast<const bool*>(v), false);
+        parametersChanged = true;
+        lastChangeTime = millis();
+    });
+    storage->setOnChange("system/waterOverrideOff", [](const std::string&, const void* v) {
+        StateManager::setWaterOverrideOff(*static_cast<const bool*>(v), false);
+        parametersChanged = true;
+        lastChangeTime = millis();
+    });
     storage->setOnChange("wheater/heatingRate", floatParamCallback);
     storage->setOnChange("wheater/tempChargeDelta", floatParamCallback);
     // Note: tempLimitLow/High, tempSafeLimitLow/High are int32 with inline callbacks
@@ -725,10 +776,19 @@ void PersistentStorageTask(void* pvParameters) {
 
         // Note: Connection verified at function entry (TOCTOU guard)
 
-        // H14: Use standardized heap threshold - need buffer for MQTT subscriptions
-        size_t freeHeap = ESP.getFreeHeap();
-        if (freeHeap < SystemConstants::System::MIN_FREE_HEAP_WARNING) {
-            LOG_ERROR(TAG, "Low heap for MQTT subs: %d", freeHeap);
+        // Need DRAM for the subscription list. MALLOC_CAP_DEFAULT, not ESP.getFreeHeap():
+        // that is MALLOC_CAP_INTERNAL, counts IRAM, reads ~58 kB on this chip, and so the
+        // old comparison against MIN_FREE_HEAP_WARNING (20000) was true-by-construction -
+        // this gate had never once refused, so the "do not subscribe when memory is
+        // short" protection it claimed did not exist (2026-10-18 review).
+        //
+        // Refusing is safe and self-correcting: returning false leaves
+        // mqttSubscriptionsActive false, and the loop retries with exponential backoff.
+        const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+        if (largestBlock < SystemConstants::System::MIN_DRAM_BLOCK_WARNING) {
+            LOG_ERROR(TAG, "Low DRAM for MQTT subs: largest block %u B (need %u B)",
+                      static_cast<unsigned>(largestBlock),
+                      static_cast<unsigned>(SystemConstants::System::MIN_DRAM_BLOCK_WARNING));
             return false;
         }
 
