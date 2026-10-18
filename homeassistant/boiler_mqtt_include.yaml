@@ -381,6 +381,92 @@ sensor:
     state_class: total_increasing
     entity_category: diagnostic
 
+  # Heating control diagnostics (fw 0.1.0-4de039d): boiler/status/heating/control, RETAINED,
+  # on change + every 10 s. Temps in TENTHS. Fields: mode weather|room, dem (= s bit2, already
+  # "Heating Active"), blk why-off reason, raw PRE-clamp curve, shift total curve shift,
+  # cmd post-clamp curve target, clp none|floor|ceil, o/i/tgt inputs used this evaluation.
+  # cmd is the CURVE answer: equals the flow setpoint only while dem is true; the actually
+  # commanded burner target stays t.bt ("Boiler Commanded Setpoint"; water target during a charge).
+  - name: "Heating Status"
+    unique_id: boiler_ctl_block_reason
+    state_topic: "boiler/status/heating/control"
+    value_template: >-
+      {{ {'none':'Heating','outside':'Too warm outside','backstop':'Room warm enough','roomsat':'Room at target','sensor':'Sensor fault','override':'Summer override','disabled':'Heating disabled'}.get(value_json.blk, value_json.blk) }}
+    icon: mdi:radiator
+    json_attributes_topic: "boiler/status/heating/control"
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Heating Control Mode"
+    unique_id: boiler_ctl_mode
+    state_topic: "boiler/status/heating/control"
+    value_template: >-
+      {{ {'weather':'Weather','room':'Room thermostat'}.get(value_json.mode, value_json.mode) }}
+    entity_category: diagnostic
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Heating Curve Target"
+    unique_id: boiler_ctl_curve_cmd
+    state_topic: "boiler/status/heating/control"
+    value_template: >-
+      {{ (value_json.cmd | float) / 10 }}
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Heating Curve Raw"
+    unique_id: boiler_ctl_curve_raw
+    state_topic: "boiler/status/heating/control"
+    value_template: >-
+      {{ (value_json.raw | float) / 10 }}
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    entity_category: diagnostic
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Heating Curve Shift"
+    unique_id: boiler_ctl_curve_shift
+    state_topic: "boiler/status/heating/control"
+    value_template: >-
+      {{ (value_json.shift | float) / 10 }}
+    unit_of_measurement: "°C"
+    state_class: measurement
+    entity_category: diagnostic
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
+  - name: "Heating Curve Limit"
+    unique_id: boiler_ctl_curve_clamp
+    state_topic: "boiler/status/heating/control"
+    value_template: >-
+      {{ {'none':'None','floor':'Flow floor','ceil':'Flow max'}.get(value_json.clp, value_json.clp) }}
+    entity_category: diagnostic
+    availability:
+      - topic: "boiler/status/online"
+        payload_available: "online"
+        payload_not_available: "offline"
+        value_template: "{{ 'online' if value_json.online else 'offline' }}"
+
   # Read-only views of tuning/safety/calibration params (2026-10-18: not writable from HA;
   # change them in the boiler add-on panel). State from grouped params replies.
   - name: "Water Safety High Limit"
