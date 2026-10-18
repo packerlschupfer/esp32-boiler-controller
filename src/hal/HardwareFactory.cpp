@@ -279,113 +279,19 @@ bool configureRYN4HAL(RYN4* ryn4) {
     }
 }
 
-/**
- * @brief Example of using HAL to read temperatures
- */
-void readTemperaturesThroughHAL() {
-    static const char* TAG = "HALExample";
-    
-    auto& hal = HardwareAbstractionLayer::getInstance();
-    const auto& config = hal.getConfig();
-    
-    if (config.boilerTempSensor) {
-        // Read boiler output temperature (channel 0)
-        auto reading = config.boilerTempSensor->readTemperature(0);
-        if (reading.valid) {
-            LOG_INFO(TAG, "Boiler output temp: %.1f°C", reading.temperature);
-        }
-        
-        // Read boiler return temperature (channel 1)
-        reading = config.boilerTempSensor->readTemperature(1);
-        if (reading.valid) {
-            LOG_INFO(TAG, "Boiler return temp: %.1f°C", reading.temperature);
-        }
-    }
-    
-    if (config.waterTempSensor) {
-        // Read water tank temperature (channel 2)
-        auto reading = config.waterTempSensor->readTemperature(2);
-        if (reading.valid) {
-            LOG_INFO(TAG, "Water tank temp: %.1f°C", reading.temperature);
-        }
-    }
-    
-    if (config.outsideTempSensor) {
-        // Read outside temperature (channel 4)
-        auto reading = config.outsideTempSensor->readTemperature(4);
-        if (reading.valid) {
-            LOG_INFO(TAG, "Outside temp: %.1f°C", reading.temperature);
-        }
-    }
-    
-    if (config.roomTempSensor) {
-        // Read room temperature from ANDRTF3
-        auto reading = config.roomTempSensor->readTemperature();
-        if (reading.valid) {
-            LOG_INFO(TAG, "Room temp: %.1f°C", reading.temperature);
-        }
-    }
-}
+// Removed 2026-10-19: readTemperaturesThroughHAL() and controlRelaysThroughHAL(),
+// two "Example of using HAL to ..." functions. Both were dead - defined here, declared
+// in no header, zero callers - but the relay one was worse than dead. It drove
+// burnerRelay->setState() directly, bypassing BurnerRequestManager, BurnerAntiFlapping,
+// the rate limiter and RelayCommandPolicy's pump protection, and its relay indices were
+// wrong against RelayIndices.h: it labelled index 1 "heating pump" (POWER_BOOST, full
+// 42.2 kW) and index 2 "water pump" (WATER_MODE), while the real pumps are 4 and 5.
+// Copied as the "example" it claimed to be, it would fire the burner at full power with
+// no pump running - the Sept 2026 overheat. The temperature one read channel 4 as
+// "outside"; channel 4 is the 4-20 mA pressure input and outside is CH3.
 
-/**
- * @brief Example of using HAL to control relays
- */
-void controlRelaysThroughHAL(bool burnerOn, bool heatingPumpOn, bool waterPumpOn) {
-    static const char* TAG = "HALExample";
-    
-    auto& hal = HardwareAbstractionLayer::getInstance();
-    const auto& config = hal.getConfig();
-    
-    if (config.burnerRelay) {
-        // Control burner (relay 0)
-        IRelay::State burnerState = burnerOn ? IRelay::State::ON : IRelay::State::OFF;
-        if (config.burnerRelay->setState(0, burnerState)) {
-            LOG_INFO(TAG, "Burner set to %s", burnerOn ? "ON" : "OFF");
-        }
-        
-        // Control heating pump (relay 1)
-        IRelay::State heatingPumpState = heatingPumpOn ? IRelay::State::ON : IRelay::State::OFF;
-        if (config.burnerRelay->setState(1, heatingPumpState)) {
-            LOG_INFO(TAG, "Heating pump set to %s", heatingPumpOn ? "ON" : "OFF");
-        }
-        
-        // Control water pump (relay 2)
-        IRelay::State waterPumpState = waterPumpOn ? IRelay::State::ON : IRelay::State::OFF;
-        if (config.burnerRelay->setState(2, waterPumpState)) {
-            LOG_INFO(TAG, "Water pump set to %s", waterPumpOn ? "ON" : "OFF");
-        }
-    }
-}
-
-/**
- * @brief Example of using HAL with callbacks
- */
-void setupHALCallbacks() {
-    // static const char* TAG = "HALExample";  // Unused in this example
-    
-    auto& hal = HardwareAbstractionLayer::getInstance();
-    const auto& config = hal.getConfig();
-    
-    // Set up relay state change callback
-    if (config.burnerRelay) {
-        config.burnerRelay->onStateChange([](uint8_t channel, IRelay::State newState) {
-            const char* stateStr = (newState == IRelay::State::ON) ? "ON" : "OFF";
-            LOG_INFO("HALCallback", "Relay %u changed to %s", channel, stateStr);
-            
-            // Could trigger events or update shared state here
-            switch(channel) {
-                case 0:  // Burner
-                    // Update burner state in shared resources
-                    break;
-                case 1:  // Heating pump
-                    // Update heating pump state
-                    break;
-                case 2:  // Water pump
-                    // Update water pump state
-                    break;
-            }
-        });
-    }
-}
+// setupHALCallbacks() removed in the same pass: also dead, also an "example", and it
+// repeated the same wrong relay labels in its switch (case 1 "Heating pump",
+// case 2 "Water pump") with empty bodies.
 
 } // namespace HAL

@@ -451,6 +451,14 @@ void PersistentStorageTask(void* pvParameters) {
 
     // Sensor compensation offsets (MB8ART channels) - int32_t shadows, values in tenths of °C
     // MQTT: Send integer value e.g., -14 for -1.4°C offset, 5 for +0.5°C offset
+    //
+    // Channel numbers are from include/config/SensorIndices.h. Four of the seven
+    // descriptions below were wrong until 2026-10-19 (outside said CH6, which is
+    // WATER_RETURN and hardware-deactivated). These strings are published by
+    // params/list, so a wrong one actively misleads.
+    //
+    // NOTE: none of these seven reach a reading yet - the MB8ART library owns the
+    // pointers it writes (SensorBindings.cpp). See SystemSettingsStruct.h.
     storage->registerInt("sensor/offset/boilerOutput", &temperatureShadows.boilerOutputOffset,
                           -50, 50, "Boiler output offset (tenths °C, CH0)");
     storage->registerInt("sensor/offset/boilerReturn", &temperatureShadows.boilerReturnOffset,
@@ -458,13 +466,13 @@ void PersistentStorageTask(void* pvParameters) {
     storage->registerInt("sensor/offset/waterTank", &temperatureShadows.waterTankOffset,
                           -50, 50, "Water tank offset (tenths °C, CH2)");
     storage->registerInt("sensor/offset/waterOutput", &temperatureShadows.waterOutputOffset,
-                          -50, 50, "Water output offset (tenths °C, CH3)");
+                          -50, 50, "Water output offset (tenths °C, no channel)");
     storage->registerInt("sensor/offset/waterReturn", &temperatureShadows.waterReturnOffset,
-                          -50, 50, "Water return offset (tenths °C, CH4)");
+                          -50, 50, "Water return offset (tenths °C, CH6)");
     storage->registerInt("sensor/offset/heatingReturn", &temperatureShadows.heatingReturnOffset,
-                          -50, 50, "Heating return offset (tenths °C, CH5)");
+                          -50, 50, "Heating return offset (tenths °C, CH7)");
     storage->registerInt("sensor/offset/outside", &temperatureShadows.outsideTempOffset,
-                          -50, 50, "Outside temp offset (tenths °C, CH6)");
+                          -50, 50, "Outside temp offset (tenths °C, CH3)");
     // ANDRTF3 room temperature
     storage->registerInt("sensor/offset/room", &temperatureShadows.roomTempOffset,
                           -50, 50, "Room temp offset (tenths °C, ANDRTF3)");

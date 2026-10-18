@@ -632,12 +632,26 @@ All values use **fixed-point integers** matching the internal representation:
 | boilerOutput | `sensor/offset/boilerOutput` | ±50 (±5.0°C) | 0 | CH0: Boiler output temp |
 | boilerReturn | `sensor/offset/boilerReturn` | ±50 (±5.0°C) | 0 | CH1: Boiler return temp |
 | waterTank | `sensor/offset/waterTank` | ±50 (±5.0°C) | 0 | CH2: Hot water tank |
-| waterOutput | `sensor/offset/waterOutput` | ±50 (±5.0°C) | 0 | CH3: Hot water output |
-| waterReturn | `sensor/offset/waterReturn` | ±50 (±5.0°C) | 0 | CH4: Hot water return |
-| heatingReturn | `sensor/offset/heatingReturn` | ±50 (±5.0°C) | 0 | CH5: Heating return |
-| outside | `sensor/offset/outside` | ±50 (±5.0°C) | 0 | CH6: Outside temp |
-| room | `sensor/offset/room` | ±50 (±5.0°C) | -14 | ANDRTF3: Room temp |
+| outside | `sensor/offset/outside` | ±50 (±5.0°C) | 0 | CH3: Outside temp |
+| waterReturn | `sensor/offset/waterReturn` | ±50 (±5.0°C) | 0 | CH6: Water return (channel off) |
+| heatingReturn | `sensor/offset/heatingReturn` | ±50 (±5.0°C) | 0 | CH7: Heating return (channel off) |
+| waterOutput | `sensor/offset/waterOutput` | ±50 (±5.0°C) | 0 | No such channel - orphan |
+| room | `sensor/offset/room` | ±50 (±5.0°C) | -17 | ANDRTF3: Room temp |
 | pressure | `sensor/offset/pressure` | ±50 (±0.5 BAR) | 0 | System pressure |
+
+Channel numbers are from `include/config/SensorIndices.h`. Until 2026-10-19 this table,
+the settings struct and the parameter descriptions all carried an older map in which
+`outside` was CH6 - which is actually `WATER_RETURN`, and deactivated - so following them
+sent an outside calibration to a dead channel.
+
+**Only `room` and `pressure` currently affect a reading.** The seven MB8ART temperature
+offsets are stored and published but applied to nothing: the MB8ART library writes
+temperatures directly into `SharedSensorReadings` through the pointers bound in
+`SensorBindings.cpp`, so this layer has no interception point. Per-channel correction is
+being added to the library; once wired, `boilerOutput`, `boilerReturn`, `waterTank` and
+`outside` will take effect. `waterReturn` and `heatingReturn` will remain inert while
+CH6/CH7 are disabled (`ENABLE_SENSOR_*` in `ProjectConfig.h`), and CH4 is the 4-20 mA
+pressure input, which is never temperature-offset.
 
 #### Set Sensor Offset
 ```bash

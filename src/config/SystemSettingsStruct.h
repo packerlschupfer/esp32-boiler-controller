@@ -88,14 +88,28 @@ struct SystemSettings {
     bool waterOverrideOff = false;          // Block water heating circuit
 
     // Sensor Compensation Offsets (in tenths of °C, e.g., -14 = -1.4°C)
-    // MB8ART channels (CH0-CH6)
+    //
+    // Channel numbers below are from include/config/SensorIndices.h, which declares
+    // itself the single source of truth. The comments here previously named CH3-CH6
+    // from an older channel map: outside was documented as CH6, which is WATER_RETURN
+    // (and hardware-deactivated), so anyone wiring an outside calibration by following
+    // them would have sent it to a dead channel (2026-10-19).
+    //
+    // CAUTION: of the seven below, only roomTempOffset and pressureOffset are applied
+    // to anything. The MB8ART library writes temperatures straight into
+    // SharedSensorReadings through the pointers bound in SensorBindings.cpp, so this
+    // layer has no interception point; see MB8ART::applyTemperatureCorrection(), a
+    // stub that is never called. Per-channel correction is being added to the library
+    // - wire these through its setter then, and keep CH4 out of it (CURRENT mode).
     Temperature_t boilerOutputOffset = 0;   // CH0: Boiler output temperature
     Temperature_t boilerReturnOffset = 0;   // CH1: Boiler return temperature
     Temperature_t waterTankOffset = 0;      // CH2: Hot water tank temperature
-    Temperature_t waterOutputOffset = 0;    // CH3: Hot water output temperature
-    Temperature_t waterReturnOffset = 0;    // CH4: Hot water return temperature
-    Temperature_t heatingReturnOffset = 0;  // CH5: Heating return temperature
-    Temperature_t outsideTempOffset = 0;    // CH6: Outside temperature
+    Temperature_t waterOutputOffset = 0;    // ORPHAN: no such channel in SensorIndices
+    Temperature_t waterReturnOffset = 0;    // CH6: WATER_RETURN   (deactivated)
+    Temperature_t heatingReturnOffset = 0;  // CH7: HEATING_RETURN (deactivated)
+    Temperature_t outsideTempOffset = 0;    // CH3: OUTSIDE  <-- was wrongly CH6
+    // CH4 is PRESSURE (4-20 mA, not a temperature); its offset is pressureOffset below.
+    // CH5 WATER_TANK_TOP has no offset parameter.
     // ANDRTF3
     Temperature_t roomTempOffset = -17;     // Room temperature offset (default -1.7°C)
     // Pressure (in hundredths of BAR, e.g., -5 = -0.05 BAR)
