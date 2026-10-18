@@ -30,6 +30,13 @@ void test_heating_curve_outside_part_not_ten_times_too_small();
 void test_heating_curve_clamps_to_limits();
 
 // Space heating policy (weather mode outside threshold hysteresis)
+void test_sensor_error_bit_single_failure_does_not_raise();
+void test_sensor_error_bit_raises_only_after_the_confirm_window();
+void test_sensor_error_bit_recovery_inside_the_window_never_raises();
+void test_sensor_error_bit_clears_on_recovery_when_owned();
+void test_sensor_error_bit_never_clears_a_bit_owned_by_the_fallback();
+void test_sensor_error_bit_raise_is_idempotent_and_outranks_clear();
+void test_sensor_error_bit_full_latch_regression_sequence();
 void test_param_save_explicit_request_is_never_delayed();
 void test_param_save_idle_never_saves();
 void test_param_save_waits_for_the_debounce_window();
@@ -514,6 +521,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_heating_curve_clamps_to_limits);
 
     // Space heating policy (weather mode outside threshold hysteresis)
+    RUN_TEST(test_sensor_error_bit_single_failure_does_not_raise);
+    RUN_TEST(test_sensor_error_bit_raises_only_after_the_confirm_window);
+    RUN_TEST(test_sensor_error_bit_recovery_inside_the_window_never_raises);
+    RUN_TEST(test_sensor_error_bit_clears_on_recovery_when_owned);
+    RUN_TEST(test_sensor_error_bit_never_clears_a_bit_owned_by_the_fallback);
+    RUN_TEST(test_sensor_error_bit_raise_is_idempotent_and_outranks_clear);
+    RUN_TEST(test_sensor_error_bit_full_latch_regression_sequence);
     RUN_TEST(test_param_save_explicit_request_is_never_delayed);
     RUN_TEST(test_param_save_idle_never_saves);
     RUN_TEST(test_param_save_waits_for_the_debounce_window);

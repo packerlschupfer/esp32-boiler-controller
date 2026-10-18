@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### One sensor-mutex timeout latched an emergency stop that only a reboot could clear
+
+`Error::SENSOR_FAILURE` has two writers and, until now, one of them had no way to clear it. `TemperatureSensorFallback` raises it for a genuinely missing sensor and clears it in exactly two places (`TemperatureSensorFallback.cpp:292`, `:318`) - one inside `if (currentMode == SHUTDOWN)`, the other inside a mode-**change** guard. `BurnerControlTask.cpp:759` raised it when it could not *read* the sensors, which says nothing about whether they work: a single 100 ms mutex timeout, or one stale reading. The only other clear, `ErrorRecovery.cpp:397`, sits in `clearErrors()`, which has no callers.
+
+So a bit raised from the burner task while the sensors were perfectly healthy was cleared by nobody - and the bit is load-bearing twice over. It is in `CRITICAL_ERRORS` (`SafetyInterlocks.cpp:362`), so `checkSystemErrors()` fails forever and `performSafetyCheck()` emergency-stops the burner; and `clearEmergencyStop()` requires it clear (`CentralizedFailsafe.cpp:508-511`, in both `sensorsOk` and `systemErrorsClear`), so `boiler/cmd/emergency_reset` refuses permanently. **Net effect: one transient mutex timeout produced an emergency stop that no MQTT command could release, recoverable only by a power cycle.**
+
+The timeout is reachable rather than theoretical: `MQTTPublisher.cpp:109` takes the sensor mutex in a **function-scoped** guard and then builds the whole sensor JSON inside that hold, acquiring two further mutexes on the way (`getHeatDemandState()` through the retry helper, then the relay mutex at 50 ms). The comment at `:118` - "SemaphoreGuard releases automatically when it goes out of scope" - is true but reads as though it releases at once, which is how a multi-hundred-millisecond hold went unnoticed. `BurnerControlTask` makes a single 100 ms attempt against it.
+
+Fixed with two narrow changes, plus a new header-only `SensorErrorBitPolicy` (`include/modules/control/SensorErrorBitPolicy.h`) so the decision is natively testable:
+
+1. **Confirm before escalating.** Reuses the `SensorFailureConfirm` helper already in that file (10 s window), so a transient timeout or one stale read no longer raises the bit at all. Safety is unchanged while confirming: `heatDemand = false` still fires on every failing cycle, so the burner stays blocked exactly as before. Only the error-bit escalation is delayed.
+2. **Clear on recovery, but only what this task raised.** An `ownedHere` flag keeps `BurnerControlTask` from clearing a bit that `TemperatureSensorFallback` set - without it, a successful read would unblock `performSafetyCheck()` and permit an emergency-stop release while a sensor was still missing.
+
+The stale-reading site is covered as well as the mutex-timeout one; it had the same flaw, since readings that go stale and recover need not move the fallback between modes at all.
+
+7 new tests (281 total), and they were **mutation-checked** rather than merely run: restoring the old unconditional raise fails 4 of them including the end-to-end latch sequence, and removing the ownership guard fails exactly the test written for it. `BurnerControlTask` bound 3252-3264 B of 4096 (+832 B); both selective envs build clean.
+
+
 ### NetworkMonitor's stack was BELOW its static bound - a 21st task the "every task" sweep never saw
 
 `STACK_SIZE_NETWORK_MONITOR_TASK` was 2048 B against a worst-case static bound of **2068-2080 B** in the `prod_debug_selective` build - over by 20-32 B, with no phantom-edge flag, in the binary flashed on 2026-10-18. Raised to **3072** (+992 B headroom there, +1168 B in `esp32dev_usb_debug_selective`, both verdict "fits, including the worst case").

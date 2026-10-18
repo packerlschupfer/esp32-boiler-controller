@@ -13,6 +13,7 @@
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/ReturnPreheater.h"
 #include "modules/control/SensorFailureConfirm.h"
+#include "modules/control/SensorErrorBitPolicy.h"
 #include "shared/SharedResources.h"
 #include "events/SystemEventsGenerated.h"
 #include "events/TemperatureEventHelpers.h"
@@ -756,20 +757,58 @@ static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t t
         // H4: Feed watchdog after potentially slow mutex operation
         (void)SRP::getTaskManager().feedWatchdog();
 
+        // Error::SENSOR_FAILURE is SHARED with TemperatureSensorFallback and this task was
+        // the writer without a clear path, so a bit raised here while the sensors were
+        // healthy stayed set forever - and it is in CRITICAL_ERRORS and gates
+        // clearEmergencyStop(), so one 100 ms mutex timeout latched an emergency stop that
+        // only a reboot could clear (measured 2026-10-18). SensorErrorBitPolicy.h has the
+        // full account. Two narrow changes: confirm over SensorFailureConfirm::CONFIRM_MS
+        // before raising, and clear on recovery but ONLY a bit we raised ourselves.
+        //
+        // Safety is unchanged while confirming: heatDemand is still cleared on every
+        // failing cycle below, so the burner stays blocked exactly as before. All that is
+        // delayed is the error-bit escalation.
+        static SensorFailureConfirm::State readFailure;
+        static bool sensorFailureOwnedHere = false;
+
+        const bool readOk = sensorResult.mutexAcquired && !sensorResult.isStale;
+
         if (!sensorResult.mutexAcquired) {
             LOG_ERROR(TAG, "Failed to acquire sensor mutex - blocking burner");
             heatDemand = false;
-            xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
-                              SystemEvents::Error::SENSOR_FAILURE);
         } else if (sensorResult.isStale) {
             LOG_ERROR(TAG, "Sensor data stale (%lu ms old) - blocking burner operation",
                       sensorResult.ageMs);
             heatDemand = false;
-            xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
-                              SystemEvents::Error::SENSOR_FAILURE);
         } else {
             readings = sensorResult.readings;
             readingsValid = true;
+        }
+
+        // heatDemand is true throughout this block, so the confirm window tracks read
+        // failures only; it resets itself on the first good read.
+        const bool confirmedReadFailure =
+            SensorFailureConfirm::shouldStop(readFailure, readOk, true, millis());
+
+        switch (SensorErrorBitPolicy::decide(confirmedReadFailure, readOk,
+                                             sensorFailureOwnedHere)) {
+            case SensorErrorBitPolicy::Action::RAISE:
+                if (!sensorFailureOwnedHere) {
+                    LOG_ERROR(TAG, "Sensor reads failing for %lus - raising SENSOR_FAILURE",
+                              static_cast<unsigned long>(SensorFailureConfirm::CONFIRM_MS / 1000));
+                    sensorFailureOwnedHere = true;
+                }
+                xEventGroupSetBits(SRP::getErrorNotificationEventGroup(),
+                                  SystemEvents::Error::SENSOR_FAILURE);
+                break;
+            case SensorErrorBitPolicy::Action::CLEAR:
+                LOG_INFO(TAG, "Sensor reads recovered - clearing SENSOR_FAILURE");
+                xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),
+                                     SystemEvents::Error::SENSOR_FAILURE);
+                sensorFailureOwnedHere = false;
+                break;
+            case SensorErrorBitPolicy::Action::NONE:
+                break;
         }
 
         if (heatDemand) {
