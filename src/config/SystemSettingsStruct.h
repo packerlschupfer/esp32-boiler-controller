@@ -104,7 +104,6 @@ struct SystemSettings {
     Temperature_t boilerOutputOffset = 0;   // CH0: Boiler output temperature
     Temperature_t boilerReturnOffset = 0;   // CH1: Boiler return temperature
     Temperature_t waterTankOffset = 0;      // CH2: Hot water tank temperature
-    Temperature_t waterOutputOffset = 0;    // ORPHAN: no such channel in SensorIndices
     Temperature_t waterReturnOffset = 0;    // CH6: WATER_RETURN   (deactivated)
     Temperature_t heatingReturnOffset = 0;  // CH7: HEATING_RETURN (deactivated)
     Temperature_t outsideTempOffset = 0;    // CH3: OUTSIDE  <-- was wrongly CH6

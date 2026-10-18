@@ -44,7 +44,7 @@ package "PersistentStorageTask" {
         storage "limits h/ (4) and w/ (2)\nburner low / high, heating low / high\nwater heating low / high" as LimitParams
         storage "wheater (7)\npriorityEnabled, tempLimitLow / High\ntempSafeLimitLow / High\ntempChargeDelta, heatingRate" as WaterParams
         storage "pid (9)\nspaceHeating kp / ki / kd\nwaterHeater kp / ki / kd\nautotune amplitude / hysteresis / method" as PIDParams
-        storage "sensor/offset (9)\nboilerOutput, boilerReturn, waterTank\nwaterOutput, waterReturn, heatingReturn\noutside, room, pressure" as SensorParams
+        storage "sensor/offset (8)\nboilerOutput, boilerReturn, waterTank\noutside, waterReturn, heatingReturn\nroom, pressure" as SensorParams
         storage "syslog (8)\nenabled, serverIP0-3, port\nfacility, minLevel" as SyslogParams
     }
 }

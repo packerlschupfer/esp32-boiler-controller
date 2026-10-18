@@ -465,8 +465,6 @@ void PersistentStorageTask(void* pvParameters) {
                           -50, 50, "Boiler return offset (tenths °C, CH1)");
     storage->registerInt("sensor/offset/waterTank", &temperatureShadows.waterTankOffset,
                           -50, 50, "Water tank offset (tenths °C, CH2)");
-    storage->registerInt("sensor/offset/waterOutput", &temperatureShadows.waterOutputOffset,
-                          -50, 50, "Water output offset (tenths °C, no channel)");
     storage->registerInt("sensor/offset/waterReturn", &temperatureShadows.waterReturnOffset,
                           -50, 50, "Water return offset (tenths °C, CH6)");
     storage->registerInt("sensor/offset/heatingReturn", &temperatureShadows.heatingReturnOffset,
@@ -609,7 +607,6 @@ void PersistentStorageTask(void* pvParameters) {
     storage->setOnChange("sensor/offset/boilerOutput", sensorOffsetCallback);
     storage->setOnChange("sensor/offset/boilerReturn", sensorOffsetCallback);
     storage->setOnChange("sensor/offset/waterTank", sensorOffsetCallback);
-    storage->setOnChange("sensor/offset/waterOutput", sensorOffsetCallback);
     storage->setOnChange("sensor/offset/waterReturn", sensorOffsetCallback);
     storage->setOnChange("sensor/offset/heatingReturn", sensorOffsetCallback);
     storage->setOnChange("sensor/offset/outside", sensorOffsetCallback);

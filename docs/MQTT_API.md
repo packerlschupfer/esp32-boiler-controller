@@ -635,7 +635,6 @@ All values use **fixed-point integers** matching the internal representation:
 | outside | `sensor/offset/outside` | ±50 (±5.0°C) | 0 | CH3: Outside temp |
 | waterReturn | `sensor/offset/waterReturn` | ±50 (±5.0°C) | 0 | CH6: Water return (channel off) |
 | heatingReturn | `sensor/offset/heatingReturn` | ±50 (±5.0°C) | 0 | CH7: Heating return (channel off) |
-| waterOutput | `sensor/offset/waterOutput` | ±50 (±5.0°C) | 0 | No such channel - orphan |
 | room | `sensor/offset/room` | ±50 (±5.0°C) | -17 | ANDRTF3: Room temp |
 | pressure | `sensor/offset/pressure` | ±50 (±0.5 BAR) | 0 | System pressure |
 

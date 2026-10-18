@@ -115,7 +115,6 @@ struct SystemSettingsTemperatureShadows {
     int32_t boilerOutputOffset;
     int32_t boilerReturnOffset;
     int32_t waterTankOffset;
-    int32_t waterOutputOffset;
     int32_t waterReturnOffset;
     int32_t heatingReturnOffset;
     int32_t outsideTempOffset;
@@ -144,7 +143,6 @@ struct SystemSettingsTemperatureShadows {
         boilerOutputOffset = static_cast<int32_t>(settings.boilerOutputOffset);
         boilerReturnOffset = static_cast<int32_t>(settings.boilerReturnOffset);
         waterTankOffset = static_cast<int32_t>(settings.waterTankOffset);
-        waterOutputOffset = static_cast<int32_t>(settings.waterOutputOffset);
         waterReturnOffset = static_cast<int32_t>(settings.waterReturnOffset);
         heatingReturnOffset = static_cast<int32_t>(settings.heatingReturnOffset);
         outsideTempOffset = static_cast<int32_t>(settings.outsideTempOffset);
@@ -169,7 +167,6 @@ struct SystemSettingsTemperatureShadows {
         settings.boilerOutputOffset = static_cast<Temperature_t>(boilerOutputOffset);
         settings.boilerReturnOffset = static_cast<Temperature_t>(boilerReturnOffset);
         settings.waterTankOffset = static_cast<Temperature_t>(waterTankOffset);
-        settings.waterOutputOffset = static_cast<Temperature_t>(waterOutputOffset);
         settings.waterReturnOffset = static_cast<Temperature_t>(waterReturnOffset);
         settings.heatingReturnOffset = static_cast<Temperature_t>(heatingReturnOffset);
         settings.outsideTempOffset = static_cast<Temperature_t>(outsideTempOffset);
