@@ -902,7 +902,7 @@ polynomial  = 14347 + 210 * diff / 10 + 248 * diffSquared / 1000;   // × 10000
 adjustment  = coeffX100 * diff * polynomial / ADJUSTMENT_SCALE;     // tenths, ADJUSTMENT_SCALE = 1000000
 target      = clamp(inside + shift - adjustment, lowerLimit, upperLimit);
 ```
-All divisions are integer divisions (truncated toward zero). `calculateSpaceHeatingTargetTemp()` passes `burner_low_limit` (`h/bLo`, default 38.0°C) and `heating_high_limit` (`h/sHi`, default 75.0°C) as limits; `BurnerRequestManager::setHeatingRequest()` then clamps the request to `heating_low_limit` (`h/sLo`, default 40.0°C) .. `heating_high_limit` (absolute 20.0-110.0°C).
+All divisions are integer divisions (truncated toward zero). `calculateSpaceHeatingTargetTemp()` passes `burner_low_limit` (`h/bLo`, default 38.0°C) and `heating_high_limit` (`h/sHi`, default 75.0°C) as limits; `BurnerRequestManager::setHeatingRequest()` then clamps the request to `heating_low_limit` (`h/sLo`, default 38.0°C) .. `heating_high_limit` (absolute 20.0-110.0°C).
 
 **Weather mode room shift**: with `heating/weatherControl` on and a valid room reading, `shift += (targetTemp - room) × heating/roomCurveShiftFactor`. Room mode uses the curve without this shift.
 
@@ -923,7 +923,7 @@ All divisions are integer divisions (truncated toward zero). `calculateSpaceHeat
 
 | Outside | diff (tenths) | polynomial | adjustment (tenths) | Curve result | Heating request |
 |---------|---------------|------------|---------------------|--------------|-----------------|
-| 10.0°C | -100 | 12495 | -174 | 37.4 → 38.0°C (h/bLo) | 40.0°C (h/sLo) |
+| 10.0°C | -100 | 12495 | -174 | 37.4 → 38.0°C (h/bLo) | 38.0°C (h/sLo) |
 | 0.0°C | -200 | 11139 | -311 | 51.1°C | 51.1°C |
 | -10.0°C | -300 | 10279 | -431 | 63.1°C | 63.1°C |
 

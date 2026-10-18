@@ -39,7 +39,7 @@ public:
      * @brief What the curve computed before clamping, for the
      *        boiler/status/heating/control diagnostics topic (2026-10-18).
      *
-     * Needed because the clamped result is a flat h/sLo 40.0 in mild weather and so says
+     * Needed because the clamped result sits flat on the h/sLo floor in mild weather and says
      * nothing about what the curve actually asked for, and because the room-deviation
      * contribution is otherwise invisible - it is folded into the returned target.
      */

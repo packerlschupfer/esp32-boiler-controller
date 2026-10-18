@@ -337,7 +337,12 @@ void PersistentStorageTask(void* pvParameters) {
     });
 
     // Space Heating Limits
-    static int32_t heating_low_i32 = 400;  // 40.0°C default
+    // 38.0°C: the space-heating flow floor. At the previous 40.0 the heating curve was
+    // clamped flat for every outside temperature above about 10.5 °C, so weather
+    // compensation did nothing for most of the shoulder season. The Vaillant VK 42/4-2 is a
+    // low-temperature boiler with a 35 °C minimum flow (docs/EQUIPMENT_SPECS.md:52-72); 38
+    // matches h/bLo and leaves the manufacturer margin intact (2026-10-19).
+    static int32_t heating_low_i32 = 380;
     static int32_t heating_high_i32 = 750; // 75.0°C default
 
     storage->registerInt("h/sLo", &heating_low_i32, 300, 600, "Space heating min (tenths °C)");
@@ -701,7 +706,7 @@ void PersistentStorageTask(void* pvParameters) {
     // load() zeros values for missing keys, so restore defaults here
     if (burner_low_i32 == 0) burner_low_i32 = 380;
     if (burner_high_i32 == 0) burner_high_i32 = 1100;
-    if (heating_low_i32 == 0) heating_low_i32 = 400;
+    if (heating_low_i32 == 0) heating_low_i32 = 380;
     if (heating_high_i32 == 0) heating_high_i32 = 750;
     if (water_low_i32 == 0) water_low_i32 = 400;
     if (water_high_i32 == 0 || water_high_i32 == 1) water_high_i32 = 900;

@@ -165,7 +165,7 @@ struct SystemSettings {
         Temperature_t heating_hysteresis = tempFromFloat(0.5f),
         Temperature_t burner_low_limit = tempFromFloat(38.0f),   // Global burner minimum
         Temperature_t burner_high_limit = tempFromFloat(110.0f), // Global burner maximum
-        Temperature_t heating_low_limit = tempFromFloat(40.0f),  // Space heating minimum
+        Temperature_t heating_low_limit = tempFromFloat(38.0f),  // Space heating minimum (= h/bLo)
         Temperature_t heating_high_limit = tempFromFloat(75.0f), // Space heating maximum
         Temperature_t water_heating_low_limit = tempFromFloat(40.0f),  // Water heating minimum
         Temperature_t water_heating_high_limit = tempFromFloat(90.0f), // Water heating maximum

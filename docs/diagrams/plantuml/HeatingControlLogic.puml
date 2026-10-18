@@ -63,10 +63,13 @@ note right
      burner_low_limit h/bLo (default 38 °C)
      .. heating_high_limit h/sHi (75 °C)
   2. in setHeatingRequest() to
-     heating_low_limit h/sLo (default 40 °C)
+     heating_low_limit h/sLo (default 38 °C)
      .. h/sHi - so h/sLo is the EFFECTIVE
-     floor, and in mild weather the curve
-     sits on it and compensation is inert
+     floor. It was 40 °C until 2026-10-19,
+     which pinned the curve flat above
+     ~10.5 °C outside; at 38 it matches
+     h/bLo and the curve modulates down
+     to the boiler's own minimum
 end note
 
 :BurnerRequestManager::setHeatingRequest(target)\nHEATING + POWER_LOW + target in bits 16-23;

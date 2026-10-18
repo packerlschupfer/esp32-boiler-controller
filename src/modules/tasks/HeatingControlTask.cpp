@@ -578,9 +578,11 @@ static void publishControlDiagnostics() {
     // Apply the SECOND clamp, the one BurnerRequestManager::setHeatingRequest() does.
     // calculateSpaceHeatingTargetTemp -> HeatingCurve::target() clamps to
     // settings.burner_low_limit (h/bLo, 38.0), but the request handler then clamps to
-    // heating_low_limit (h/sLo, 40.0), so h/sLo is the effective floor. Without this the
-    // topic reported cmd = 380 where the boiler would actually command 400 - caught on the
-    // device by cross-checking against an independent model of the curve (2026-10-18).
+    // heating_low_limit (h/sLo), so h/sLo is the effective floor. Without this the topic
+    // reported cmd = 380 where the boiler would actually command 400 - caught on the device
+    // by cross-checking against an independent model of the curve (2026-10-18). The two
+    // limits are both 38.0 since 2026-10-19, so they agree at the defaults; h/sLo is still
+    // the one that decides, and the mechanism matters the moment either is changed.
     {
         Temperature_t lo = effectiveLow;
         Temperature_t hi = effectiveHigh;
