@@ -30,6 +30,11 @@ void test_heating_curve_outside_part_not_ten_times_too_small();
 void test_heating_curve_clamps_to_limits();
 
 // Space heating policy (weather mode outside threshold hysteresis)
+void test_param_save_explicit_request_is_never_delayed();
+void test_param_save_idle_never_saves();
+void test_param_save_waits_for_the_debounce_window();
+void test_param_save_coalesces_a_burst_of_clicks();
+void test_param_save_survives_the_millis_wrap();
 void test_space_heating_outside_threshold_start_and_stop_limits();
 void test_space_heating_outside_noise_does_not_toggle();
 
@@ -509,6 +514,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_heating_curve_clamps_to_limits);
 
     // Space heating policy (weather mode outside threshold hysteresis)
+    RUN_TEST(test_param_save_explicit_request_is_never_delayed);
+    RUN_TEST(test_param_save_idle_never_saves);
+    RUN_TEST(test_param_save_waits_for_the_debounce_window);
+    RUN_TEST(test_param_save_coalesces_a_burst_of_clicks);
+    RUN_TEST(test_param_save_survives_the_millis_wrap);
     RUN_TEST(test_space_heating_outside_threshold_start_and_stop_limits);
     RUN_TEST(test_space_heating_outside_noise_does_not_toggle);
 

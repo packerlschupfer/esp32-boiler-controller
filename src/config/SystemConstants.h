@@ -138,7 +138,16 @@ namespace SystemConstants {
 
         // Persistent Storage Task
         namespace Storage {
-            constexpr uint32_t SAVE_INTERVAL_MS = 300000;       // 5 minutes
+            constexpr uint32_t SAVE_INTERVAL_MS = 300000;       // 5 minutes (unused - there
+                                                                // are no periodic saves)
+            // Coalescing window for saves triggered by parameter onChange callbacks. A
+            // thermostat card clicking the room target up five times used to run five full
+            // saveAll() passes, each 60 parameters x (nvs_set + nvs_commit), because
+            // Preferences commits per key. The key that changed is already written
+            // immediately by PersistentStorage::setJson(), so waiting costs nothing.
+            // Explicit saves (boiler/params/save, StateManager enable/priority/override)
+            // are NOT debounced.
+            constexpr uint32_t PARAM_SAVE_DEBOUNCE_MS = 2000;
         }
 
         // Heating Control Task

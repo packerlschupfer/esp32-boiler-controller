@@ -10,6 +10,7 @@
 #include "shared/SharedRelayReadings.h"
 #include "config/SystemSettings.h"
 #include "config/SystemConstants.h"
+#include "modules/tasks/ParameterSavePolicy.h"
 #include "config/SafetyConfig.h"
 #include <MQTTManager.h>
 #include "events/SystemEventsGenerated.h"
@@ -235,7 +236,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
     storage->setOnChange("wheater/tempLimitHigh", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempLimitHigh = static_cast<Temperature_t>(tankHigh_i32);
@@ -243,7 +243,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
     storage->setOnChange("wheater/tempSafeLimitHigh", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh = static_cast<Temperature_t>(tankSafeHigh_i32);
@@ -251,7 +250,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
     storage->setOnChange("wheater/tempSafeLimitLow", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempSafeLimitLow = static_cast<Temperature_t>(tankSafeLow_i32);
@@ -259,7 +257,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
 
     storage->registerFloat("wheater/tempChargeDelta", &settings.wHeaterConfTempChargeDelta,
@@ -277,7 +274,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
     
     storage->registerFloat("heating/curveShift", &settings.heating_curve_shift,
@@ -346,7 +342,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
     
     // PID parameters for space heating (wider range to accommodate autotune results)
@@ -415,7 +410,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
     storage->setOnChange("heating/roomOverheatMargin", [](const std::string& name, const void*) {
         SRP::getSystemSettings().roomTempOverheatMargin = static_cast<Temperature_t>(roomOverheatMargin_i32);
@@ -423,7 +417,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     });
 
     // Room temp curve shift factor (float, can be registered directly)
@@ -456,7 +449,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     };
     storage->setOnChange("preheat/offMultiplier", preheatPumpCallback);
     storage->setOnChange("preheat/maxCycles", preheatPumpCallback);
@@ -510,7 +502,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     };
 
     auto boolParamCallback = [](const std::string& name, const void* value) {
@@ -519,7 +510,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     };
 
     // Generic callback for unknown types (fallback)
@@ -529,7 +519,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     };
 
     // Callback for sensor offset parameters - syncs int32_t shadow to Temperature_t immediately
@@ -540,7 +529,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     };
     
     // Set callbacks for all parameters
@@ -596,7 +584,6 @@ void PersistentStorageTask(void* pvParameters) {
         parametersChanged = true;
         lastChangeTime = millis();
         SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
-        xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);
     };
     storage->setOnChange("syslog/enabled", boolParamCallback);
     storage->setOnChange("syslog/serverIP0", syslogCallback);
@@ -889,10 +876,30 @@ void PersistentStorageTask(void* pvParameters) {
         // Process MQTT command queue - this is required for commands like save, get, set to work
         storage->processCommandQueue();
 
-        // Handle save request (parameter change callbacks, boiler/params/save, StateManager
-        // enable/priority/override changes)
-        if (bits & STORAGE_SAVE_REQUEST_BIT) {
-            LOG_INFO(TAG, "Parameter save requested");
+        // Two kinds of save.
+        //
+        // EXPLICIT (boiler/params/save, StateManager enable/priority/override, the syslog
+        // and autotune writers) goes through PersistentStorageTask_RequestSave() and saves
+        // at once - someone asked for it, so do not make them wait.
+        //
+        // DEBOUNCED covers the parameter onChange callbacks. They now only set
+        // parametersChanged/lastChangeTime and the save is coalesced over
+        // PARAM_SAVE_DEBOUNCE_MS, so a thermostat card clicking the room target up five
+        // times costs ONE saveAll instead of five. saveAll() is 60 parameters x (nvs_set +
+        // nvs_commit) because Preferences commits per key, and nothing is at risk while we
+        // wait: PersistentStorage::setJson() has already written the one key that changed.
+        // The full pass still earns its place - it is what persists a setting written
+        // straight to SystemSettings by boiler/cmd/room_target or boiler/cmd/heating, which
+        // never goes near setJson() (see MQTTCommandHandlers.cpp:193, :223).
+        //
+        // parametersChanged and lastChangeTime were assigned by all 14 callbacks and read by
+        // NOTHING until now (found 2026-10-18): the debounce was designed and never wired
+        // up, so every set ran the full save immediately.
+        const bool explicitSave = (bits & STORAGE_SAVE_REQUEST_BIT) != 0;
+        if (ParameterSavePolicy::shouldSave(
+                explicitSave, parametersChanged, millis(), lastChangeTime,
+                SystemConstants::Tasks::Storage::PARAM_SAVE_DEBOUNCE_MS)) {
+            LOG_INFO(TAG, "Parameter save (%s)", explicitSave ? "requested" : "debounced");
             // Repeated here, not just at the top of the loop: another task can write a
             // setting after the sync above and before this save, and what NVS keeps is
             // whatever the shadow holds at this instant.
@@ -902,7 +909,6 @@ void PersistentStorageTask(void* pvParameters) {
             // Update temperature shadows if needed
             temperatureShadows.applyToSettings(settings);
             
-            // Clear changed flag after manual save
             parametersChanged = false;
         }
         
