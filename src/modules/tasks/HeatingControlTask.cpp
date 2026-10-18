@@ -527,30 +527,79 @@ static void publishControlDiagnostics() {
     }
     st.block = st.demand ? HeatingControlDiagnostics::Block::OK : g_blockReason;
 
-    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(20))) {
-        const SystemSettings& s = SRP::getSystemSettings();
-        st.weatherMode = s.useWeatherCompensatedControl;
-        st.roomTarget = s.targetTemperatureInside;
-        SRP::giveSystemSettingsMutex();
-    } else {
-        return;  // no snapshot, no publish - a stale mix is worse than a skipped cycle
-    }
-
-    if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(20))) {
-        const SharedSensorReadings& r = SRP::getSensorReadings();
-        st.outside = r.outsideTemp;
-        st.room = r.insideTemp;
-        SRP::giveSensorReadingsMutex();
-    } else {
+    // Evaluate the curve here rather than reusing the last control-loop value.
+    // calculateSpaceHeatingTargetTemp() only runs on the turn-on and target-update paths,
+    // so with heating OFF the cached values stayed 0 - blank in exactly the situation this
+    // topic is for ("what does the curve want right now?"). It is a const, side-effect-free
+    // computation over the same inputs the control loop uses, so this is the curve's
+    // current answer, not a prediction.
+    //
+    // `cmd` is therefore the clamped CURVE output, which equals the active setpoint while
+    // demand is on and is what the curve would ask for while it is off. The actually
+    // commanded burner target remains t.bt on boiler/status/sensors - and during a water
+    // charge bt is the water target, which this topic deliberately does not track.
+    HeatingControlModule::CurveDebug dbg;
+    Temperature_t curveTarget = 0;
+    Temperature_t effectiveLow = 0;
+    Temperature_t effectiveHigh = 0;
+    if (heatingState.heatingControl == nullptr) {
         return;
     }
+    {
+        // ONE acquisition for the inputs AND the curve evaluation, so o/i/tgt in the
+        // payload are exactly the values `raw` was computed from. Reading them separately
+        // let a sensor update land in between and broke that consistency, which is the
+        // main reason this topic carries its own inputs at all.
+        //
+        // Nesting order is Sensor -> Settings, which is the documented direction
+        // (docs/MUTEX_HIERARCHY.md; every nested pair in this file is already that way).
+        auto guard = MutexRetryHelper::acquireGuard(SRP::getSensorReadingsMutex(),
+                                                    "SensorReadings-HeatingDiag");
+        if (!guard) {
+            return;  // no snapshot, no publish - a stale mix is worse than a skipped cycle
+        }
+        if (!SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(20))) {
+            return;
+        }
+        const SharedSensorReadings& r = SRP::getSensorReadings();
+        const SystemSettings& cfg = SRP::getSystemSettings();
+        st.weatherMode = cfg.useWeatherCompensatedControl;
+        st.roomTarget = cfg.targetTemperatureInside;
+        st.outside = r.outsideTemp;
+        st.room = r.insideTemp;
+        effectiveLow = cfg.heating_low_limit;    // h/sLo - the EFFECTIVE floor
+        effectiveHigh = cfg.heating_high_limit;  // h/sHi
+        curveTarget = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(r, cfg, &dbg);
+        SRP::giveSystemSettingsMutex();
+    }
+    st.rawTarget = dbg.rawTarget;
+    st.shift = dbg.shift;
 
-    st.rawTarget = g_curveDebug.rawTarget;
-    st.shift = g_curveDebug.shift;
-    st.commanded = g_commandedTarget;
+    // Apply the SECOND clamp, the one BurnerRequestManager::setHeatingRequest() does.
+    // calculateSpaceHeatingTargetTemp -> HeatingCurve::target() clamps to
+    // settings.burner_low_limit (h/bLo, 38.0), but the request handler then clamps to
+    // heating_low_limit (h/sLo, 40.0), so h/sLo is the effective floor. Without this the
+    // topic reported cmd = 380 where the boiler would actually command 400 - caught on the
+    // device by cross-checking against an independent model of the curve (2026-10-18).
+    {
+        Temperature_t lo = effectiveLow;
+        Temperature_t hi = effectiveHigh;
+        if (lo < SystemConstants::Temperature::MIN_BOILER_TEMP_C) {
+            lo = SystemConstants::Temperature::MIN_BOILER_TEMP_C;
+        }
+        if (hi > SystemConstants::Temperature::MAX_BOILER_TEMP_C) {
+            hi = SystemConstants::Temperature::MAX_BOILER_TEMP_C;
+        }
+        if (curveTarget < lo) {
+            curveTarget = lo;
+        } else if (curveTarget > hi) {
+            curveTarget = hi;
+        }
+    }
+    st.commanded = curveTarget;
 
     // Which bound decided it. h/sLo is the effective floor: setHeatingRequest clamps to it
-    // after HeatingCurve has already clamped to h/bLo.
+    // after HeatingCurve has already clamped to h/bLo, so compare against that floor.
     if (st.commanded != 0) {
         if (st.rawTarget < st.commanded) {
             st.clamp = HeatingControlDiagnostics::Clamp::AT_FLOOR;
@@ -670,11 +719,18 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     g_blockReason = HeatingControlDiagnostics::Block::OK;
                 } else {
                     heatingNeeded = false;
-                    // roomOverheated is reported in preference to the outside gate: when
-                    // both are true the room limit is the one the user changed.
-                    g_blockReason = roomOverheated
-                                        ? HeatingControlDiagnostics::Block::ROOM_BACKSTOP
-                                        : HeatingControlDiagnostics::Block::OUTSIDE_GATE;
+                    // Outside gate FIRST. Corrected after the first hardware check
+                    // (2026-10-18): with outside 20.1 C against a 13.0 threshold the topic
+                    // reported "backstop", which is misleading twice over. The gate is the
+                    // primary weather-mode decision - at 20 C outside the honest answer is
+                    // "it is warm" - and `roomOverheated` does not mean what its name
+                    // suggests while heating is OFF: it is then the RESTART test
+                    // (room >= limit - hysteresis), so a room merely sitting in the
+                    // deadband at 19.9 set it true. Reporting the room limit then invites
+                    // the user to adjust a margin that is not the cause.
+                    g_blockReason = !outsideCold
+                                        ? HeatingControlDiagnostics::Block::OUTSIDE_GATE
+                                        : HeatingControlDiagnostics::Block::ROOM_BACKSTOP;
                     if (!outsideCold && currentlyHeating) {
                         char outBuf[16], threshBuf[16];
                         formatTemp(outBuf, sizeof(outBuf), outsideTemp);

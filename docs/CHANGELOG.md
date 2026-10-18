@@ -30,6 +30,16 @@ Implementation notes worth keeping:
 
 6 new tests (287 total), including that the worst realistic payload fits the 319-byte limit and that `differs()` catches every field. `HeatingControlTask` bound unchanged at 2820-2832 B of 4096 (+1264 B) despite the new MQTT dependency.
 
+**Three defects in the first version, all found on the device and none catchable by the build or the unit tests.** Recorded because they are the argument for cross-checking a new diagnostic against an independent model rather than eyeballing it:
+
+1. **The block reason was misleading.** With outside 20.1 C against a 13.0 C threshold it reported `backstop`. Two errors in one: the outside gate is the primary weather-mode decision (at 20 C outside the honest answer is "it is warm"), and `roomOverheated` does not mean what its name suggests while heating is OFF - it is then the RESTART test, `room >= limit - hysteresis`, so a room merely sitting in the deadband at 19.9 set it true. Reporting the room limit there would have sent the user to adjust a margin that was not the cause. The gate now takes precedence.
+2. **`raw`, `shift` and `cmd` were all 0 whenever heating was off** - i.e. blank in exactly the situation the topic exists for. `calculateSpaceHeatingTargetTemp()` only runs on the turn-on and target-update paths, so the cached values were never populated with no demand. The publisher now evaluates the curve itself; it is a `const`, side-effect-free computation over the same inputs the control loop uses, so it is the curve's current answer rather than a prediction.
+3. **`cmd` reported the wrong floor.** It showed 380 where the boiler would actually command 400, because `HeatingCurve::target()` clamps to `h/bLo` (38.0) while `BurnerRequestManager::setHeatingRequest()` then clamps to `h/sLo` (40.0) - the effective floor. The publisher now mirrors the second clamp. Caught by predicting the payload from an independent implementation of the curve and finding the 20-tenths disagreement.
+
+Also restructured to take the sensor and settings mutexes **once** (nested Sensor -> Settings, the documented order) for the inputs *and* the curve evaluation. The first version read `o`/`i` in one acquisition and computed `raw` in another, so a sensor update landing in between would have broken the internal consistency that is the whole reason this payload carries its own inputs.
+
+Verified on hardware: `{"mode":"weather","dem":false,"blk":"outside","raw":237,"shift":36,"cmd":400,"clp":"floor","o":198,"i":199,"tgt":192}` - `raw` and `shift` match an independent model of the curve exactly, `cmd` sits on the h/sLo floor, and `blk` names the gate that is actually blocking.
+
 
 ### DELAY renewal no longer allocates, and no longer encodes the RYN4 wire format itself
 
