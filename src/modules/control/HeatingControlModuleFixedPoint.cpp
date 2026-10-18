@@ -13,12 +13,14 @@ Temperature_t HeatingControlModuleFixedPoint::calculateHeatingCurveTarget(
     int16_t curveCoeff,
     Temperature_t curveShift,
     Temperature_t lowerLimit,
-    Temperature_t upperLimit) {
+    Temperature_t upperLimit,
+    int32_t* rawOut) {
     
     // target = inside + shift - coeff * diff * (1.4347 + 0.021 * diff + 0.000248 * diff^2),
     // in HeatingCurve.h (native-tested; the old inline version was 10x too weak)
     const Temperature_t target = HeatingCurve::target(insideTemp, outsideTemp, curveCoeff,
-                                                      curveShift, lowerLimit, upperLimit);
+                                                      curveShift, lowerLimit, upperLimit,
+                                                      rawOut);
 
     LOG_DEBUG(TAG, "Heating curve: inside=%d, outside=%d, coeff=%d, shift=%d, target=%d (0.1°C units)",
               insideTemp, outsideTemp, curveCoeff, curveShift, target);

@@ -30,6 +30,12 @@ void test_heating_curve_outside_part_not_ten_times_too_small();
 void test_heating_curve_clamps_to_limits();
 
 // Space heating policy (weather mode outside threshold hysteresis)
+void test_heating_diag_payload_is_the_agreed_schema();
+void test_heating_diag_fits_the_mqtt_payload_limit();
+void test_heating_diag_refuses_a_too_small_buffer_instead_of_truncating();
+void test_heating_diag_block_reasons_are_distinct_strings();
+void test_heating_diag_room_mode_and_negative_raw_serialise();
+void test_heating_diag_differs_detects_every_field();
 void test_sensor_error_bit_single_failure_does_not_raise();
 void test_sensor_error_bit_raises_only_after_the_confirm_window();
 void test_sensor_error_bit_recovery_inside_the_window_never_raises();
@@ -521,6 +527,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_heating_curve_clamps_to_limits);
 
     // Space heating policy (weather mode outside threshold hysteresis)
+    RUN_TEST(test_heating_diag_payload_is_the_agreed_schema);
+    RUN_TEST(test_heating_diag_fits_the_mqtt_payload_limit);
+    RUN_TEST(test_heating_diag_refuses_a_too_small_buffer_instead_of_truncating);
+    RUN_TEST(test_heating_diag_block_reasons_are_distinct_strings);
+    RUN_TEST(test_heating_diag_room_mode_and_negative_raw_serialise);
+    RUN_TEST(test_heating_diag_differs_detects_every_field);
     RUN_TEST(test_sensor_error_bit_single_failure_does_not_raise);
     RUN_TEST(test_sensor_error_bit_raises_only_after_the_confirm_window);
     RUN_TEST(test_sensor_error_bit_recovery_inside_the_window_never_raises);

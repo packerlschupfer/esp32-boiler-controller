@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### New topic `boiler/status/heating/control`: why the heating is off, and what the curve actually wanted
+
+Four things about weather compensation were unobservable from outside the firmware, so Home Assistant could only guess at them with templates: the **pre-clamp** curve output, the **room-deviation shift** on its own, the **active mode**, and whether demand is blocked by the **outside-threshold gate** or the **room backstop**. The last two are indistinguishable from published state, and the first is the one that matters most in mild weather - the clamped target is a flat `h/sLo` 40.0 and says nothing about what the curve asked for.
+
+Published **retained**, QoS 0, LOW priority, on change and at least every 10 s so a retained pre-reboot value self-corrects. All temperatures in tenths, matching `t.*` on `boiler/status/sensors`:
+
+```
+{"mode":"weather","dem":true,"blk":"none","raw":364,"shift":38,
+ "cmd":400,"clp":"floor","o":130,"i":199,"tgt":192}
+```
+
+`blk` is the field that answers the question directly, in the firmware's own words: `none`, `outside`, `backstop`, `roomsat`, `sensor`, `override`, `disabled`. `clp` reports which bound won, so `floor` means weather compensation is currently inert. `o`/`i`/`tgt` are the values *this* evaluation used, so one payload is internally consistent instead of having to be paired with separately-published sensors and their sampling lag.
+
+Implementation notes worth keeping:
+
+- The pre-clamp value is threaded out through optional `rawOut`/`CurveDebug*` parameters defaulting to `nullptr`, so `HeatingCurve::target()` and both module layers keep their existing behaviour and every existing caller - including three native tests - is untouched. The formula is not duplicated anywhere.
+- `snprintf` into a stack buffer, not a `JsonDocument`: this evaluates on the 1 s task loop and the project avoids heap on runtime paths. `format()` returns 0 rather than emitting a fragment, and the caller checks it - a truncated JSON payload is worse than a skipped publish, and since today `MQTTTask::publish` refuses oversized payloads anyway.
+- The publisher takes both mutexes with a 20 ms timeout and **returns without publishing** if either fails, rather than mixing a fresh reading with a stale setting.
+- Enumerators are `OK`/`OUTSIDE_GATE`/`HEATING_DISABLED` rather than the obvious words because Arduino's `esp32-hal-gpio.h` does `#define DISABLED 0x00` (also `RISING`, `FALLING`, `CHANGE`, `ANALOG`). A `DISABLED` enumerator expands to a numeric constant and the compiler reports the error *inside the framework header*, which is a thoroughly confusing place to debug. The JSON strings are unchanged - the wire format is the contract.
+
+6 new tests (287 total), including that the worst realistic payload fits the 319-byte limit and that `differs()` catches every field. `HeatingControlTask` bound unchanged at 2820-2832 B of 4096 (+1264 B) despite the new MQTT dependency.
+
+
 ### DELAY renewal no longer allocates, and no longer encodes the RYN4 wire format itself
 
 `sendCompactDelayRenewal()` built a `std::vector<uint16_t>` per contiguous ON block and filled it with a hand-rolled `0x0600 | 10`, then called `writeMultipleRegisters(uint16_t, const std::vector<uint16_t>&)`. That signature is declared in ESP32-ModbusDevice and merely inherited by RYN4, so the allocation was forced by reaching past RYN4's own API - every one of which is `std::array`-based and allocation-free. Small (2-16 B) but on the path that owns the DELAY watchdog, at a 5 s cadence, in a project whose stated policy is no heap on runtime paths; and the duplicated wire format was the worse half.

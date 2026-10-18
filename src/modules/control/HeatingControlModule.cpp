@@ -26,7 +26,9 @@ void HeatingControlModule::initialize() {
     LOG_INFO(TAG, "HeatingControlModule initialized.");
 }
 
-Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(const SharedSensorReadings& readings, const SystemSettings& settings) const {
+Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
+    const SharedSensorReadings& readings, const SystemSettings& settings,
+    CurveDebug* debugOut) const {
     // Use fixed-point calculations from HeatingControlModuleFixedPoint
     // Convert float coefficients to fixed-point (scaled by 100)
     int16_t curveCoeff = static_cast<int16_t>(settings.heating_curve_coeff * 100);
@@ -51,14 +53,23 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(const Shared
                  devBuf, adjustBuf);
     }
 
+    int32_t rawTarget = 0;
     Temperature_t result = HeatingControlModuleFixedPoint::calculateHeatingCurveTarget(
         readings.insideTemp,
         readings.outsideTemp,
         curveCoeff,
         curveShift,
         settings.burner_low_limit,
-        settings.heating_high_limit
+        settings.heating_high_limit,
+        &rawTarget
     );
+
+    if (debugOut != nullptr) {
+        debugOut->rawTarget = rawTarget;
+        // curveShift here already carries the room-deviation term added above when weather
+        // compensation is on, which is exactly the value the diagnostics topic reports.
+        debugOut->shift = static_cast<int32_t>(curveShift);
+    }
 
     char insideBuf[16], outsideBuf[16], resultBuf[16];
     formatTemp(insideBuf, sizeof(insideBuf), readings.insideTemp);

@@ -35,8 +35,23 @@ public:
     // Initialize the heating control module
     void initialize();
 
+    /**
+     * @brief What the curve computed before clamping, for the
+     *        boiler/status/heating/control diagnostics topic (2026-10-18).
+     *
+     * Needed because the clamped result is a flat h/sLo 40.0 in mild weather and so says
+     * nothing about what the curve actually asked for, and because the room-deviation
+     * contribution is otherwise invisible - it is folded into the returned target.
+     */
+    struct CurveDebug {
+        int32_t rawTarget = 0;  // pre-clamp, tenths (can be negative)
+        int32_t shift = 0;      // curveShift*10 + room-deviation term, tenths
+    };
+
     // Calculate the target temperature for space heating based on shared sensor readings and system settings
-    Temperature_t calculateSpaceHeatingTargetTemp(const SharedSensorReadings& readings, const SystemSettings& settings) const;
+    Temperature_t calculateSpaceHeatingTargetTemp(const SharedSensorReadings& readings,
+                                                  const SystemSettings& settings,
+                                                  CurveDebug* debugOut = nullptr) const;
 
     // Check if heating conditions are met based on temperature and hysteresis
     bool checkHeatingConditions(const SharedSensorReadings& readings, Temperature_t targetTemperature, Temperature_t hysteresis) const;

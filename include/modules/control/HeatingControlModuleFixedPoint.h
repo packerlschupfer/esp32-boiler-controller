@@ -33,7 +33,8 @@ public:
         int16_t curveCoeff,    // Coefficient * 100 (e.g., 150 = 1.5)
         Temperature_t curveShift,
         Temperature_t lowerLimit,
-        Temperature_t upperLimit
+        Temperature_t upperLimit,
+        int32_t* rawOut = nullptr   // optional PRE-CLAMP result, tenths (diagnostics)
     );
 
     /**

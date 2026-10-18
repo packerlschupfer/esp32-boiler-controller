@@ -24,8 +24,16 @@ namespace HeatingCurve {
     constexpr int32_t POLY_C3 = 248;    // 0.000248 * 1000000 (per °C^2)
     constexpr int64_t ADJUSTMENT_SCALE = 1000000;
 
+    /**
+     * @param rawOut  optional: the PRE-CLAMP result in tenths. Added 2026-10-18 for the
+     *                boiler/status/heating/control diagnostics topic, which has to show how
+     *                far below the h/sLo floor the curve actually is - in mild weather the
+     *                clamped output is a flat 40.0 and tells you nothing. Defaults to
+     *                nullptr so every existing caller is unaffected.
+     */
     inline int16_t target(int16_t insideTenths, int16_t outsideTenths, int16_t coeffX100,
-                          int16_t shiftTenths, int16_t lowerLimit, int16_t upperLimit) {
+                          int16_t shiftTenths, int16_t lowerLimit, int16_t upperLimit,
+                          int32_t* rawOut = nullptr) {
         const int32_t diff = static_cast<int32_t>(outsideTenths) - insideTenths;  // tenths
         const int32_t diffSquared = (diff * diff) / 10;                           // °C^2 * 10
         int32_t polynomial = POLY_C1;                                             // x10000
@@ -36,6 +44,9 @@ namespace HeatingCurve {
             static_cast<int64_t>(coeffX100) * diff * polynomial / ADJUSTMENT_SCALE;  // tenths
 
         int64_t result = static_cast<int64_t>(insideTenths) + shiftTenths - adjustment;
+        if (rawOut != nullptr) {
+            *rawOut = static_cast<int32_t>(result);
+        }
         if (result < lowerLimit) {
             result = lowerLimit;
         } else if (result > upperLimit) {

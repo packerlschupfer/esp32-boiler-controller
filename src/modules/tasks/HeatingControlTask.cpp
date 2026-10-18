@@ -11,6 +11,9 @@
 #include "modules/control/BurnerSafetyValidator.h"
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/SpaceHeatingPolicy.h"
+#include "modules/control/HeatingControlDiagnostics.h"
+#include "modules/tasks/MQTTTask.h"   // publishControlDiagnostics
+#include "MQTTTopics.h"
 #include "utils/ResourceGuard.h"
 #include "utils/MutexRetryHelper.h"
 #include "LoggingMacros.h"
@@ -44,6 +47,14 @@ static void safetyCheckCallback(TimerHandle_t xTimer);
 static void processTimerCallback(TimerHandle_t xTimer);
 static void processHeatingState(EventBits_t pendingControl = 0);
 static bool checkIfSpaceHeatingNeededEvent();
+
+// Diagnostics for boiler/status/heating/control. Written only by this task
+// (checkIfSpaceHeatingNeededEvent and processHeatingState both run on it), so no
+// synchronisation is needed; published by publishControlDiagnostics() below.
+static HeatingControlDiagnostics::Block g_blockReason = HeatingControlDiagnostics::Block::OK;
+static HeatingControlModule::CurveDebug g_curveDebug;
+static Temperature_t g_commandedTarget = 0;
+static void publishControlDiagnostics();
 
 void HeatingControlTask(void *parameter) {
     const char* TAG = "HeatingControlTask";
@@ -174,6 +185,11 @@ void HeatingControlTask(void *parameter) {
             processHeatingState(controlBits & (SystemEvents::ControlRequest::HEATING_ON_OVERRIDE |
                                                SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE));
         }
+
+        // After the state has been evaluated, not before - so the payload reflects this
+        // cycle's decision. Self-rate-limited: publishes on change, else once per
+        // heartbeat, so the 1 s loop does not become a 1 s publisher.
+        publishControlDiagnostics();
 
         // Feed watchdog
         (void)SRP::getTaskManager().feedWatchdog();
@@ -319,7 +335,8 @@ static void processHeatingState(EventBits_t pendingControl) {
                         if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                             if (heatingState.heatingControl != nullptr) {
                                 boilerTargetTemp = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(
-                                    readings, SRP::getSystemSettings());
+                                    readings, SRP::getSystemSettings(), &g_curveDebug);
+                                g_commandedTarget = boilerTargetTemp;
                             } else {
                                 LOG_WARN(TAG, "HeatingControlModule unavailable - using default target");
                             }
@@ -440,7 +457,8 @@ static void processHeatingState(EventBits_t pendingControl) {
                         if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                             if (heatingState.heatingControl != nullptr) {
                                 newBoilerTarget = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(
-                                    readings, SRP::getSystemSettings());
+                                    readings, SRP::getSystemSettings(), &g_curveDebug);
+                                g_commandedTarget = newBoilerTarget;
                             }
                             SRP::giveSystemSettingsMutex();
                         }
@@ -480,6 +498,83 @@ static void processHeatingState(EventBits_t pendingControl) {
             }
             break;
         }
+    }
+}
+
+// Publish boiler/status/heating/control: why heating is on or off, and what the curve
+// asked for before the h/sLo clamp flattened it. Added 2026-10-18 so Home Assistant can
+// show the real reason instead of inferring one from templates - four values were
+// unobservable before this (pre-clamp curve output, the room-deviation shift on its own,
+// the active mode, and outside-gate vs room-backstop).
+//
+// Retained, because it is state a reconnecting subscriber should see; published on change
+// and at least every DIAG_HEARTBEAT_MS so a retained pre-reboot value self-corrects. LOW
+// priority so it never competes with safety publishes. snprintf into a stack buffer - this
+// runs every cycle and the project avoids heap on runtime paths.
+static void publishControlDiagnostics() {
+    const char* TAG = "HeatingDiag";
+    constexpr uint32_t DIAG_HEARTBEAT_MS = 10000;
+    static HeatingControlDiagnostics::State lastPublished;
+    static uint32_t lastPublishMs = 0;
+    static bool everPublished = false;
+
+    HeatingControlDiagnostics::State st;
+    const EventBits_t systemBits = SRP::getSystemStateEventBits();
+    st.demand = (systemBits & SystemEvents::SystemState::HEATING_ON) != 0;
+
+    if (!(systemBits & SystemEvents::SystemState::HEATING_ENABLED)) {
+        g_blockReason = HeatingControlDiagnostics::Block::HEATING_DISABLED;
+    }
+    st.block = st.demand ? HeatingControlDiagnostics::Block::OK : g_blockReason;
+
+    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(20))) {
+        const SystemSettings& s = SRP::getSystemSettings();
+        st.weatherMode = s.useWeatherCompensatedControl;
+        st.roomTarget = s.targetTemperatureInside;
+        SRP::giveSystemSettingsMutex();
+    } else {
+        return;  // no snapshot, no publish - a stale mix is worse than a skipped cycle
+    }
+
+    if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(20))) {
+        const SharedSensorReadings& r = SRP::getSensorReadings();
+        st.outside = r.outsideTemp;
+        st.room = r.insideTemp;
+        SRP::giveSensorReadingsMutex();
+    } else {
+        return;
+    }
+
+    st.rawTarget = g_curveDebug.rawTarget;
+    st.shift = g_curveDebug.shift;
+    st.commanded = g_commandedTarget;
+
+    // Which bound decided it. h/sLo is the effective floor: setHeatingRequest clamps to it
+    // after HeatingCurve has already clamped to h/bLo.
+    if (st.commanded != 0) {
+        if (st.rawTarget < st.commanded) {
+            st.clamp = HeatingControlDiagnostics::Clamp::AT_FLOOR;
+        } else if (st.rawTarget > st.commanded) {
+            st.clamp = HeatingControlDiagnostics::Clamp::AT_CEIL;
+        }
+    }
+
+    const uint32_t now = millis();
+    const bool due = !everPublished || (now - lastPublishMs) >= DIAG_HEARTBEAT_MS;
+    if (!due && !HeatingControlDiagnostics::differs(st, lastPublished)) {
+        return;
+    }
+
+    char payload[160];
+    if (HeatingControlDiagnostics::format(payload, sizeof(payload), st) == 0) {
+        LOG_WARN(TAG, "Control diagnostics payload would not fit - skipped");
+        return;
+    }
+    if (MQTTTask::publish(MQTT_STATUS_HEATING "/control", payload, 0, true,
+                          MQTTPriority::PRIORITY_LOW)) {
+        lastPublished = st;
+        lastPublishMs = now;
+        everPublished = true;
     }
 }
 
@@ -531,6 +626,7 @@ static bool checkIfSpaceHeatingNeededEvent() {
     // point for both turn-on (HeatingOff state) and keep-running (HeatingOn state), so
     // the block is reliable regardless of the race and across reboots.
     if (ss.overrideOff) {
+        g_blockReason = HeatingControlDiagnostics::Block::SUMMER_OVERRIDE;
         return false;  // heating blocked by override - not needed
     }
 
@@ -571,8 +667,14 @@ static bool checkIfSpaceHeatingNeededEvent() {
 
                 if (outsideCold && !roomOverheated) {
                     heatingNeeded = true;
+                    g_blockReason = HeatingControlDiagnostics::Block::OK;
                 } else {
                     heatingNeeded = false;
+                    // roomOverheated is reported in preference to the outside gate: when
+                    // both are true the room limit is the one the user changed.
+                    g_blockReason = roomOverheated
+                                        ? HeatingControlDiagnostics::Block::ROOM_BACKSTOP
+                                        : HeatingControlDiagnostics::Block::OUTSIDE_GATE;
                     if (!outsideCold && currentlyHeating) {
                         char outBuf[16], threshBuf[16];
                         formatTemp(outBuf, sizeof(outBuf), outsideTemp);
@@ -592,6 +694,7 @@ static bool checkIfSpaceHeatingNeededEvent() {
             } else {
                 LOG_DEBUG(TAG, "Weather control enabled but outside temp invalid - heating disabled");
                 heatingNeeded = false;
+                g_blockReason = HeatingControlDiagnostics::Block::SENSOR_INVALID;
             }
         } else {
             // Traditional room-temp ON/OFF mode (original behavior)
@@ -612,12 +715,13 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     // Currently OFF - turn ON if temperature drops below setpoint
                     if (currentTemp < setpoint) {
                         heatingNeeded = true;
-                        // Note: Log moved to activation code to prevent spam
+                        g_blockReason = HeatingControlDiagnostics::Block::OK;
                     }
                 } else {
                     // Currently ON - turn OFF if temperature rises above (setpoint + hysteresis)
                     if (currentTemp >= stopThreshold) {
                         heatingNeeded = false;
+                        g_blockReason = HeatingControlDiagnostics::Block::ROOM_SATISFIED;
                         char currBuf[16], setBuf[16], threshBuf[16];
                         formatTemp(currBuf, sizeof(currBuf), currentTemp);
                         formatTemp(setBuf, sizeof(setBuf), setpoint);
@@ -629,6 +733,7 @@ static bool checkIfSpaceHeatingNeededEvent() {
             } else {
                 LOG_DEBUG(TAG, "Invalid sensor data or setpoint - heating not needed");
                 heatingNeeded = false;
+                g_blockReason = HeatingControlDiagnostics::Block::SENSOR_INVALID;
             }
         }
 
