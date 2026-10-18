@@ -1,12 +1,12 @@
 - id: boiler_refresh_param_groups
   alias: "Boiler: refresh parameter groups"
   description: >-
-    Param replies on boiler/params/status/<group> are not retained, so the HA number
-    entities read the grouped reply. Request each group (paced, to spare the ESP32
-    mqtt_high_priority queue) on HA start / boiler online, and re-read a single group
-    after any per-parameter change (individual reply boiler/params/status/<group>/<key>).
+    Grouped param replies on boiler/params/status/<group> are retained and republished by the
+    firmware on every set (library 315a969), but NOT on boot/MQTT connect, so a retained group can
+    be pre-reboot stale. Re-request each group (paced, to spare the ESP32 mqtt_high_priority queue)
+    on HA start and whenever the boiler comes online. A manual run refreshes too.
   mode: queued
-  max: 20
+  max: 5
   triggers:
     - trigger: homeassistant
       event: start
@@ -14,35 +14,18 @@
     - trigger: mqtt
       topic: "boiler/status/online"
       id: all
-    - trigger: mqtt
-      topic: "boiler/params/status/+/+"
-      id: one
-    - trigger: mqtt
-      topic: "boiler/params/status/+/+/+"
-      id: one
   conditions:
     - condition: template
       value_template: >-
-        {{ trigger.id != 'all' or trigger.platform != 'mqtt'
+        {{ trigger is not defined or trigger.platform != 'mqtt'
            or 'true' in trigger.payload or trigger.payload == 'online' }}
   actions:
-    - if:
-        - condition: trigger
-          id: one
-      then:
-        - delay: 1
-        - action: mqtt.publish
-          data:
-            topic: "boiler/params/get/{{ trigger.topic.split('/')[3] }}"
-            payload: ""
-      else:
-        # HA start, boiler online, or a manual run: refresh every group
-        - delay: "{{ 15 if trigger.id is defined and trigger.id == 'all' else 0 }}"
-        - repeat:
-            for_each: [heating, h, pid, sensor, wheater, w]
-            sequence:
-              - action: mqtt.publish
-                data:
-                  topic: "boiler/params/get/{{ repeat.item }}"
-                  payload: ""
-              - delay: 1.5
+    - delay: "{{ 15 if trigger is defined and trigger.id is defined and trigger.id == 'all' else 0 }}"
+    - repeat:
+        for_each: [heating, h, pid, sensor, wheater, w]
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "boiler/params/get/{{ repeat.item }}"
+              payload: ""
+          - delay: 1.5
