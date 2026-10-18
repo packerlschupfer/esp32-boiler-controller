@@ -235,28 +235,24 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), tankLow_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
     storage->setOnChange("wheater/tempLimitHigh", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempLimitHigh = static_cast<Temperature_t>(tankHigh_i32);
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), tankHigh_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
     storage->setOnChange("wheater/tempSafeLimitHigh", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh = static_cast<Temperature_t>(tankSafeHigh_i32);
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), tankSafeHigh_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
     storage->setOnChange("wheater/tempSafeLimitLow", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempSafeLimitLow = static_cast<Temperature_t>(tankSafeLow_i32);
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), tankSafeLow_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
 
     storage->registerFloat("wheater/tempChargeDelta", &settings.wHeaterConfTempChargeDelta,
@@ -273,7 +269,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), targetTemp_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
     
     storage->registerFloat("heating/curveShift", &settings.heating_curve_shift,
@@ -341,7 +336,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), hysteresis_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
     
     // PID parameters for space heating (wider range to accommodate autotune results)
@@ -409,14 +403,12 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), outsideHeatingThreshold_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
     storage->setOnChange("heating/roomOverheatMargin", [](const std::string& name, const void*) {
         SRP::getSystemSettings().roomTempOverheatMargin = static_cast<Temperature_t>(roomOverheatMargin_i32);
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), roomOverheatMargin_i32);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     });
 
     // Room temp curve shift factor (float, can be registered directly)
@@ -448,7 +440,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed", name.c_str());
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     };
     storage->setOnChange("preheat/offMultiplier", preheatPumpCallback);
     storage->setOnChange("preheat/maxCycles", preheatPumpCallback);
@@ -501,7 +492,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed to %.2f", name.c_str(), val);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     };
 
     auto boolParamCallback = [](const std::string& name, const void* value) {
@@ -509,7 +499,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed to %s", name.c_str(), val ? "true" : "false");
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     };
 
     // Generic callback for unknown types (fallback)
@@ -518,7 +507,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Parameter %s changed", name.c_str());
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     };
 
     // Callback for sensor offset parameters - syncs int32_t shadow to Temperature_t immediately
@@ -528,7 +516,6 @@ void PersistentStorageTask(void* pvParameters) {
         temperatureShadows.applyToSettings(settings);
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     };
     
     // Set callbacks for all parameters
@@ -583,7 +570,6 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Syslog config %s changed", name.c_str());
         parametersChanged = true;
         lastChangeTime = millis();
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
     };
     storage->setOnChange("syslog/enabled", boolParamCallback);
     storage->setOnChange("syslog/serverIP0", syslogCallback);
@@ -925,8 +911,6 @@ void PersistentStorageTask(void* pvParameters) {
             // path never had it, so a runtime reload never reached live settings.
             settings.targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
             settings.heating_hysteresis = static_cast<Temperature_t>(hysteresis_i32);
-            // Settings changed - no direct equivalent in new system, notify via control request
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
         }
         
         // Handle MQTT reconnect

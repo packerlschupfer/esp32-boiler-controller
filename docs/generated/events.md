@@ -1,14 +1,7 @@
 # Event System Documentation
-Generated: 2026-09-15 23:05:22
+Generated: 2026-10-18 11:11:10
 
 Generated from `tools/event_config.yaml` by `tools/generate_events_zero_overhead.py`.
-
-> **This file is edited by hand in practice.** Both generators are print-only - they
-> report "Would write to: include/events/GeneratedEvents.h" and write nothing. That
-> header does not exist; the build uses the hand-maintained
-> `include/events/SystemEventsGenerated.h`. So neither this file nor the header is
-> actually regenerated, and edits here must be mirrored into `tools/event_config.yaml`
-> by hand (and vice versa) until the generator is wired up.
 
 ## Overview
 This system uses zero-overhead namespaced constants for event management.
@@ -36,12 +29,12 @@ All constants compile to the same machine code as traditional #define macros.
 | 13 | `MQTT_COMMAND_ENABLED` | MQTT commands enabled |
 | 14 | `MQTT_REPORT_ENABLED` | MQTT reporting enabled |
 | 15 | `MQTT_OPERATIONAL` | MQTT fully operational |
-| 16 | `BURNER_OFF` | **UNUSED since cce02c8** - never set; burner off = relay `BURNER_ENABLE` clear |
-| 17 | `BURNER_HEATING_LOW` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
-| 18 | `BURNER_HEATING_HIGH` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
-| 19 | `BURNER_WATER_LOW` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
-| 20 | `BURNER_WATER_HIGH` | **UNUSED since cce02c8** - never set; use `BURNER_ON` + relay `WATER_MODE`/`POWER_BOOST` |
-| 21 | `BURNER_ERROR` | Burner in error state - set by `BurnerStateMachine`/`CentralizedFailsafe`, not `BurnerControlTask` |
+| 16 | `BURNER_OFF` | UNUSED since cce02c8 - never set; burner off = relay BURNER_ENABLE clear |
+| 17 | `BURNER_HEATING_LOW` | UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays |
+| 18 | `BURNER_HEATING_HIGH` | UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays |
+| 19 | `BURNER_WATER_LOW` | UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays |
+| 20 | `BURNER_WATER_HIGH` | UNUSED since cce02c8 - never set; use BURNER_ON + WATER_MODE/POWER_BOOST relays |
+| 21 | `BURNER_ERROR` | Burner in error state |
 | 22 | `EMERGENCY_STOP` | Emergency stop active |
 | 23 | `WARNING` | System warning active |
 
@@ -195,8 +188,7 @@ All constants compile to the same machine code as traditional #define macros.
 | 16 | `MQTT_REPORT_ENABLE` | Enable MQTT reporting |
 | 17 | `MQTT_REPORT_DISABLE` | Disable MQTT reporting |
 | 18 | `WATER_PRIORITY_RELEASED` | Water priority was released (notify heating) |
-| 19 | `PID_SAVE` | Save PID parameters |
-| 20 | `SAVE_PARAMETERS` | Save system parameters |
+| 19 | `PID_SAVE` | UNUSED - never set and never waited on |
 | 22 | `PID_AUTOTUNE` | Start PID auto-tuning |
 | 23 | `PID_AUTOTUNE_STOP` | Stop PID auto-tuning |
 

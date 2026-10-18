@@ -200,12 +200,11 @@ event_groups:
       - { name: MQTT_REPORT_DISABLE, bit: 17, desc: "Disable MQTT reporting" }
       # Inter-task notification events (18-20)
       - { name: WATER_PRIORITY_RELEASED, bit: 18, desc: "Water priority was released (notify heating)" }
-      - { name: PID_SAVE, bit: 19, desc: "Save PID parameters" }
-      - { name: SAVE_PARAMETERS, bit: 20, desc: "Save system parameters" }
+      - { name: PID_SAVE, bit: 19, desc: "UNUSED - never set and never waited on" }
       # PID control (22-23) - Note: bits 24-31 reserved by FreeRTOS!
       - { name: PID_AUTOTUNE, bit: 22, desc: "Start PID auto-tuning" }
       - { name: PID_AUTOTUNE_STOP, bit: 23, desc: "Stop PID auto-tuning" }
-    next_free_bit: "21 (Note: bits 24-31 reserved by FreeRTOS!)"
+    next_free_bit: "20, 21 (Note: bits 24-31 reserved by FreeRTOS!)"
     migration_macro_order:
       - BOILER_ENABLE
       - BOILER_DISABLE
@@ -229,7 +228,6 @@ event_groups:
       - PID_AUTOTUNE
       - PID_AUTOTUNE_STOP
       - PID_SAVE
-      - SAVE_PARAMETERS
 
   # Device Ready Event Group (local to SystemInitializer)
   DeviceReady:

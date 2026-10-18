@@ -494,9 +494,14 @@ void handleFRAMCommand(const char* payload) {
         MQTTTask::publish(MQTT_STATUS_FRAM_ERROR, "use_format_confirm", 0, false, MQTTPriority::PRIORITY_HIGH);
     }
     else if (strcmp(payload, "save_pid") == 0) {
-        SRP::setControlRequestsEventBits(SystemEvents::ControlRequest::SAVE_PARAMETERS);
+        // This used to set ControlRequest::SAVE_PARAMETERS, a bit that nothing ever waited
+        // on or tested, so the command published "requested", logged a save, and saved
+        // NOTHING (2026-10-18). The PID gains are ordinary registered parameters
+        // (pid/spaceHeating/*, pid/waterHeater/*), so the real request is the same one
+        // boiler/params/save uses. Storage is NVS, not FRAM - the topic name is legacy.
+        PersistentStorageTask_RequestSave();
         MQTTTask::publish(MQTT_STATUS_FRAM_PID_SAVE, "requested", 0, true, MQTTPriority::PRIORITY_HIGH);
-        LOG_INFO(TAG_CMD, "Requested PID parameters save to FRAM");
+        LOG_INFO(TAG_CMD, "Requested PID parameters save");
     }
     else {
         LOG_WARN(TAG_CMD, "Unknown FRAM command: %s", payload);

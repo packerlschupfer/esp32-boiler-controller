@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### `boiler/cmd/fram` `save_pid` saved nothing, and two dead declarations removed
+
+`ControlRequest::SAVE_PARAMETERS` (bit 20) was **set in 16 places and never waited on or tested** - and, because nothing cleared it either, it latched on first use and stayed set for the rest of the run. Fifteen of those sites were belt-and-braces alongside a real `STORAGE_SAVE_REQUEST_BIT`, so they lost nothing. The sixteenth was not: `boiler/cmd/fram` with payload `save_pid` set **only** that bit, then published `requested` on `boiler/status/fram/pid_save` and logged "Requested PID parameters save to FRAM". The command saved nothing and reported success. It now calls `PersistentStorageTask_RequestSave()`, the same path `boiler/params/save` uses - the PID gains are ordinary registered parameters (`pid/spaceHeating/*`, `pid/waterHeater/*`), so a full save persists them. The topic's "FRAM" is legacy; the storage is NVS.
+
+The bit is gone from `tools/event_config.yaml` and the header regenerated. Bit numbers in that spec are explicit rather than sequential, so **nothing was renumbered** - the only other change to `SystemEventsGenerated.h` is five `BURNER_*` comments that had been updated in the YAML and never regenerated, plus the dropped `CONTROLREQUEST_SAVE_PARAMETERS_BIT` migration macro, which had no users. `Tasks::Storage::SAVE_INTERVAL_MS` (5 minutes, unused - there are no periodic saves) removed, with a comment where it sat recording that the absence is deliberate.
+
+**Left alone deliberately:** `ControlRequest::PID_SAVE` (bit 19) is the same defect one bit down - never set, never waited on - and is now labelled as such in the spec rather than removed. Bits 20 and 21 are free.
+
+274/274 native tests, both `prod_debug_selective` and `esp32dev_usb_debug_selective` build clean, task bounds unchanged (storage 4308-4320 B of 5120, MQTT 3300-3312 B of 4096).
+
+
 ### A parameter set never refreshed the group HA reads, and every set ran a full 60-key NVS save
 
 Two defects found while chasing a stale Home Assistant entity, one in the storage library and one in the task.

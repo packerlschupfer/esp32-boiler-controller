@@ -138,8 +138,11 @@ namespace SystemConstants {
 
         // Persistent Storage Task
         namespace Storage {
-            constexpr uint32_t SAVE_INTERVAL_MS = 300000;       // 5 minutes (unused - there
-                                                                // are no periodic saves)
+            // There is no periodic save interval here on purpose: saves are triggered by a
+            // parameter set, boiler/params/save, and the StateManager enable/priority/
+            // override writers. A SAVE_INTERVAL_MS of 5 minutes sat here unused until it
+            // was removed on 2026-10-18.
+            //
             // Coalescing window for saves triggered by parameter onChange callbacks. A
             // thermostat card clicking the room target up five times used to run five full
             // saveAll() passes, each 60 parameters x (nvs_set + nvs_commit), because
