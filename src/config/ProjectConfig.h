@@ -11,7 +11,7 @@
 #define PROJECT_NAME "ESPlan Boiler Controller"
 #endif
 #ifndef PROJECT_VERSION
-#define PROJECT_VERSION "0.2.0"
+#define PROJECT_VERSION "0.1.0"
 #endif
 
 // Firmware version string - includes git hash if available (from auto_firmware_version.py)
