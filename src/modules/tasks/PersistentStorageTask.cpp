@@ -12,6 +12,8 @@
 #include "config/SystemConstants.h"
 #include <esp_heap_caps.h>
 #include "modules/tasks/ParameterSavePolicy.h"
+#include "modules/tasks/SensorOffsetMap.h"  // persisted offsets -> MB8ART channel order
+#include <MB8ART.h>                         // setChannelOffsets()
 #include "config/SafetyConfig.h"
 #include <MQTTManager.h>
 #include "events/SystemEventsGenerated.h"
@@ -120,6 +122,45 @@ static std::atomic<PersistentStorage*> storageInstance{nullptr};
 static std::atomic<bool> parametersLoaded{false};
 
 // Task function
+// Push the persisted per-channel calibration offsets into the MB8ART driver.
+//
+// Until 2026-10-19 the seven temperature offsets were registered, persisted and published
+// but applied to nothing: the library writes temperatures straight into
+// SharedSensorReadings through the pointers bound in SensorBindings.cpp, and its own
+// correction hook was a stub with a hardcoded zero and no callers. ESP32-MB8ART b917db6
+// added setChannelOffsets(); this is the consumer side.
+//
+// The library validates at set time (index and magnitude only) and gates at apply time on
+// the channel having a binding AND a temperature mode, so the pressure channel is refused
+// there regardless of what we send - SensorOffsetMap never sends one for it either.
+// Offsets for channels that are disabled (CH6/CH7 here) are stored and never applied.
+//
+// Called on every offset change and after each load. There is no retry: MB8ART is
+// initialised in initializeModbusDevices() before this task starts, so the device is
+// normally present by the time parameters load; if its boot init failed outright there are
+// no temperature readings to correct anyway. The warning below is the signal for that case.
+static bool pushSensorOffsetsToMB8ART(const SystemSettings& s) {
+    MB8ART* device = SRP::getMB8ART();
+    if (device == nullptr) {
+        LOG_WARN(TAG, "MB8ART unavailable - sensor offsets not applied");
+        return false;
+    }
+
+    SensorOffsetMap::Offsets offsets;
+    offsets.boilerOutput  = s.boilerOutputOffset;
+    offsets.boilerReturn  = s.boilerReturnOffset;
+    offsets.waterTank     = s.waterTankOffset;
+    offsets.outside       = s.outsideTempOffset;
+    offsets.waterReturn   = s.waterReturnOffset;
+    offsets.heatingReturn = s.heatingReturnOffset;
+
+    if (!device->setChannelOffsets(SensorOffsetMap::build(offsets))) {
+        LOG_ERROR(TAG, "MB8ART rejected sensor offsets");
+        return false;
+    }
+    return true;
+}
+
 void PersistentStorageTask(void* pvParameters) {
     LOG_INFO(TAG, "PersistentStorageTask started");
     
@@ -521,6 +562,7 @@ void PersistentStorageTask(void* pvParameters) {
         LOG_INFO(TAG, "Sensor offset %s changed", name.c_str());
         // Sync all offset shadows to settings (efficient - just integer casts)
         temperatureShadows.applyToSettings(settings);
+        pushSensorOffsetsToMB8ART(settings);
         parametersChanged = true;
         lastChangeTime = millis();
     };
@@ -642,6 +684,9 @@ void PersistentStorageTask(void* pvParameters) {
 
     // Apply loaded shadow values to Temperature_t fields
     temperatureShadows.applyToSettings(settings);
+
+    // Hand the restored calibration offsets to the MB8ART driver
+    pushSensorOffsetsToMB8ART(settings);
 
     // Apply loaded syslog shadows to settings
     settings.syslogServerIP[0] = static_cast<uint8_t>(syslog_serverIP0);
@@ -976,6 +1021,9 @@ void PersistentStorageTask(void* pvParameters) {
             // path never had it, so a runtime reload never reached live settings.
             settings.targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
             settings.heating_hysteresis = static_cast<Temperature_t>(hysteresis_i32);
+
+            // Same reason: a reload can change the offsets, so the driver needs them again
+            pushSensorOffsetsToMB8ART(settings);
         }
         
         // Handle MQTT reconnect
