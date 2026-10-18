@@ -804,8 +804,13 @@ number:
     unique_id: boiler_param_heating_target
     command_topic: "boiler/params/set/heating/targetTemp"
     command_template: "{{ (value * 10) | round(0) | int }}"
-    state_topic: "boiler/params/status/heating"
-    value_template: "{{ (value_json.targetTemp | float) / 10 }}"
+    # Reads the dedicated retained topic, not the grouped params JSON. The grouped
+    # topic is only written on a set or a get/all, so this entity showed a stale
+    # 19.2 for ~12 h on 2026-10-17 after the target was changed through the climate
+    # card. boiler/status/heating/target is republished for EVERY writer from
+    # PersistentStorageTask.cpp:835 (parameter path, boiler/cmd/heating,
+    # boiler/cmd/room_target and the scheduler) and is retained.
+    state_topic: "boiler/status/heating/target"
     min: 10
     max: 30
     step: 0.1
