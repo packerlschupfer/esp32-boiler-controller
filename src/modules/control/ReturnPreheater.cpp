@@ -1,5 +1,6 @@
 // src/modules/control/ReturnPreheater.cpp
 #include "modules/control/ReturnPreheater.h"
+#include "modules/control/BurnerStateMachine.h"
 #include "core/SystemResourceProvider.h"
 #include "config/SystemConstants.h"
 #include "config/SystemSettingsStruct.h"
@@ -20,6 +21,35 @@ bool ReturnPreheater::pumpOn_ = false;
 uint32_t ReturnPreheater::lastPumpChangeTime_ = 0;
 
 bool ReturnPreheater::start() {
+    // The preheater takes the heating pump away from PumpControlModule
+    // (PumpControlModule.cpp:264-266 overrides the desired state with
+    // shouldPumpBeOn() while PREHEATING), so it must never run while the burner is
+    // firing. Both callers reach us from a mid-run safety validation
+    // (BoilerTempControlTask.cpp:517 on a PID power edge, BurnerControlTask.cpp:795 on a
+    // target change), and setHeatDemand(false) does NOT stop the burner promptly: it
+    // leaves HEATING_ON and the mode request set, so BurnerTransitions rule 3 does not
+    // apply and rule 4 waits for canTurnOff() - up to MIN_ON_TIME_MS, 120 s. The burner
+    // would then fire into a pump being cycled off, with only the 110 C check behind it.
+    //
+    // Found by review 2026-10-18. Latent rather than live here: the trigger is
+    // THERMAL_SHOCK_RISK at a 45.0 C flow-return spread (SafetyConfig.h:17) and the widest
+    // spread measured on this boiler is ~24 C - but a return sensor failing low
+    // manufactures that spread out of nothing, which is exactly when the pump matters.
+    //
+    // IDLE only, deliberately. PRE_PURGE/IGNITION/RUNNING_*/MODE_SWITCHING all have the
+    // burner lit or committed, and POST_PURGE is dissipating residual heat and needs the
+    // pump just as much. LOCKOUT and ERROR are excluded too: the burner may still be
+    // physically firing there (BurnerSystemController::deactivate() is a no-op when
+    // isActive_ is false after a partially applied relay batch), and pumps in those states
+    // belong to the failsafe. NOT using SystemState::BOILER_ON - that bit is declared but
+    // set by nothing, so a guard on it would never fire.
+    const BurnerSMState burnerState = BurnerStateMachine::getCurrentState();
+    if (burnerState != BurnerSMState::IDLE) {
+        LOG_WARN(TAG, "Refusing to preheat - burner state is not IDLE (%d)",
+                 static_cast<int>(burnerState));
+        return false;
+    }
+
     if (state_ == State::PREHEATING) {
         LOG_WARN(TAG, "Already preheating");
         return false;

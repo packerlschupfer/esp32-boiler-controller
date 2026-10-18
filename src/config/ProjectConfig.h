@@ -77,10 +77,29 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // Round 20 Issue #7: Safety flag for pressure sensor requirement
 // When defined, allows burner operation without a valid pressure sensor (development/testing only)
 // WARNING: Do NOT enable in production - pressure monitoring is safety-critical!
-#define ALLOW_NO_PRESSURE_SENSOR  // TODO: Remove before production deployment
-// #ifdef ALLOW_NO_PRESSURE_SENSOR
-//     #warning "ALLOW_NO_PRESSURE_SENSOR is enabled - burner can operate without pressure sensor. Remove for production!"
-// #endif
+//
+// 2026-10-18: NO LONGER DEFINED. It had been defined unconditionally since the initial
+// release - two lines under its own warning, tagged "TODO: Remove before production
+// deployment", with the #warning that would have surfaced it at every build commented out.
+// Effect while defined: BurnerSafetyValidator.cpp:37 set allowMissingPressure = true and
+// BurnerSafetyRules.h:133 skipped Check::PRESSURE_MISSING, so a 4-20 mA loop break or any
+// invalid reading left the burner running with one LOG_WARN per validation. Combined with
+// the inert pressure event bits (Burner::ERROR_PRESSURE is set by MB8ARTTasks and read by
+// nobody; processSafetyEvent waits on four bits nothing sets), every signal this firmware
+// raises on a pressure-sensor failure was inert.
+//
+// What changes now: an invalid pressure reading blocks the burner for that validation.
+// It does NOT latch - validateBurnerOperation runs per cycle and heatDemand is recomputed
+// each time, so a transient Modbus hiccup costs a cycle or two of firing, not a lockout
+// needing a reset. The in-range value checks (PRESSURE_LOW / PRESSURE_HIGH) were always
+// live and are unaffected.
+//
+// Re-enable ONLY for bench work with no sensor fitted, and note the #warning below is
+// active again so the build will tell you.
+// #define ALLOW_NO_PRESSURE_SENSOR
+#ifdef ALLOW_NO_PRESSURE_SENSOR
+    #warning "ALLOW_NO_PRESSURE_SENSOR is enabled - burner can operate without pressure sensor. Remove for production!"
+#endif
 
 // Optional temperature sensors (default disabled)
 // Uncomment to enable these additional MB8ART channels
