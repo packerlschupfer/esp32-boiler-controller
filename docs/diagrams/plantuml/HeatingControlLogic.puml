@@ -55,10 +55,18 @@ endif
 note right
   HeatingControlModuleFixedPoint:
   coefficients 1.4347, 0.021, 0.000248
-  shift: heating/curveShift
+  shift: heating/curveShift (WHOLE °C, float)
   + room deviation x heating/roomCurveShiftFactor
-  clamped to burner_low_limit (default 38 °C)
-  .. heating_high_limit (default 75 °C)
+  TWO clamps, and only the second one is
+  what the boiler commands:
+  1. inside HeatingCurve::target() to
+     burner_low_limit h/bLo (default 38 °C)
+     .. heating_high_limit h/sHi (75 °C)
+  2. in setHeatingRequest() to
+     heating_low_limit h/sLo (default 40 °C)
+     .. h/sHi - so h/sLo is the EFFECTIVE
+     floor, and in mild weather the curve
+     sits on it and compensation is inert
 end note
 
 :BurnerRequestManager::setHeatingRequest(target)\nHEATING + POWER_LOW + target in bits 16-23;
@@ -69,6 +77,17 @@ note right
 end note
 
 :BurnerControlTask arms the heat demand\n(BurnerDemandGate);
+
+:publishControlDiagnostics()\nboiler/status/heating/control (retained);
+note right
+  Observability for everything above:
+  mode, demand, the block reason
+  (outside gate vs room backstop vs
+  sensor/override/disabled), the
+  PRE-clamp curve value, the room
+  shift on its own, and which clamp
+  bound won. See docs/MQTT_API.md.
+end note
 
 stop
 

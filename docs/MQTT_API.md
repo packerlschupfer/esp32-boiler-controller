@@ -124,7 +124,46 @@ ESPlan-Boiler
 ### 5. Error Notifications
 There is no `boiler/status/errors` notification topic. Critical errors publish a snapshot on `boiler/error/context` (see MQTT Topics Reference) and failsafe events on `alert/critical`.
 
-### 6. Other Status Topics
+### 6. Heating Control Diagnostics
+
+**Topic**: `boiler/status/heating/control` - **retained**, QoS 0, published on change and at
+least every 10 s.
+
+Answers "why is the heating off, and what is the curve actually asking for" from firmware
+state, so a subscriber never has to infer it. All temperatures in **tenths of °C**, signed,
+matching `t.*` on `boiler/status/sensors`.
+
+```json
+{"mode":"weather","dem":false,"blk":"outside","raw":237,"shift":36,
+ "cmd":400,"clp":"floor","o":198,"i":199,"tgt":192}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `mode` | `weather` (outside temp drives demand) or `room` (plain room thermostat) |
+| `dem` | space-heating demand active (same signal as `s` bit 2) |
+| `blk` | why demand is off - see below |
+| `raw` | **pre-clamp** heating-curve output. Can be far below `cmd`, and can be negative |
+| `shift` | `curveShift` x 10 plus the room-deviation term, i.e. the room correction isolated |
+| `cmd` | the curve's answer after clamping to `h/sLo`..`h/sHi` |
+| `clp` | which bound won: `none`, `floor` (h/sLo - weather compensation is inert), `ceil` (h/sHi) |
+| `o`, `i`, `tgt` | outside, room and room-target values **this evaluation used** |
+
+`blk` values: `none` (heating wanted), `outside` (outside >= `outsideThreshold` + 1.0),
+`backstop` (room > `targetTemp` + `roomOverheatMargin`), `roomsat` (room thermostat
+satisfied, room mode), `sensor` (outside or room reading invalid - weather mode fails safe),
+`override` (`heatingOverrideOff`, summer mode), `disabled` (`heatingEnabled` false).
+
+**`cmd` is the curve's answer, not the commanded burner target.** While `dem` is true they
+agree; while it is false, `cmd` is what the curve would ask for. The actually commanded
+target is `t.bt` on `boiler/status/sensors`, which during a water charge is the **water**
+target and which this topic deliberately does not track.
+
+`o`/`i`/`tgt` are read under the same mutex acquisition as the curve evaluation, so one
+payload is internally consistent - pairing `raw` against separately-published sensor topics
+would introduce sampling lag.
+
+### 7. Other Status Topics
 
 | Topic | Retained | Payload |
 |-------|----------|---------|
