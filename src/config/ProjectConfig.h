@@ -388,8 +388,31 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // before the TaskManager-supervised tasks and the network is explicitly non-critical),
 // so it gets no watchdog registration and no restart supervision. Its size was an
 // inline literal, invisible to the tiers and to the assertions below - the same blind
-// spot as the pump stack. Not mode-tuned: this task only polls link state.
-#define STACK_SIZE_NETWORK_MONITOR_TASK  2048
+// spot as the pump stack.
+//
+// 2026-10-18: raised 2048 -> 3072 because 2048 was BELOW its static bound. The old
+// comment here said "this task only polls link state", and that is what hid the
+// problem: on link-up it also calls EthernetManager::logEthernetStatus(), whose
+// NetworkInterface::macAddress() builds an Arduino String through snprintf ->
+// _svfprintf_r (an 800 B frame) -> _malloc_r. Measured with
+//   tools/stack_walker.py --no-task-manager-wrapper "NetworkInitializer::networkMonitorTask(void*)"
+// (no TaskManager wrapper frame, because xTaskCreate is raw):
+//   prod_debug_selective          chain 1744 B -> used 2068-2080 B   over 2048 by 20-32 B
+//   esp32dev_usb_debug_selective  chain 1568 B -> used 1892-1904 B   only 144-156 B spare
+// The 800 B frame is the framework's own String build, so LOG_DEFERRED_FORMAT cannot
+// remove it; that is also why the two tiers differ by 176 B rather than more.
+//
+// Why no high-water mark ever caught this: the deep path runs ONCE, at link-up, and the
+// task then calls vTaskDelete(NULL) (NetworkInitializer.cpp:135). It is therefore absent
+// from the `tasks` diagnostic dump by the time anyone reads it - confirmed, 0 occurrences
+// in the 2026-10-18 dump - so no peak for it has ever been recorded in any run. The
+// e3f230a sweep that cleared "every task" by 512 B enumerated the dump, and so missed
+// this one. Enumerate xTaskCreate call sites, not the dump.
+//
+// 3072 gives 992-1004 B over the prod bound and 1168-1180 B over the usb one. The cost is
+// transient: the task deletes itself at link-up, so the extra 1024 B returns to the heap
+// and steady-state DRAM is unchanged.
+#define STACK_SIZE_NETWORK_MONITOR_TASK  3072
 
 // SyslogTask and ModbusInit: the last two task stacks that were inline literals, moved
 // here 2026-09-18 so they are visible to the tier system and covered by the

@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### NetworkMonitor's stack was BELOW its static bound - a 21st task the "every task" sweep never saw
+
+`STACK_SIZE_NETWORK_MONITOR_TASK` was 2048 B against a worst-case static bound of **2068-2080 B** in the `prod_debug_selective` build - over by 20-32 B, with no phantom-edge flag, in the binary flashed on 2026-10-18. Raised to **3072** (+992 B headroom there, +1168 B in `esp32dev_usb_debug_selective`, both verdict "fits, including the worst case").
+
+Two things hid it. First, the comment that sat above the macro said "this task only polls link state" - but on link-up it also calls `EthernetManager::logEthernetStatus()`, whose `NetworkInterface::macAddress()` builds an Arduino String through `snprintf` -> `_svfprintf_r` (an 800 B frame) -> `_malloc_r`. That frame is the framework's own, so `LOG_DEFERRED_FORMAT` cannot remove it, which is also why the two tiers differ by only 176 B. Second, and more useful as a method lesson: the deep path runs **once, at link-up**, and the task then calls `vTaskDelete(NULL)`, so it is absent from the `tasks` diagnostic dump by the time anyone reads it (confirmed: 0 occurrences in the 2026-10-18 dump). **No high-water mark for it has ever been recorded, in any run.** The e3f230a sweep that raised "every task" to 512 B over its bound enumerated the dump, and a self-deleting task is invisible there. Enumerate `xTaskCreate` call sites instead.
+
+The task is also created by a raw `xTaskCreate` rather than through TaskManager, so its bound must be measured with `--no-task-manager-wrapper` (no `safeTaskWrapper` frame) - measuring it the usual way understates the headroom by 32 B in the wrong direction.
+
+The DRAM cost is transient: the task deletes itself at link-up, so the extra 1024 B returns to the heap and steady-state DRAM is unchanged. 274/274 native tests; `prod_debug_selective` and `esp32dev_usb_debug_selective` both build clean.
+
+
 ### `boiler/cmd/fram` `save_pid` saved nothing, and two dead declarations removed
 
 `ControlRequest::SAVE_PARAMETERS` (bit 20) was **set in 16 places and never waited on or tested** - and, because nothing cleared it either, it latched on first use and stayed set for the rest of the run. Fifteen of those sites were belt-and-braces alongside a real `STORAGE_SAVE_REQUEST_BIT`, so they lost nothing. The sixteenth was not: `boiler/cmd/fram` with payload `save_pid` set **only** that bit, then published `requested` on `boiler/status/fram/pid_save` and logged "Requested PID parameters save to FRAM". The command saved nothing and reported success. It now calls `PersistentStorageTask_RequestSave()`, the same path `boiler/params/save` uses - the PID gains are ordinary registered parameters (`pid/spaceHeating/*`, `pid/waterHeater/*`), so a full save persists them. The topic's "FRAM" is legacy; the storage is NVS.
