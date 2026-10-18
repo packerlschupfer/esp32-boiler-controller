@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### DELAY renewal no longer allocates, and no longer encodes the RYN4 wire format itself
+
+`sendCompactDelayRenewal()` built a `std::vector<uint16_t>` per contiguous ON block and filled it with a hand-rolled `0x0600 | 10`, then called `writeMultipleRegisters(uint16_t, const std::vector<uint16_t>&)`. That signature is declared in ESP32-ModbusDevice and merely inherited by RYN4, so the allocation was forced by reaching past RYN4's own API - every one of which is `std::array`-based and allocation-free. Small (2-16 B) but on the path that owns the DELAY watchdog, at a 5 s cadence, in a project whose stated policy is no heap on runtime paths; and the duplicated wire format was the worse half.
+
+Replaced with `setRelayCommandRange(startRelay, count, spec)`, added to ESP32-RYN4 at this project's request. The library now builds the register payload on a stack buffer and owns the encoding. Both libraries were squashed to fresh v0.1.0 root commits in the process: **ESP32-ModbusDevice `bbf737a`** (tag `v0.1.0` -> `9ca40d3`, adds `ensureSyncReady()` as protected) and **ESP32-RYN4 `0825689`** (tag `v0.1.0` -> `47fb195`).
+
+Three things were verified before migrating, because this is the path that keeps the burner and pump relays from auto-OFF:
+
+- **Indices are 0-based on both sides.** The library documents "startRelay = 0 targets Relay 1". A 1-based parameter would have shifted every relay by one, which here means commanding the wrong relay on a gas boiler.
+- **Timing is unchanged.** The new method wraps its transaction in `RetryPolicies::modbusDefault()`, which sets `maxRetries = 0`, and `execute()` loops `attempt <= maxRetries` - so exactly one attempt, like `writeMultipleRegisters` has always been. This matters: F14 in this function deliberately fails fast and retries on the *next* SET tick rather than blocking, so that a lost renewal cannot race the 10 s hardware auto-OFF. A retrying library call, across up to 4 blocks each able to spend 2000 ms of `MODBUS_MUTEX_TIMEOUT_MS` plus response wait plus backoff, could have pushed a renewal past that deadline.
+- **The encoding matches.** `makeDelayCommand(10)` produces `0x0600 | 0x0A = 0x060A`, identical to the word this code used to build by hand.
+
+The failure log now carries the error code, which the old `ModbusResult<void>` path did not expose usefully.
+
+Honest scope note: `RYN4ProcessingTask.cpp.o` still has undefined references to `operator new`/`operator delete`, but they come from `std::unordered_map<std::string, ResourceInfo>` template instantiations pulled in through `SharedResourceManager`'s header - the boot-only cache-miss lookup, not the renewal path. No function in this file references the allocator. Task bound unchanged at 2324-2336 B of 3584 (+1248 B). 281/281 native tests.
+
+
 ### Deferred logging reaches the deployed firmware, ~18 kB of DRAM recovered, and four checks that could not fire now can
 
 A sweep of the 2026-10-18 review findings.

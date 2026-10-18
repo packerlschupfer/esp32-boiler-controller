@@ -82,21 +82,37 @@ static bool sendCompactDelayRenewal(RYN4* ryn4, uint8_t desired) {
             // Continue block
             count++;
         } else if (!isOn && start != 0xFF) {
-            // End of block - send renewal for start..start+count-1
-            std::vector<uint16_t> data(count);
-            for (int j = 0; j < count; j++) {
-                data[j] = 0x0600 | SystemConstants::Relay::DELAY_WATCHDOG_SECONDS;  // DELAY 10s
-            }
-
-            auto result = ryn4->writeMultipleRegisters(start, data);
-            if (result.isOk()) {
+            // End of block - send renewal for start..start+count-1.
+            //
+            // setRelayCommandRange (ESP32-RYN4 v0.1.0, added 2026-10-18 at my request)
+            // replaces a hand-rolled register write that went around the library:
+            // writeMultipleRegisters(uint16_t, const std::vector<uint16_t>&) is declared
+            // in ESP32-ModbusDevice and inherited by RYN4, so it forced a heap
+            // allocation - 2-16 B, but on the path that owns the DELAY watchdog, at a 5 s
+            // cadence, in a project that avoids heap on runtime paths. It also meant
+            // encoding the wire format here (0x0600 | seconds), duplicating knowledge
+            // that belongs in the library. Both are gone: the library builds the register
+            // payload on the stack and owns the encoding.
+            //
+            // Indices are 0-based and so is `start`; the library documents
+            // "startRelay = 0 targets Relay 1". Timing is unchanged: the new method is
+            // single-attempt, because RetryPolicies::modbusDefault() is maxRetries = 0,
+            // exactly like writeMultipleRegisters has always been. That matters - F14
+            // below depends on failing fast and retrying on the NEXT SET tick rather
+            // than blocking, so a lost renewal cannot race the 10 s hardware auto-OFF.
+            const ryn4::RelayErrorCode result = ryn4->setRelayCommandRange(
+                start, count,
+                RYN4::RelayCommandSpec{ryn4::RelayAction::DELAY,
+                                       SystemConstants::Relay::DELAY_WATCHDOG_SECONDS});
+            if (result == ryn4::RelayErrorCode::SUCCESS) {
                 // Update tracking
                 for (int j = start; j < start + count; j++) {
                     g_relayState.setDelayCommand(j, SystemConstants::Relay::DELAY_WATCHDOG_SECONDS);
                 }
                 LOG_DEBUG(TAG, "DELAY renewed: R%d-%d (%d bytes)", start + 1, start + count, count * 2);
             } else {
-                LOG_ERROR(TAG, "Failed DELAY renewal: R%d-%d", start + 1, start + count);
+                LOG_ERROR(TAG, "Failed DELAY renewal: R%d-%d (err %d)",
+                          start + 1, start + count, static_cast<int>(result));
                 allOk = false;
             }
 
