@@ -4,6 +4,7 @@
 
 #include "config/SystemConstants.h"
 #include "modules/control/BoilerTempController.h"
+#include "modules/control/BurnerBoostPolicy.h"
 #include "modules/control/BurnerStateMachine.h"
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"  // F2: validate before arming demand
@@ -522,8 +523,27 @@ void BoilerTempControlTask(void* parameter) {
                 } else {
                     armBlockedLogged = false;
                     // Pump control is independent (PumpControlModule watches HEATING_ON bit)
+                    // Stage 2 is gated three ways: the bang-bang must want it, the burner
+                    // state machine must permit it (hot-boiler ceiling), and for space
+                    // heating the flow target must be high enough that 42.2 kW can actually
+                    // leave through the emitters (BurnerBoostPolicy.h - this is the
+                    // shoulder-season lock; water charges and autotune runs are exempt).
+                    const bool boostAllowed = BurnerBoostPolicy::fullPowerAllowed(
+                        controller.isWaterMode(), controller.isAutoTuning(), targetTemp,
+                        SRP::getSystemSettings().heating_boost_min_target);
                     const bool highPower = (output.powerLevel == BoilerTempController::PowerLevel::FULL) &&
-                                           permission.highPowerAllowed;
+                                           permission.highPowerAllowed && boostAllowed;
+                    static bool boostDeniedLogged = false;
+                    if (output.powerLevel == BoilerTempController::PowerLevel::FULL && !boostAllowed) {
+                        if (!boostDeniedLogged) {
+                            LOG_INFO(TAG, "Stage 2 withheld: flow target %.1f below h/boostMin %.1f",
+                                     tempToFloat(targetTemp),
+                                     tempToFloat(SRP::getSystemSettings().heating_boost_min_target));
+                            boostDeniedLogged = true;
+                        }
+                    } else {
+                        boostDeniedLogged = false;
+                    }
                     // The state machine re-checks the permission under its demand mutex:
                     // `permission` is a snapshot from the start of this cycle (bsm-6)
                     if (BurnerStateMachine::setHeatDemand(true, targetTemp, highPower)) {

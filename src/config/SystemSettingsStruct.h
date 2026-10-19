@@ -48,6 +48,13 @@ struct SystemSettings {
     Temperature_t heating_low_limit;       // Minimum for space heating
     Temperature_t heating_high_limit;      // Maximum for space heating
 
+    // Lowest space-heating flow target that may use stage 2 (POWER_BOOST, full 42.2 kW).
+    // Default member initializer, not a constructor parameter: adding one in the middle of
+    // that positional parameter list would silently shift every caller's arguments.
+    // See BurnerBoostPolicy.h for why the gate is the flow target and not the outside
+    // temperature. 50.0 °C is about +4 °C outside on the 2026-10-19 curve.
+    Temperature_t heating_boost_min_target = tempFromFloat(50.0f);
+
     // Water Heating Limits (Mode-Specific)
     Temperature_t water_heating_low_limit;   // Minimum for water heating
     Temperature_t water_heating_high_limit;  // Maximum for water heating

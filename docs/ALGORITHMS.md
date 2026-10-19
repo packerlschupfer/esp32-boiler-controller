@@ -940,6 +940,39 @@ Weather mode, room 19.0°C, target 20.0°C, factor 2.0, outside 0.0°C: shift = 
   - Needed = outside cold and room not overheated.
 - **Room mode** (`heating/weatherControl` off): needs a valid room reading and `targetTemp` > 0, otherwise not needed. Start when room < `targetTemp`, stop when room >= `targetTemp` + `hysteresis` (target 20.0°C, hysteresis 0.5°C: stops at 20.5°C). The outside temperature is not used for the decision.
 
+### Stage-2 Power Selection and the Mild-Weather Lock (`BurnerBoostPolicy`)
+
+The boiler is two-stage: 23.3 kW on stage 1, 42.2 kW with POWER_BOOST. The stage is chosen
+by `BoilerPowerLevel::fromBangBangError()` on `error = flow target - flow actual`:
+
+| Condition | Level |
+|-----------|-------|
+| `error < -offHysteresis` (-5.0°C) | OFF |
+| `error > fullPowerThreshold` (+10.0°C) | FULL (stage 2) |
+| `error > onHysteresis` (+3.0°C) | HALF (stage 1) |
+| otherwise | unchanged (hysteresis band) |
+
+A space-heating cold start always clears the FULL threshold: the radiator circuit sits at
+room temperature, so the first flow reading after the pump starts is 20-26°C, which is more
+than 10°C below even a shoulder-season target of 38-40°C. Measured 2026-10-19 at 11.5°C
+outside with a 38.0°C target: ignition 19:55:57 at RUNNING_LOW, RUNNING_HIGH 20 s later,
+back to RUNNING_LOW at 20:07:17 - 11 minutes of 42.2 kW. At that flow temperature the
+emitters cannot pass the extra 19 kW, so it heats the boiler's 12 L instead, overshoots the
+setpoint, trips the off-hysteresis and ends the cycle early (4 starts in 46 minutes).
+
+`BurnerBoostPolicy::fullPowerAllowed()`, checked in `BoilerTempControlTask` at the one point
+where FULL becomes a burner request, requires the space-heating flow target to be at least
+`h/boostMin` (default 50.0°C, about +4°C outside on the 2026-10-19 curve). Exempt:
+
+- **water charges** - the tank is a real heat sink and the target is tank + 10°C, not a curve;
+- **autotune runs** - `PIDAutoTuner` needs a full-power step for usable oscillations.
+
+The gate is the flow target, not the outside temperature, because the target already carries
+the outside temperature (through the curve) and the room deficit (through the room-deviation
+shift, 2.0°C of flow per °C of room error). A cold-morning recovery therefore raises the
+target and earns stage 2 back on its own, which an outside-temperature gate would refuse.
+Denying is the fail-safe direction: the burner still runs at stage 1.
+
 ---
 
 ## Summary Table
@@ -958,6 +991,7 @@ Weather mode, room 19.0°C, target 20.0°C, factor 2.0, outside 0.0°C: shift = 
 | **Burner Demand Gate** | Heat demand arming | 6s decision age, 1°C tolerance, 10s retry | BurnerDemandGate.h |
 | **Burner Transitions** | Burner state decisions | 10s no-mode grace, 15s/30s mode switch bounds | BurnerTransitions.h |
 | **Heating Curve** | Space heating boiler target, weather/room mode | coeff 1.4, shift 0, outside hysteresis 1.0°C | HeatingCurve.h, SpaceHeatingPolicy.h |
+| **Stage-2 Lock** | No 42.2 kW for mild-weather heating | h/boostMin 50.0°C, water/autotune exempt | BurnerBoostPolicy.h |
 
 ---
 

@@ -22,6 +22,39 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Stage 2 (42.2 kW) no longer fires for mild-weather space heating
+
+New parameter `h/boostMin` (default **50.0 C**, range 38.0-75.0): the lowest space-heating
+flow target allowed to use POWER_BOOST. Water charges and autotune runs are exempt.
+
+The boiler control loop is a three-point bang-bang on `flow target - flow actual` and asks
+for stage 2 whenever that error exceeds 10.0 C. A space-heating cold start always exceeds
+it, because the radiator circuit sits at room temperature: the first flow reading after the
+pump starts is 20-26 C, against a shoulder-season target of 38-40 C. Measured on the live
+boiler 2026-10-19 at 11.5 C outside with a 38.0 C target - ignition at 19:55:57 RUNNING_LOW,
+RUNNING_HIGH 20 s later, back to RUNNING_LOW at 20:07:17: **11 minutes of 42.2 kW to chase a
+38 C setpoint**, plus a second 1.5-minute burst at 20:35. The house needs single-digit kW at
+11 C outside and stage 1 alone is 23.3 kW, so the extra 19 kW cannot leave through the
+emitters at that flow temperature. It heats the boiler's 12 L of water instead, overshoots
+the setpoint, trips the -5.0 C off-hysteresis and ends the cycle early - the 4-starts-in-46-
+minutes pattern logged the same evening.
+
+The gate is the flow target and not the outside temperature, although the outside
+temperature is what the behaviour is about. The target already contains it, through the
+curve, and also contains the room deficit, through the room-deviation shift (2.0 C of flow
+per C of room error) - so a cold-morning recovery raises the target and earns stage 2 back
+by itself, where an outside-temperature gate would deny it. The target also survives sensor
+fallback, which clamps it, rather than depending on the outside reading that fallback has
+just declared untrustworthy. 50.0 C corresponds to roughly +4 C outside on the current curve.
+
+Not a version-bump item: no existing parameter changes meaning, and the default only
+withholds a power stage the boiler should not have been using in these conditions. Energy
+per cycle is roughly unchanged (the same heat at half the rate takes twice as long); what it
+buys is less overshoot past the setpoint and fewer burner starts.
+
+Rules in `BurnerBoostPolicy.h` (header-only, 8 native tests, mutation-checked), applied in
+`BoilerTempControlTask` at the single point where FULL becomes a burner request.
+
 ### `h/sLo` defaults to 38.0, the floor that was making weather compensation inert
 
 `h/sLo` was 40.0, and the heating curve's raw output only reaches 40.0 at about **10.5 C**

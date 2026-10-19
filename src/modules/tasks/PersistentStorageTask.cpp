@@ -348,6 +348,17 @@ void PersistentStorageTask(void* pvParameters) {
     storage->registerInt("h/sLo", &heating_low_i32, 300, 600, "Space heating min (tenths °C)");
     storage->registerInt("h/sHi", &heating_high_i32, 500, 900, "Space heating max (tenths °C)");
 
+    // Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, 42.2 kW).
+    // 2026-10-19: measured 11 minutes of full power chasing a 38.0 °C setpoint at 11.5 °C
+    // outside, because the bang-bang asks for FULL whenever flow is >10 °C below target and
+    // a cold radiator circuit always is. Rationale and the choice of target-over-outside in
+    // BurnerBoostPolicy.h. The range ends are the degenerate cases: 380 (= h/sLo) lets every
+    // heating target boost, 750 (= h/sHi default) is effectively never.
+    static int32_t boostMinTarget_i32 = 500;
+
+    storage->registerInt("h/boostMin", &boostMinTarget_i32, 380, 750,
+                         "Min flow target for stage 2, heating only (tenths °C)");
+
     storage->setOnChange("h/sLo", [](const std::string&, const void*) {
         auto& s = SRP::getSystemSettings();
         s.heating_low_limit = static_cast<Temperature_t>(heating_low_i32);
@@ -355,6 +366,10 @@ void PersistentStorageTask(void* pvParameters) {
     storage->setOnChange("h/sHi", [](const std::string&, const void*) {
         auto& s = SRP::getSystemSettings();
         s.heating_high_limit = static_cast<Temperature_t>(heating_high_i32);
+    });
+    storage->setOnChange("h/boostMin", [](const std::string&, const void*) {
+        auto& s = SRP::getSystemSettings();
+        s.heating_boost_min_target = static_cast<Temperature_t>(boostMinTarget_i32);
     });
 
     // Water Heating Limits
@@ -708,6 +723,7 @@ void PersistentStorageTask(void* pvParameters) {
     if (burner_high_i32 == 0) burner_high_i32 = 1100;
     if (heating_low_i32 == 0) heating_low_i32 = 380;
     if (heating_high_i32 == 0) heating_high_i32 = 750;
+    if (boostMinTarget_i32 == 0) boostMinTarget_i32 = 500;
     if (water_low_i32 == 0) water_low_i32 = 400;
     if (water_high_i32 == 0 || water_high_i32 == 1) water_high_i32 = 900;
     // Weather control defaults (15.0°C threshold, 2.0°C overheat margin)
@@ -719,6 +735,7 @@ void PersistentStorageTask(void* pvParameters) {
     settings.burner_high_limit = static_cast<Temperature_t>(burner_high_i32);
     settings.heating_low_limit = static_cast<Temperature_t>(heating_low_i32);
     settings.heating_high_limit = static_cast<Temperature_t>(heating_high_i32);
+    settings.heating_boost_min_target = static_cast<Temperature_t>(boostMinTarget_i32);
     settings.water_heating_low_limit = static_cast<Temperature_t>(water_low_i32);
     settings.water_heating_high_limit = static_cast<Temperature_t>(water_high_i32);
     settings.outsideTempHeatingThreshold = static_cast<Temperature_t>(outsideHeatingThreshold_i32);

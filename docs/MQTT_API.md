@@ -705,6 +705,7 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 | Outside threshold | `heating/outsideThreshold` | 50-250 (5.0-25.0°C) | 150 | Weather-compensated heating starts below this and stops at threshold + 1.0°C (hysteresis) |
 | Curve coefficient | `heating/curveCoeff` | 0.5-4.0 | 1.4 | Heating curve slope (float) |
 | Curve shift | `heating/curveShift` | -20.0-40.0 (°C) | 0 | Heating curve parallel shift (float) |
+| Stage-2 lock | `h/boostMin` | 380-750 (38.0-75.0°C) | 500 | Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, 42.2 kW). Water charges and autotune runs are exempt. 380 (= `h/sLo`) lets every heating target boost; 750 is effectively never |
 | Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
 | Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
 | Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |
@@ -716,6 +717,7 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 - Temperature parameter changes (tank limits, burner/heating/water limits, room target, hysteresis) apply immediately and are no longer reverted by the next save.
 - PID gain changes apply on the next boiler control cycle (the PID is reset when the active gains change); no reboot needed.
 - `heating/outsideThreshold` up to 25°C allows weather-compensated heating on a mild day (e.g. for a space-heating autotune).
+- `h/boostMin` exists because the boiler control loop is a three-point bang-bang on (flow target - flow actual) and asks for stage 2 whenever that error exceeds 10.0°C. A cold radiator circuit always exceeds it, so before this gate a mild-weather heating start ran full power: measured 2026-10-19, 11 minutes of 42.2 kW against a 38.0°C setpoint at 11.5°C outside. The gate is the flow target rather than the outside temperature because the target already contains both the outside temperature (via the curve) and the room deficit (via the room-deviation shift), so a cold-morning recovery earns stage 2 back by itself.
 
 ```bash
 # Raise tank limits from 45/65°C to 60/75°C: high first, then low

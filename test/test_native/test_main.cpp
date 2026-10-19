@@ -231,6 +231,16 @@ void test_scheduler_clear_requires_confirm_payload();
 void test_scheduler_unhandled_command_always_replies();
 void test_scheduler_status_lists_active_and_disabled_ids();
 void test_scheduler_status_worst_case_fits_mqtt_payload();
+// Burner boost policy (stage-2 lock-out for mild-weather heating)
+void test_boost_denied_for_mild_weather_heating_targets();
+void test_boost_allowed_for_cold_weather_heating_targets();
+void test_boost_threshold_is_inclusive_at_exactly_the_limit();
+void test_boost_always_allowed_for_water_charge();
+void test_boost_always_allowed_while_autotuning();
+void test_boost_gate_degenerate_ends_of_the_parameter_range();
+void test_boost_denied_for_invalid_or_zero_target();
+void test_boost_water_and_autotune_override_an_invalid_target();
+
 void test_scheduler_status_small_buffer_stays_valid_json();
 
 void test_basic_allocation();
@@ -735,6 +745,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_scheduler_status_lists_active_and_disabled_ids);
     RUN_TEST(test_scheduler_status_worst_case_fits_mqtt_payload);
     RUN_TEST(test_scheduler_status_small_buffer_stays_valid_json);
+
+    // Burner boost policy (stage-2 lock-out for mild-weather heating)
+    RUN_TEST(test_boost_denied_for_mild_weather_heating_targets);
+    RUN_TEST(test_boost_allowed_for_cold_weather_heating_targets);
+    RUN_TEST(test_boost_threshold_is_inclusive_at_exactly_the_limit);
+    RUN_TEST(test_boost_always_allowed_for_water_charge);
+    RUN_TEST(test_boost_always_allowed_while_autotuning);
+    RUN_TEST(test_boost_gate_degenerate_ends_of_the_parameter_range);
+    RUN_TEST(test_boost_denied_for_invalid_or_zero_target);
+    RUN_TEST(test_boost_water_and_autotune_override_an_invalid_target);
 
     return UNITY_END();
 }
