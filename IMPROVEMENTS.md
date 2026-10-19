@@ -586,6 +586,20 @@ MQTT package deploys (14:39 and 15:02), and the boot at 14:57 - before the secon
 did not blip. Nothing is retained under `boiler/cmd/#` now (checked 2026-10-19 22:59, and
 independently by the `homeassistant` session), and the last three boots did not blip.
 
+**Narrowed further, 2026-10-19 23:05.** Within the firmware only two things ever publish
+`/target`: `handleRoomTargetCommand()`, which publishes the value from the **payload**, and
+the storage loop, which publishes from live settings but only runs after the load.
+`handleStatusCommand()` is a no-op that publishes nothing. So a retained command explains
+the observation only if its payload was literally `18.0` - there is no path that republishes
+the struct default from live settings during the window. Home Assistant did not publish it
+(one `climate.set_temperature 19.2` in two days, no retain, and `mqtt.reload` publishes
+nothing), and this session's transcript contains no publish to `cmd/room_target` and no
+`--retain` anywhere, so it was not this session's tooling either. That leaves the
+`boiler_config` add-on or an older session. The retained message, if it existed, is gone
+(`scripts/clear_retained_mqtt.sh` is in the repo and would do it), so the specific trigger
+is probably no longer recoverable - which is a reason to fix the window and stop chasing the
+trigger.
+
 **Ruled out, each with evidence rather than reasoning:**
 
 - Home Assistant core - no service calls, no publishes to `boiler/cmd/*`, nothing retained,
