@@ -543,25 +543,51 @@ window the heating curve's room-deviation shift and the room backstop
 against a room at 20.1 blocks heating. One second is harmless; the window existing at all
 is not, because nothing marks settings as "not yet loaded".
 
-What is NOT yet established, and should be before fixing:
+What is established, after the `homeassistant` session checked the HA side read-only:
 
-1. **Why only some boots.** The boot sequence is `loadAll(true)` (line 703) then the apply
-   (760-762) then the publish loop (958), strictly sequential in one task, so the publish
-   should never see the pre-load value. A missing or zeroed NVS key on those two boots fits
-   the evidence better than a race - and `loadAll(true)` passes `autoSaveDefaults = true`,
-   so a missing key would also have *written* 18.0 back to NVS.
-2. **What restored 19.2 one second later.** No firmware path re-reads NVS that fast. The
-   suspect is Home Assistant: the climate entity is `optimistic: true` with
-   `temperature_command_topic: boiler/cmd/room_target`, and `handleRoomTargetCommand()`
-   writes live settings and republishes `/target` - exactly the observed correction. If
-   that is what happens, **HA is silently restoring the room target after every boot**,
-   which collides with the no-HA-in-the-control-loop requirement: the boiler alone would
-   have kept 18.0.
+- **Home Assistant is not the one restoring 19.2.** No `climate.set_temperature`,
+  `number.set_value` or `mqtt.publish` to `boiler/cmd/*` in the recorder events table for
+  either window; MQTT climate only publishes on a service call; the broker has nothing
+  retained under `boiler/cmd/#`; no automation or script writes `room_target`. The only HA
+  activity was an automation triggered by `boiler/status/online` that published
+  `params/get/...` reads 15 s *after* the recovery. So the 18.0 -> 19.2 correction came from
+  the boiler itself or from another local MQTT client.
+- **The runtime reload path is unreachable.** `PersistentStorageTask_RequestLoad()` is
+  declared and defined but has **no callers anywhere**, so the `STORAGE_LOAD_REQUEST_BIT`
+  handler never runs. That rules it out as the recovery mechanism, invalidates the "trigger
+  a reload" test first written here, and is a defect of its own (N8).
 
-Deciding test, safe to run: `params/set/heating/targetTemp 192` (idempotent, persists),
-then trigger a parameter reload and confirm the target does not move. Running the reload
-*first* would reveal what NVS actually holds, but sets the live target to that value, so it
-should not be run unattended on a heating night.
+Still open - the three remaining candidates for the recovery one second later:
+
+1. the `heating/targetTemp` `setOnChange` callback, driven by a queued `params/set` from
+   another MQTT client. The `boiler_config` Home Assistant add-on talks to the boiler
+   directly and HA core cannot see its traffic;
+2. `SpaceHeatingScheduleAction::applyHeatingMode()` (line 201), which writes
+   `targetTemperatureInside` directly, if a schedule applies at startup. A
+   `boiler/cmd/scheduler status` query got no reply, so this is unconfirmed either way;
+3. a second NVS pass inside the library - `PersistentStorage::begin()` calls `loadAll()`
+   on its own (`PersistentStorage.cpp:142`) besides the explicit `loadAll(true)` at
+   `PersistentStorageTask.cpp:703`.
+
+Deciding test, needs a deliberate reboot with a serial capture attached: read
+`Loaded %d/%d parameters` (library) and `Room control params after load: targetTemp=%ld`
+(line 764) from the boot log, then watch which writer moves it afterwards. Two of four
+boots showed the blip, so one reboot may not reproduce it.
+
+### N8. `PersistentStorageTask_RequestLoad()` has no callers - the reload path is dead
+
+`STORAGE_LOAD_REQUEST_BIT` is defined, the loop handles it (`PersistentStorageTask.cpp:1034`)
+and `PersistentStorageTask_RequestLoad()` sets it, but nothing calls that function - no MQTT
+command, no other task, nothing in `include/`. The handler carries real logic that therefore
+never executes: `storage->loadAll()`, the shadow->setting copy for room target and
+hysteresis that the comment above it describes as fixing a genuine bug, and (added
+2026-10-19 in `4a42466`) the `pushSensorOffsetsToMB8ART()` re-push.
+
+Consequence for the sensor-offset work: offsets reach the MB8ART through the boot apply and
+the `sensorOffsetCallback`, both live, so nothing is broken - but that commit's claim of
+three apply sites included one that cannot run. Either wire the reload to a command
+(`boiler/cmd/params reload` would match the existing command vocabulary) or delete the path;
+leaving a dead handler that looks like coverage is the worst of the three.
 
 ### N7. `boiler/status/heating` retains a stale room target on a mode-word topic
 
