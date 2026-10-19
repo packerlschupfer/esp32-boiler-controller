@@ -557,22 +557,53 @@ What is established, after the `homeassistant` session checked the HA side read-
   handler never runs. That rules it out as the recovery mechanism, invalidates the "trigger
   a reload" test first written here, and is a defect of its own (N8).
 
-Still open - the three remaining candidates for the recovery one second later:
+**Measured 2026-10-19 22:57:35 on a deliberate reboot with a serial capture
+(`/tmp/bootcap/boot_22-57_reboot.log`), which is the structural answer even though the blip
+did not reproduce:**
 
-1. the `heating/targetTemp` `setOnChange` callback, driven by a queued `params/set` from
-   another MQTT client. The `boiler_config` Home Assistant add-on talks to the boiler
-   directly and HA core cannot see its traffic;
-2. `SpaceHeatingScheduleAction::applyHeatingMode()` (line 201), which writes
-   `targetTemperatureInside` directly, if a schedule applies at startup. A
-   `boiler/cmd/scheduler status` query got no reply, so this is unconfirmed either way;
-3. a second NVS pass inside the library - `PersistentStorage::begin()` calls `loadAll()`
-   on its own (`PersistentStorage.cpp:142`) besides the explicit `loadAll(true)` at
-   `PersistentStorageTask.cpp:703`.
+```
+[4880] TaskInitializer: MQTT task started successfully
+[4881] TaskInitializer: Starting persistent storage task...
+[4895] MQTTM: MQTT connected
+[4908] MQTTSubMgr: Step 2/5: Subscribing to boiler/cmd/+     <- commands now accepted
+[5008] PersistentStorageTask: Loading saved parameters...
+[5052] PersistentStorageTask: Room control params after load: targetTemp=192  <- NVS applied
+```
 
-Deciding test, needs a deliberate reboot with a serial capture attached: read
-`Loaded %d/%d parameters` (library) and `Room control params after load: targetTemp=%ld`
-(line 764) from the boot log, then watch which writer moves it afterwards. Two of four
-boots showed the blip, so one reboot may not reproduce it.
+The MQTT task is started BEFORE the persistent storage task (`TaskInitializer.cpp:87` then
+:97), so for **144 ms** the device is connected and subscribed to `boiler/cmd/+` while
+`settings` still holds the constructor's struct defaults - room target 18.0 among them. That
+window is the defect, whatever triggered the published value.
+
+**Most likely trigger, consistent with every observation:** a RETAINED message on a
+`boiler/cmd/*` topic. The broker delivers retained messages the instant the device
+subscribes, i.e. inside the window, and `handleRoomTargetCommand()` both writes live
+settings and republishes `/target` itself (`MQTTCommandHandlers.cpp:228`) - producing an
+18.0 on `/target`, which the storage load then overwrites with the NVS value about a second
+later. It also explains the intermittency: it depends on a retained command existing at the
+time, and on the race between its delivery and the load. Both 10-18 blips are bracketed by
+MQTT package deploys (14:39 and 15:02), and the boot at 14:57 - before the second deploy -
+did not blip. Nothing is retained under `boiler/cmd/#` now (checked 2026-10-19 22:59, and
+independently by the `homeassistant` session), and the last three boots did not blip.
+
+**Ruled out, each with evidence rather than reasoning:**
+
+- Home Assistant core - no service calls, no publishes to `boiler/cmd/*`, nothing retained,
+  no automation writing `room_target`; its only activity was `params/get` reads 15 s later.
+- The scheduler (`SpaceHeatingScheduleAction.cpp:201`) - the same boot log shows
+  `TimerScheduler: Loaded 0 schedules from FRAM`, so no schedule can apply a target.
+- The runtime reload path - no callers at all (N8).
+- A missing NVS key on this boot - the log shows `targetTemp=192` straight from NVS.
+
+**Fix, and it is the window rather than the symptom:** either start the persistent storage
+task before the MQTT task, or gate command handling and the first status publish on a
+"parameters loaded" bit. The second is safer than reordering task startup, which has its own
+dependency graph. A boot that accepts and acts on commands against struct defaults is also
+why `h/sLo`, the tank limits and the burner limits are all briefly at defaults - the room
+target is simply the one with a visible subscriber.
+
+Tally so far: 18.0 on 2 of 5 observed boots (10-18 15:00:06, 15:49:19; not 10-18 14:57:34,
+10-19 22:40:08, 22:57:35).
 
 ### N8. `PersistentStorageTask_RequestLoad()` has no callers - the reload path is dead
 
