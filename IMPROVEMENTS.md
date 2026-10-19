@@ -521,3 +521,60 @@ outside gate's own threshold. 36.0 would extend the modulating range further and
 distribution and standby loss; the boiler's own minimum settable flow is 35 C
 (`docs/EQUIPMENT_SPECS.md:52-72`). Gate on watching the heating return (`t.br`) during a
 sustained burn across a few cold evenings first. `ReturnPreheater` covers the cold start.
+
+### N6. The room target reads 18.0 for about a second after some boots
+
+`boiler/status/heating/target` published **18.0** about 40 ms after `boiler/status/online`
+on two of four observed boots, returning to 19.2 roughly one second later (HA recorder,
+2026-10-18 15:00:06.358 and 15:49:19.098; the 14:57:34 boot and the 2026-10-19 22:40:08
+boot did not do it).
+
+18.0 is `SystemSettings`' struct default for `targetTemperatureInside`
+(`SystemSettingsStruct.h:169`), and `PersistentStorageTask.cpp:760` substitutes exactly
+that value when the NVS key reads 0:
+
+```cpp
+if (targetTemp_i32 == 0) targetTemp_i32 = 180;  // 18.0°C default (struct default)
+```
+
+This is not only a display artefact. The same assignment writes live settings, so for that
+window the heating curve's room-deviation shift and the room backstop
+(`targetTemp + roomOverheatMargin`) both run on 18.0 instead of 19.2 - a backstop of 19.0
+against a room at 20.1 blocks heating. One second is harmless; the window existing at all
+is not, because nothing marks settings as "not yet loaded".
+
+What is NOT yet established, and should be before fixing:
+
+1. **Why only some boots.** The boot sequence is `loadAll(true)` (line 703) then the apply
+   (760-762) then the publish loop (958), strictly sequential in one task, so the publish
+   should never see the pre-load value. A missing or zeroed NVS key on those two boots fits
+   the evidence better than a race - and `loadAll(true)` passes `autoSaveDefaults = true`,
+   so a missing key would also have *written* 18.0 back to NVS.
+2. **What restored 19.2 one second later.** No firmware path re-reads NVS that fast. The
+   suspect is Home Assistant: the climate entity is `optimistic: true` with
+   `temperature_command_topic: boiler/cmd/room_target`, and `handleRoomTargetCommand()`
+   writes live settings and republishes `/target` - exactly the observed correction. If
+   that is what happens, **HA is silently restoring the room target after every boot**,
+   which collides with the no-HA-in-the-control-loop requirement: the boiler alone would
+   have kept 18.0.
+
+Deciding test, safe to run: `params/set/heating/targetTemp 192` (idempotent, persists),
+then trigger a parameter reload and confirm the target does not move. Running the reload
+*first* would reveal what NVS actually holds, but sets the live target to that value, so it
+should not be run unattended on a heating night.
+
+### N7. `boiler/status/heating` retains a stale room target on a mode-word topic
+
+`boiler/cmd/heating <number>` (`MQTTCommandHandlers.cpp:197-198`) publishes
+`target:19.4` **retained** to `boiler/status/heating`, a topic whose every other payload is
+a mode word (`enabled`, `disabled`, `override_on`, `override_off`, `normal`). One retained
+topic, two incompatible payload grammars, last writer wins - and nothing ever corrects it,
+so the broker has served `target:19.4` since 2026-10-18 09:25 while the real target has
+been 19.2.
+
+Harmless today: nothing subscribes to it (checked both the firmware and the deployed Home
+Assistant package plus `automations.yaml`). It is a latent trap for the next consumer of
+that topic, and the mirror image of the already-fixed case where the parameter path left
+`/target` stale. Fix is one line - publish the confirmation to `MQTT_STATUS_HEATING
+"/target"`, which the parameter path already keeps current, and leave the bare topic to
+mode words.
