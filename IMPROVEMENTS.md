@@ -440,3 +440,84 @@ if (s.consecutiveFailOpens >= CONSECUTIVE_ALERT_THRESHOLD && !s.mqttAlertSent)
 14. **M3 + M5 + M6 + M7** — Remaining medium items in any order.
 
 15. **L1-L5** — Backlog items as time permits.
+
+---
+
+## Open items found 2026-10-18/19 (not part of the Round 22 numbering)
+
+Recorded here because they were found while fixing the sensor-offset and `h/sLo` work
+and would otherwise exist only in a chat log. None is urgent; the boiler is running
+`0.1.0-ecb867e` with all of them present.
+
+### N1. Burner-start counter never reaches Home Assistant (30 min)
+
+`boiler/cmd/fram` with payload `counters` publishes **non-retained, on request only**
+(`MQTTCommandHandlers.cpp:429-448`) and nothing ever requests it, so HA's `Burner Starts`
+entity (`boiler_counter_burner`) has been permanently unavailable. Two fixes, in order of
+preference:
+
+1. Publish retained at the increment site (`BurnerStateMachine::onEnterIgnition()`,
+   `BurnerStateMachine.cpp:738-744`). ~12-26 publishes a day instead of 288 polls, correct
+   immediately after an HA restart, and it yields exact start **timestamps** - which is the
+   number that actually tells you whether a change helped, unlike a 5-minute-sampled total.
+2. An HA automation polling every 5 min. No firmware change, but strictly worse on every
+   axis and would be thrown away by (1).
+
+Blocking anything that wants to measure burner cycling. Note the cumulative total is
+**not** trustworthy: FRAM reports 1778 starts against 1284 burner hours (43 min per start),
+which does not reconcile with 10-32 starts/day derived from HA's `burner_mode` history, so
+the counter has been reset or FRAM reformatted at some point. Use deltas, never the total,
+and never compare across a reset. (`reset_counters` exists if a clean baseline is wanted.)
+
+### N2. `RUNTIME_TOTAL` is a duplicate of `RUNTIME_BURNER`, not uptime (15 min)
+
+`BurnerRuntimeTracker.cpp:37-50` increments both by the identical value, so `t` on
+`boiler/status/fram/runtime` carries no information beyond `b`. Either make
+`RUNTIME_TOTAL` real system uptime or drop it from the payload and the docs. Currently
+`t == b` and `h + w == b` by construction, which invites the reader to believe they are
+three independent measurements.
+
+### N3. "will retry in background" is aspirational for MB8ART and RYN4 (1-2 hours)
+
+`ModbusDeviceInitializer.cpp:216` and `:480` log that an uninitialised device will be
+retried in the background. There is no retry: one `initialize()` call site each, inside
+the boot loop. If either device misses its boot window it stays down until a reboot.
+Either implement the retry or change the message - a log line promising recovery that
+never comes is worse than one admitting defeat, because it stops whoever reads it from
+power-cycling.
+
+### N4. Weather mode has no anticipation, only instantaneous outside temperature (4-8 hours)
+
+The curve and the outside gate both read the raw sensor with no filtering and no notion of
+trend, so 15 C at 09:00 rising produces the same flow target as 15 C at 20:00 falling.
+Measured daily outside swing is a median **13.7 C** (10 days of HA history), so this is not
+a marginal effect in the shoulder season.
+
+Two terms, deliberately separate because they act on different time scales and pull in
+opposite directions in the diurnal case:
+
+- An EWMA on the outside reading (time constant ~2-3 h) feeding the curve, which models
+  heat loss through 25 cm solid brick, plus a 24 h mean for a true summer cut-off. This is
+  what commercial controllers do - **and on its own it answers the morning case backwards**,
+  because a lag filter reports the overnight cold just as the sun arrives.
+- A trend term, `k * dT_out/dt`, which is what actually captures "where it is heading".
+  Rising through the morning means heat less; falling through the evening means heat more.
+  The signal is strong: the morning ramp runs 2-3 C/h against a sensor resolving 0.1 C.
+
+Both computable on-device, both as header-only policy modules with native tests matching
+`SpaceHeatingPolicy.h`, both gain-zero by default so flashing changes nothing until
+enabled. A solar term from sun elevation and azimuth is also pure arithmetic from NTP time
+plus coordinates - worth having deliberately, since the mis-sited outside sensor currently
+provides a crude accidental version (about +0.7 C of its bias is radiation-driven).
+
+**Constraint:** the owner requires the boiler to work with no internet and no Home
+Assistant in the control loop, so a forecast value pushed over MQTT is ruled out even with
+a TTL and a safe fallback. Everything above stays on-device.
+
+### N5. `h/sLo` could go to 36.0 (parameter only)
+
+38.0 moved the curve's clamp crossover from ~10.5 C to ~13.0 C outside, which is the
+outside gate's own threshold. 36.0 would extend the modulating range further and cut
+distribution and standby loss; the boiler's own minimum settable flow is 35 C
+(`docs/EQUIPMENT_SPECS.md:52-72`). Gate on watching the heating return (`t.br`) during a
+sustained burn across a few cold evenings first. `ReturnPreheater` covers the cold start.
