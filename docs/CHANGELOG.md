@@ -13,11 +13,154 @@ refreshed v0.1.0 snapshot rather than under a new version number. Same conventio
 ESP32-RYN4 and ESP32-ModbusDevice libraries, which were also re-released as v0.1.0 on
 2026-10-18 without a bump.
 
-Two items here would normally argue for a version bump, recorded so the decision is
+Three items here would normally argue for a version bump, recorded so the decision is
 visible rather than implicit: `boiler/params/set/...` now rejects malformed payloads it
-previously coerced (a client sending `13,22` for a PID gain used to get a silent `0`), and
-a pressure-sensor fault now stops the burner where it previously continued. Both are
-corrections toward documented intent rather than breaks of a documented contract.
+previously coerced (a client sending `13,22` for a PID gain used to get a silent `0`), a
+pressure-sensor fault now stops the burner where it previously continued, and
+`sensor/offset/waterOutput` has been **removed** - a client setting it now gets a
+rejection rather than a silent no-op. The first two are corrections toward documented
+intent rather than breaks of a documented contract. The third is a genuine removal, but of
+a parameter that never affected anything and that Home Assistant never exposed.
+
+### `h/sLo` defaults to 38.0, the floor that was making weather compensation inert
+
+`h/sLo` was 40.0, and the heating curve's raw output only reaches 40.0 at about **10.5 C**
+indicated outside temperature. Above that the commanded flow was a flat 40.0 and weather
+compensation did nothing at all - the system was a plain room thermostat at fixed flow.
+The outside gate cuts out at 14.0, so the whole band 10.5-14.0 C ran unmodulated, and
+October's outside readings spanned 5.0-27.5 C. Weather compensation was in practice a
+deep-winter-only feature, which is the opposite of where it is usually worth the most.
+
+The diagnostics topic added above is what made it visible: `cmd:400` with `clp:"floor"`
+for an entire mild evening, while `raw` showed the curve asking for 30.1 C at 16.4 C
+outside and 37.4 at 11.8.
+
+38.0 is not an arbitrary reduction. The Vaillant VK 42/4-2 is a low-temperature
+(Niedertemperatur) boiler with a **35 C** minimum settable flow
+(`docs/EQUIPMENT_SPECS.md:52-72`); `burner_low_limit` sits at 38.0 only to stay
+oil-burner-compatible. So 38.0 matches `h/bLo`, keeps 3 C of manufacturer margin, and
+moves the clamp crossover from 10.5 up to about **13.0** - the outside gate's own
+threshold, so the curve now modulates across the whole band where heating is allowed to
+run at all.
+
+Confirmed on the device at 10.1 C outside: `cmd:407` with `clp:"none"`, the curve driving
+the flow target rather than sitting on a bound.
+
+Changed in **both** places that define it, plus the fallback that would have undone it:
+`PersistentStorageTask.cpp:340` (the NVS shadow default, what a fresh device actually
+receives via `loadAll(autoSaveDefaults=true)`), `SystemSettingsStruct.h:168` (the struct
+constructor default, which applies before the storage task runs and if storage fails), and
+the missing-key restore at `PersistentStorageTask.cpp:704`, which would otherwise have
+quietly put 400 back on any device whose NVS lacked the key. That third one is the
+instructive one - change the default, watch it work on your own device because NVS already
+holds the new value, and never notice that a factory-reset unit gets the old one.
+
+`water_heating_low_limit` stays 40.0 (different circuit, and the tank charge wants the
+higher flow) and `h/bLo` stays 38.0. `ALGORITHMS.md` and its worked-example row, plus the
+clamp note in `HeatingControlLogic.puml`, now state the new default and why it changed.
+
+### The seven MB8ART sensor offsets were applied to nothing, and four of them named the wrong channel
+
+`sensor/offset/boilerOutput` and its six siblings have been registered with a +-5.0 C
+range, persisted to NVS, published on `boiler/params/status/sensor` and settable over MQTT
+since the project began - and **read by nothing that touches a reading**. Setting one was
+accepted, echoed back on the status topic, displayed correctly in Home Assistant, and
+changed no temperature. Only `roomTempOffset` (`ANDRTF3Task.cpp:47`, a different device)
+and `pressureOffset` (`MB8ARTTasks.cpp:378`) ever worked.
+
+The cause is structural: the MB8ART library writes temperatures **directly into**
+`SharedSensorReadings` through the raw pointers bound in `SensorBindings.cpp`
+(`mb8art_->bindSensorPointers(...)`, `ModbusDeviceInitializer.cpp:170`), so this firmware
+had no interception point. The library's own hook, `MB8ART::applyTemperatureCorrection()`,
+was a stub with a hardcoded `TEMPERATURE_OFFSET = 0` and zero callers in either repo - its
+own `MINOR_ENHANCEMENTS.md` listed per-channel calibration as a future enhancement, so it
+had always been a placeholder.
+
+**And the documented channel map was wrong**, in three places that agreed with each other
+and disagreed with `include/config/SensorIndices.h`, which declares itself the single
+source of truth:
+
+| parameter | documented | actual |
+|---|---|---|
+| `waterOutput` | CH3 | no such channel |
+| `waterReturn` | CH4 | CH6 |
+| `heatingReturn` | CH5 | CH7 |
+| `outside` | CH6 | **CH3** |
+
+The `outside` row is the one that mattered: CH6 is both the wrong channel and
+hardware-deactivated (`MB8ART_ACTIVE_CHANNELS` is 5), so wiring an outside calibration by
+following the documentation would have sent it to a dead channel. Invisible while nothing
+applied the offsets; a silent failure the moment they were wired. Corrected in
+`SystemSettingsStruct.h`, in the `registerInt()` descriptions that `params/list` publishes,
+and in the `MQTT_API.md` table - which also had the `room` default as -14 where the struct
+says -17.
+
+`sensor/offset/waterOutput` is **removed**: no such sensor exists in `SensorIndices.h` or
+`SharedSensorReadings`, and it was left over from an older map in which CH3 was hot water
+output rather than the outside sensor. Removed rather than renamed - the only channel it
+could have served is CH5 `WATER_TANK_TOP`, which is not installed, not enabled and
+deactivated in hardware, so renaming would have handed a calibration knob to hardware that
+does not exist. If a tank-top sensor is ever fitted, adding
+`sensor/offset/waterTankTop` is one `registerInt()` line. The stale NVS key is harmless and
+deliberately not cleaned up: `loadAll()` iterates the registered parameter map rather than
+the NVS contents (`PersistentStorage.cpp:474`), so an unregistered key is never read.
+
+**Now wired.** ESP32-MB8ART `1a4ca62` adds `setChannelOffset()` / `setChannelOffsets()` /
+`getChannelOffset()`. The library validates at set time (channel index and magnitude only)
+and gates at apply time on the channel having a binding **and** a temperature mode. That
+split is deliberate and was the one real design bug caught during review: every channel
+mode starts `DEACTIVATED` until the first config read from the device, so a set-time mode
+check would have silently dropped every offset restored at boot - which is the ordering
+this firmware actually has.
+
+`SensorOffsetMap.h` (header-only, native-testable) owns the name-to-position translation,
+because that is the step that was already wrong. Two properties the tests hold beyond the
+mapping itself:
+
+- **CH4 is always 0.** It is the 4-20 mA pressure input, whose calibration lives in a
+  different layer and unit entirely (`pressureOffset`, hundredths of BAR). Asserted at zero
+  and at both ends of the registered +-5.0 C range. This is the outer of two independent
+  guards, the library refusing a `CURRENT`-mode channel at apply time being the inner one.
+- **No two fields share a channel and none is dropped** - setting each alone must light
+  exactly one slot. A collision would let one offset silently win.
+
+6 new tests (293 total), mutation-checked, all four mutations caught: `outside` to CH6 (the
+original bug) by 3 tests, the pressure channel given an offset by 2, two fields colliding
+by 2, a field dropped by 2. Pushed from the three points where `applyToSettings()` already
+runs - every offset change, after the boot load, after a runtime reload - and not from the
+post-`saveAll()` apply, where no value can have changed. A `LOG_WARN` covers the absent
+device, replacing what would otherwise have been another silent no-op.
+
+Verified end to end on the device: `sensor/offset/boilerOutput` = -20 moved the published
+`t.bo` from 36.1 to 34.1, exactly -2.0 C and stable across samples, with boiler return,
+tank and pressure all unmoved; restoring 0 brought it back. All-zero offsets were
+bit-identical to the pre-flash readings.
+
+Of the six remaining offsets, four take effect: `boilerOutput` CH0, `boilerReturn` CH1,
+`waterTank` CH2, `outside` CH3. `waterReturn` (CH6) and `heatingReturn` (CH7) are stored
+and never applied while those channels are disabled - the library's documented behaviour
+for an unbound channel, expected rather than a defect.
+
+First real use, as site calibration in NVS rather than a repo default: the outside sensor
+reads about **+1.05 C** in winter against TAWES station 11182, 1.8 km away, so
+`sensor/offset/outside` is set to -10, with `heating/curveShift` reduced 5.0 to 3.6 in the
+same change to keep flow behaviour neutral - the curve had been empirically tuned against
+the raw sensor, so an uncompensated offset would have double-counted the bias. 3.6 rather
+than 3.5 or 4.0 because curve sensitivity runs 1.20 C of flow per C of outside at -12 C up
+to 1.70 at 13 C, and 3.6 centres the residual at -0.2..+0.3 C across the range.
+
+Also removed in this pass: three dead "Example of using HAL to ..." functions from
+`HardwareFactory.cpp` (119 lines) - all defined there, declared in no header, zero callers.
+Deadness was not the main reason. `controlRelaysThroughHAL` drove
+`burnerRelay->setState()` directly, bypassing `BurnerRequestManager`,
+`BurnerAntiFlapping`, the rate limiter and `RelayCommandPolicy`'s pump protection, and its
+indices were wrong against `RelayIndices.h`: it labelled index 1 "heating pump"
+(`POWER_BOOST`, full 42.2 kW) and index 2 "water pump" (`WATER_MODE`), while the real pumps
+are 4 and 5. Copied as the example it announced itself to be, it would have fired the
+burner at full power with no pump running - the September 2026 overheat.
+`setupHALCallbacks` repeated the same wrong labels in an empty switch, and
+`readTemperaturesThroughHAL` read channel 4 as "outside" when channel 4 is the pressure
+input.
 
 ### New topic `boiler/status/heating/control`: why the heating is off, and what the curve actually wanted
 
