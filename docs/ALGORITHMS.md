@@ -942,23 +942,58 @@ Weather mode, room 19.0°C, target 20.0°C, factor 2.0, outside 0.0°C: shift = 
 
 ### Stage-2 Power Selection and the Mild-Weather Lock (`BurnerBoostPolicy`)
 
-The boiler is two-stage: 23.3 kW on stage 1, 42.2 kW with POWER_BOOST. The stage is chosen
-by `BoilerPowerLevel::fromBangBangError()` on `error = flow target - flow actual`:
+The boiler is two-stage: 23.3 kW on stage 1, 42.2 kW with POWER_BOOST. Which selector picks
+the stage depends on `boiler/pidEnabled`, read once in `BoilerTempController::initialize()`
+(`BoilerTempController.cpp:94`):
 
-| Condition | Level |
-|-----------|-------|
-| `error < -offHysteresis` (-5.0°C) | OFF |
-| `error > fullPowerThreshold` (+10.0°C) | FULL (stage 2) |
-| `error > onHysteresis` (+3.0°C) | HALF (stage 1) |
-| otherwise | unchanged (hysteresis band) |
+| `boiler/pidEnabled` | `BurnerType` | Path | Asks for FULL when |
+|---------------------|--------------|------|--------------------|
+| **true** (live config) | `MODULATING` | `calculateModulating()` -> `fromPidOutput()` | PID output > `fullThreshold` (75 %) |
+| false | `TWO_STAGE` | `calculateBangBang()` -> `fromBangBangError()` | `flow target - flow actual` > `fullPowerThreshold` (+10.0°C) |
 
-A space-heating cold start always clears the FULL threshold: the radiator circuit sits at
-room temperature, so the first flow reading after the pump starts is 20-26°C, which is more
-than 10°C below even a shoulder-season target of 38-40°C. Measured 2026-10-19 at 11.5°C
-outside with a 38.0°C target: ignition 19:55:57 at RUNNING_LOW, RUNNING_HIGH 20 s later,
-back to RUNNING_LOW at 20:07:17 - 11 minutes of 42.2 kW. At that flow temperature the
-emitters cannot pass the extra 19 kW, so it heats the boiler's 12 L instead, overshoots the
-setpoint, trips the off-hysteresis and ends the cycle early (4 starts in 46 minutes).
+The live boiler runs the **PID path**. Its full band, `BoilerTempController::Config` defaults:
+
+| PID output | Level |
+|------------|-------|
+| `< offThreshold` (35 %) | OFF |
+| `> fullThreshold` (75 %) | FULL (stage 2) |
+| `> halfThreshold + thresholdHysteresis` (55 %), from OFF | HALF (stage 1) |
+| `< fullThreshold - thresholdHysteresis` (65 %), from FULL | HALF |
+| otherwise | unchanged |
+
+A space-heating cold start saturates either selector: the radiator circuit sits at room
+temperature, so the first flow reading after the pump starts is 20-27°C, a 10-20°C deficit
+against a shoulder-season target of 38-46°C. Measured 2026-10-19 at 11.5°C outside with a
+38.0°C target (clamped at `h/sLo`): ignition 19:55:57 at RUNNING_LOW with flow 35.7,
+RUNNING_HIGH 20 s later at flow 29.3, back to RUNNING_LOW at 20:07:17 at flow 38.9 - 11
+minutes of 42.2 kW, plus a second 1.5-minute burst at 20:35.
+
+**What stage 2 did not do.** An earlier version of this section said the extra 19 kW
+overshoots the setpoint, trips the off-hysteresis and ends the cycle early, giving that
+evening's 4 starts in 46 minutes. The recorder data refutes it: boost was released at flow
+38.9, 0.9°C *past* the 38.0 target, and peak flow for the whole cycle was 40.3, where the
+-5.0°C band would need 43.0 - and on the PID path that band is not in use at all. The four
+burner-offs happened at flow 40.3, 39.4, 39.3 and 40.9, which is the PID's 35 % off
+threshold (empirically target +2.3 to +2.9) against a target pinned on the 38.0 floor, with
+burns held near 3 minutes by `SystemConstants::Burner::MIN_ON_TIME_MS` (120 s). Starts in
+this regime are a function of the PID band, `MIN_ON_TIME_MS` and the `h/sLo` floor - not of
+the power stage, and the lock does not change them.
+
+**Measured with the lock live.**
+
+| Window | Outside | Target | Result |
+|--------|---------|--------|--------|
+| 2026-10-20 00:00-06:35 | 5.9-7.6°C | 44.0-46.0 | 2 burns, 40m50s + 49m00s, stage 1 only, both ended on "Room warm enough"; ramp 0.42°C/min; burn 1 peaked 43.3 and never reached its 46.0 setpoint |
+| 2026-10-20 09:46-10:30 | 8.6-9.9°C | 42.0 -> 41.0 | 37m10s burn ended flow-driven at 43.4 (target +2.4), 3m40s stop, restart at flow 40.5 (target -0.5), then a 2m00s burn ended room-driven - the room crossed at 10:29:50 and `MIN_ON_TIME_MS` held the burner to 10:29:55 |
+| 2026-10-20 07:08-07:42 | - | tank +10 | RUNNING_HIGH in Water mode at 07:08:45-07:10:35 and from 07:21:45 - the water exemption works |
+
+So the lock is confirmed on hardware (no `RUNNING_HIGH` in Heating since it was flashed) and
+the water exemption with it. What it buys is less heat-exchanger stress - 42.2 kW into
+20.8°C return water is the harshest thermal moment of the day - and a quieter boiler. It
+does not save gas, since the house needs the same heat either way, and it does not reduce
+starts. Between `h/sLo` and `h/boostMin` stage 1 can also under-deliver on the flow
+setpoint, as burn 1 above shows; that is harmless while the room stays satisfied, and above
+`h/boostMin` stage 2 returns by itself.
 
 `BurnerBoostPolicy::fullPowerAllowed()`, checked in `BoilerTempControlTask` at the one point
 where FULL becomes a burner request, requires the space-heating flow target to be at least

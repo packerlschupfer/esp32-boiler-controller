@@ -27,17 +27,16 @@ a parameter that never affected anything and that Home Assistant never exposed.
 New parameter `h/boostMin` (default **50.0 C**, range 38.0-75.0): the lowest space-heating
 flow target allowed to use POWER_BOOST. Water charges and autotune runs are exempt.
 
-The boiler control loop is a three-point bang-bang on `flow target - flow actual` and asks
-for stage 2 whenever that error exceeds 10.0 C. A space-heating cold start always exceeds
-it, because the radiator circuit sits at room temperature: the first flow reading after the
-pump starts is 20-26 C, against a shoulder-season target of 38-40 C. Measured on the live
-boiler 2026-10-19 at 11.5 C outside with a 38.0 C target - ignition at 19:55:57 RUNNING_LOW,
-RUNNING_HIGH 20 s later, back to RUNNING_LOW at 20:07:17: **11 minutes of 42.2 kW to chase a
-38 C setpoint**, plus a second 1.5-minute burst at 20:35. The house needs single-digit kW at
-11 C outside and stage 1 alone is 23.3 kW, so the extra 19 kW cannot leave through the
-emitters at that flow temperature. It heats the boiler's 12 L of water instead, overshoots
-the setpoint, trips the -5.0 C off-hysteresis and ends the cycle early - the 4-starts-in-46-
-minutes pattern logged the same evening.
+A space-heating cold start saturates the power selector, because the radiator circuit sits
+at room temperature: the first flow reading after the pump starts is 20-27 C, a 10-20 C
+deficit against a shoulder-season target of 38-46 C. With `boiler/pidEnabled` true - the
+live configuration - that means `fromPidOutput()` asks for FULL above a 75 % PID output;
+with it false, `fromBangBangError()` asks for FULL above a 10.0 C error. The gate sits
+downstream of both. Measured on the live boiler 2026-10-19 at 11.5 C outside with a 38.0 C
+target - ignition at 19:55:57 RUNNING_LOW with flow 35.7, RUNNING_HIGH 20 s later at flow
+29.3, back to RUNNING_LOW at 20:07:17 at flow 38.9: **11 minutes of 42.2 kW to chase a 38 C
+setpoint**, plus a second 1.5-minute burst at 20:35. The house needs single-digit kW at
+11 C outside and stage 1 alone is 23.3 kW.
 
 The gate is the flow target and not the outside temperature, although the outside
 temperature is what the behaviour is about. The target already contains it, through the
@@ -48,9 +47,20 @@ fallback, which clamps it, rather than depending on the outside reading that fal
 just declared untrustworthy. 50.0 C corresponds to roughly +4 C outside on the current curve.
 
 Not a version-bump item: no existing parameter changes meaning, and the default only
-withholds a power stage the boiler should not have been using in these conditions. Energy
-per cycle is roughly unchanged (the same heat at half the rate takes twice as long); what it
-buys is less overshoot past the setpoint and fewer burner starts.
+withholds a power stage the boiler should not have been using in these conditions.
+
+**Corrected 2026-10-20 against recorder data.** This entry first claimed the lock buys less
+overshoot and fewer starts. Neither is true. Boost was released 0.9 C *past* the 38.0 target
+and peak flow for that whole cycle was 40.3, so there was no overshoot to remove; the -5.0 C
+off-hysteresis cited above was never approached and is not even in use on the PID path. The
+four starts came from the PID's 35 % off threshold against a target pinned on the `h/sLo`
+floor, with burns held near 3 minutes by `MIN_ON_TIME_MS`, and that pattern recurred with
+the lock live (2026-10-20 09:46-10:30: a 37m10s burn ending flow-driven at 43.4 against a
+41.0 target, a 3m40s stop, then a 2m00s burn). Energy per cycle is unchanged, as stated.
+What the lock does buy is less heat-exchanger stress on a cold start - 42.2 kW into 20.8 C
+return water - and a quieter boiler. Confirmed working on hardware: no `RUNNING_HIGH` in
+Heating mode since the flash, including two overnight burns at 44-46 C targets, while a
+07:08 tank charge did use stage 2, so the water exemption works as intended.
 
 Rules in `BurnerBoostPolicy.h` (header-only, 8 native tests, mutation-checked), applied in
 `BoilerTempControlTask` at the single point where FULL becomes a burner request.
