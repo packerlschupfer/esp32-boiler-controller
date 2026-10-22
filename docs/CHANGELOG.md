@@ -22,7 +22,46 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
-### Stage 2 (42.2 kW) no longer fires for mild-weather space heating
+### Burner output measured against the house gas meter; nameplate figures corrected
+
+The docs quoted the nameplate **23.3 kW / 42.2 kW** as this boiler's delivered output. It is
+set to the lowest gas pressure its valve allows, so those were always upper bounds, and they
+are now measured: ten days of `sensor.esp32_gas_meter_gas_used` (one pulse = 0.01 m3) binned
+by `sensor.burner_power_level`, 2026-10-13 to 2026-10-22, 22.3 h of firing.
+
+| Stage | Firing time | Gas | Measured rate |
+|-------|-------------|-----|---------------|
+| Stage 1 (`Low`) | 14.47 h | 29.87 m3 | **2.065 m3/h** |
+| Stage 2 (`High`) | 7.81 h | 28.72 m3 | **3.678 m3/h** |
+| Burner off | 217.71 h | 0.21 m3 | 0.001 m3/h |
+
+At `Hi` ~10.2 kWh/m3 that is about **19 kW and 34 kW of output, both ~82 % of nameplate** -
+one uniform derate, which is what a single pressure adjustment looks like. Corrected in
+`BurnerBoostPolicy.h`, `ALGORITHMS.md`, `MQTT_API.md` and `EQUIPMENT_SPECS.md`; the
+nameplate values are kept where they are labelled as nameplate.
+
+Three further results, all in `EQUIPMENT_SPECS.md`:
+
+- **No standing pilot.** 0.21 m3 over 218 h of burner-off, most of it one cooking event.
+  Idle loss on this boiler is thermal, not fuel.
+- **The spec table's "Minimum heat load (Hi) 22.3 kW" is a transcription error** - it would
+  make stage 1 104 % efficient. The nameplate figure is 25.3 kW, and the measured stage
+  ratio 0.561 confirms it (25.3/46.4 = 0.545, a 3 % match; 22.3/46.4 = 0.481 is off by 17 %).
+- **The tank-compatibility verdict flips.** Against the tank's 21-36 kW recommended charging
+  power, nameplate said stage 1 cleared the minimum and stage 2 overshot the maximum.
+  Measured, it is the reverse: stage 1 (~19 kW) is *under* the minimum and stage 2 (~34 kW)
+  sits inside the band - an independent argument for the water exemption in
+  `BurnerBoostPolicy`.
+
+Also corrected in `EQUIPMENT_SPECS.md`: the "Power Level Selection" table claimed a 50 %
+split between stage 1 and stage 2. The real mapping is `BoilerPowerLevel::fromPidOutput()`,
+a four-way band with hysteresis at 35 / 55 / 65 / 75 %.
+
+Measurement note for anyone repeating this: the HA sensor state is a float32, so near a
+36 300 m3 meter reading the representable step is 0.0039 m3 and consecutive deltas alternate
+0.0078 / 0.0117. Count pulses rather than differencing readings.
+
+### Stage 2 no longer fires for mild-weather space heating
 
 New parameter `h/boostMin` (default **50.0 C**, range 38.0-75.0): the lowest space-heating
 flow target allowed to use POWER_BOOST. Water charges and autotune runs are exempt.
@@ -34,9 +73,9 @@ live configuration - that means `fromPidOutput()` asks for FULL above a 75 % PID
 with it false, `fromBangBangError()` asks for FULL above a 10.0 C error. The gate sits
 downstream of both. Measured on the live boiler 2026-10-19 at 11.5 C outside with a 38.0 C
 target - ignition at 19:55:57 RUNNING_LOW with flow 35.7, RUNNING_HIGH 20 s later at flow
-29.3, back to RUNNING_LOW at 20:07:17 at flow 38.9: **11 minutes of 42.2 kW to chase a 38 C
+29.3, back to RUNNING_LOW at 20:07:17 at flow 38.9: **11 minutes of stage 2 to chase a 38 C
 setpoint**, plus a second 1.5-minute burst at 20:35. The house needs single-digit kW at
-11 C outside and stage 1 alone is 23.3 kW.
+11 C outside and stage 1 alone is ~19 kW.
 
 The gate is the flow target and not the outside temperature, although the outside
 temperature is what the behaviour is about. The target already contains it, through the
@@ -57,7 +96,7 @@ four starts came from the PID's 35 % off threshold against a target pinned on th
 floor, with burns held near 3 minutes by `MIN_ON_TIME_MS`, and that pattern recurred with
 the lock live (2026-10-20 09:46-10:30: a 37m10s burn ending flow-driven at 43.4 against a
 41.0 target, a 3m40s stop, then a 2m00s burn). Energy per cycle is unchanged, as stated.
-What the lock does buy is less heat-exchanger stress on a cold start - 42.2 kW into 20.8 C
+What the lock does buy is less heat-exchanger stress on a cold start - ~34 kW into 20.8 C
 return water - and a quieter boiler. Confirmed working on hardware: no `RUNNING_HIGH` in
 Heating mode since the flash, including two overnight burns at 44-46 C targets, while a
 07:08 tank charge did use stage 2, so the water exemption works as intended.
@@ -654,7 +693,7 @@ First production-ready release after comprehensive 20-run analysis scoring 9.5/1
 
 #### Features
 - 9-state burner finite state machine with anti-flapping
-- Two-stage burner control (23.3kW / 42.2kW)
+- Two-stage burner control (nameplate 23.3kW / 42.2kW)
 - Space heating with weather compensation
 - Hot water tank scheduling with progressive preheating
 - MQTT remote monitoring and control (100+ topics)

@@ -942,7 +942,11 @@ Weather mode, room 19.0°C, target 20.0°C, factor 2.0, outside 0.0°C: shift = 
 
 ### Stage-2 Power Selection and the Mild-Weather Lock (`BurnerBoostPolicy`)
 
-The boiler is two-stage: 23.3 kW on stage 1, 42.2 kW with POWER_BOOST. Which selector picks
+The boiler is two-stage: about **19 kW on stage 1 and 34 kW with POWER_BOOST** as measured
+on this installation, which is set to the lowest gas pressure its valve allows (the nameplate
+23.3 / 42.2 kW are upper bounds - see
+[EQUIPMENT_SPECS.md, Measured Gas Throughput](EQUIPMENT_SPECS.md#measured-gas-throughput)).
+Which selector picks
 the stage depends on `boiler/pidEnabled`, read once in `BoilerTempController::initialize()`
 (`BoilerTempController.cpp:94`):
 
@@ -966,9 +970,9 @@ temperature, so the first flow reading after the pump starts is 20-27°C, a 10-2
 against a shoulder-season target of 38-46°C. Measured 2026-10-19 at 11.5°C outside with a
 38.0°C target (clamped at `h/sLo`): ignition 19:55:57 at RUNNING_LOW with flow 35.7,
 RUNNING_HIGH 20 s later at flow 29.3, back to RUNNING_LOW at 20:07:17 at flow 38.9 - 11
-minutes of 42.2 kW, plus a second 1.5-minute burst at 20:35.
+minutes of stage 2, plus a second 1.5-minute burst at 20:35.
 
-**What stage 2 did not do.** An earlier version of this section said the extra 19 kW
+**What stage 2 did not do.** An earlier version of this section said the extra ~15 kW
 overshoots the setpoint, trips the off-hysteresis and ends the cycle early, giving that
 evening's 4 starts in 46 minutes. The recorder data refutes it: boost was released at flow
 38.9, 0.9°C *past* the 38.0 target, and peak flow for the whole cycle was 40.3, where the
@@ -988,7 +992,7 @@ the power stage, and the lock does not change them.
 | 2026-10-20 07:08-07:42 | - | tank +10 | RUNNING_HIGH in Water mode at 07:08:45-07:10:35 and from 07:21:45 - the water exemption works |
 
 So the lock is confirmed on hardware (no `RUNNING_HIGH` in Heating since it was flashed) and
-the water exemption with it. What it buys is less heat-exchanger stress - 42.2 kW into
+the water exemption with it. What it buys is less heat-exchanger stress - ~34 kW into
 20.8°C return water is the harshest thermal moment of the day - and a quieter boiler. It
 does not save gas, since the house needs the same heat either way, and it does not reduce
 starts. Between `h/sLo` and `h/boostMin` stage 1 can also under-deliver on the flow
@@ -1026,7 +1030,7 @@ Denying is the fail-safe direction: the burner still runs at stage 1.
 | **Burner Demand Gate** | Heat demand arming | 6s decision age, 1°C tolerance, 10s retry | BurnerDemandGate.h |
 | **Burner Transitions** | Burner state decisions | 10s no-mode grace, 15s/30s mode switch bounds | BurnerTransitions.h |
 | **Heating Curve** | Space heating boiler target, weather/room mode | coeff 1.4, shift 0, outside hysteresis 1.0°C | HeatingCurve.h, SpaceHeatingPolicy.h |
-| **Stage-2 Lock** | No 42.2 kW for mild-weather heating | h/boostMin 50.0°C, water/autotune exempt | BurnerBoostPolicy.h |
+| **Stage-2 Lock** | No stage 2 (~34 kW) for mild-weather heating | h/boostMin 50.0°C, water/autotune exempt | BurnerBoostPolicy.h |
 
 ---
 

@@ -348,7 +348,7 @@ void PersistentStorageTask(void* pvParameters) {
     storage->registerInt("h/sLo", &heating_low_i32, 300, 600, "Space heating min (tenths °C)");
     storage->registerInt("h/sHi", &heating_high_i32, 500, 900, "Space heating max (tenths °C)");
 
-    // Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, 42.2 kW).
+    // Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, ~34 kW measured).
     // 2026-10-19: measured 11 minutes of full power chasing a 38.0 °C setpoint at 11.5 °C
     // outside, because the bang-bang asks for FULL whenever flow is >10 °C below target and
     // a cold radiator circuit always is. Rationale and the choice of target-over-outside in

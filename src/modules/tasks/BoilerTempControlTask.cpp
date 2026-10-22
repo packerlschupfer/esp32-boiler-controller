@@ -525,7 +525,7 @@ void BoilerTempControlTask(void* parameter) {
                     // Pump control is independent (PumpControlModule watches HEATING_ON bit)
                     // Stage 2 is gated three ways: the bang-bang must want it, the burner
                     // state machine must permit it (hot-boiler ceiling), and for space
-                    // heating the flow target must be high enough that 42.2 kW can actually
+                    // heating the flow target must be high enough that stage 2 can actually
                     // leave through the emitters (BurnerBoostPolicy.h - this is the
                     // shoulder-season lock; water charges and autotune runs are exempt).
                     const bool boostAllowed = BurnerBoostPolicy::fullPowerAllowed(

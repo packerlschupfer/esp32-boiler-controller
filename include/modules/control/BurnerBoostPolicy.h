@@ -5,7 +5,7 @@
 #include "shared/Temperature.h"
 
 /**
- * @brief May stage 2 (POWER_BOOST, full 42.2 kW) be used for this demand?
+ * @brief May stage 2 (POWER_BOOST) be used for this demand?
  *
  * Header-only and natively testable, like SpaceHeatingPolicy and RelayCommandPolicy.
  *
@@ -28,12 +28,12 @@
  * Measured 2026-10-19, outside 11.5 °C, flow target 38.0 (clamped at h/sLo):
  *
  *   19:55:57  RUNNING_LOW   ignition, flow 35.7 and falling as the cold circuit mixes in
- *   19:56:17  RUNNING_HIGH  <- 42.2 kW, 20 s after ignition, flow 29.3
+ *   19:56:17  RUNNING_HIGH  <- stage 2, 20 s after ignition, flow 29.3
  *   20:07:17  RUNNING_LOW   11 minutes later, flow 38.9
  *
  * 11 minutes of full power to chase a 38 °C setpoint on a mild autumn evening, plus a
  * second 1.5-minute burst at 20:35. The house needs single-digit kW at 11 °C outside and
- * stage 1 alone is 23.3 kW.
+ * stage 1 alone is ~19 kW (measured; see POWER FIGURES below).
  *
  * WHAT THIS DOES NOT DO. An earlier version of this comment said stage 2 overshoots the
  * setpoint, trips the -5.0 °C off-hysteresis and ends the cycle early, producing that
@@ -49,11 +49,19 @@
  * followed, and the 2m00s restart that followed that was itself cut short - the room
  * crossed its limit at 10:29:50 and MIN_ON_TIME_MS held the burner on to 10:29:55.
  *
- * WHAT IT IS WORTH, then: 42.2 kW fired into 20.8 °C return water is the harshest thermal
+ * WHAT IT IS WORTH, then: ~34 kW fired into 20.8 °C return water is the harshest thermal
  * moment of the day, and full fire on an atmospheric boiler is audible. The lock buys
  * heat-exchanger stress and noise. It does not buy gas - the house needs the same heat
  * either way - and it does not buy fewer starts, which are set by the PID band, MIN_ON_TIME
  * and the h/sLo floor.
+ *
+ * POWER FIGURES (measured 2026-10-23, corrected from nameplate). This boiler is set to the
+ * lowest gas pressure its valve allows, so the nameplate 23.3 / 42.2 kW are upper bounds.
+ * Ten days of house gas meter against burner power level, 22.3 h of firing:
+ * stage 1 = 2.065 m3/h, stage 2 = 3.678 m3/h, burner-off = 0.001 m3/h (no standing pilot).
+ * At Hi ~10.2 kWh/m3 that is roughly 19 kW and 34 kW of output, both ~82 % of nameplate.
+ * Earlier revisions of this comment quoted 42.2 and 23.3 as delivered power; they are not.
+ * See docs/EQUIPMENT_SPECS.md "Measured Gas Throughput".
  *
  * MEASURED COST, 2026-10-20 00:00-06:35 with the lock live, outside 5.9-7.6 °C, targets
  * 44.0-46.0: two burns of 40m50s and 49m00s, stage 1 only, both ending on "Room warm
@@ -97,8 +105,8 @@ namespace BurnerBoostPolicy {
      *                        the parameter's range.
      * @return true if stage 2 may be requested
      *
-     * Denying is the fail-safe direction: the burner still runs at stage 1 (23.3 kW), so an
-     * invalid or zero target loses boost rather than gaining it.
+     * Denying is the fail-safe direction: the burner still runs at stage 1 (~19 kW measured),
+     * so an invalid or zero target loses boost rather than gaining it.
      */
     inline bool fullPowerAllowed(bool isWaterMode, bool isAutoTuning,
                                  Temperature_t flowTarget, Temperature_t minTargetForFull) {

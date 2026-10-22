@@ -20,6 +20,14 @@ Minimum settable flow temperature: 35°C (dial setting 1) to 90°C (dial setting
 | Number of sections | 9 | |
 | Category | II2ELL3B/P | |
 
+> **The 22.3 kW figure is wrong.** A 23.3 kW output from a 22.3 kW Hi input would be
+> 104 % efficient. The nameplate minimum heat load is **25.3 kW**; 22.3 is a transcription
+> error in this table, kept visible here because it was quoted elsewhere for a long time.
+> The measured stage ratio confirms 25.3 - see *Measured Gas Throughput* below.
+>
+> **These are all nameplate values at nominal nozzle pressure.** This installation is set to
+> the lowest gas pressure the valve allows and delivers about **82 %** of them.
+
 ### Operating Limits
 
 | Parameter | Value | Unit | Notes |
@@ -74,13 +82,57 @@ For this specific gas boiler, 35°C is acceptable if needed for efficiency.
 
 The burner operates in two stages controlled by a solenoid valve:
 
-| Stage | Heat Output | Gas Consumption | Nozzle Pressure |
-|-------|-------------|-----------------|-----------------|
-| Stage 1 (Part load) | 23.3 kW | ~55% | 2.9-3.5 mbar |
-| Stage 2 (Full load) | 42.2 kW | 100% | 9.6-11.5 mbar |
+| Stage | Nameplate output | Nameplate load (Hi) | Nozzle pressure (table) |
+|-------|------------------|---------------------|-------------------------|
+| Stage 1 (Part load) | 23.3 kW | 25.3 kW | 3.47 mbar |
+| Stage 2 (Full load) | 42.2 kW | 46.4 kW | 11.47 mbar |
+
+Nozzle pressures are from the Vaillant *Einstellwerte und Düsengrößen* table for
+`VK 42/4-2`, H-Gas at Wobbe index 15.0 kWh/m³: **16 nozzles of size 150** (1.50 mm),
+3.47 mbar on stage 1 and 11.47 mbar on stage 2. The whole `/4-2` family shares those two
+pressures and that nozzle size - only the nozzle *count* changes with model size - so output
+scales with nozzle count, not with pressure.
 
 **Relay Control:**
-- `POWER_BOOST` relay (Physical Relay 2): ON = Stage 2 (full power 42.2kW), OFF = Stage 1 (half power 23.3kW)
+- `POWER_BOOST` relay (Physical Relay 2): ON = Stage 2, OFF = Stage 1
+
+### Measured Gas Throughput
+
+This boiler is set to the **lowest gas pressure its valve allows**, so the nameplate figures
+above are upper bounds. Measured against the house gas meter
+(`sensor.esp32_gas_meter_gas_used`, one pulse = 0.01 m³) over ten days,
+2026-10-13 to 2026-10-22, 22.3 hours of firing:
+
+| Stage | Firing time | Gas | **Measured rate** |
+|-------|-------------|-----|-------------------|
+| Stage 1 (`Low`) | 14.47 h | 29.87 m³ | **2.065 m³/h** |
+| Stage 2 (`High`) | 7.81 h | 28.72 m³ | **3.678 m³/h** |
+| Burner off | 217.71 h | 0.21 m³ | 0.001 m³/h |
+
+Three results:
+
+1. **No standing pilot.** 0.21 m³ across 218 hours of burner-off, and most of that is a
+   single cooking event on 10-22. Idle loss on this boiler is purely thermal, not fuel.
+2. **Uniform derate to about 82 % of nameplate.** With `Hi` around 10.2 kWh/m³ that is
+   21.1 kW input on stage 1 and 37.5 kW on stage 2, so roughly **19 kW and 34 kW of
+   output** - not 23.3 and 42.2. Both stages land at the same fraction, which is what a
+   single pressure adjustment looks like. Since gas flow goes as the square root of nozzle
+   pressure, 82 % of flow implies about 67 % of pressure: **~2.3 and ~7.7 mbar** against the
+   table's 3.47 and 11.47. That is directly checkable with a manometer on the test nipple.
+3. **The stage ratio confirms the 25.3 kW correction.** Measured stage 1 / stage 2 = 0.561.
+   Against a 25.3/46.4 nameplate load that is 0.545, a 3 % match; against the erroneous
+   22.3/46.4 it would be 0.481, off by 17 %. The nozzle-pressure ratio agrees too:
+   `sqrt(3.47/11.47)` = 0.550.
+
+The kW conversions depend on `Hi`, which is assumed at 10.2 kWh/m³ (Brennwert from the gas
+bill times 0.9). **The m³/h figures and the 0.561 ratio are measured and assumption-free.**
+To make the kW exact, take `Ho` (Brennwert) and the Zustandszahl from a gas bill:
+`input_kW = m³/h x Z x Ho / 1.108`.
+
+> Note on the HA sensor: the state is a float32, so at a meter reading near 36 300 m³ the
+> representable step is 0.0039 m³ and individual deltas alternate between 0.0078 and 0.0117.
+> Over 126 consecutive updates the mean was 0.01001 m³. **Count pulses, do not difference
+> readings**, unless the window is long.
 
 ---
 
@@ -193,8 +245,17 @@ Indirect heated hot water storage tank with internal heating coil.
 | Maximum possible | 36 | kW | |
 
 **Compatibility with VK 42/4-2:**
-- Stage 1 (23.3 kW): ✓ Above minimum, gentle heating
-- Stage 2 (42.2 kW): ✓ Above maximum but tank can handle (limited by flow rate)
+
+| | Nameplate | Measured (82 % derate) | vs tank's 21-36 kW |
+|---|---|---|---|
+| Stage 1 | 23.3 kW | **~19 kW** | **below** the 21 kW minimum |
+| Stage 2 | 42.2 kW | **~34 kW** | within range |
+
+The derate changes this verdict in both directions. On nameplate figures stage 1 cleared the
+tank's minimum and stage 2 overshot its maximum; measured, it is the reverse. Stage 1 alone
+is now *under* the power this tank wants for a charge, while stage 2 sits comfortably inside
+the band. That is an independent argument for the water exemption in `BurnerBoostPolicy` -
+see *Measured Gas Throughput* above.
 
 ### Physical Dimensions
 
