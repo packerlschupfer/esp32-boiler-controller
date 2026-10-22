@@ -511,14 +511,22 @@ These timings are appropriate for an atmospheric burner without forced-air fan.
 
 ### Power Level Selection
 
-The system uses PID output to select power level:
+The system uses PID output to select power level. The real mapping is a four-way band with
+hysteresis, not a 50 % split - `BoilerPowerLevel::fromPidOutput()`, defaults from
+`BoilerPowerLevel.h`:
 
-| PID Output | Power Level | Actual Output |
-|------------|-------------|---------------|
-| < 50% | Stage 1 (LOW) | 23.3 kW |
-| ≥ 50% | Stage 2 (HIGH) | 42.2 kW |
+| PID output | Power level | Measured output |
+|------------|-------------|-----------------|
+| `< offThreshold` (35 %) | OFF | - |
+| `> halfThreshold + hysteresis` (55 %), coming from OFF | Stage 1 (LOW) | ~19 kW |
+| `> fullThreshold` (75 %) | Stage 2 (HIGH) | ~34 kW |
+| `< fullThreshold - hysteresis` (65 %), coming from FULL | Stage 1 (LOW) | ~19 kW |
+| otherwise | unchanged | |
 
-Both stages are within the tank's recommended heating power range (21-36 kW),
+Stage 2 is additionally gated for space heating by `BurnerBoostPolicy` (`h/boostMin`); water
+charges and autotune runs are exempt.
+
+Stage 2 is within the tank's recommended heating power range (21-36 kW), stage 1 is just under it,
 though Stage 2 exceeds the "maximum possible" of 36 kW. This is acceptable because:
 1. The heating coil limits actual heat transfer
 2. The boiler's internal thermostat provides additional protection
