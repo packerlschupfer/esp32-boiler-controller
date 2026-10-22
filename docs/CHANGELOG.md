@@ -22,6 +22,34 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### `wheater/tempChargeDelta` accepted values it then ignored
+
+The parameter was registered with range **1.0-20.0** (`PersistentStorageTask.cpp`) but the
+use site (`WheaterControlTask::calculateBoilerTarget`) rejected anything below **5.0** and
+silently substituted the 10.0 default. A `params/set` of 1.0-4.9 was therefore validated,
+acknowledged, persisted to NVS and then ignored - the stored value and the running value
+disagreed, with no error raised anywhere and nothing in the status topic to show it.
+
+The bounds now live once, in `WaterChargePolicy` (the header that already owns the
+tank-limit invariant), as `CHARGE_DELTA_MIN` / `MAX` / `DEFAULT` plus `chargeDeltaValid()`
+and `chargeDeltaOrDefault()`. All three sites read them: the registration, the task, and
+`WheaterControlModule::calculateWaterHeatingTargetTemp()` - a third copy of the same
+calculation that had no validation at all and currently has no callers (its wire-or-delete
+decision is still open; the comment there records that).
+
+5.0 is the correct floor rather than 1.0: the delta is the head that drives the tank coil,
+and transfer is `UA x (flow - tank)`. A 10.0 delta already produces only a 3.0-3.5 K
+flow-return gap on this boiler, measured across a full charge on 2026-10-22. Below ~5.0 the
+boiler would command tank plus a few tenths and could not charge the tank at all.
+
+Out-of-range now fails at `params/set` (`PersistentStorage` returns
+`ERROR_VALIDATION_FAILED`), and an out-of-range value already in NVS loads as the default
+with a warning, so tightening the minimum is safe for existing installs. Four native tests
+added, including one that pins the three constants so the registration and the use site
+cannot be split apart again.
+
+Unrelated to, but found during, the charge-delta work below.
+
 ### Burner output measured against the house gas meter; nameplate figures corrected
 
 The docs quoted the nameplate **23.3 kW / 42.2 kW** as this boiler's delivered output. It is

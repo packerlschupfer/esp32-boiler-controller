@@ -3,7 +3,7 @@
 #include "WheaterControlTask.h"
 #include "modules/control/WaterChargePolicy.h"  // tank limit consistency
 #include <atomic>
-#include <cmath>  // Round 15 Issue #10: For std::isfinite
+#include <cmath>  // Round 15 Issue #10: isfinite, now inside WaterChargePolicy
 
 #include "shared/SharedResources.h"
 #include "shared/Temperature.h"
@@ -24,7 +24,6 @@ static const char* TAG = "WaterControlTask";
 
 // Constants
 #define DEFAULT_WHEATER_BOILER_TARGET tempFromFloat(65.0f)
-#define DEFAULT_CHARGE_DELTA tempFromFloat(10.0f)  // Default offset if setting invalid
 // Note: MIN/MAX_BOILER_TEMP removed - now use settings.water_heating_low/high_limit
 
 // Timer handles
@@ -65,16 +64,15 @@ static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const
 static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const SharedSensorReadings& readings) {
     Temperature_t boilerTarget;
 
-    // Round 15 Issue #10 fix: Check for NaN/Inf before converting float to Temperature_t
-    // Get charge delta from settings (convert float to Temperature_t)
-    float rawDelta = settings.wHeaterConfTempChargeDelta;
-    Temperature_t chargeDelta;
-    if (!std::isfinite(rawDelta) || rawDelta < 5.0f || rawDelta > 20.0f) {
+    // Round 15 Issue #10 fix: Check for NaN/Inf before converting float to Temperature_t.
+    // Bounds live in WaterChargePolicy and are also what the parameter is registered with,
+    // so an out-of-range value is rejected at params/set rather than silently ignored here.
+    const float rawDelta = settings.wHeaterConfTempChargeDelta;
+    if (!WaterChargePolicy::chargeDeltaValid(rawDelta)) {
         LOG_WARN(TAG, "Invalid charge delta: %.2f, using default", rawDelta);
-        chargeDelta = DEFAULT_CHARGE_DELTA;  // Use default 10°C if invalid
-    } else {
-        chargeDelta = tempFromFloat(rawDelta);
     }
+    const Temperature_t chargeDelta =
+        tempFromFloat(WaterChargePolicy::chargeDeltaOrDefault(rawDelta));
 
     // Calculate target based on water tank temperature + delta
     // Boiler needs to be hotter than the tank to charge it effectively

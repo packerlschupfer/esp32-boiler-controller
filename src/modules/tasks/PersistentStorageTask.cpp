@@ -2,6 +2,7 @@
 // Persistent storage task - handles parameter save/load operations
 #include "PersistentStorageTask.h"
 #include "modules/control/AutotuneRelayConfig.h"  // autotune setting ranges
+#include "modules/control/WaterChargePolicy.h"    // charge delta bounds
 #include <TaskManager.h>
 #include "LoggingMacros.h"
 #include "core/SystemResourceProvider.h"
@@ -297,8 +298,13 @@ void PersistentStorageTask(void* pvParameters) {
         lastChangeTime = millis();
     });
 
+    // Bounds from WaterChargePolicy so the storage layer rejects what the use site would
+    // reject. These disagreed until 2026-10-23 (registered 1.0, enforced 5.0), so a
+    // params/set of 1.0-4.9 was acknowledged and persisted but then ignored at use.
     storage->registerFloat("wheater/tempChargeDelta", &settings.wHeaterConfTempChargeDelta,
-                          1.0f, 20.0f, "Water heater charging temperature delta");
+                          WaterChargePolicy::CHARGE_DELTA_MIN,
+                          WaterChargePolicy::CHARGE_DELTA_MAX,
+                          "Water heater charging temperature delta");
 
     storage->registerFloat("wheater/heatingRate", &settings.waterHeatingRate,
                           0.1f, 5.0f, "Water heating rate (°C per minute)");

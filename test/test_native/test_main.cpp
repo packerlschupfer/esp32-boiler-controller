@@ -241,6 +241,11 @@ void test_boost_gate_degenerate_ends_of_the_parameter_range();
 void test_boost_denied_for_invalid_or_zero_target();
 void test_boost_water_and_autotune_override_an_invalid_target();
 
+void test_charge_delta_bounds_match_what_the_parameter_is_registered_with();
+void test_charge_delta_valid_range_is_inclusive_at_both_ends();
+void test_charge_delta_rejects_nan_and_inf();
+void test_charge_delta_or_default_passes_valid_values_through_unchanged();
+
 void test_scheduler_status_small_buffer_stays_valid_json();
 
 void test_basic_allocation();
@@ -609,6 +614,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_power_fault_window_restarts_after_ten_minutes);
     RUN_TEST(test_water_limits_valid_only_when_low_below_high);
     RUN_TEST(test_water_charge_latch_resumes_only_while_latched);
+    RUN_TEST(test_charge_delta_bounds_match_what_the_parameter_is_registered_with);
+    RUN_TEST(test_charge_delta_valid_range_is_inclusive_at_both_ends);
+    RUN_TEST(test_charge_delta_rejects_nan_and_inf);
+    RUN_TEST(test_charge_delta_or_default_passes_valid_values_through_unchanged);
 
     // Autotune relay settings (amplitude, hysteresis)
     RUN_TEST(test_autotune_amplitude_setting_used_within_range);
