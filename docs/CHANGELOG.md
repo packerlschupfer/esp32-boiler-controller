@@ -143,6 +143,13 @@ Fixes:
 - An invalid *outside* reading now returns the flow floor and logs it, instead of feeding
   `TEMP_INVALID` into the same arithmetic. `HeatingControlTask` already refuses to request
   heating while `isOutsideTempValid` is false, so this is a backstop for the room-mode path.
+- Both of those warnings are **edge-triggered**, one line when the sensor breaks and one
+  when it recovers. As first written they were plain `LOG_WARN` calls on a function that
+  runs about once a second, so a room-sensor dropout logged at 1 Hz for its duration and a
+  disconnected outside sensor logged at 1 Hz forever - including from boot until the first
+  successful read. On a device where a single `LOG_*` call costs ~1312 B of stack and syslog
+  is deliberately off to recover DRAM, the repetition buys nothing. Found in review,
+  2026-10-23. Statics are safe here: every caller is `HeatingControlTask`, a single task.
 
 The commanded target was never unsafe - the existing clamp caught the garbage and pinned the
 target to the 38.0 floor. What was broken was the arithmetic (UB) and the `raw` diagnostics
@@ -153,7 +160,12 @@ declared heating not-needed because the room reading was invalid, and `MIN_OFF_T
 the restart. Cost was one burner start. Not changed here.
 
 Four native tests added (305 -> 309), including the exact field input, both int16 extremes
-on both arguments, `rawOut` saturation, and the fallback-accuracy check above.
+on both arguments, `rawOut` saturation, and the fallback-accuracy check above. The
+saturation test as first written asserted
+`raw == INT32_MAX || raw == INT32_MIN || (raw > INT32_MIN && raw < INT32_MAX)`, which is
+every `int32` there is: it could not fail, and would have passed against the narrowing cast
+it existed to catch (verified by mutation - the unfixed code returns -1835557525 and the old
+assertion accepts it). It now asserts both saturated values exactly.
 
 ### `wheater/tempChargeDelta` accepted values it then ignored
 

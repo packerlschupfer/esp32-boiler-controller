@@ -71,13 +71,23 @@ void test_heating_curve_survives_invalid_room_reading() {
 void test_heating_curve_raw_saturates_instead_of_truncating() {
     // rawOut is int32 but result is int64. A narrowing cast would put an arbitrary value on
     // the diagnostics topic - the one place someone looks to see that the curve went wrong.
+    //
+    // Assert the saturated values EXACTLY. The first version of this test asserted
+    //   raw == INT32_MAX || raw == INT32_MIN || (raw > INT32_MIN && raw < INT32_MAX)
+    // which is every int32 there is - it could not fail, in either direction, and would
+    // have passed just as happily against the narrowing cast it was written to catch.
+    // Both inputs below overflow int32 by three orders of magnitude, so landing on exactly
+    // INT32_MAX/INT32_MIN can only come from the clamp branches.
     int32_t raw = 0;
+    // inside high, outside low: diff -65535, so the adjustment is negative and subtracting
+    // it drives the result positive, far past INT32_MAX.
     HeatingCurve::target(INT16_MAX, INT16_MIN, 32767, 0, 380, 750, &raw);
-    TEST_ASSERT_TRUE(raw == INT32_MAX || raw == INT32_MIN || (raw > INT32_MIN && raw < INT32_MAX));
-    // The specific direction: inside high, outside low -> huge positive adjustment
-    // subtracted -> very negative result -> saturates low, never wraps positive.
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, raw);
+    // The mirror case - inside low, outside high -> huge positive adjustment subtracted ->
+    // result far below INT32_MIN. This is the one a narrowing cast would have wrapped to a
+    // positive number, i.e. a plausible-looking flow target on the diagnostics topic.
     HeatingCurve::target(0, INT16_MAX, 32767, 0, 380, 750, &raw);
-    TEST_ASSERT_TRUE(raw < 0);
+    TEST_ASSERT_EQUAL_INT32(INT32_MIN, raw);
 }
 
 void test_heating_curve_nominal_room_fallback_is_sane() {

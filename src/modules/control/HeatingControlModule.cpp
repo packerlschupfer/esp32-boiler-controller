@@ -65,26 +65,49 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     // target - so the curve falls back to the nominal line for the current outside
     // temperature instead of to a wrong one. If the target is also unset, use the curve's
     // own nominal room temperature.
+    //
+    // Both sensor warnings below are edge-triggered. This function runs on the ~1 Hz
+    // diagnostics path (HeatingControlTask), so a plain LOG_WARN would repeat once a second
+    // for as long as the fault lasts - from boot until the first successful read, and
+    // forever with an unplugged outside sensor. One line when it breaks and one when it
+    // recovers is the whole signal; the repetition only buys log pressure on a device where
+    // a single LOG_* costs ~1312 B of stack. Statics are safe here: every caller of this
+    // function is HeatingControlTask, a single task.
     Temperature_t effectiveInside = readings.insideTemp;
+    static bool insideWarned = false;
     if (!readings.isInsideTempValid) {
         effectiveInside = (settings.targetTemperatureInside > 0)
                               ? settings.targetTemperatureInside
                               : HeatingCurve::NOMINAL_ROOM_TENTHS;
-        LOG_WARN(TAG, "Room sensor invalid - heating curve using %d (0.1°C) as its base",
-                 effectiveInside);
+        if (!insideWarned) {
+            LOG_WARN(TAG, "Room sensor invalid - heating curve using %d (0.1°C) as its base",
+                     effectiveInside);
+            insideWarned = true;
+        }
+    } else if (insideWarned) {
+        LOG_INFO(TAG, "Room sensor valid again - heating curve back on the real reading");
+        insideWarned = false;
     }
 
     // Outside has no meaningful substitute: a weather curve without a weather reading is
     // not a curve. Return the floor and say so on the diagnostics topic. HeatingControlTask
     // already refuses to request heating while isOutsideTempValid is false, so this is a
     // backstop for the room-mode path and for any future caller.
+    static bool outsideWarned = false;
     if (!readings.isOutsideTempValid) {
-        LOG_WARN(TAG, "Outside sensor invalid - heating curve pinned to the flow floor");
+        if (!outsideWarned) {
+            LOG_WARN(TAG, "Outside sensor invalid - heating curve pinned to the flow floor");
+            outsideWarned = true;
+        }
         if (debugOut != nullptr) {
             debugOut->rawTarget = settings.burner_low_limit;
             debugOut->shift = static_cast<int32_t>(curveShift);
         }
         return settings.burner_low_limit;
+    }
+    if (outsideWarned) {
+        LOG_INFO(TAG, "Outside sensor valid again - heating curve resumed");
+        outsideWarned = false;
     }
 
     int32_t rawTarget = 0;
