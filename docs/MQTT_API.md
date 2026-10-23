@@ -48,15 +48,38 @@ boiler/
     "br": 582,    // Boiler return: 58.2°C
     "wt": 551,    // Water tank: 55.1°C
     "o": 125,     // Outside: 12.5°C
-    "i": 213,     // Inside/room: 21.3°C (only if valid)
+    "i": 213,     // Inside/room: 21.3°C
     "bt": 700     // Burner target: 70.0°C (only while a heat demand state is available)
   },
-  "p": 152,       // Pressure (hundredths of BAR): 152 = 1.52 BAR (only if valid)
+  "p": 152,       // Pressure (hundredths of BAR): 152 = 1.52 BAR
   "r": 21,        // Relay states (bitmask)
   "s": 39,        // System state (bitmask)
   "sf": 1         // Sensor fallback mode
 }
 ```
+
+**Every temperature key, and `p`, is present only while that reading is current. An absent
+key means "no reading" - never substitute a number for it.** Since 2026-10-23 that applies to
+all of them; before, only `i` and `p` were conditional and the other four were published
+whatever the struct held. A subscriber cannot defend itself after the fact, because the key
+arrives present and numeric: Home Assistant's long-term statistics still carry two hours from
+2025-12-06/07 where all four channels recorded **-3276.8 °C** - `TEMP_INVALID` (`INT16_MIN`
+tenths) divided by ten - with hourly *means* of -1504 and -528 °C.
+
+So `{{ value_json.t.bo | default(0) }}` is the wrong shape for these keys in any consumer: it
+turns "no reading" into a plausible measurement. Use presence:
+
+```jinja
+{{ (value_json.t.bo / 10) | round(1) if value_json.t.bo is defined else None }}
+```
+
+`None` rather than `'unknown'` for a Home Assistant MQTT sensor - a rendered "None" becomes
+`unknown` and is skipped by statistics, while the literal string fails numeric parsing on an
+entity that has a `device_class`. The add-on panel's `formatTemp()` already renders an absent
+key as `--`.
+
+`bt` is the exception that stays `default(0)`-safe: 0 is its real idle value, so absence and
+zero mean nearly the same thing there.
 
 Optional temperature keys, compiled in only with the matching flag in `src/config/ProjectConfig.h` (all commented out by default): `wtt` water tank top (`ENABLE_SENSOR_WATER_TANK_TOP`), `wr` water return (`ENABLE_SENSOR_WATER_RETURN`), `hr` heating return (`ENABLE_SENSOR_HEATING_RETURN`).
 

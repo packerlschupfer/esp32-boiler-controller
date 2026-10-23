@@ -125,26 +125,47 @@ void publishSensorData() {
 
     // Compact format: Use shorter keys for smaller payload
     JsonObject temps = doc["t"].to<JsonObject>();  // temperatures
-    temps["bo"] = sensors.boilerTempOutput;     // boiler output
-    temps["br"] = sensors.boilerTempReturn;     // boiler return
-    temps["wt"] = sensors.waterHeaterTempTank;  // water tank
-    temps["o"] = sensors.outsideTemp;           // outside
+
+    // EVERY temperature key is present only while its reading is current. An ABSENT key
+    // means "no reading" - that was already the contract for `i` and `p`, and since
+    // 2026-10-23 it is the contract for all of them.
+    //
+    // Why: `bo`, `br`, `wt` and `o` used to be published unconditionally, so whatever sat in
+    // the struct went out as if it were a measurement. Home Assistant's long-term statistics
+    // still carry the result - all four channels recorded a minimum of -3276.8 °C across two
+    // hours on 2025-12-06/07, with hourly MEANS of -1504 and -528 °C. That is TEMP_INVALID
+    // (INT16_MIN tenths) divided by ten. No subscriber can defend itself against it either,
+    // because the key is present and numeric; the receiving end cannot tell -3276.8 from a
+    // reading. Nothing writes TEMP_INVALID into those fields today, which only changes the
+    // failure from impossible to invisible: a failed channel published its last good value
+    // as though it were current.
+    //
+    // The flags were already sitting in the struct next to each field, unused here.
+    const auto putTemp = [&temps](const char* key, Temperature_t value, bool valid) {
+        if (valid && tempIsValid(value)) {
+            temps[key] = value;
+        }
+    };
+
+    putTemp("bo", sensors.boilerTempOutput, sensors.isBoilerTempOutputValid);
+    putTemp("br", sensors.boilerTempReturn, sensors.isBoilerTempReturnValid);
+    putTemp("wt", sensors.waterHeaterTempTank, sensors.isWaterHeaterTempTankValid);
+    putTemp("o", sensors.outsideTemp, sensors.isOutsideTempValid);
 
     // Optional sensors (enable via ENABLE_SENSOR_* flags)
 #ifdef ENABLE_SENSOR_WATER_TANK_TOP
-    temps["wtt"] = sensors.waterTankTopTemp;    // water tank top
+    putTemp("wtt", sensors.waterTankTopTemp, sensors.isWaterTankTopTempValid);
 #endif
 #ifdef ENABLE_SENSOR_WATER_RETURN
-    temps["wr"] = sensors.waterHeaterTempReturn; // water return
+    putTemp("wr", sensors.waterHeaterTempReturn, sensors.isWaterHeaterTempReturnValid);
 #endif
 #ifdef ENABLE_SENSOR_HEATING_RETURN
-    temps["hr"] = sensors.heatingTempReturn;    // heating return
+    putTemp("hr", sensors.heatingTempReturn, sensors.isHeatingTempReturnValid);
 #endif
 
-    // Only include inside temp if valid
-    if (tempIsValid(sensors.insideTemp)) {
-        temps["i"] = sensors.insideTemp;        // inside
-    }
+    // Inside: was already guarded, but on the marker alone - and the struct starts at 0,
+    // which tempIsValid() accepts, so the flag belongs here too.
+    putTemp("i", sensors.insideTemp, sensors.isInsideTempValid);
 
     // Add burner target temperature (from BurnerStateMachine)
     bool burnerDemand = false;

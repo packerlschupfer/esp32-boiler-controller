@@ -94,7 +94,7 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    value_template: "{{ (value_json.t.bo | default(0)) / 10 | round(1) }}"
+    value_template: "{{ (value_json.t.bo / 10) | round(1) if value_json.t.bo is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
@@ -107,7 +107,7 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    value_template: "{{ (value_json.t.br | default(0)) / 10 | round(1) }}"
+    value_template: "{{ (value_json.t.br / 10) | round(1) if value_json.t.br is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
@@ -120,7 +120,7 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    value_template: "{{ (value_json.t.wt | default(0)) / 10 | round(1) }}"
+    value_template: "{{ (value_json.t.wt / 10) | round(1) if value_json.t.wt is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
@@ -133,7 +133,7 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    value_template: "{{ (value_json.t.o | default(0)) / 10 | round(1) }}"
+    value_template: "{{ (value_json.t.o / 10) | round(1) if value_json.t.o is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
@@ -175,7 +175,7 @@ sensor:
     state_topic: "boiler/status/sensors"
     unit_of_measurement: "°C"
     state_class: measurement
-    value_template: "{{ ((value_json.t.bo | default(0)) - (value_json.t.br | default(0))) / 10 | round(1) }}"
+    value_template: "{{ ((value_json.t.bo - value_json.t.br) / 10) | round(1) if value_json.t.bo is defined and value_json.t.br is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"

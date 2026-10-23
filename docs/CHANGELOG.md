@@ -22,6 +22,48 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### An absent sensor key now means "no reading", on every temperature
+
+`boiler/status/sensors` published `t.bo`, `t.br`, `t.wt` and `t.o` **unconditionally**, so
+whatever sat in `SharedSensorReadings` went out as though it were a measurement - while the
+per-channel validity flags sat unused right beside those fields. Only `t.i` and `p` were
+guarded.
+
+The evidence that this matters is in Home Assistant's long-term statistics, which still
+carry **two hours from 2025-12-06/07 where all four channels recorded a minimum of
+-3276.8 °C**, with hourly *means* of **-1504 °C** and **-528 °C**. That is `TEMP_INVALID`
+(`INT16_MIN` tenths) divided by ten, on every channel at once - the whole Modbus block
+failing or being rewired. One hour also carries a +227 °C maximum.
+
+A subscriber cannot defend itself against this: the key arrives present and numeric, so
+there is nothing to test for. That is the whole reason to fix it at the publisher.
+
+Every temperature key is now gated on its own validity flag plus the marker check:
+
+```cpp
+const auto putTemp = [&temps](const char* key, Temperature_t value, bool valid) {
+    if (valid && tempIsValid(value)) { temps[key] = value; }
+};
+```
+
+`t.i` was already guarded, but on the marker alone - and the struct initialises `insideTemp`
+to **0**, which `tempIsValid()` accepts, so a boot-window publish could have reported the
+room as 0.0 °C. Checked against the recorder for all three of this evening's reboots: no
+such sample ever reached HA, so this one was latent rather than realised. The flag closes it
+regardless.
+
+Nothing currently writes `TEMP_INVALID` into those four fields, which only changed the
+failure mode from impossible to invisible: a failed channel published its **last good
+value** as though it were current, and only `sf` hinted otherwise.
+
+Consumer side: the five Home Assistant templates that read these keys moved from
+`| default(0)` to presence tests, so an absent reading renders `None` and the entity goes
+`unknown` instead of recording a zero (`boiler_mqtt_include.yaml` lines 97, 110, 123, 136
+and the flow-return delta at 178). **Deploy order matters** - the templates have to be live
+before the firmware starts omitting keys, or a channel failure records 0 instead. The add-on
+panel needs nothing: its `formatTemp()` already renders an absent key as `--`, because `t.i`
+was always optional. `t.bt` keeps `default(0)`: zero is its real idle value.
+
 ### The burner dead band is now in degrees, and mode-aware
 
 New parameters `h/bandOff` / `h/bandOn` (heating, default **+5.0 / -3.0 C**) and
