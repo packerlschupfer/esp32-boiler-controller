@@ -29,9 +29,10 @@ Nothing in the firmware reacted to a **low** temperature. `FREEZE_PROTECTION_TEM
 freezing of the boiler") was read by nothing and has now been removed, `SafetyInterlocks`
 bounds pressure from below but not temperature, and `MIN_BOILER_TEMP_C` is a floor on
 requested setpoints rather than a trigger. What kept the water warm was a side effect of
-normal operation - the tank recharges below `wheater/tempLimitLow` (45.0, so 40 K of margin)
-and the house is held at its room target - and both stop the moment heating and water are
-switched off.
+normal operation - the tank recharges below `wheater/tempLimitLow`, which is **40.0** on this
+installation (the struct comment's "e.g. 45.0" is only an example; the live NVS value is
+400), so 35 K of margin above freezing - and the house is held at its room target. Both stop
+the moment heating and water are switched off.
 
 `FrostProtectionPolicy` (header-only, natively testable) now latches a demand when a **valid**
 flow or tank reading falls to **5.0 °C**, and releases when everything readable is back above

@@ -20,9 +20,10 @@
  * MIN_BOILER_TEMP_C is a floor on requested setpoints, not a trigger.
  *
  * What kept the water warm was a side effect of normal operation: the tank is recharged
- * whenever it falls below `wheater/tempLimitLow` (45.0, so 40 K of margin) and the house is
- * held at its room target. Both stop the moment heating and water are disabled - a summer
- * setting left on into a cold snap, or a long absence.
+ * whenever it falls below `wheater/tempLimitLow` - **40.0 on this installation**, not the
+ * 45.0 the struct comment uses as its example, so 35 K of margin above freezing - and the
+ * house is held at its room target. Both stop the moment heating and water are disabled: a
+ * summer setting left on into a cold snap, or a long absence.
  *
  * WHAT THIS DOES NOT COVER, and cannot:
  *
