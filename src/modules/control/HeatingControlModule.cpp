@@ -1,5 +1,6 @@
 // src/modules/control/HeatingControlModule.cpp
 #include "modules/control/HeatingControlModule.h"
+#include "modules/control/HeatingCurve.h"  // NOMINAL_ROOM_TENTHS fallback
 #include "modules/control/HeatingControlModuleFixedPoint.h"  // For fixed-point heating curve calculations
 #include "shared/Temperature.h"  // For temperature conversions
 #include "config/SystemConstants.h"  // For magic number constants
@@ -53,9 +54,42 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
                  devBuf, adjustBuf);
     }
 
+    // The curve's base temperature. A sensor marked invalid carries TEMP_INVALID
+    // (INT16_MIN = -32768), not a plausible value, and it used to be passed in regardless:
+    // on 2026-10-23 08:34:13 that made diff 3281.4 °C, overflowed the curve polynomial and
+    // put raw = -755418.5 °C on the diagnostics topic. The clamp masked it, so the
+    // commanded target stayed safe, but the arithmetic was undefined behaviour.
+    //
+    // With no room reading, assume the room is AT target. That is the same assumption the
+    // skipped room-deviation shift above already makes - zero deviation means inside equals
+    // target - so the curve falls back to the nominal line for the current outside
+    // temperature instead of to a wrong one. If the target is also unset, use the curve's
+    // own nominal room temperature.
+    Temperature_t effectiveInside = readings.insideTemp;
+    if (!readings.isInsideTempValid) {
+        effectiveInside = (settings.targetTemperatureInside > 0)
+                              ? settings.targetTemperatureInside
+                              : HeatingCurve::NOMINAL_ROOM_TENTHS;
+        LOG_WARN(TAG, "Room sensor invalid - heating curve using %d (0.1°C) as its base",
+                 effectiveInside);
+    }
+
+    // Outside has no meaningful substitute: a weather curve without a weather reading is
+    // not a curve. Return the floor and say so on the diagnostics topic. HeatingControlTask
+    // already refuses to request heating while isOutsideTempValid is false, so this is a
+    // backstop for the room-mode path and for any future caller.
+    if (!readings.isOutsideTempValid) {
+        LOG_WARN(TAG, "Outside sensor invalid - heating curve pinned to the flow floor");
+        if (debugOut != nullptr) {
+            debugOut->rawTarget = settings.burner_low_limit;
+            debugOut->shift = static_cast<int32_t>(curveShift);
+        }
+        return settings.burner_low_limit;
+    }
+
     int32_t rawTarget = 0;
     Temperature_t result = HeatingControlModuleFixedPoint::calculateHeatingCurveTarget(
-        readings.insideTemp,
+        effectiveInside,
         readings.outsideTemp,
         curveCoeff,
         curveShift,
@@ -72,7 +106,7 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     }
 
     char insideBuf[16], outsideBuf[16], resultBuf[16];
-    formatTemp(insideBuf, sizeof(insideBuf), readings.insideTemp);
+    formatTemp(insideBuf, sizeof(insideBuf), effectiveInside);
     formatTemp(outsideBuf, sizeof(outsideBuf), readings.outsideTemp);
     formatTemp(resultBuf, sizeof(resultBuf), result);
     LOG_DEBUG(TAG, "Calculated target temp: %s, based on inside: %s, outside: %s",

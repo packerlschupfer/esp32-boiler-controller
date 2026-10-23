@@ -246,6 +246,11 @@ void test_charge_delta_valid_range_is_inclusive_at_both_ends();
 void test_charge_delta_rejects_nan_and_inf();
 void test_charge_delta_or_default_passes_valid_values_through_unchanged();
 
+void test_heating_curve_survives_invalid_room_reading();
+void test_heating_curve_raw_saturates_instead_of_truncating();
+void test_heating_curve_nominal_room_fallback_is_sane();
+void test_heating_curve_room_at_target_fallback_tracks_the_real_reading();
+
 void test_scheduler_status_small_buffer_stays_valid_json();
 
 void test_basic_allocation();
@@ -546,6 +551,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_heating_curve_matches_reference_formula);
     RUN_TEST(test_heating_curve_outside_part_not_ten_times_too_small);
     RUN_TEST(test_heating_curve_clamps_to_limits);
+    RUN_TEST(test_heating_curve_survives_invalid_room_reading);
+    RUN_TEST(test_heating_curve_raw_saturates_instead_of_truncating);
+    RUN_TEST(test_heating_curve_nominal_room_fallback_is_sane);
+    RUN_TEST(test_heating_curve_room_at_target_fallback_tracks_the_real_reading);
 
     // Space heating policy (weather mode outside threshold hysteresis)
     RUN_TEST(test_heating_diag_payload_is_the_agreed_schema);

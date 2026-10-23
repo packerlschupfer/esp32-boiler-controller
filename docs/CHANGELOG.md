@@ -22,6 +22,57 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### An invalid room reading overflowed the heating curve
+
+Found in recorder data, 2026-10-23 08:34:13: the device published
+`heating_curve_raw = -755418.5` on `boiler/status/heating/control` and the burner stopped
+for 20 s. Two defects in sequence.
+
+**1. An invalid reading was passed into the curve.**
+`HeatingControlModule::calculateSpaceHeatingTargetTemp()` guards the room-deviation shift on
+`readings.isInsideTempValid`, but then passed `readings.insideTemp` to the curve
+unconditionally. `ANDRTF3Task` sets that field to `TEMP_INVALID` (`INT16_MIN` = -32768)
+after three consecutive read failures, so the curve ran with a base temperature of
+-3276.8 C. The published `shift` of 4.4 - `curveShift` alone, with no room term - is the
+fingerprint: the guard worked, the curve input did not.
+
+**2. The curve then overflowed int32.** With `diff = outside - inside = 32814` tenths and
+`diffSquared = 107675859`, `POLY_C3 * diffSquared` is 248 x 107675859 = **26,703,613,032**,
+which does not fit int32 and wrapped to 933,809,256. Both operands were int32, so this was
+signed overflow - undefined behaviour, not merely a wrong number. Wrapping that one multiply
+reproduces the published value exactly: polynomial 1637250, adjustment 7521461, result
+-7554185 tenths = -755418.5 C.
+
+Fixes:
+
+- `HeatingCurve::target()` now does `diffSquared` and the polynomial in int64. With int16
+  inputs `diff` reaches +/-65535, so `diff * diff` alone is up to 4.29e9 and could not be
+  held in int32 either - that one had simply never been reached. Division truncates toward
+  zero identically in both widths, so results for in-range inputs are unchanged. `rawOut`
+  now saturates instead of narrowing, because the diagnostics topic is the one place
+  someone looks to find out the curve went wrong.
+- `calculateSpaceHeatingTargetTemp()` substitutes `targetTemperatureInside` when the room
+  reading is invalid, falling back to `HeatingCurve::NOMINAL_ROOM_TENTHS` (20.0) if the
+  target is also unset. Assuming the room is *at target* is the same assumption the skipped
+  room-deviation shift already makes, so the curve degrades to its nominal line rather than
+  to a wrong one. Replaying the real glitch, that yields **47.8 C against the 48.0 C** the
+  curve computed six seconds later once the sensor recovered - a 0.2 C perturbation, where
+  the old behaviour was a clamp to the 38.0 floor.
+- An invalid *outside* reading now returns the flow floor and logs it, instead of feeding
+  `TEMP_INVALID` into the same arithmetic. `HeatingControlTask` already refuses to request
+  heating while `isOutsideTempValid` is false, so this is a backstop for the room-mode path.
+
+The commanded target was never unsafe - the existing clamp caught the garbage and pinned the
+target to the 38.0 floor. What was broken was the arithmetic (UB) and the `raw` diagnostics
+field, and it would have become a control fault if that lower clamp were ever widened.
+
+The 20 s burner stop was a *separate* and defensible thing: the space-heating policy
+declared heating not-needed because the room reading was invalid, and `MIN_OFF_TIME_MS` held
+the restart. Cost was one burner start. Not changed here.
+
+Four native tests added (305 -> 309), including the exact field input, both int16 extremes
+on both arguments, `rawOut` saturation, and the fallback-accuracy check above.
+
 ### `wheater/tempChargeDelta` accepted values it then ignored
 
 The parameter was registered with range **1.0-20.0** (`PersistentStorageTask.cpp`) but the
