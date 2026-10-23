@@ -155,9 +155,32 @@ The commanded target was never unsafe - the existing clamp caught the garbage an
 target to the 38.0 floor. What was broken was the arithmetic (UB) and the `raw` diagnostics
 field, and it would have become a control fault if that lower clamp were ever widened.
 
-The 20 s burner stop was a *separate* and defensible thing: the space-heating policy
-declared heating not-needed because the room reading was invalid, and `MIN_OFF_TIME_MS` held
-the restart. Cost was one burner start. Not changed here.
+**The 20 s burner stop had a different cause than first recorded here, and it is not
+defensible.** This entry originally said the space-heating policy declared heating
+not-needed because the room reading was invalid. That mechanism does not exist in weather
+mode: `roomOverheated` stays false when the reading is invalid, so `heatingNeeded` stays
+true - and the recorder confirms it, `heating_status` never left "Heating" and
+`boiler_target_temp` never left 48.0, so neither the policy nor the curve clamp touched the
+burner. What the recorder does show:
+
+```
+08:34:14.898  sensor_mode   SHUTDOWN
+08:34:14.906  sensor_mode   NORMAL
+08:34:15.088  sensor_mode   SHUTDOWN
+08:34:19.884  sensor_mode   NORMAL
+08:34:24.906  burner_mode   Idle
+08:34:44.906  burner_mode   Heating     <- exactly MIN_OFF_TIME_MS later
+```
+
+`TemperatureSensorFallback` escalated to SHUTDOWN. In `SPACE_HEATING` its
+`hasRequiredSensors()` requires `roomTempValid`, and `INVALID_COUNT_TO_SHUTDOWN` is **1**
+with the comment "Was 2 - instant shutdown on sensor fail" - so a single failed check of a
+Modbus room sensor on a shared bus stops the burner, while the surrounding code comments
+claim the counters exist to prevent "mode chattering when sensors are intermittently
+failing". The trace above is that chatter, four transitions in five seconds. This will
+recur, and each occurrence costs a burner start. Not changed here: relaxing it changes
+safety behaviour and is a maintainer decision, recorded so it is not rediscovered a third
+time.
 
 Four native tests added (305 -> 309), including the exact field input, both int16 extremes
 on both arguments, `rawOut` saturation, and the fallback-accuracy check above. The
