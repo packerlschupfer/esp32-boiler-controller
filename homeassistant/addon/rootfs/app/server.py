@@ -31,7 +31,10 @@ state = {
             'waterHeater': {},
             'autotune': {}
         },
-        'system': {}
+        'system': {},
+        'h': {},
+        'w': {},
+        'sensor': {}
     },
     'status': {
         'system': {},
@@ -63,6 +66,16 @@ state_lock = threading.Lock()
 mqtt_client = None
 
 
+def _request_preheat_params(client):
+    """Request the preheat/pump/boiler params via GROUP reads (fw >= 0.1.0-c4fdf2c).
+    Three group gets replace the previous 8 individual gets (6 preheat + cooldownMs + pidEnabled),
+    which is far lighter on the device's scarce DRAM. Small delay + spacing still helps."""
+    time.sleep(1.0)
+    for group in ('preheat', 'pump', 'boiler'):
+        client.publish(f"{MQTT_PREFIX}/params/get/{group}", "")
+        time.sleep(0.3)
+
+
 def on_connect(client, userdata, flags, reason_code, properties):
     """Handle MQTT connection."""
     print(f"Connected to MQTT: {reason_code}")
@@ -79,6 +92,11 @@ def on_connect(client, userdata, flags, reason_code, properties):
     client.publish(f"{MQTT_PREFIX}/cmd/fram", "runtime")
     client.publish(f"{MQTT_PREFIX}/cmd/fram", "counters")
     client.publish(f"{MQTT_PREFIX}/cmd/config/get", "safety")  # Request safety config
+    client.publish(f"{MQTT_PREFIX}/cmd/scheduler/status", "")  # active/disabled ids
+    # Preheat params: request from a delayed thread. Doing it inline here collides with the
+    # params/get/all reply storm and overflows the firmware mqtt_high_priority queue (drops
+    # replies). Wait for the storm to drain, then request them paced apart.
+    threading.Thread(target=_request_preheat_params, args=(client,), daemon=True).start()
 
 
 def on_disconnect(client, userdata, flags, reason_code, properties):
@@ -116,6 +134,34 @@ def on_message(client, userdata, msg):
                         state['params']['pid']['spaceHeating'].update(data['spaceHeating'])
                     if 'waterHeater' in data:
                         state['params']['pid']['waterHeater'].update(data['waterHeater'])
+            # Short-group params (boiler/params/status/{h,w,sensor}) — space-heating/burner
+            # clamps (h/*), water boiler-target clamps (w/*), sensor offsets (sensor/offset/*)
+            elif topic.endswith('/params/status/h'):
+                if isinstance(data, dict):
+                    state['params']['h'].update(data)
+            elif topic.endswith('/params/status/w'):
+                if isinstance(data, dict):
+                    state['params']['w'].update(data)
+            elif topic.endswith('/params/status/sensor'):
+                if isinstance(data, dict):
+                    state['params']['sensor'].update(data)
+            # Preheat / pump / boiler params, collected under params.preheat keyed by camelKey.
+            # GROUP reply (params/status/{preheat,pump,boiler}) is a flat {key: value} dict;
+            # normalize each to {value: v} to match the individual-reply {value,min,max} shape.
+            elif (topic.endswith('/params/status/preheat') or
+                  topic.endswith('/params/status/pump') or
+                  topic.endswith('/params/status/boiler')):
+                if isinstance(data, dict):
+                    ph = state['params'].setdefault('preheat', {})
+                    for k, v in data.items():
+                        ph[k] = {'value': v}
+            # INDIVIDUAL reply (params/status/<group>/<camelKey>) = {name,value,min,max,...},
+            # used by the per-field R buttons.
+            elif '/params/status/preheat/' in topic or \
+                 '/params/status/pump/' in topic or \
+                 '/params/status/boiler/' in topic:
+                key = topic.split('/')[-1]
+                state['params'].setdefault('preheat', {})[key] = data
             # Individual parameter updates (boiler/params/status/{category}/{param})
             elif '/params/status/heating/' in topic:
                 key = topic.split('/')[-1]
@@ -189,6 +235,13 @@ def on_message(client, userdata, msg):
                         state['system_state'] = data['s']
                     if 'r' in data:
                         state['relays'] = parse_relay_bits(data['r'])
+                        # Derive burner state from relay bitmap
+                        r = data['r']
+                        if r & 0x01:  # burner enable relay on
+                            bs = 'RUNNING_HIGH' if (r & 0x08) else 'RUNNING_LOW'
+                        else:
+                            bs = 'IDLE'
+                        state['burner_state'] = {'state': bs}
 
             # Status topics
             elif '/status/health' in topic:
@@ -215,6 +268,8 @@ def on_message(client, userdata, msg):
             elif '/scheduler/response' in topic:
                 if isinstance(data, dict) and 'schedules' in data:
                     state['schedules'] = data['schedules']
+                    # count = entries included in this (320-byte capped) reply, total = stored
+                    state['schedule_meta'] = {'count': data.get('count'), 'total': data.get('total')}
                 elif isinstance(data, list):
                     state['schedules'] = data
 
@@ -347,44 +402,43 @@ def refresh_params():
 
 @app.route('/api/schedule/add', methods=['POST'])
 def add_schedule():
-    """Add a new schedule."""
-    data = request.json
+    """Add a schedule. The frontend sends the exact firmware payload:
+    {name(req), type:'water_heating'|'space_heating', start_hour, start_minute,
+     end_hour, end_minute, days(bitmask bit0=Sun), enabled, target_temp, ...}.
+    The `days` array form is buggy in firmware; the UI sends the bitmask.
+    """
+    data = request.json or {}
+    if not data.get('name'):
+        return jsonify({'error': 'name is required'}), 400
 
-    schedule = {
-        'type': data.get('type', 'water'),  # 'water' or 'heating'
-        'days': data.get('days', 127),  # Bitmask: Sun=1, Mon=2, ... Sat=64
-        'startHour': data.get('startHour', 6),
-        'startMinute': data.get('startMinute', 0),
-        'endHour': data.get('endHour', 7),
-        'endMinute': data.get('endMinute', 0),
-        'enabled': data.get('enabled', True)
-    }
-
-    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/add", json.dumps(schedule))
+    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/add", json.dumps(data))
 
     # Request updated list after a short delay
     time.sleep(0.5)
     mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/list", "")
 
-    return jsonify({'success': True, 'schedule': schedule})
+    return jsonify({'success': True, 'schedule': data})
 
 
 @app.route('/api/schedule/remove', methods=['POST'])
 def remove_schedule():
-    """Remove a schedule by index."""
-    data = request.json
-    index = data.get('index')
+    """Remove a schedule by its firmware id (payload {"id":N}, not an index)."""
+    data = request.json or {}
+    sid = data.get('id')
+    if sid is None:
+        return jsonify({'error': 'Missing id'}), 400
+    try:
+        sid = int(sid)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'id must be an integer'}), 400
 
-    if index is None:
-        return jsonify({'error': 'Missing index'}), 400
-
-    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/remove", str(index))
+    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/remove", json.dumps({'id': sid}))
 
     # Request updated list after a short delay
     time.sleep(0.5)
     mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/list", "")
 
-    return jsonify({'success': True, 'removed': index})
+    return jsonify({'success': True, 'removed': sid})
 
 
 @app.route('/api/schedule/list', methods=['GET'])
@@ -407,7 +461,7 @@ def set_safety_config():
         return jsonify({'error': 'Missing param or value'}), 400
 
     # Validate parameter name
-    valid_params = ['pump_protection_ms', 'sensor_stale_ms', 'post_purge_ms']
+    valid_params = ['pump_protection_ms', 'sensor_stale_ms', 'post_purge_ms', 'thermal_shock_c']
     if param not in valid_params:
         return jsonify({'error': f'Invalid parameter: {param}'}), 400
 
@@ -429,6 +483,61 @@ def get_safety_config():
     time.sleep(0.3)
     with state_lock:
         return jsonify(state['safety_config'])
+
+
+@app.route('/api/schedule/enable', methods=['POST'])
+def enable_schedule():
+    """Enable or disable a stored schedule by its firmware id (1-255)."""
+    data = request.json or {}
+    sid = data.get('id')
+    enabled = data.get('enabled')
+    if sid is None or enabled is None:
+        return jsonify({'error': 'Missing id or enabled'}), 400
+    try:
+        sid = int(sid)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'id must be an integer'}), 400
+    # Coerce enabled without the bool("false") == True trap: accept real bools,
+    # 0/1, and common truthy/falsy strings.
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in ('1', 'true', 'on', 'yes')
+    else:
+        enabled = bool(enabled)
+    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/enable",
+                        json.dumps({'id': sid, 'enabled': enabled}))
+    time.sleep(0.4)
+    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/list", "")
+    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/scheduler/status", "")
+    return jsonify({'success': True, 'id': sid, 'enabled': enabled})
+
+
+# Preheat / pump-cooldown / boiler-pid params: SET via cmd/config/<snake>, READ via
+# params/status/<group>/<camelKey>. Map the UI camelKey -> (config snake name, read group).
+PREHEAT_PARAM_MAP = {
+    'enabled':       ('preheat_enabled',        'preheat'),
+    'offMultiplier': ('preheat_off_multiplier', 'preheat'),
+    'maxCycles':     ('preheat_max_cycles',     'preheat'),
+    'timeoutMs':     ('preheat_timeout_ms',     'preheat'),
+    'pumpMinMs':     ('preheat_pump_min_ms',    'preheat'),
+    'safeDiff':      ('preheat_safe_diff',      'preheat'),
+    'cooldownMs':    ('pump_cooldown_ms',       'pump'),
+    'pidEnabled':    ('boiler_pid_enabled',     'boiler'),
+}
+
+
+@app.route('/api/preheat/set', methods=['POST'])
+def set_preheat():
+    """Set a preheat/pump/boiler config param. Body: {key: <camelKey>, value}."""
+    data = request.json or {}
+    key = data.get('key')
+    value = data.get('value')
+    if key not in PREHEAT_PARAM_MAP or value is None:
+        return jsonify({'error': f'Invalid key: {key}'}), 400
+    cmd_name, group = PREHEAT_PARAM_MAP[key]
+    mqtt_client.publish(f"{MQTT_PREFIX}/cmd/config/{cmd_name}", str(value))
+    time.sleep(0.3)
+    mqtt_client.publish(f"{MQTT_PREFIX}/params/get/{group}/{key}", "")
+    return jsonify({'success': True, 'key': key, 'value': value})
 
 
 if __name__ == '__main__':

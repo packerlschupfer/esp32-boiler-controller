@@ -138,8 +138,16 @@
             border-radius: 4px;
             font-size: 14px;
         }
-        input[type="number"] { width: 80px; text-align: right; }
+        /* Centered (not right-aligned): the native spin buttons sit pinned to the right edge and
+           ignore margins in this browser, so right-aligned digits always collide with them.
+           Centering keeps these short values clear of the spinner. */
+        input[type="number"] { width: 82px; text-align: center; }
         input[type="time"] { width: 100px; }
+        /* Explicit 24h hour:minute fields (native type=time follows the OS locale in Firefox
+           and can't be forced to 24h). */
+        .time-field { display: inline-flex; align-items: center; gap: 4px; }
+        .time-sep { color: var(--text-dim); font-weight: 600; }
+        input[type="number"].time-num { width: 68px; }
         select { min-width: 100px; }
         input:focus, select:focus {
             outline: none;
@@ -237,12 +245,18 @@
         .day-btn {
             width: 32px;
             height: 32px;
+            box-sizing: border-box;
+            padding: 0;
             border-radius: 50%;
             border: 1px solid var(--border);
             background: var(--bg);
             color: var(--text-dim);
             cursor: pointer;
             font-size: 11px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
         }
         .day-btn.active {
             background: var(--primary);
@@ -583,11 +597,11 @@
                 <div class="health-grid">
                     <div class="health-item" id="health_heap">
                         <div class="value">--</div>
-                        <div class="label">Free Heap</div>
+                        <div class="label">Alloc Block</div>
                     </div>
                     <div class="health-item" id="health_heap_min">
                         <div class="value">--</div>
-                        <div class="label">Min Heap</div>
+                        <div class="label">Min Free (boot)</div>
                     </div>
                     <div class="health-item" id="health_uptime">
                         <div class="value">--</div>
@@ -618,7 +632,7 @@
                 <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Room temperature setpoint">Target Temperature</span>
                     <div class="param-value">
-                        <input type="number" step="0.5" id="heating_targetTemp" data-topic="params/heating/targetTemp" min="15" max="30">
+                        <input type="number" step="0.1" id="heating_targetTemp" data-topic="params/heating/targetTemp" min="10" max="30">
                         <span class="unit">°C</span>
                         <button class="small" onclick="getParam('params/get/heating', 'heating_targetTemp')">R</button>
                         <button class="small save" onclick="setParamFromInput('heating_targetTemp')">S</button>
@@ -627,7 +641,7 @@
                 <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Temperature band around setpoint">Hysteresis</span>
                     <div class="param-value">
-                        <input type="number" step="0.1" id="heating_hysteresis" data-topic="params/heating/hysteresis" min="0.1" max="5">
+                        <input type="number" step="0.1" id="heating_hysteresis" data-topic="params/heating/hysteresis" min="0.1" max="2">
                         <span class="unit">°C</span>
                         <button class="small" onclick="getParam('params/get/heating', 'heating_hysteresis')">R</button>
                         <button class="small save" onclick="setParamFromInput('heating_hysteresis')">S</button>
@@ -654,19 +668,72 @@
                 <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Min boiler temp for space heating">Burner Low Limit</span>
                     <div class="param-value">
-                        <input type="number" step="1" id="heating_burnerLowLimit" data-topic="params/heating/burnerLowLimit" min="20" max="70">
+                        <input type="number" step="0.1" id="heating_burnerLowLimit" data-topic="params/h/bLo" min="20" max="70">
                         <span class="unit">°C</span>
-                        <button class="small" onclick="getParam('params/get/heating', 'heating_burnerLowLimit')">R</button>
+                        <button class="small" onclick="getParam('params/get/all', 'heating_burnerLowLimit')">R</button>
                         <button class="small save" onclick="setParamFromInput('heating_burnerLowLimit')">S</button>
                     </div>
                 </div>
                 <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Max boiler temp for space heating">High Limit</span>
                     <div class="param-value">
-                        <input type="number" step="1" id="heating_highLimit" data-topic="params/heating/highLimit" min="40" max="85">
+                        <input type="number" step="0.1" id="heating_highLimit" data-topic="params/h/bHi" min="70" max="110">
                         <span class="unit">°C</span>
-                        <button class="small" onclick="getParam('params/get/heating', 'heating_highLimit')">R</button>
+                        <button class="small" onclick="getParam('params/get/all', 'heating_highLimit')">R</button>
                         <button class="small save" onclick="setParamFromInput('heating_highLimit')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Min boiler flow-temp target for space heating (h/sLo)">Space Heating Min</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="h_sLo" data-topic="params/h/sLo" min="30" max="60">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'h_sLo')">R</button>
+                        <button class="small save" onclick="setParamFromInput('h_sLo')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Max boiler flow-temp target for space heating (h/sHi)">Space Heating Max</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="h_sHi" data-topic="params/h/sHi" min="50" max="90">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'h_sHi')">R</button>
+                        <button class="small save" onclick="setParamFromInput('h_sHi')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Outdoor temp below which weather-comp heating runs (heating/outsideThreshold)">Outside Threshold</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="heating_outsideThreshold" data-topic="params/heating/outsideThreshold" min="5" max="25">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'heating_outsideThreshold')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_outsideThreshold')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Room temp above target that forces heating off (heating/roomOverheatMargin)">Room Overheat Margin</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="heating_roomOverheatMargin" data-topic="params/heating/roomOverheatMargin" min="1" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'heating_roomOverheatMargin')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_roomOverheatMargin')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Room-deviation influence on heating curve (float, unscaled)">Room Curve Shift Factor</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="heating_roomCurveShiftFactor" data-topic="params/heating/roomCurveShiftFactor" min="1" max="4">
+                        <span class="unit"></span>
+                        <button class="small" onclick="getParam('params/get/all', 'heating_roomCurveShiftFactor')">R</button>
+                        <button class="small save" onclick="setParamFromInput('heating_roomCurveShiftFactor')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Enable weather-compensated space heating (heating/weatherControl)">Weather Control</span>
+                    <div class="param-value">
+                        <input type="checkbox" id="heating_weatherControl" data-topic="params/heating/weatherControl">
+                        <button class="small" onclick="getParam('params/get/all', 'heating_weatherControl')">R</button>
+                        <button class="small save" onclick="setCheckboxParam('heating_weatherControl')">S</button>
                     </div>
                 </div>
                 <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
@@ -703,7 +770,7 @@
                 <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Target temperature to heat water to">High Limit</span>
                     <div class="param-value">
-                        <input type="number" step="1" id="wheater_tempLimitHigh" data-topic="params/wheater/tempLimitHigh" min="40" max="75">
+                        <input type="number" step="0.1" id="wheater_tempLimitHigh" data-topic="params/wheater/tempLimitHigh" min="50" max="85">
                         <span class="unit">°C</span>
                         <button class="small" onclick="getParam('params/get/wheater', 'wheater_tempLimitHigh')">R</button>
                         <button class="small save" onclick="setParamFromInput('wheater_tempLimitHigh')">S</button>
@@ -712,7 +779,7 @@
                 <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Temperature at which heating starts">Low Limit</span>
                     <div class="param-value">
-                        <input type="number" step="1" id="wheater_tempLimitLow" data-topic="params/wheater/tempLimitLow" min="20" max="60">
+                        <input type="number" step="0.1" id="wheater_tempLimitLow" data-topic="params/wheater/tempLimitLow" min="30" max="60">
                         <span class="unit">°C</span>
                         <button class="small" onclick="getParam('params/get/wheater', 'wheater_tempLimitLow')">R</button>
                         <button class="small save" onclick="setParamFromInput('wheater_tempLimitLow')">S</button>
@@ -742,6 +809,24 @@
                         <input type="checkbox" id="wheater_priorityEnabled" data-topic="params/wheater/priorityEnabled">
                         <button class="small" onclick="getParam('params/get/wheater', 'wheater_priorityEnabled')">R</button>
                         <button class="small save" onclick="setCheckboxParam('wheater_priorityEnabled')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Water-heating boiler flow-target clamp, minimum (w/hLo)">Boiler Target Min</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="w_hLo" data-topic="params/w/hLo" min="30" max="70">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'w_hLo')">R</button>
+                        <button class="small save" onclick="setParamFromInput('w_hLo')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Water-heating boiler flow-target clamp, maximum (w/hHi)">Boiler Target Max</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="w_hHi" data-topic="params/w/hHi" min="60" max="100">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'w_hHi')">R</button>
+                        <button class="small save" onclick="setParamFromInput('w_hHi')">S</button>
                     </div>
                 </div>
                 <div class="param-row" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
@@ -903,6 +988,10 @@
             <div class="card">
                 <h2><span class="icon">➕</span> Add Schedule</h2>
                 <div class="schedule-form">
+                    <div class="full-width">
+                        <label class="param-label">Name (required)</label>
+                        <input type="text" id="sched_name" maxlength="20" placeholder="e.g. Morning water">
+                    </div>
                     <div>
                         <label class="param-label">Type</label>
                         <select id="sched_type">
@@ -911,23 +1000,36 @@
                         </select>
                     </div>
                     <div>
-                        <label class="param-label">Start Time</label>
-                        <input type="time" id="sched_start" value="06:00">
+                        <label class="param-label">Target °C</label>
+                        <input type="number" id="sched_target" min="10" max="85" value="55">
                     </div>
                     <div>
-                        <label class="param-label">End Time</label>
-                        <input type="time" id="sched_end" value="07:00">
+                        <label class="param-label">Start Time <span style="color:var(--text-dim);font-size:11px;">(24h)</span></label>
+                        <div class="time-field">
+                            <input type="number" id="sched_start_h" class="time-num" min="0" max="23" value="6">
+                            <span class="time-sep">:</span>
+                            <input type="number" id="sched_start_m" class="time-num" min="0" max="59" value="0">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="param-label">End Time <span style="color:var(--text-dim);font-size:11px;">(24h)</span></label>
+                        <div class="time-field">
+                            <input type="number" id="sched_end_h" class="time-num" min="0" max="23" value="7">
+                            <span class="time-sep">:</span>
+                            <input type="number" id="sched_end_m" class="time-num" min="0" max="59" value="0">
+                        </div>
                     </div>
                     <div class="full-width">
                         <label class="param-label">Days</label>
                         <div class="day-selector" id="daySelector">
-                            <button type="button" class="day-btn active" data-day="0">Su</button>
+                            <!-- ISO week order (Mon-first); data-day is the firmware bit index (bit0=Sun) -->
                             <button type="button" class="day-btn active" data-day="1">Mo</button>
                             <button type="button" class="day-btn active" data-day="2">Tu</button>
                             <button type="button" class="day-btn active" data-day="3">We</button>
                             <button type="button" class="day-btn active" data-day="4">Th</button>
                             <button type="button" class="day-btn active" data-day="5">Fr</button>
                             <button type="button" class="day-btn active" data-day="6">Sa</button>
+                            <button type="button" class="day-btn active" data-day="0">Su</button>
                         </div>
                     </div>
                     <div class="full-width">
@@ -1021,9 +1123,156 @@
                         <button class="small" onclick="setSafetyConfig('post_purge_ms', document.getElementById('safety_post_purge').value * 1000)">Set</button>
                     </div>
                 </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Thermal-shock safety limit (cmd/config/thermal_shock_c, tenths degC)">Thermal Shock Limit</span>
+                    <div class="param-value">
+                        <input type="number" id="safety_thermal_shock" min="20" max="70" step="0.5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="setSafetyConfig('thermal_shock_c', Math.round(document.getElementById('safety_thermal_shock').value * 10))">Set</button>
+                    </div>
+                </div>
                 <div class="param-row" style="padding-top: 12px; border-top: 1px solid var(--border); margin-top: 8px;">
                     <span class="param-label" style="font-size: 11px; color: var(--text-dim);">Changes saved to NVS automatically</span>
                     <button class="small" onclick="refreshSafetyConfig()">Refresh</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">🔥</span> Return Preheater</h2>
+                <div class="param-row"><span class="param-label" style="font-size: 11px; color: var(--text-dim);">Thermal-shock preheat cycling. Persisted across reboots since 2026-09-15.</span></div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Enable return-preheater cycling">Preheat Enabled</span>
+                    <div class="param-value">
+                        <input type="checkbox" id="preheat_enabled">
+                        <button class="small" onclick="getPreheat('enabled')">R</button>
+                        <button class="small save" onclick="setPreheat('enabled', document.getElementById('preheat_enabled').checked ? 1 : 0)">Set</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Safe output-vs-return diff for preheat (tenths degC in firmware)">Safe Diff</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="preheat_safeDiff" min="10" max="30">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getPreheat('safeDiff')">R</button>
+                        <button class="small save" onclick="setPreheat('safeDiff', preheatWire('preheat_safeDiff', 10))">Set</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Max preheat cycles before giving up (1-20)">Max Cycles</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="preheat_maxCycles" min="1" max="20">
+                        <button class="small" onclick="getPreheat('maxCycles')">R</button>
+                        <button class="small save" onclick="setPreheat('maxCycles', preheatWire('preheat_maxCycles', 1))">Set</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Pump cooldown after burner stop (seconds)">Pump Cooldown</span>
+                    <div class="param-value">
+                        <input type="number" step="1" id="preheat_cooldownMs" min="60" max="900">
+                        <span class="unit">s</span>
+                        <button class="small" onclick="getPreheat('cooldownMs')">R</button>
+                        <button class="small save" onclick="setPreheat('cooldownMs', preheatWire('preheat_cooldownMs', 1000))">Set</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Boiler-temp PID; takes effect only after a reboot">Boiler PID (reboot)</span>
+                    <div class="param-value">
+                        <input type="checkbox" id="preheat_pidEnabled">
+                        <button class="small" onclick="getPreheat('pidEnabled')">R</button>
+                        <button class="small save" onclick="setPreheat('pidEnabled', document.getElementById('preheat_pidEnabled').checked ? 1 : 0)">Set</button>
+                    </div>
+                </div>
+                <div class="param-row" style="padding-top: 12px; border-top: 1px solid var(--border); margin-top: 8px;">
+                    <span class="param-label" style="font-size: 11px; color: var(--text-dim);">Advanced (display only)</span>
+                </div>
+                <div class="param-row"><span class="param-label has-tooltip" data-tooltip="OFF duration = ON x this">Off Multiplier</span><span id="preheat_offMultiplier">--</span></div>
+                <div class="param-row"><span class="param-label has-tooltip" data-tooltip="Preheat cycle timeout">Timeout</span><span id="preheat_timeoutMs">--</span></div>
+                <div class="param-row"><span class="param-label has-tooltip" data-tooltip="Min pump run per preheat cycle">Pump Min</span><span id="preheat_pumpMinMs">--</span></div>
+            </div>
+
+            <div class="card">
+                <h2><span class="icon">🎚️</span> Sensor Calibration (Offsets)</h2>
+                <div class="param-row"><span class="param-label" style="font-size: 11px; color: var(--text-dim);">Offset added to each raw sensor reading. Blank input = leave unchanged.</span></div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Boiler Output reading (sensor/offset/boilerOutput, tenths degC)">Boiler Output Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_boilerOutput" data-topic="params/sensor/offset/boilerOutput" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_boilerOutput')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_boilerOutput')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Boiler Return reading (sensor/offset/boilerReturn, tenths degC)">Boiler Return Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_boilerReturn" data-topic="params/sensor/offset/boilerReturn" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_boilerReturn')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_boilerReturn')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Water Tank reading (sensor/offset/waterTank, tenths degC)">Water Tank Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_waterTank" data-topic="params/sensor/offset/waterTank" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_waterTank')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_waterTank')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Water Output reading (sensor/offset/waterOutput, tenths degC)">Water Output Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_waterOutput" data-topic="params/sensor/offset/waterOutput" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_waterOutput')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_waterOutput')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Water Return reading (sensor/offset/waterReturn, tenths degC)">Water Return Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_waterReturn" data-topic="params/sensor/offset/waterReturn" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_waterReturn')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_waterReturn')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Heating Return reading (sensor/offset/heatingReturn, tenths degC)">Heating Return Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_heatingReturn" data-topic="params/sensor/offset/heatingReturn" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_heatingReturn')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_heatingReturn')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Outside reading (sensor/offset/outside, tenths degC)">Outside Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_outside" data-topic="params/sensor/offset/outside" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_outside')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_outside')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Room reading (sensor/offset/room, tenths degC)">Room Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.1" id="offset_room" data-topic="params/sensor/offset/room" min="-5" max="5">
+                        <span class="unit">°C</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_room')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_room')">S</button>
+                    </div>
+                </div>
+                <div class="param-row">
+                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to pressure (sensor/offset/pressure, hundredths bar)">Pressure Offset</span>
+                    <div class="param-value">
+                        <input type="number" step="0.01" id="offset_pressure" data-topic="params/sensor/offset/pressure" min="-0.5" max="0.5">
+                        <span class="unit">bar</span>
+                        <button class="small" onclick="getParam('params/get/all', 'offset_pressure')">R</button>
+                        <button class="small save" onclick="setParamFromInput('offset_pressure')">S</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1146,8 +1395,9 @@
 
         // Parse day bitmask to string
         function daysToString(bits) {
-            const days = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
-            return days.filter((_, i) => bits & (1 << i)).join(', ') || 'None';
+            // ISO week order (Mon-first); the number is the firmware bit index (bit0=Sun).
+            const days = [['Mo',1],['Tu',2],['We',3],['Th',4],['Fr',5],['Sa',6],['Su',0]];
+            return days.filter(([, i]) => bits & (1 << i)).map(([n]) => n).join(', ') || 'None';
         }
 
         // Update UI with state
@@ -1226,16 +1476,24 @@
                 const heapEl = document.getElementById('health_heap');
                 const heapMinEl = document.getElementById('health_heap_min');
 
-                if (h.heap_free !== undefined) {
-                    heapEl.querySelector('.value').textContent = formatBytes(h.heap_free);
-                    // Warn if heap low
-                    heapEl.classList.toggle('warning', h.heap_free < 50000);
-                    heapEl.classList.toggle('danger', h.heap_free < 30000);
+                // Use real byte-addressable DRAM (heap_dram_blk = largest allocatable block),
+                // NOT heap_free/heap_max_blk which include IRAM (~58kB vs ~7kB real). Thresholds
+                // mirror firmware: warn <2560 B, critical <1536 B.
+                const blk = (h.heap_dram_blk !== undefined) ? h.heap_dram_blk : h.heap_free;
+                if (blk !== undefined) {
+                    heapEl.querySelector('.value').textContent = formatBytes(blk);
+                    heapEl.classList.toggle('warning', blk < 2560);
+                    heapEl.classList.toggle('danger', blk < 1536);
                 }
-                if (h.heap_min !== undefined) {
-                    heapMinEl.querySelector('.value').textContent = formatBytes(h.heap_min);
-                    heapMinEl.classList.toggle('warning', h.heap_min < 40000);
-                    heapMinEl.classList.toggle('danger', h.heap_min < 20000);
+                // heap_dram_min = LOWEST TOTAL FREE DRAM since boot (monotonic, only ever
+                // decreases). Diagnostic only: it will look small on any long uptime and is
+                // NOT an allocation-failure signal, so do NOT color it with the block
+                // thresholds (that caused a false "alarming" red). Alloc Block (heap_dram_blk)
+                // is the live figure the alerts key off.
+                const mn = (h.heap_dram_min !== undefined) ? h.heap_dram_min : h.heap_min;
+                if (mn !== undefined) {
+                    heapMinEl.querySelector('.value').textContent = formatBytes(mn);
+                    heapMinEl.classList.remove('warning', 'danger');
                 }
                 if (h.uptime !== undefined) {
                     document.getElementById('health_uptime').querySelector('.value').textContent = formatUptime(h.uptime);
@@ -1315,61 +1573,120 @@
             // Update heating params (actual device param names)
             if (state.params.heating) {
                 const h = state.params.heating;
-                if (h.targetTemp !== undefined) document.getElementById('heating_targetTemp').placeholder = h.targetTemp;
-                if (h.hysteresis !== undefined) document.getElementById('heating_hysteresis').placeholder = h.hysteresis;
+                if (h.targetTemp !== undefined) document.getElementById('heating_targetTemp').placeholder = tenthsToDeg(h.targetTemp);
+                if (h.hysteresis !== undefined) document.getElementById('heating_hysteresis').placeholder = tenthsToDeg(h.hysteresis);
                 if (h.curveCoeff !== undefined) document.getElementById('heating_curveCoeff').placeholder = h.curveCoeff;
                 if (h.curveShift !== undefined) document.getElementById('heating_curveShift').placeholder = h.curveShift;
-                if (h.burnerLowLimit !== undefined) document.getElementById('heating_burnerLowLimit').placeholder = h.burnerLowLimit;
-                if (h.highLimit !== undefined) document.getElementById('heating_highLimit').placeholder = h.highLimit;
+                if (h.outsideThreshold !== undefined) document.getElementById('heating_outsideThreshold').placeholder = tenthsToDeg(h.outsideThreshold);
+                if (h.roomOverheatMargin !== undefined) document.getElementById('heating_roomOverheatMargin').placeholder = tenthsToDeg(h.roomOverheatMargin);
+                if (h.roomCurveShiftFactor !== undefined) document.getElementById('heating_roomCurveShiftFactor').placeholder = h.roomCurveShiftFactor;
+                if (h.weatherControl !== undefined) document.getElementById('heating_weatherControl').checked = !!h.weatherControl;
+            }
+            // Space-heating/burner clamps (group "h": sLo/sHi/bLo/bHi, tenths degC)
+            if (state.params.h) {
+                const hg = state.params.h;
+                if (hg.sLo !== undefined) document.getElementById('h_sLo').placeholder = tenthsToDeg(hg.sLo);
+                if (hg.sHi !== undefined) document.getElementById('h_sHi').placeholder = tenthsToDeg(hg.sHi);
+                if (hg.bLo !== undefined) document.getElementById('heating_burnerLowLimit').placeholder = tenthsToDeg(hg.bLo);
+                if (hg.bHi !== undefined) document.getElementById('heating_highLimit').placeholder = tenthsToDeg(hg.bHi);
+            }
+            // Water boiler-target clamps (group "w": hLo/hHi, tenths degC)
+            if (state.params.w) {
+                const wg = state.params.w;
+                if (wg.hLo !== undefined) document.getElementById('w_hLo').placeholder = tenthsToDeg(wg.hLo);
+                if (wg.hHi !== undefined) document.getElementById('w_hHi').placeholder = tenthsToDeg(wg.hHi);
+            }
+            // Sensor offsets (group "sensor": keys "offset/<name>"; tenths degC, pressure hundredths bar)
+            if (state.params.sensor) {
+                const sg = state.params.sensor;
+                const off = (k, id, hund) => { const v = sg['offset/' + k]; if (v !== undefined) { const el = document.getElementById(id); if (el) el.placeholder = hund ? hundredthsToVal(v) : tenthsToDeg(v); } };
+                off('boilerOutput','offset_boilerOutput'); off('boilerReturn','offset_boilerReturn');
+                off('waterTank','offset_waterTank'); off('waterOutput','offset_waterOutput');
+                off('waterReturn','offset_waterReturn'); off('heatingReturn','offset_heatingReturn');
+                off('outside','offset_outside'); off('room','offset_room');
+                off('pressure','offset_pressure', true);
             }
 
             // Update wheater params (actual device param names)
             if (state.params.wheater) {
                 const w = state.params.wheater;
-                if (w.tempLimitHigh !== undefined) document.getElementById('wheater_tempLimitHigh').placeholder = w.tempLimitHigh;
-                if (w.tempLimitLow !== undefined) document.getElementById('wheater_tempLimitLow').placeholder = w.tempLimitLow;
+                if (w.tempLimitHigh !== undefined) document.getElementById('wheater_tempLimitHigh').placeholder = tenthsToDeg(w.tempLimitHigh);
+                if (w.tempLimitLow !== undefined) document.getElementById('wheater_tempLimitLow').placeholder = tenthsToDeg(w.tempLimitLow);
                 if (w.tempChargeDelta !== undefined) document.getElementById('wheater_tempChargeDelta').placeholder = w.tempChargeDelta;
                 if (w.heatingRate !== undefined) document.getElementById('wheater_heatingRate').placeholder = w.heatingRate;
                 if (w.priorityEnabled !== undefined) document.getElementById('wheater_priorityEnabled').checked = w.priorityEnabled;
                 // Update safety limits display
                 if (w.tempSafeLimitLow !== undefined) {
-                    document.getElementById('wheater_safeLow').textContent = w.tempSafeLimitLow + '°C';
+                    document.getElementById('wheater_safeLow').textContent = tenthsToDeg(w.tempSafeLimitLow) + '°C';
                 }
                 if (w.tempSafeLimitHigh !== undefined) {
-                    document.getElementById('wheater_safeHigh').textContent = w.tempSafeLimitHigh + '°C';
+                    document.getElementById('wheater_safeHigh').textContent = tenthsToDeg(w.tempSafeLimitHigh) + '°C';
                 }
                 if (w.tempLimitLow !== undefined && w.tempLimitHigh !== undefined) {
-                    document.getElementById('wheater_range').textContent = w.tempLimitLow + ' - ' + w.tempLimitHigh + '°C';
+                    document.getElementById('wheater_range').textContent = tenthsToDeg(w.tempLimitLow) + ' - ' + tenthsToDeg(w.tempLimitHigh) + '°C';
                 }
             }
 
             // Update schedules
-            updateScheduleList(state.schedules || []);
+            updateScheduleList(state.schedules || [], state.schedule_meta);
 
             // Update safety config
             if (state.safety_config) {
                 updateSafetyConfigUI(state.safety_config);
             }
+
+            // Preheat / pump / boiler-pid params (state.params.preheat[key] = {value,min,max,...})
+            if (state.params && state.params.preheat) {
+                const ph = state.params.preheat;
+                const val = (k) => (ph[k] && ph[k].value !== undefined) ? ph[k].value : undefined;
+                if (val('enabled') !== undefined) document.getElementById('preheat_enabled').checked = !!val('enabled');
+                if (val('pidEnabled') !== undefined) document.getElementById('preheat_pidEnabled').checked = !!val('pidEnabled');
+                if (val('safeDiff') !== undefined) document.getElementById('preheat_safeDiff').placeholder = (val('safeDiff') / 10).toFixed(1);
+                if (val('maxCycles') !== undefined) document.getElementById('preheat_maxCycles').placeholder = val('maxCycles');
+                if (val('cooldownMs') !== undefined) document.getElementById('preheat_cooldownMs').placeholder = Math.round(val('cooldownMs') / 1000);
+                if (val('offMultiplier') !== undefined) document.getElementById('preheat_offMultiplier').textContent = val('offMultiplier');
+                if (val('timeoutMs') !== undefined) document.getElementById('preheat_timeoutMs').textContent = Math.round(val('timeoutMs') / 1000) + ' s';
+                if (val('pumpMinMs') !== undefined) document.getElementById('preheat_pumpMinMs').textContent = (val('pumpMinMs') / 1000).toFixed(1) + ' s';
+            }
         }
 
         // Update schedule list
-        function updateScheduleList(schedules) {
+        function updateScheduleList(schedules, meta) {
             const list = document.getElementById('scheduleList');
             if (!schedules || schedules.length === 0) {
                 list.innerHTML = '<p style="color: var(--text-dim); text-align: center;">No schedules configured</p>';
                 return;
             }
-
-            list.innerHTML = schedules.map((s, i) => `
-                <div class="schedule-item">
+            // List format: {id,name,enabled,type:'water'|'space',days(bitmask bit0=Sun),start,end}
+            // start/end are packed (hour<<8)|minute.
+            const fmt = (v) => (v === undefined || v === null) ? '--:--'
+                : String((v >> 8) & 0xFF).padStart(2,'0') + ':' + String(v & 0xFF).padStart(2,'0');
+            let html = schedules.map((s) => {
+                const start = (s.start !== undefined) ? fmt(s.start)
+                    : `${String(s.startHour).padStart(2,'0')}:${String(s.startMinute).padStart(2,'0')}`;
+                const end = (s.end !== undefined) ? fmt(s.end)
+                    : `${String(s.endHour).padStart(2,'0')}:${String(s.endMinute).padStart(2,'0')}`;
+                const on = s.enabled !== false;
+                const esc = (x) => String(x).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+                const label = (s.name ? esc(s.name) + ' · ' : '') + esc(s.type || 'water');
+                const toggle = (s.id !== undefined)
+                    ? `<label style="margin-right:8px;font-size:12px;white-space:nowrap;cursor:pointer;"><input type="checkbox" ${on ? 'checked' : ''} onchange="setScheduleEnabled(${s.id}, this.checked)"> on</label>`
+                    : '';
+                const rm = (s.id !== undefined) ? `<button class="small danger" onclick="removeSchedule(${s.id})">✕</button>` : '';
+                return `
+                <div class="schedule-item" style="${on ? '' : 'opacity:0.5;'}">
                     <div class="info">
-                        <div class="type">${s.type || 'water'}</div>
-                        <div class="time">${String(s.startHour).padStart(2,'0')}:${String(s.startMinute).padStart(2,'0')} - ${String(s.endHour).padStart(2,'0')}:${String(s.endMinute).padStart(2,'0')}</div>
+                        <div class="type">${label}</div>
+                        <div class="time">${start} - ${end}</div>
                         <div class="days">${daysToString(s.days)}</div>
                     </div>
-                    <button class="small danger" onclick="removeSchedule(${i})">✕</button>
-                </div>
-            `).join('');
+                    ${toggle}${rm}
+                </div>`;
+            }).join('');
+            if (meta && meta.count != null && meta.total != null && meta.count < meta.total) {
+                html += `<p style="color: var(--warning); text-align:center; font-size:12px;">Showing ${meta.count} of ${meta.total} (reply size-capped)</p>`;
+            }
+            list.innerHTML = html;
         }
 
         // Fetch state from server
@@ -1384,7 +1701,55 @@
         }
 
         // Set parameter
-        async function setParam(topic, value) {
+        // The ESP32 firmware represents these Temperature_t params on boiler/params/...
+        // as integer tenths-of-degC (e.g. 500 == 50.0 degC). Display them divided by 10
+        // and publish them multiplied by 10 (rounded to integer tenths). Every other
+        // param (PID gains, curve coeff/shift, charge delta, heating rate, autotune) is a
+        // real float and passes through unchanged.
+        // TENTHS: integer tenths-of-degC (500 -> 50.0). HUNDREDTHS: integer hundredths
+        // (pressure offset, bar). Everything else (curve coeff/shift, roomCurveShiftFactor,
+        // charge delta, heating rate, pid gains, autotune, bools) is real and passes through.
+        const TENTHS_TEMP_PARAMS = new Set([
+            'heating/targetTemp',
+            'heating/hysteresis',
+            'heating/outsideThreshold',
+            'heating/roomOverheatMargin',
+            'wheater/tempLimitLow',
+            'wheater/tempLimitHigh',
+            'wheater/tempSafeLimitLow',
+            'wheater/tempSafeLimitHigh',
+            'w/hLo', 'w/hHi',
+            'h/sLo', 'h/sHi', 'h/bLo', 'h/bHi',
+            'sensor/offset/boilerOutput', 'sensor/offset/boilerReturn',
+            'sensor/offset/waterTank', 'sensor/offset/waterOutput',
+            'sensor/offset/waterReturn', 'sensor/offset/heatingReturn',
+            'sensor/offset/outside', 'sensor/offset/room',
+        ]);
+        const HUNDREDTHS_PARAMS = new Set(['sensor/offset/pressure']);
+        function paramPath(topic) {
+            // 'params/h/bLo' | 'params/set/h/bLo' | 'h/bLo' -> 'h/bLo'
+            return String(topic).replace(/^params\/(?:set\/|get\/)?/, '');
+        }
+        function isTenthsTemp(topic) { return TENTHS_TEMP_PARAMS.has(paramPath(topic)); }
+        function isHundredths(topic) { return HUNDREDTHS_PARAMS.has(paramPath(topic)); }
+        function tenthsToDeg(raw) { return (Number(raw) / 10).toFixed(1); }
+        function degToTenths(deg) { return Math.round(Number(deg) * 10); }
+        function hundredthsToVal(raw) { return (Number(raw) / 100).toFixed(2); }
+        function valToHundredths(v) { return Math.round(Number(v) * 100); }
+        // scale a UI value to the integer the firmware expects on the wire
+        function scaleForWire(topic, value) {
+            if (isTenthsTemp(topic)) return degToTenths(value);
+            if (isHundredths(topic)) return valToHundredths(value);
+            return value;
+        }
+        // format a raw firmware value for display in the UI
+        function dispRaw(topic, raw) {
+            if (isTenthsTemp(topic)) return tenthsToDeg(raw);
+            if (isHundredths(topic)) return hundredthsToVal(raw);
+            return raw;
+        }
+
+        async function setParam(topic, value, displayValue) {
             try {
                 const response = await fetch(apiUrl('/api/param'), {
                     method: 'POST',
@@ -1393,7 +1758,7 @@
                 });
                 const result = await response.json();
                 if (result.success) {
-                    showToast(`Set ${topic.split('/').pop()} = ${value}`);
+                    showToast(`Set ${topic.split('/').pop()} = ${displayValue !== undefined ? displayValue : value}`);
                 } else {
                     showToast(result.error, true);
                 }
@@ -1434,7 +1799,10 @@
                 showToast('No value to set', true);
                 return;
             }
-            await setParam(topic, value);
+            // tenths/hundredths params are scaled to integers on publish; the toast still
+            // shows the human value the user entered.
+            const wireValue = scaleForWire(topic, value);
+            await setParam(topic, wireValue, value);
             input.value = '';  // Clear input after setting
         }
 
@@ -1458,24 +1826,37 @@
 
         // Add schedule
         async function addSchedule() {
-            const type = document.getElementById('sched_type').value;
-            const start = document.getElementById('sched_start').value.split(':');
-            const end = document.getElementById('sched_end').value.split(':');
+            const name = (document.getElementById('sched_name').value || '').trim();
+            if (!name) { showToast('Schedule name is required', true); return; }
+            const typeSel = document.getElementById('sched_type').value; // 'water' | 'heating'
+            const startH = parseInt(document.getElementById('sched_start_h').value, 10);
+            const startM = parseInt(document.getElementById('sched_start_m').value, 10);
+            const endH = parseInt(document.getElementById('sched_end_h').value, 10);
+            const endM = parseInt(document.getElementById('sched_end_m').value, 10);
+            const inRange = (h, m) => h >= 0 && h <= 23 && m >= 0 && m <= 59;
+            if ([startH, startM, endH, endM].some(isNaN) || !inRange(startH, startM) || !inRange(endH, endM)) {
+                showToast('Enter a valid 24h time (hour 0-23, minute 0-59)', true); return;
+            }
 
+            // days bitmask, bit0 = Sunday (firmware rejects the array form)
             let days = 0;
             document.querySelectorAll('.day-btn.active').forEach(btn => {
                 days |= (1 << parseInt(btn.dataset.day));
             });
+            const tt = parseInt(document.getElementById('sched_target').value);
 
+            // Exact firmware add payload (snake_case; type uses the *_heating names)
             const schedule = {
-                type,
-                startHour: parseInt(start[0]),
-                startMinute: parseInt(start[1]),
-                endHour: parseInt(end[0]),
-                endMinute: parseInt(end[1]),
+                name,
+                type: typeSel === 'heating' ? 'space_heating' : 'water_heating',
+                start_hour: startH,
+                start_minute: startM,
+                end_hour: endH,
+                end_minute: endM,
                 days,
                 enabled: true
             };
+            if (!isNaN(tt)) schedule.target_temp = tt;
 
             try {
                 const response = await fetch(apiUrl('/api/schedule/add'), {
@@ -1494,21 +1875,72 @@
         }
 
         // Remove schedule
-        async function removeSchedule(index) {
+        async function removeSchedule(id) {
             try {
                 const response = await fetch(apiUrl('/api/schedule/remove'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ index })
+                    body: JSON.stringify({ id })
                 });
                 const result = await response.json();
                 if (result.success) {
                     showToast('Schedule removed');
                     setTimeout(fetchState, 500);
+                } else {
+                    showToast(result.error || 'Remove failed', true);
                 }
             } catch (e) {
                 showToast('Failed to remove schedule', true);
             }
+        }
+
+        // Enable/disable a schedule by firmware id (cmd/scheduler/enable {id,enabled})
+        async function setScheduleEnabled(id, enabled) {
+            try {
+                const r = await fetch(apiUrl('/api/schedule/enable'), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, enabled })
+                });
+                const res = await r.json();
+                if (res.success) { showToast(`Schedule ${id} ${enabled ? 'enabled' : 'disabled'}`); setTimeout(fetchState, 600); }
+                else showToast(res.error || 'Toggle failed', true);
+            } catch (e) { showToast('Failed to toggle schedule', true); }
+        }
+
+        // Preheat / pump-cooldown / boiler-pid params (set via cmd/config, read via params).
+        const PREHEAT_GROUP = { enabled: 'preheat', offMultiplier: 'preheat', maxCycles: 'preheat',
+            timeoutMs: 'preheat', pumpMinMs: 'preheat', safeDiff: 'preheat', cooldownMs: 'pump', pidEnabled: 'boiler' };
+        // Resolve a preheat numeric field to a wire value: use the typed value,
+        // else the placeholder (last device value). Returns null if neither is a number,
+        // so an empty field never silently writes 0.
+        function preheatWire(id, mult) {
+            const el = document.getElementById(id);
+            const raw = (el && el.value !== '') ? el.value : (el ? el.placeholder : '');
+            if (raw === '' || raw == null || isNaN(parseFloat(raw))) return null;
+            return Math.round(parseFloat(raw) * mult);
+        }
+        async function setPreheat(key, value) {
+            if (value === null || value === undefined || (typeof value === 'number' && isNaN(value))) {
+                showToast('No value to set', true); return;
+            }
+            try {
+                const r = await fetch(apiUrl('/api/preheat/set'), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key, value })
+                });
+                const res = await r.json();
+                if (res.success) { showToast(`Set ${key} = ${value}`); setTimeout(fetchState, 700); }
+                else showToast(res.error || 'Set failed', true);
+            } catch (e) { showToast('Failed to set preheat param', true); }
+        }
+        async function getPreheat(key) {
+            try {
+                await fetch(apiUrl('/api/command'), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic: `params/get/${PREHEAT_GROUP[key]}/${key}`, payload: '' })
+                });
+                showToast(`Requested ${key}`); setTimeout(fetchState, 500);
+            } catch (e) { showToast('Failed to read param', true); }
         }
 
         // Refresh parameters
@@ -1554,18 +1986,26 @@
                 { id: 'heating_hysteresis', topic: 'params/heating/hysteresis' },
                 { id: 'heating_curveCoeff', topic: 'params/heating/curveCoeff' },
                 { id: 'heating_curveShift', topic: 'params/heating/curveShift' },
-                { id: 'heating_burnerLowLimit', topic: 'params/heating/burnerLowLimit' },
-                { id: 'heating_highLimit', topic: 'params/heating/highLimit' }
+                { id: 'heating_burnerLowLimit', topic: 'params/h/bLo' },
+                { id: 'heating_highLimit', topic: 'params/h/bHi' },
+                { id: 'h_sLo', topic: 'params/h/sLo' },
+                { id: 'h_sHi', topic: 'params/h/sHi' },
+                { id: 'heating_outsideThreshold', topic: 'params/heating/outsideThreshold' },
+                { id: 'heating_roomOverheatMargin', topic: 'params/heating/roomOverheatMargin' },
+                { id: 'heating_roomCurveShiftFactor', topic: 'params/heating/roomCurveShiftFactor' }
             ];
             let count = 0;
             for (const p of params) {
                 const input = document.getElementById(p.id);
                 const value = input.value || input.placeholder;
                 if (value && value !== '--') {
-                    await setParam(p.topic, value);
+                    // tenths/hundredths params scale up on publish; floats pass through
+                    await setParam(p.topic, scaleForWire(p.topic, value), value);
                     count++;
                 }
             }
+            const _wc = document.getElementById('heating_weatherControl');
+            if (_wc) { await setParam('params/heating/weatherControl', _wc.checked ? 'true' : 'false'); count++; }
             showToast(`Set ${count} heating parameters`);
         }
 
@@ -1597,7 +2037,8 @@
                 const input = document.getElementById(p.id);
                 const value = input.value || input.placeholder;
                 if (value && value !== '--') {
-                    await setParam(p.topic, value);
+                    // tenths/hundredths params scale up on publish; floats pass through
+                    await setParam(p.topic, scaleForWire(p.topic, value), value);
                     count++;
                 }
             }
@@ -1680,17 +2121,10 @@
             await setParam('params/pid/autotune/method', select.value);
         }
 
-        // Setup input change handlers
-        document.querySelectorAll('input[data-topic]').forEach(input => {
-            input.addEventListener('change', () => {
-                const topic = input.dataset.topic;
-                const value = input.value;
-                if (value !== '') {
-                    setParam(topic, value);
-                    input.value = '';
-                }
-            });
-        });
+        // NOTE: no global change-handler auto-send. Each data-topic input has an
+        // explicit "S" button (setParamFromInput) that scales via scaleForWire.
+        // A blur/Enter auto-send here published raw UNSCALED values (e.g. 50 -> 5.0C),
+        // bypassing scaling and firing on accidental focus changes. Removed 2026-09-16.
 
         // Safety config functions
         async function setSafetyConfig(param, value) {
@@ -1732,6 +2166,9 @@
             }
             if (config.post_purge !== undefined) {
                 document.getElementById('safety_post_purge').value = config.post_purge / 1000;
+            }
+            if (config.thermal_shock_c !== undefined) {
+                document.getElementById('safety_thermal_shock').value = (config.thermal_shock_c / 10).toFixed(1);
             }
         }
 
