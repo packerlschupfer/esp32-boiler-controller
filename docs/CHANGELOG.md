@@ -22,6 +22,60 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Added: frost protection, which did not exist
+
+Nothing in the firmware reacted to a **low** temperature. `FREEZE_PROTECTION_TEMP_C` (5.0 °C,
+"Anti-freeze activation") was referenced nowhere, `wheater/tempSafeLimitLow` ("prevent
+freezing of the boiler") was read by nothing and has now been removed, `SafetyInterlocks`
+bounds pressure from below but not temperature, and `MIN_BOILER_TEMP_C` is a floor on
+requested setpoints rather than a trigger. What kept the water warm was a side effect of
+normal operation - the tank recharges below `wheater/tempLimitLow` (45.0, so 40 K of margin)
+and the house is held at its room target - and both stop the moment heating and water are
+switched off.
+
+`FrostProtectionPolicy` (header-only, natively testable) now latches a demand when a **valid**
+flow or tank reading falls to **5.0 °C**, and releases when everything readable is back above
+**10.0 °C**. The 5 K of hysteresis stops a thermometer sitting on the trigger from chattering
+the burner. The trigger value is `static_assert`-ed equal to `FREEZE_PROTECTION_TEMP_C`, so
+that constant finally has logic behind it.
+
+Two asymmetries, both deliberate:
+
+- **Triggering requires a valid reading.** `TEMP_INVALID` is `INT16_MIN`, i.e. -3276.8 °C,
+  which would otherwise fire the burner instantly and permanently.
+- **Releasing treats an invalid reading as not-blocking.** If every reading goes invalid
+  during a frost burn the demand drops rather than firing blind; stopping is the safe
+  direction when the controller can no longer see what it is heating, and the sensor-failure
+  machinery is better placed to react.
+
+What the demand overrides, in `HeatingControlTask`: the heating switch (`HEATING_ENABLED`),
+the remote OFF override, and the room being satisfied - the three "nobody wants heat"
+reasons. Nothing else. A frost burn still yields to water priority, still stops on a sensor
+failure, still obeys the pressure interlock and anti-flapping, and asks for the **flow floor**
+(`h/sLo`) rather than the weather curve - the curve is a function of outside temperature, so
+at frost temperatures it would ask for a high flow and heat the house, which is the opposite
+of the intent.
+
+**It does not override `BOILER_ENABLED`.** A drained-for-service system is a likely reason to
+switch the boiler off, and firing a burner into a drained boiler is worse than frost. The
+pressure interlock would probably catch that, but "probably" plus a never-calibrated pressure
+channel is not a safety argument.
+
+**What it cannot cover, and why that matters more than what it can:**
+
+- **A dead controller.** `CH1 BURNER_ENABLE` is a normally-**open** relay contact, so with the
+  ESP32 unpowered, crashed or in emergency stop the burner circuit is open and the boiler
+  cannot fire at all. The original Vaillant controller is not in the loop; the STB and tandem
+  thermostat can only ever *stop* the burner. Closing that gap needs hardware - a mechanical
+  frost thermostat wired around the relay.
+- **A dead room sensor.** `TemperatureSensorFallback::hasRequiredSensors()` requires
+  `roomTempValid` in `SPACE_HEATING`, so a room-sensor failure stops the burner however cold
+  the water is. This guard deliberately does not bypass the sensor fallback.
+
+So it covers one scenario - the system is healthy and simply is not heating - which is also
+the likely one. Seven native tests (324 -> 331), including that the guard is **inert at the
+real readings** of a working system, which is what makes it safe to add to the heating path.
+
 ### Removed: `h/bHi` and `wheater/tempSafeLimitLow`
 
 Both were registered, range-checked, persisted to NVS and published in their status group -

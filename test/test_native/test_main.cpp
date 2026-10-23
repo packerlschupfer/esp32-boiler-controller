@@ -45,6 +45,15 @@ void test_room_fallback_with_nothing_remembered_uses_target_then_nominal();
 void test_room_fallback_survives_the_millis_rollover();
 void test_room_fallback_recording_a_new_reading_refreshes_the_age();
 void test_room_fallback_never_returns_an_invalid_marker();
+
+// Frost protection
+void test_frost_is_inert_in_a_working_system();
+void test_frost_triggers_on_either_reading();
+void test_frost_holds_through_the_hysteresis_band();
+void test_frost_never_triggers_on_an_invalid_reading();
+void test_frost_releases_rather_than_firing_blind();
+void test_frost_one_cold_sensor_holds_while_the_other_is_warm();
+void test_frost_thresholds_are_the_agreed_numbers();
 void test_sensor_offset_map_places_each_field_on_its_channel();
 void test_sensor_offset_map_outside_is_ch3_not_ch6();
 void test_sensor_offset_map_never_offsets_the_pressure_channel();
@@ -589,6 +598,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_room_fallback_survives_the_millis_rollover);
     RUN_TEST(test_room_fallback_recording_a_new_reading_refreshes_the_age);
     RUN_TEST(test_room_fallback_never_returns_an_invalid_marker);
+
+    RUN_TEST(test_frost_is_inert_in_a_working_system);
+    RUN_TEST(test_frost_triggers_on_either_reading);
+    RUN_TEST(test_frost_holds_through_the_hysteresis_band);
+    RUN_TEST(test_frost_never_triggers_on_an_invalid_reading);
+    RUN_TEST(test_frost_releases_rather_than_firing_blind);
+    RUN_TEST(test_frost_one_cold_sensor_holds_while_the_other_is_warm);
+    RUN_TEST(test_frost_thresholds_are_the_agreed_numbers);
     RUN_TEST(test_sensor_offset_map_places_each_field_on_its_channel);
     RUN_TEST(test_sensor_offset_map_outside_is_ch3_not_ch6);
     RUN_TEST(test_sensor_offset_map_never_offsets_the_pressure_channel);
