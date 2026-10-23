@@ -200,17 +200,28 @@ Modbus room sensor on a shared bus stopped the burner, while the surrounding cod
 claim the counters exist to prevent "mode chattering when sensors are intermittently
 failing". The trace above is that chatter, four transitions in five seconds.
 
-**`INVALID_COUNT_TO_SHUTDOWN` is now 6** (user decision, 2026-10-23). The counter ticks once
-per temperature-update event, which `BurnerControlTask` raises on every sensor read - MB8ART
-every 2.5 s, the room sensor every 5 s - so 6 is roughly **15-30 s** of continuous failure.
-Six rather than the original two because the room sensor's own driver already needs 3
-consecutive failed reads at 5 s each before it marks the value invalid, so by the time
-`roomTempValid` goes false the sensor has been failing ~15 s and a 2-check debounce adds
-little. `VALID_COUNT_TO_ENTER_NORMAL` stays at 1: slow to shut down, immediate to recover.
+**`INVALID_COUNT_TO_SHUTDOWN` is now 3** (user decision, 2026-10-23), about **7.5 s** of
+continuous failure. `VALID_COUNT_TO_ENTER_NORMAL` stays at 1: slow to shut down, immediate
+to recover.
+
+The cadence is worth stating precisely, because it is not the obvious one. Evaluation is
+driven by `BurnerControlTask`'s `TEMP_UPDATE_BITS`, which contains **MB8ART channels only**
+(`BOILER_RETURN`, `WATER_TANK` and the three error bits, set on every read). The ANDRTF3
+room sensor raises `SensorUpdate::INSIDE` / `INSIDE_ERROR`, and neither is in that mask - so
+the room sensor's own 5 s cycle does **not** tick this counter; a room failure is noticed on
+the next MB8ART read like everything else. `MB8ART_SENSOR_READ_INTERVAL_MS` is 2500, so one
+tick is 2.5 s.
+
+Three rather than two because the room sensor's driver already needs 3 consecutive failed
+reads at 5 s each before it marks the value invalid - by then the sensor has been failing
+~15 s, and the debounce here only has to cover the dropout itself. The one on record was
+~5 s of invalid room data (08:34:14.9 to 08:34:19.9), i.e. 2 ticks, so 3 covers it with a
+tick to spare.
 
 Known consequence, recorded rather than fixed: the counter is **shared by all required
 sensors**, so a missing boiler-*output* reading - the one that leaves overheat protection
-blind and sets `Error::SENSOR_FAILURE` - now also takes 15-30 s longer to escalate. The
+blind and sets `Error::SENSOR_FAILURE` - now also takes ~7.5 s longer to escalate. Keeping
+the number as low as still works is the reason to prefer 3 over a wider debounce. The
 boiler's own aquastat and manual-reset STB are independent of the firmware, and
 `SafetyInterlocks`' 110.0 C check does not depend on this mode, so the physical safety chain
 is unchanged. Splitting the debounce per sensor class (short for boiler output, long for
