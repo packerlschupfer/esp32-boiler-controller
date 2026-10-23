@@ -32,7 +32,6 @@ struct SystemSettings {
     Temperature_t wHeaterConfTempLimitHigh;  // Stop water heating when tank rises above this (default 65°C)
     float wHeaterConfTempChargeDelta;        // Desired differential between boiler water and circulating water temperatures (kept as float)
     Temperature_t wHeaterConfTempSafeLimitHigh; // Safety limit to prevent overheating of the boiler
-    Temperature_t wHeaterConfTempSafeLimitLow;  // Safety limit to prevent freezing of the boiler
     float waterHeatingRate;              // Water heating rate in °C per minute (for pre-heating calculations)
 
     // Heating Configuration
@@ -41,9 +40,15 @@ struct SystemSettings {
     float heating_curve_coeff;             // Heating curve coefficient (kept as float for calculations)
     Temperature_t heating_hysteresis;      // Hysteresis for space heating control
 
-    // Global Burner Limits (All Modes)
-    Temperature_t burner_low_limit;        // Minimum burner temperature (all modes)
-    Temperature_t burner_high_limit;       // Maximum burner temperature (all modes)
+    // The heating curve's lower clamp. Named "burner_low_limit" and filed under global
+    // limits, but it is neither global nor a burner limit: HeatingCurve::target() takes it as
+    // the floor and nothing else reads it. h/sLo is the floor that actually decides, applied
+    // afterwards by BurnerRequestManager - see HeatingControlTask's note on the two of them.
+    // The name is kept because the NVS key, MQTT topic and HA entity are all built from it.
+    // Its counterpart burner_high_limit was REMOVED 2026-10-23 - it was read by nothing, and
+    // the ceilings that matter are heating/water_high_limit per mode plus the
+    // MAX_BOILER_TEMP_C constant.
+    Temperature_t burner_low_limit;
 
     // Space Heating Limits (Mode-Specific)
     Temperature_t heating_low_limit;       // Minimum for space heating
@@ -179,14 +184,12 @@ struct SystemSettings {
         Temperature_t wHeaterConfTempLimitHigh = tempFromFloat(65.0f),
         float wHeaterConfTempChargeDelta = 10.0f,
         Temperature_t wHeaterConfTempSafeLimitHigh = tempFromFloat(80.0f),
-        Temperature_t wHeaterConfTempSafeLimitLow = tempFromFloat(5.0f),
         float waterHeatingRate = 1.0f,
         Temperature_t targetTemperatureInside = tempFromFloat(18.0f),
         float heating_curve_shift = 0.0f,   // 2026-09-15: was 20.0 with the 10x too weak curve
         float heating_curve_coeff = 1.4f,   // was 2.0
         Temperature_t heating_hysteresis = tempFromFloat(0.5f),
         Temperature_t burner_low_limit = tempFromFloat(38.0f),   // Global burner minimum
-        Temperature_t burner_high_limit = tempFromFloat(110.0f), // Global burner maximum
         Temperature_t heating_low_limit = tempFromFloat(38.0f),  // Space heating minimum (= h/bLo)
         Temperature_t heating_high_limit = tempFromFloat(75.0f), // Space heating maximum
         Temperature_t water_heating_low_limit = tempFromFloat(40.0f),  // Water heating minimum
@@ -206,14 +209,12 @@ struct SystemSettings {
           wHeaterConfTempLimitHigh(wHeaterConfTempLimitHigh),
           wHeaterConfTempChargeDelta(wHeaterConfTempChargeDelta),
           wHeaterConfTempSafeLimitHigh(wHeaterConfTempSafeLimitHigh),
-          wHeaterConfTempSafeLimitLow(wHeaterConfTempSafeLimitLow),
           waterHeatingRate(waterHeatingRate),
           targetTemperatureInside(targetTemperatureInside),
           heating_curve_shift(heating_curve_shift),
           heating_curve_coeff(heating_curve_coeff),
           heating_hysteresis(heating_hysteresis),
           burner_low_limit(burner_low_limit),
-          burner_high_limit(burner_high_limit),
           heating_low_limit(heating_low_limit),
           heating_high_limit(heating_high_limit),
           water_heating_low_limit(water_heating_low_limit),

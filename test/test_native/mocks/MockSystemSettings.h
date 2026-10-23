@@ -22,7 +22,6 @@ struct SystemSettings {
     Temperature_t wHeaterConfTempLimitHigh;     // Stop water heating above this (default 65°C)
     float wHeaterConfTempChargeDelta;           // Boiler-to-circulating temp differential
     Temperature_t wHeaterConfTempSafeLimitHigh; // Safety limit to prevent overheating
-    Temperature_t wHeaterConfTempSafeLimitLow;  // Safety limit to prevent freezing
     float waterHeatingRate;                     // °C per minute for pre-heating calculations
 
     // ========== Heating Configuration ==========
@@ -33,7 +32,6 @@ struct SystemSettings {
 
     // ========== Global Burner Limits (All Modes) ==========
     Temperature_t burner_low_limit;             // Minimum burner temperature
-    Temperature_t burner_high_limit;            // Maximum burner temperature
 
     // ========== Space Heating Limits (Mode-Specific) ==========
     Temperature_t heating_low_limit;            // Minimum for space heating
@@ -109,7 +107,6 @@ struct SystemSettings {
         wHeaterConfTempLimitHigh(tempFromFloat(65.0f)),
         wHeaterConfTempChargeDelta(10.0f),
         wHeaterConfTempSafeLimitHigh(tempFromFloat(80.0f)),
-        wHeaterConfTempSafeLimitLow(tempFromFloat(5.0f)),
         waterHeatingRate(1.0f),
         // Heating
         targetTemperatureInside(tempFromFloat(18.0f)),
@@ -118,7 +115,6 @@ struct SystemSettings {
         heating_hysteresis(tempFromFloat(0.5f)),
         // Burner limits
         burner_low_limit(tempFromFloat(38.0f)),
-        burner_high_limit(tempFromFloat(110.0f)),
         heating_low_limit(tempFromFloat(40.0f)),
         heating_high_limit(tempFromFloat(75.0f)),
         water_heating_low_limit(tempFromFloat(40.0f)),

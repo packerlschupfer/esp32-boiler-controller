@@ -22,6 +22,51 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Removed: `h/bHi` and `wheater/tempSafeLimitLow`
+
+Both were registered, range-checked, persisted to NVS and published in their status group -
+and **read by nothing**. A parameter that accepts a value and changes no behaviour is worse
+than no parameter, because someone will eventually set it and trust it. Same reasoning as
+the `sensor/offset/waterOutput` removal on 2026-10-19, and like that one this is a genuine
+removal: a client setting either key now gets a rejection rather than a silent no-op.
+
+**`h/bHi`** (`burner_high_limit`, registered 700-1100, default 110.0) was filed under
+"Global Burner Limits (All Modes)". Wiring it was considered and rejected:
+
+- It gains no capability. The ceiling that decides per mode is `h/sHi` (50-90, default 75.0)
+  or `w/hHi` (60-100, default 90.0); the absolute ceiling is `MAX_BOILER_TEMP_C` 110.0,
+  enforced in `BurnerRequestManager` and `SafetyInterlocks` and now also backing the dead
+  band's `MAX_OFF_THRESHOLD` through a `static_assert`. `h/bHi`'s range stops at exactly that
+  constant, so it could only duplicate it or undercut it.
+- It would be inert at the defaults (110 > 90 > 75) and invisible when not: lowering it would
+  silently override the mode limit the user set elsewhere, with nothing showing which won.
+  This project has already paid for that shape once - `h/sLo` against `h/bLo` had the
+  diagnostics topic reporting `cmd` 380 where the boiler commanded 400 (fixed 2026-10-18),
+  and the note at `HeatingControlTask.cpp` still warns the two only agree *at the defaults*.
+- An absolute ceiling should not be writable at runtime at all.
+
+**`wheater/tempSafeLimitLow`** (`wHeaterConfTempSafeLimitLow`, 0-10.0, default 5.0) was
+commented "Safety limit to prevent freezing of the boiler". Its sibling
+`tempSafeLimitHigh` is live - `BurnerControlTask` and `BoilerTempControlTask` both read it as
+`safetyConfig.maxWaterTemp`. The low one had no reader, and `FREEZE_PROTECTION_TEMP_C` (5.0,
+"Anti-freeze activation") is referenced nowhere either, so **tank frost protection was never
+implemented**. What does exist is the scheduler's FROST space mode, which sets the room target
+to `DEFAULT_FROST_TEMP` 10.0 and lets normal control hold it - frost protection for the house,
+not for the tank. Removing the parameter does not remove a feature; it stops advertising one
+that was never there.
+
+`h/bLo` stays, because it is genuinely read: `HeatingCurve::target()` takes it as the curve's
+lower clamp. Its name oversells it - it is the curve floor, not a global burner minimum, and
+`h/sLo` is the floor that actually decides afterwards - but the NVS key, MQTT topic and HA
+entity are all built from it, so the name stays and the comment now says what it is.
+
+Consumer side: the add-on panel's **High Limit** control writes `params/h/bHi` with a 70-110
+range, so it was writing a dead parameter *and* offering a range the live ceiling (`h/sHi`,
+50-90) would reject. Repointing it is a Home Assistant-side change. The panel degrades
+safely in the meantime - every field it fills is guarded with `!== undefined`, so the removed
+keys simply stop updating two displays. No Home Assistant *entity* referenced either key
+(`h/bHi`'s was removed on 2026-10-18).
+
 ### An absent sensor key now means "no reading", on every temperature
 
 `boiler/status/sensors` published `t.bo`, `t.br`, `t.wt` and `t.o` **unconditionally**, so

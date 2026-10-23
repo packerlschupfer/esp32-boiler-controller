@@ -29,8 +29,8 @@
 #   get/all              - Request all parameter values (no set/ prefix)
 #   save                 - Save all parameters to NVS (no set/ prefix)
 #   wheater/priorityEnabled, tempLimitLow, tempLimitHigh, tempChargeDelta,
-#           tempSafeLimitHigh, tempSafeLimitLow, heatingRate
-#   heating/targetTemp, curveShift, curveCoeff, hysteresis  (burner min/max: h/bLo, h/bHi)
+#           tempSafeLimitHigh, heatingRate
+#   heating/targetTemp, curveShift, curveCoeff, hysteresis  (curve floor: h/bLo)
 #   pid/spaceHeating/kp, ki, kd
 #   pid/waterHeater/kp, ki, kd
 #   sensor/offset/boilerOutput, boilerReturn, waterTank, outside, room, pressure
@@ -928,7 +928,8 @@ button:
 # automation "Boiler: refresh parameter groups" requests params/get/<group> on HA
 # start, on boiler online, and after any per-parameter change.
 # Integer params are tenths of degC on the wire: shown /10, sent *10 (command_template).
-# Burner Low/High limit live in group "h" (h/bLo, h/bHi), not heating/*.
+# The curve floor lives in group "h" as h/bLo, not heating/*. h/bHi was removed from the
+# firmware on 2026-10-23 - it was read by nothing; h/sHi is the space-heating ceiling.
 # Use boiler/params/save to persist changes to NVS
 # =============================================================================
 

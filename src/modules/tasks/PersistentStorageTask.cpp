@@ -267,12 +267,10 @@ void PersistentStorageTask(void* pvParameters) {
     static int32_t tankLow_i32 = static_cast<int32_t>(settings.wHeaterConfTempLimitLow);
     static int32_t tankHigh_i32 = static_cast<int32_t>(settings.wHeaterConfTempLimitHigh);
     static int32_t tankSafeHigh_i32 = static_cast<int32_t>(settings.wHeaterConfTempSafeLimitHigh);
-    static int32_t tankSafeLow_i32 = static_cast<int32_t>(settings.wHeaterConfTempSafeLimitLow);
 
     storage->registerInt("wheater/tempLimitLow", &tankLow_i32, 300, 600, "Tank start heating (tenths °C)");
     storage->registerInt("wheater/tempLimitHigh", &tankHigh_i32, 500, 850, "Tank stop heating (tenths °C)");
     storage->registerInt("wheater/tempSafeLimitHigh", &tankSafeHigh_i32, 600, 950, "Tank safety max (tenths °C)");
-    storage->registerInt("wheater/tempSafeLimitLow", &tankSafeLow_i32, 0, 100, "Tank safety min (tenths °C)");
 
     storage->setOnChange("wheater/tempLimitLow", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempLimitLow = static_cast<Temperature_t>(tankLow_i32);
@@ -289,12 +287,6 @@ void PersistentStorageTask(void* pvParameters) {
     storage->setOnChange("wheater/tempSafeLimitHigh", [](const std::string& name, const void*) {
         SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh = static_cast<Temperature_t>(tankSafeHigh_i32);
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), tankSafeHigh_i32);
-        parametersChanged = true;
-        lastChangeTime = millis();
-    });
-    storage->setOnChange("wheater/tempSafeLimitLow", [](const std::string& name, const void*) {
-        SRP::getSystemSettings().wHeaterConfTempSafeLimitLow = static_cast<Temperature_t>(tankSafeLow_i32);
-        LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), tankSafeLow_i32);
         parametersChanged = true;
         lastChangeTime = millis();
     });
@@ -329,18 +321,12 @@ void PersistentStorageTask(void* pvParameters) {
     // Global Burner Limits (All Modes) - Store as int32_t (tenths of degrees)
     // Hardcoded defaults ensure correct values when NVS is empty
     static int32_t burner_low_i32 = 380;   // 38.0°C default
-    static int32_t burner_high_i32 = 1100; // 110.0°C default
 
     storage->registerInt("h/bLo", &burner_low_i32, 200, 700, "Burner min (tenths °C)");
-    storage->registerInt("h/bHi", &burner_high_i32, 700, 1100, "Burner max (tenths °C)");
 
     storage->setOnChange("h/bLo", [](const std::string&, const void*) {
         auto& s = SRP::getSystemSettings();
         s.burner_low_limit = static_cast<Temperature_t>(burner_low_i32);
-    });
-    storage->setOnChange("h/bHi", [](const std::string&, const void*) {
-        auto& s = SRP::getSystemSettings();
-        s.burner_high_limit = static_cast<Temperature_t>(burner_high_i32);
     });
 
     // Space Heating Limits
@@ -693,12 +679,13 @@ void PersistentStorageTask(void* pvParameters) {
     });
     storage->setOnChange("wheater/heatingRate", floatParamCallback);
     storage->setOnChange("wheater/tempChargeDelta", floatParamCallback);
-    // Note: tempLimitLow/High, tempSafeLimitLow/High are int32 with inline callbacks
+    // Note: tempLimitLow/High, tempSafeLimitHigh are int32 with inline callbacks
     // Heating parameters (floats only - int32 callbacks set inline)
     storage->setOnChange("heating/curveShift", floatParamCallback);
     storage->setOnChange("heating/curveCoeff", floatParamCallback);
     // Note: targetTemp, hysteresis are int32 with inline callbacks
-    // Note: burnerLowLimit, highLimit don't exist - they're h/bLo, h/bHi, h/sLo, h/sHi
+    // Note: burnerLowLimit, highLimit don't exist - they're h/bLo, h/sLo, h/sHi
+    // (h/bHi was removed 2026-10-23: registered, persisted, published and read by nothing)
     // PID auto-tuning parameters
     storage->setOnChange("pid/autotune/amplitude", floatParamCallback);
     storage->setOnChange("pid/autotune/hysteresis", floatParamCallback);
@@ -764,7 +751,6 @@ void PersistentStorageTask(void* pvParameters) {
     // CRITICAL: Re-apply int32_t defaults after load() for parameters not in NVS
     // load() zeros values for missing keys, so restore defaults here
     if (burner_low_i32 == 0) burner_low_i32 = 380;
-    if (burner_high_i32 == 0) burner_high_i32 = 1100;
     if (heating_low_i32 == 0) heating_low_i32 = 380;
     if (heating_high_i32 == 0) heating_high_i32 = 750;
     if (boostMinTarget_i32 == 0) boostMinTarget_i32 = 500;
@@ -780,7 +766,6 @@ void PersistentStorageTask(void* pvParameters) {
 
     // Apply restored defaults to settings
     settings.burner_low_limit = static_cast<Temperature_t>(burner_low_i32);
-    settings.burner_high_limit = static_cast<Temperature_t>(burner_high_i32);
     settings.heating_low_limit = static_cast<Temperature_t>(heating_low_i32);
     settings.heating_high_limit = static_cast<Temperature_t>(heating_high_i32);
     settings.heating_boost_min_target = static_cast<Temperature_t>(boostMinTarget_i32);
@@ -803,7 +788,6 @@ void PersistentStorageTask(void* pvParameters) {
     settings.wHeaterConfTempLimitLow = static_cast<Temperature_t>(tankLow_i32);
     settings.wHeaterConfTempLimitHigh = static_cast<Temperature_t>(tankHigh_i32);
     settings.wHeaterConfTempSafeLimitHigh = static_cast<Temperature_t>(tankSafeHigh_i32);
-    settings.wHeaterConfTempSafeLimitLow = static_cast<Temperature_t>(tankSafeLow_i32);
 
     // BUG FIX (C2): Apply loaded room setpoint and hysteresis to SystemSettings.
     // Same bug pattern as wHeaterConfTempLimitHigh above: setOnChange only fires on MQTT,
@@ -816,10 +800,10 @@ void PersistentStorageTask(void* pvParameters) {
     LOG_INFO(TAG, "Room control params after load: targetTemp=%ld hysteresis=%ld",
              targetTemp_i32, hysteresis_i32);
 
-    LOG_INFO(TAG, "Temperature limits after load: burner[%ld-%ld] heating[%ld-%ld] water[%ld-%ld]",
-             burner_low_i32, burner_high_i32, heating_low_i32, heating_high_i32, water_low_i32, water_high_i32);
-    LOG_INFO(TAG, "Wheater tank limits after load: low=%ld high=%ld safeHigh=%ld safeLow=%ld",
-             tankLow_i32, tankHigh_i32, tankSafeHigh_i32, tankSafeLow_i32);
+    LOG_INFO(TAG, "Temperature limits after load: curveFloor=%ld heating[%ld-%ld] water[%ld-%ld]",
+             burner_low_i32, heating_low_i32, heating_high_i32, water_low_i32, water_high_i32);
+    LOG_INFO(TAG, "Wheater tank limits after load: low=%ld high=%ld safeHigh=%ld",
+             tankLow_i32, tankHigh_i32, tankSafeHigh_i32);
 
     parametersLoaded.store(true);
 

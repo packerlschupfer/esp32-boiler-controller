@@ -99,12 +99,10 @@ struct SystemSettingsTemperatureShadows {
     float wHeaterConfTempLimitLow;   // Start heating when tank drops below this
     float wHeaterConfTempLimitHigh;  // Stop heating when tank rises above this
     float wHeaterConfTempSafeLimitHigh;
-    float wHeaterConfTempSafeLimitLow;
     
     // Heating temperature shadows
     float targetTemperatureInside;
     float burner_low_limit;
-    float burner_high_limit;
     float heating_low_limit;
     float heating_high_limit;
     float water_heating_low_limit;
@@ -130,10 +128,8 @@ struct SystemSettingsTemperatureShadows {
         wHeaterConfTempLimitLow = tempToFloat(settings.wHeaterConfTempLimitLow);
         wHeaterConfTempLimitHigh = tempToFloat(settings.wHeaterConfTempLimitHigh);
         wHeaterConfTempSafeLimitHigh = tempToFloat(settings.wHeaterConfTempSafeLimitHigh);
-        wHeaterConfTempSafeLimitLow = tempToFloat(settings.wHeaterConfTempSafeLimitLow);
         targetTemperatureInside = tempToFloat(settings.targetTemperatureInside);
         burner_low_limit = tempToFloat(settings.burner_low_limit);
-        burner_high_limit = tempToFloat(settings.burner_high_limit);
         heating_low_limit = tempToFloat(settings.heating_low_limit);
         heating_high_limit = tempToFloat(settings.heating_high_limit);
         water_heating_low_limit = tempToFloat(settings.water_heating_low_limit);

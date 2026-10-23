@@ -12,14 +12,12 @@ SystemSettings getDefaultSystemSettings() {
         tempFromFloat(65.0f),  // wHeaterConfTempLimitHigh (stop heating when tank rises above this)
         10.0f,  // wHeaterConfTempChargeDelta (kept as float)
         tempFromFloat(80.0f),  // wHeaterConfTempSafeLimitHigh
-        tempFromFloat(5.0f),   // wHeaterConfTempSafeLimitLow
         1.0f,   // waterHeatingRate (°C per minute)
         tempFromFloat(18.0f),  // targetTemperatureInside
         0.0f,   // heating_curve_shift (kept as float) - was 20.0 with the 10x too weak curve
         1.4f,   // heating_curve_coeff (kept as float) - was 2.0
         tempFromFloat(0.5f),   // heating_hysteresis (0.5°C)
         tempFromFloat(38.0f),  // burner_low_limit - safe for oil burners (gas can go lower)
-        tempFromFloat(110.0f), // burner_high_limit
         tempFromFloat(40.0f),  // heating_low_limit
         tempFromFloat(75.0f),  // heating_high_limit
         tempFromFloat(40.0f),  // water_heating_low_limit
