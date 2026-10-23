@@ -72,7 +72,7 @@ climate:
     mode_state_topic: "boiler/status/sensors"
     mode_state_template: "{{ 'heat' if (value_json.s | default(0) | int) | bitwise_and(2) else 'off' }}"
     current_temperature_topic: "boiler/status/sensors"
-    current_temperature_template: "{{ (value_json.t.i | default(0)) / 10 }}"
+    current_temperature_template: "{{ value_json.t.i / 10 if value_json.t.i is defined else None }}"
     temperature_command_topic: "boiler/cmd/room_target"
     temperature_command_template: "{{ value | round(1) }}"
     temperature_state_topic: "boiler/status/heating/target"
@@ -146,7 +146,7 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    value_template: "{{ (value_json.t.i | default(0)) / 10 | round(1) }}"
+    value_template: "{{ (value_json.t.i / 10) | round(1) if value_json.t.i is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
@@ -189,7 +189,7 @@ sensor:
     unit_of_measurement: "bar"
     device_class: pressure
     state_class: measurement
-    value_template: "{{ (value_json.p | default(0)) / 100 | round(2) }}"
+    value_template: "{{ (value_json.p / 100) | round(2) if value_json.p is defined else None }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
