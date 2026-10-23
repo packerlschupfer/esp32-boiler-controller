@@ -55,7 +55,7 @@ Fixes:
   reading is invalid, falling back to `HeatingCurve::NOMINAL_ROOM_TENTHS` (20.0) if the
   target is also unset. Assuming the room is *at target* is the same assumption the skipped
   room-deviation shift already makes, so the curve degrades to its nominal line rather than
-  to a wrong one. Replaying the real glitch, that yields **47.8 C against the 48.0 C** the
+  to a wrong one. Replaying the real glitch, that yields **47.7 C against the 47.9 C** the
   curve computed six seconds later once the sensor recovered - a 0.2 C perturbation, where
   the old behaviour was a clamp to the 38.0 floor.
 - An invalid *outside* reading now returns the flow floor and logs it, instead of feeding
