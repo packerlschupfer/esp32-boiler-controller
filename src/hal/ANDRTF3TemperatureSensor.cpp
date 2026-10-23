@@ -34,6 +34,11 @@ bool ANDRTF3TemperatureSensor::initialize() {
     return true;
 }
 
+// The one ANDRTF3 device, remembered by createANDRTF3Sensor() so getRoomSensorStats() can
+// reach the library's counters. There is exactly one room sensor in this system, and the
+// tasks hold only an ITemperatureSensor*, which deliberately knows nothing about them.
+static andrtf3::ANDRTF3* g_roomSensorDevice = nullptr;
+
 ITemperatureSensor::Reading ANDRTF3TemperatureSensor::readTemperature(uint8_t channel) {
     Reading result = {0.0f, false, 0};
     
@@ -47,29 +52,37 @@ ITemperatureSensor::Reading ANDRTF3TemperatureSensor::readTemperature(uint8_t ch
         return result;
     }
     
-    // Try asynchronous reading first for better responsiveness
-    // Use 250ms timeout to allow for Modbus bus contention (library uses 200ms internally)
-    static constexpr uint32_t ASYNC_TIMEOUT_MS = 250;
-
+    // The library's "async" trio is synchronous - confirmed with its maintainer 2026-10-24
+    // and now documented as such upstream: requestTemperature() performs the whole
+    // transaction, isReadComplete() always returns true, and getAsyncResult() hands back the
+    // stored result. So there is nothing to wait for.
+    //
+    // This used to spin a processAsyncReading() loop with a 250 ms "timeout to allow for
+    // Modbus bus contention (library uses 200ms internally)". Both halves were wrong: the
+    // loop condition `!device->isReadComplete()` is false immediately, so its body never ran,
+    // and the library's bus-mutex timeout is MODBUS_MUTEX_TIMEOUT_MS (2000 ms). The loop and
+    // its timeout are gone rather than left looking load-bearing.
+    //
+    // Why not make it genuinely async: RS485 is half-duplex, so the bus mutex is held for
+    // request AND response however the call is shaped. Async would only stop THIS task from
+    // blocking - it would not reduce bus occupancy, which was the reason I asked for it.
     if (requestAsyncReading()) {
-        if (processAsyncReading(ASYNC_TIMEOUT_MS)) {
-            andrtf3::ANDRTF3::TemperatureData tempData;
-            if (device->getAsyncResult(tempData) && tempData.valid) {
-                // Convert from fixed-point format (value * 10) to float
-                result.temperature = tempData.celsius / 10.0f;
-                result.valid = true;
-                result.timestamp = tempData.timestamp;
+        andrtf3::ANDRTF3::TemperatureData tempData;
+        if (device->getAsyncResult(tempData) && tempData.valid) {
+            // Convert from fixed-point format (value * 10) to float
+            result.temperature = tempData.celsius / 10.0f;
+            result.valid = true;
+            result.timestamp = tempData.timestamp;  // millis() of this good read
 
-                LOG_DEBUG(TAG, "Temperature: %.1f°C", result.temperature);
-            } else {
-                LOG_WARN(TAG, "Async read failed: %s", tempData.error.c_str());
-            }
+            LOG_DEBUG(TAG, "Temperature: %.1f°C", result.temperature);
         } else {
-            LOG_WARN(TAG, "Async read timeout");
+            // errorKind is the machine-readable form; the string is kept for the log line.
+            LOG_WARN(TAG, "Read failed: %s (kind %u)", tempData.error.c_str(),
+                     static_cast<unsigned>(tempData.errorKind));
         }
     }
     // No retry - if read failed, wait for next coordinator tick (5s)
-    
+
     return result;
 }
 
@@ -103,35 +116,6 @@ bool ANDRTF3TemperatureSensor::requestAsyncReading() {
     return device->requestTemperature();
 }
 
-bool ANDRTF3TemperatureSensor::processAsyncReading(uint32_t maxWaitMs) {
-    if (!device) {
-        return false;
-    }
-
-    uint32_t startTime = millis();
-    uint32_t processCount = 0;
-    const uint32_t MAX_PROCESS_ITERATIONS = maxWaitMs / 5;  // Process every 5ms
-
-    while (!device->isReadComplete() &&
-           Utils::elapsedMs(startTime) < maxWaitMs &&
-           processCount < MAX_PROCESS_ITERATIONS) {
-        device->process();
-        vTaskDelay(pdMS_TO_TICKS(5));
-        processCount++;
-
-        // Feed watchdog every 50ms during async wait (every 10 iterations)
-        if (processCount % 10 == 0) {
-            (void)SRP::getTaskManager().feedWatchdog();
-        }
-    }
-
-    if (processCount >= MAX_PROCESS_ITERATIONS) {
-        LOG_DEBUG(TAG, "Reached max process iterations (%lu)", processCount);
-    }
-
-    return device->isReadComplete();
-}
-
 /**
  * @brief Factory function to create ANDRTF3 temperature sensor HAL
  */
@@ -140,8 +124,24 @@ ITemperatureSensor* createANDRTF3Sensor(andrtf3::ANDRTF3* device) {
         LOG_ERROR("ANDRTF3HAL", "Cannot create HAL with null device");
         return nullptr;
     }
-    
+
+    g_roomSensorDevice = device;
     return new ANDRTF3TemperatureSensor(device);
+}
+
+RoomSensorStats getRoomSensorStats() {
+    RoomSensorStats stats;
+    andrtf3::ANDRTF3* dev = g_roomSensorDevice;
+    if (dev == nullptr) {
+        return stats;  // available stays false
+    }
+    stats.available = true;
+    for (size_t i = 0; i < RoomSensorStats::KIND_COUNT; ++i) {
+        stats.counts[i] = dev->getReadErrorCount(static_cast<andrtf3::ANDRTF3::ReadError>(i));
+    }
+    stats.lastGoodAgeMs = dev->getLastGoodReadAgeMs();
+    stats.lastKind = static_cast<uint8_t>(dev->getLastReadError());
+    return stats;
 }
 
 } // namespace HAL

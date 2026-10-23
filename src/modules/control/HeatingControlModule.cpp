@@ -59,7 +59,13 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     RoomTempFallbackPolicy::Source insideSource = RoomTempFallbackPolicy::Source::MEASURED;
     static bool insideWarned = false;
     if (readings.isInsideTempValid) {
-        RoomTempFallbackPolicy::record(lastRoom_, readings.insideTemp, millis());
+        // Timestamp from the SENSOR's last good read, not from millis() here. The flag stays
+        // true through up to three failed reads (~15 s, ANDRTF3Task), so recording "now" on
+        // every valid-looking cycle would keep resetting the hold window against data that
+        // was already going stale. Falls back to millis() only if the field was never set.
+        const uint32_t readAt = (readings.insideTempGoodMs != 0) ? readings.insideTempGoodMs
+                                                                 : millis();
+        RoomTempFallbackPolicy::record(lastRoom_, readings.insideTemp, readAt);
         if (insideWarned) {
             LOG_INFO(TAG, "Room sensor valid again - heating curve back on the real reading");
             insideWarned = false;

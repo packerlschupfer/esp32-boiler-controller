@@ -15,6 +15,10 @@
 #include <MutexGuard.h>
 #include "freertos/timers.h"
 #include "hal/HardwareAbstractionLayer.h"
+#include "hal/ANDRTF3TemperatureSensor.h"       // getRoomSensorStats()
+#include "modules/control/RoomSensorDiagnostics.h"
+#include "modules/tasks/MQTTTask.h"
+#include "MQTTTopics.h"
 #include <climits>  // For ULONG_MAX
 
 static const char* TAG = "ANDRTF3";
@@ -24,6 +28,61 @@ static TaskHandle_t andrtf3TaskHandle = nullptr;
 
 // Flag to enable/disable coordinator mode
 static constexpr bool USE_MODBUS_COORDINATOR = true;
+
+// The key table in RoomSensorDiagnostics is a hand-kept mirror of the library's enum order,
+// so pin the two together here, where both headers are in scope.
+static_assert(RoomSensorDiagnostics::KIND_KEY_COUNT ==
+                  static_cast<size_t>(andrtf3::ANDRTF3::ReadError::COUNT),
+              "RoomSensorDiagnostics::KIND_KEYS must mirror ANDRTF3::ReadError");
+
+/**
+ * @brief Publish boiler/status/sensors/room - why the room sensor's reads are failing.
+ *
+ * Added 2026-10-24. The 2026-10-23 08:34 dropout cost a burner ignition and is permanently
+ * unexplained, because the HAL logs the failure reason with LOG_WARN and this device has
+ * syslog deliberately off with no capture running. Counters in the recorder make the next
+ * one explainable.
+ *
+ * On change, or every HEARTBEAT_MS. Retained, so a subscriber coming up late still sees the
+ * current state. LOW priority: this is diagnostics and must yield to control traffic.
+ */
+static void publishReadDiagnostics() {
+    static constexpr uint32_t HEARTBEAT_MS = 60000;
+    static RoomSensorDiagnostics::State lastPublished;
+    static uint32_t lastPublishMs = 0;
+    static bool everPublished = false;
+
+    const HAL::RoomSensorStats stats = HAL::getRoomSensorStats();
+    RoomSensorDiagnostics::State st;
+    st.available = stats.available;
+    st.lastGoodAgeMs = stats.lastGoodAgeMs;
+    st.lastKind = stats.lastKind;
+    for (size_t i = 0; i < RoomSensorDiagnostics::KIND_KEY_COUNT; ++i) {
+        st.counts[i] = stats.counts[i];
+    }
+
+    const uint32_t now = millis();
+    const bool due = !everPublished || (now - lastPublishMs) >= HEARTBEAT_MS;
+    if (!due && !RoomSensorDiagnostics::differs(st, lastPublished)) {
+        return;
+    }
+    if (!st.available) {
+        return;  // no device: nothing meaningful to say
+    }
+
+    char payload[160];
+    const size_t len = RoomSensorDiagnostics::format(payload, sizeof(payload), st);
+    if (len == 0) {
+        LOG_WARN(TAG, "Read diagnostics payload did not fit - not publishing");
+        return;
+    }
+    if (MQTTTask::publish(MQTT_STATUS_PREFIX "/sensors/room", payload, 0, true,
+                          MQTTPriority::PRIORITY_LOW)) {
+        lastPublished = st;
+        lastPublishMs = now;
+        everPublished = true;
+    }
+}
 
 // Process temperature reading through HAL
 static bool processTemperatureReading() {
@@ -66,6 +125,13 @@ static bool processTemperatureReading() {
                 
                 // Update timestamp
                 readings.lastUpdateTimestamp = reading.timestamp;
+
+                // The millis() of THIS successful Modbus read, straight from the library via
+                // the HAL. Distinct from isInsideTempValid: that flag stays true for up to
+                // three failed reads (~15 s) while the value goes stale, so anything that
+                // cares how OLD the reading is has to use this, not the flag. The heating
+                // curve's hold policy does - see RoomTempFallbackPolicy.h.
+                readings.insideTempGoodMs = reading.timestamp;
                 
                 // Set update bit to notify other tasks
                 xEventGroupSetBits(SRP::getSensorEventGroup(), SystemEvents::SensorUpdate::INSIDE);
@@ -256,6 +322,9 @@ void ANDRTF3Task(void* parameter) {
 
             // Feed watchdog after Modbus operation (may have blocked on mutex)
             (void)SRP::getTaskManager().feedWatchdog();
+
+            // Counters have just been updated by the read above, success or failure
+            publishReadDiagnostics();
         }
 
         // Check if we should report statistics

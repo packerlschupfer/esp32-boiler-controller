@@ -66,13 +66,36 @@ private:
      */
     bool requestAsyncReading();
     
-    /**
-     * @brief Process pending asynchronous operations
-     * @param maxWaitMs Maximum time to wait for response
-     * @return true if reading completed successfully
-     */
-    bool processAsyncReading(uint32_t maxWaitMs = 100);
 };
+
+/**
+ * @brief Read-path statistics for the one room sensor, for publishing.
+ *
+ * Exists because the ANDRTF3's failure counters live on the library object, which only this
+ * translation unit holds: the tasks reach the sensor through ITemperatureSensor*, and these
+ * counters are specific to this device (the MB8ART channels have no equivalent), so widening
+ * that interface for them would be wrong.
+ *
+ * `counts` is indexed by andrtf3::ANDRTF3::ReadError, where index 0 (NONE) counts SUCCESSFUL
+ * reads - that is the denominator for a failure rate.
+ */
+struct RoomSensorStats {
+    static constexpr size_t KIND_COUNT =
+        static_cast<size_t>(andrtf3::ANDRTF3::ReadError::COUNT);
+    uint32_t counts[KIND_COUNT] = {0};
+    uint32_t lastGoodAgeMs = UINT32_MAX;  // UINT32_MAX = never read successfully
+    uint8_t lastKind = 0;                 // andrtf3::ANDRTF3::ReadError of the last read
+    bool available = false;               // false if no ANDRTF3 device was ever created
+};
+
+/**
+ * @brief Snapshot the room sensor's read statistics.
+ *
+ * Each counter is an aligned 32-bit word so individual reads cannot tear, but this sweep is
+ * NOT a coherent snapshot: a read completing mid-sweep means the counts need not sum to the
+ * total number of reads. That is fine for diagnostics and must not be relied on for more.
+ */
+RoomSensorStats getRoomSensorStats();
 
 /**
  * @brief Factory function to create ANDRTF3 temperature sensor HAL

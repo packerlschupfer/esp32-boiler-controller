@@ -197,6 +197,48 @@ value still earns the room-deviation shift, because holding a reading and then d
 correction term would change the curve output during a dropout, which is precisely what the
 hold exists to prevent.
 
+### 6b. Room Sensor Read Diagnostics
+
+**Topic**: `boiler/status/sensors/room` - **retained**, QoS 0, LOW priority, published on
+change or at least every 60 s.
+
+Why the room sensor's reads are failing, which was previously only knowable from a serial
+log. On 2026-10-23 08:34 three consecutive failed reads marked the reading invalid, escalated
+the sensor fallback to SHUTDOWN and cost a burner ignition - and the reason is permanently
+unknown, because the HAL logs it with `LOG_WARN`, syslog is deliberately off on this device
+and no capture was running.
+
+```json
+{"ok":17280,"busy":3,"age":15,"last":"busy"}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `ok` | **successful** reads since boot - always present, and the denominator for a failure rate |
+| `busy` | `BUS_BUSY`: the RS485 bus mutex was not acquired, so nothing was even sent - pure contention |
+| `to` | `TIMEOUT`: request sent, no answer |
+| `crc` | corrupted answer |
+| `exc` | Modbus exception response |
+| `bad` | malformed response |
+| `flt` | `SENSOR_FAULT`: the sensor answered `0x0000` / `0xFFFF` |
+| `rng` | reading outside the plausible range |
+| `oth` | anything else |
+| `age` | **seconds** since the last successful read. Omitted entirely if there has never been one |
+| `last` | the kind of the most recent read, using the same short names (`ok` when it succeeded) |
+
+**Error keys appear only when non-zero**, so a healthy device publishes about 30 bytes and
+"no failures yet" is the *absence* of the key rather than a row of zeros. Counters are
+cumulative since boot and wrap at 2^32.
+
+`age` is excluded from change detection - it moves every cycle, so including it would publish
+continuously and defeat the point. It still goes out on the 60 s heartbeat, or alongside a
+counter that did change.
+
+Counters come from ESP32-ANDRTF3 `b4a661d`. Each is an aligned 32-bit word so individual
+reads cannot tear, but the sweep across kinds is **not** a coherent snapshot: the counts need
+not sum to the total number of reads if one completes mid-sweep. Fine for diagnostics; do not
+build arithmetic on it.
+
 ### 7. Other Status Topics
 
 | Topic | Retained | Payload |

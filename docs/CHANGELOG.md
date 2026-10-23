@@ -22,6 +22,39 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Room sensor read failures are now observable
+
+The 2026-10-23 08:34 dropout cost a burner ignition and its cause is permanently unknown: the
+HAL logs the failure reason with `LOG_WARN`, syslog is deliberately off on this device
+(it cost ~11 kB of DRAM) and no serial capture was running, so the string went to a UART
+nobody was listening to. ESP32-ANDRTF3 `b4a661d` adds per-kind read counters for exactly this
+reason; new topic **`boiler/status/sensors/room`** publishes them, so the next dropout is
+explainable from the recorder rather than guessed at. The maintainer's hypothesis for 08:34
+is `BUS_BUSY` - pure RS485 contention, nothing sent - and `busy` is the field that will
+confirm or kill it.
+
+Error kinds appear only when non-zero, so the steady state is ~30 bytes; successes are always
+published as the denominator for a failure rate. Full key table in `docs/MQTT_API.md`.
+
+Two other changes from the same library update:
+
+- **The heating curve's room-reading hold now measures age from the sensor's own last good
+  read** rather than from `millis()` at the moment this code noticed a valid-looking flag.
+  Those differ by more than bookkeeping: `isInsideTempValid` stays **true through up to three
+  failed reads** (~15 s, `ANDRTF3Task`) while `insideTemp` goes stale, so the old version kept
+  resetting its 10-minute window against data that was already ageing. `SharedSensorReadings`
+  carries the timestamp as `insideTempGoodMs`.
+- **A dead wait loop is gone from the HAL wrapper.** `processAsyncReading()` spun on
+  `!device->isReadComplete()` with a 250 ms "timeout to allow for Modbus bus contention
+  (library uses 200ms internally)". Both halves were wrong: `isReadComplete()` is always
+  true, so the loop body never ran, and the library's bus-mutex timeout is 2000 ms. Asking
+  for a genuinely async read was *also* wrong of me, and the maintainer declined it correctly:
+  RS485 is half-duplex, so the mutex is held for request **and** response however the call is
+  shaped - async would only stop the calling task from blocking, not reduce bus occupancy.
+
+Seven native tests (331 -> 338), including the worst-case payload against MQTTTask's 319-byte
+refusal threshold and that `age` alone never triggers a publish.
+
 ### Added: frost protection, which did not exist
 
 Nothing in the firmware reacted to a **low** temperature. `FREEZE_PROTECTION_TEMP_C` (5.0 °C,

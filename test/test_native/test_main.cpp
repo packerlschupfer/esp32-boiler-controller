@@ -54,6 +54,15 @@ void test_frost_never_triggers_on_an_invalid_reading();
 void test_frost_releases_rather_than_firing_blind();
 void test_frost_one_cold_sensor_holds_while_the_other_is_warm();
 void test_frost_thresholds_are_the_agreed_numbers();
+
+// Room sensor read diagnostics
+void test_room_diag_healthy_payload_is_tiny_and_has_no_error_keys();
+void test_room_diag_reports_the_contention_hypothesis();
+void test_room_diag_age_is_seconds_and_omitted_when_never_read();
+void test_room_diag_worst_case_fits_the_mqtt_payload_limit();
+void test_room_diag_refuses_a_too_small_buffer_instead_of_truncating();
+void test_room_diag_differs_ignores_the_age_but_catches_every_counter();
+void test_room_diag_key_table_matches_the_state_array();
 void test_sensor_offset_map_places_each_field_on_its_channel();
 void test_sensor_offset_map_outside_is_ch3_not_ch6();
 void test_sensor_offset_map_never_offsets_the_pressure_channel();
@@ -606,6 +615,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_frost_releases_rather_than_firing_blind);
     RUN_TEST(test_frost_one_cold_sensor_holds_while_the_other_is_warm);
     RUN_TEST(test_frost_thresholds_are_the_agreed_numbers);
+
+    RUN_TEST(test_room_diag_healthy_payload_is_tiny_and_has_no_error_keys);
+    RUN_TEST(test_room_diag_reports_the_contention_hypothesis);
+    RUN_TEST(test_room_diag_age_is_seconds_and_omitted_when_never_read);
+    RUN_TEST(test_room_diag_worst_case_fits_the_mqtt_payload_limit);
+    RUN_TEST(test_room_diag_refuses_a_too_small_buffer_instead_of_truncating);
+    RUN_TEST(test_room_diag_differs_ignores_the_age_but_catches_every_counter);
+    RUN_TEST(test_room_diag_key_table_matches_the_state_array);
     RUN_TEST(test_sensor_offset_map_places_each_field_on_its_channel);
     RUN_TEST(test_sensor_offset_map_outside_is_ch3_not_ch6);
     RUN_TEST(test_sensor_offset_map_never_offsets_the_pressure_channel);

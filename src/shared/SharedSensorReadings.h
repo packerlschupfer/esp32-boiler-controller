@@ -40,6 +40,12 @@ struct SharedSensorReadings {
     // Environment temperature readings (in tenths of degrees Celsius)
     Temperature_t outsideTemp = 0;
     Temperature_t insideTemp = 0;
+
+    // millis() of the last SUCCESSFUL room-sensor read, from the ANDRTF3 library via the HAL.
+    // Not the same thing as isInsideTempValid: that flag stays true through up to three
+    // failed reads (~15 s) while insideTemp goes stale, so anything that cares how OLD the
+    // reading is must use this. 0 = never read. Added 2026-10-24.
+    uint32_t insideTempGoodMs = 0;
     float insideHumidity = 0.0f;  // Keep humidity as float (not temperature)
     bool isOutsideTempValid = false;
     bool isInsideTempValid = false;
