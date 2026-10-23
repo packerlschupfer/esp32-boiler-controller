@@ -135,7 +135,7 @@ matching `t.*` on `boiler/status/sensors`.
 
 ```json
 {"mode":"weather","dem":false,"blk":"outside","raw":237,"shift":36,
- "cmd":400,"clp":"floor","o":198,"i":199,"tgt":192}
+ "cmd":400,"clp":"floor","o":198,"i":199,"isrc":"meas","tgt":192}
 ```
 
 | Key | Meaning |
@@ -148,6 +148,7 @@ matching `t.*` on `boiler/status/sensors`.
 | `cmd` | the curve's answer after clamping to `h/sLo`..`h/sHi` |
 | `clp` | which bound won: `none`, `floor` (h/sLo - weather compensation is inert), `ceil` (h/sHi) |
 | `o`, `i`, `tgt` | outside, room and room-target values **this evaluation used** |
+| `isrc` | where `i` came from: `meas` (the sensor), `held` (the sensor, up to 10 min ago), `tgt` (room target assumed), `nom` (20.0 assumed) |
 
 `blk` values: `none` (heating wanted), `outside` (outside >= `outsideThreshold` + 1.0),
 `backstop` (room > `targetTemp` + `roomOverheatMargin`), `roomsat` (room thermostat
@@ -162,6 +163,16 @@ target and which this topic deliberately does not track.
 `o`/`i`/`tgt` are read under the same mutex acquisition as the curve evaluation, so one
 payload is internally consistent - pairing `raw` against separately-published sensor topics
 would introduce sampling lag.
+
+**`i` is what the curve used, which is not always what the sensor said.** When the room
+reading is invalid the curve substitutes, in order: the last valid reading if it is less than
+10 minutes old (`isrc":"held"`), the configured room target (`"tgt"`), or 20.0 (`"nom"`).
+`raw` and `shift` were computed from whatever `i` shows, so the payload stays
+self-consistent - and `isrc` is what keeps that from being a silent substitution. The
+**raw** sensor field, invalid marker and all, is `t.i` on `boiler/status/sensors`. A `held`
+value still earns the room-deviation shift, because holding a reading and then dropping its
+correction term would change the curve output during a dropout, which is precisely what the
+hold exists to prevent.
 
 ### 7. Other Status Topics
 

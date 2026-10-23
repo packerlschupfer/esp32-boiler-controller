@@ -1,6 +1,7 @@
 // src/modules/control/HeatingControlModule.cpp
 #include "modules/control/HeatingControlModule.h"
 #include "modules/control/HeatingCurve.h"  // NOMINAL_ROOM_TENTHS fallback
+#include "modules/control/RoomTempFallbackPolicy.h"  // hold the last good room reading
 #include "modules/control/HeatingControlModuleFixedPoint.h"  // For fixed-point heating curve calculations
 #include "shared/Temperature.h"  // For temperature conversions
 #include "config/SystemConstants.h"  // For magic number constants
@@ -35,13 +36,62 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     int16_t curveCoeff = static_cast<int16_t>(settings.heating_curve_coeff * 100);
     Temperature_t curveShift = tempFromFloat(settings.heating_curve_shift);
 
+    // The curve's base room temperature. A sensor marked invalid carries TEMP_INVALID
+    // (INT16_MIN = -32768), not a plausible value, and it used to be passed in regardless:
+    // on 2026-10-23 08:34:13 that made diff 3281.4 °C, overflowed the curve polynomial and
+    // put raw = -755418.5 °C on the diagnostics topic. The clamp masked it, so the
+    // commanded target stayed safe, but the arithmetic was undefined behaviour.
+    //
+    // Resolved FIRST, because the room-deviation shift below depends on the answer:
+    // RoomTempFallbackPolicy holds the last valid reading for up to MAX_HOLD_MS, so a
+    // few-second Modbus dropout reproduces the previous cycle's output exactly instead of
+    // substituting a guess. See RoomTempFallbackPolicy.h for why the hold expires and why a
+    // held reading still earns the shift.
+    //
+    // The warnings below are edge-triggered. This function runs on the ~1 Hz diagnostics
+    // path (HeatingControlTask), so a plain LOG_WARN would repeat once a second for as long
+    // as the fault lasts - from boot until the first successful read, and forever with an
+    // unplugged outside sensor. One line when it breaks and one when it recovers is the
+    // whole signal; the repetition only buys log pressure on a device where a single LOG_*
+    // costs ~1312 B of stack. Statics are safe here: every caller of this function is
+    // HeatingControlTask, a single task.
+    Temperature_t effectiveInside = readings.insideTemp;
+    RoomTempFallbackPolicy::Source insideSource = RoomTempFallbackPolicy::Source::MEASURED;
+    static bool insideWarned = false;
+    if (readings.isInsideTempValid) {
+        RoomTempFallbackPolicy::record(lastRoom_, readings.insideTemp, millis());
+        if (insideWarned) {
+            LOG_INFO(TAG, "Room sensor valid again - heating curve back on the real reading");
+            insideWarned = false;
+        }
+    } else {
+        const RoomTempFallbackPolicy::Substitute sub =
+            RoomTempFallbackPolicy::substitute(lastRoom_, millis(),
+                                               settings.targetTemperatureInside);
+        effectiveInside = sub.value;
+        insideSource = sub.source;
+        if (!insideWarned) {
+            LOG_WARN(TAG, "Room sensor invalid - heating curve using %d (0.1°C) from %s",
+                     effectiveInside, RoomTempFallbackPolicy::toString(insideSource));
+            insideWarned = true;
+        }
+    }
+
     // Weather-compensated mode: apply room temp deviation curve shift (Parallelverschiebung)
     // If room is cold relative to target → shift curve UP (more heat)
     // If room is warm relative to target → shift curve DOWN (less heat)
-    if (settings.useWeatherCompensatedControl && readings.isInsideTempValid &&
+    //
+    // Gated on the room value being an actual MEASUREMENT (fresh or held) rather than on
+    // isInsideTempValid: holding the reading and then dropping its shift term would change
+    // the curve output during a dropout, which is the one thing the hold exists to prevent.
+    // For the TARGET and NOMINAL substitutions the deviation is zero by construction, so
+    // skipping the shift and applying it would agree anyway - except that TARGET would then
+    // depend on a float multiply of zero, so it is skipped explicitly.
+    if (settings.useWeatherCompensatedControl &&
+        RoomTempFallbackPolicy::isMeasurement(insideSource) &&
         settings.targetTemperatureInside > 0) {
         // Room deviation = target - actual (positive if room is cold)
-        Temperature_t roomDeviation = tempSub(settings.targetTemperatureInside, readings.insideTemp);
+        Temperature_t roomDeviation = tempSub(settings.targetTemperatureInside, effectiveInside);
         // Curve shift adjustment = deviation * factor
         // e.g., room 1°C cold with factor 2.0 → curve +2°C
         float shiftAdjust = tempToFloat(roomDeviation) * settings.roomTempCurveShiftFactor;
@@ -54,45 +104,11 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
                  devBuf, adjustBuf);
     }
 
-    // The curve's base temperature. A sensor marked invalid carries TEMP_INVALID
-    // (INT16_MIN = -32768), not a plausible value, and it used to be passed in regardless:
-    // on 2026-10-23 08:34:13 that made diff 3281.4 °C, overflowed the curve polynomial and
-    // put raw = -755418.5 °C on the diagnostics topic. The clamp masked it, so the
-    // commanded target stayed safe, but the arithmetic was undefined behaviour.
-    //
-    // With no room reading, assume the room is AT target. That is the same assumption the
-    // skipped room-deviation shift above already makes - zero deviation means inside equals
-    // target - so the curve falls back to the nominal line for the current outside
-    // temperature instead of to a wrong one. If the target is also unset, use the curve's
-    // own nominal room temperature.
-    //
-    // Both sensor warnings below are edge-triggered. This function runs on the ~1 Hz
-    // diagnostics path (HeatingControlTask), so a plain LOG_WARN would repeat once a second
-    // for as long as the fault lasts - from boot until the first successful read, and
-    // forever with an unplugged outside sensor. One line when it breaks and one when it
-    // recovers is the whole signal; the repetition only buys log pressure on a device where
-    // a single LOG_* costs ~1312 B of stack. Statics are safe here: every caller of this
-    // function is HeatingControlTask, a single task.
-    Temperature_t effectiveInside = readings.insideTemp;
-    static bool insideWarned = false;
-    if (!readings.isInsideTempValid) {
-        effectiveInside = (settings.targetTemperatureInside > 0)
-                              ? settings.targetTemperatureInside
-                              : HeatingCurve::NOMINAL_ROOM_TENTHS;
-        if (!insideWarned) {
-            LOG_WARN(TAG, "Room sensor invalid - heating curve using %d (0.1°C) as its base",
-                     effectiveInside);
-            insideWarned = true;
-        }
-    } else if (insideWarned) {
-        LOG_INFO(TAG, "Room sensor valid again - heating curve back on the real reading");
-        insideWarned = false;
-    }
-
     // Outside has no meaningful substitute: a weather curve without a weather reading is
-    // not a curve. Return the floor and say so on the diagnostics topic. HeatingControlTask
-    // already refuses to request heating while isOutsideTempValid is false, so this is a
-    // backstop for the room-mode path and for any future caller.
+    // not a curve, and there is no outer loop to catch an error the way the room loop
+    // catches a wrong room assumption. Return the floor and say so on the diagnostics topic.
+    // HeatingControlTask already refuses to request heating while isOutsideTempValid is
+    // false, so this is a backstop for the room-mode path and for any future caller.
     static bool outsideWarned = false;
     if (!readings.isOutsideTempValid) {
         if (!outsideWarned) {
@@ -102,6 +118,8 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
         if (debugOut != nullptr) {
             debugOut->rawTarget = settings.burner_low_limit;
             debugOut->shift = static_cast<int32_t>(curveShift);
+            debugOut->effectiveInside = effectiveInside;
+            debugOut->insideSource = insideSource;
         }
         return settings.burner_low_limit;
     }
@@ -126,6 +144,8 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
         // curveShift here already carries the room-deviation term added above when weather
         // compensation is on, which is exactly the value the diagnostics topic reports.
         debugOut->shift = static_cast<int32_t>(curveShift);
+        debugOut->effectiveInside = effectiveInside;
+        debugOut->insideSource = insideSource;
     }
 
     char insideBuf[16], outsideBuf[16], resultBuf[16];

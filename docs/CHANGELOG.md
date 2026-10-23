@@ -133,13 +133,34 @@ Fixes:
   zero identically in both widths, so results for in-range inputs are unchanged. `rawOut`
   now saturates instead of narrowing, because the diagnostics topic is the one place
   someone looks to find out the curve went wrong.
-- `calculateSpaceHeatingTargetTemp()` substitutes `targetTemperatureInside` when the room
-  reading is invalid, falling back to `HeatingCurve::NOMINAL_ROOM_TENTHS` (20.0) if the
-  target is also unset. Assuming the room is *at target* is the same assumption the skipped
-  room-deviation shift already makes, so the curve degrades to its nominal line rather than
-  to a wrong one. Replaying the real glitch, that yields **47.7 C against the 47.9 C** the
-  curve computed six seconds later once the sensor recovered - a 0.2 C perturbation, where
-  the old behaviour was a clamp to the 38.0 floor.
+- `calculateSpaceHeatingTargetTemp()` no longer passes an invalid reading to the curve. It
+  now **holds the last valid room reading** for up to 10 minutes (`RoomTempFallbackPolicy`),
+  and only if there is nothing fresh to hold does it assume the room is *at target*, or
+  20.0 (`HeatingCurve::NOMINAL_ROOM_TENTHS`) if no target is configured either.
+
+  The first version of this fix went straight to the target assumption. That is sound
+  reasoning - it is the same assumption the skipped room-deviation shift already makes, so
+  the curve degrades to its nominal line rather than to a wrong one, and replaying the real
+  glitch it yields **47.7 C against the 47.9 C** the curve computed six seconds later once
+  the sensor recovered. But a 0.2 C perturbation is still a perturbation of something that
+  was *known*: the sensor fails for a few seconds at a time, and in those seconds the room
+  temperature had just been measured. Holding it makes the dropout a true no-op - identical
+  curve output, not a near one (user's call, 2026-10-23).
+
+  The hold expires because a held reading is a measurement with an age, and the room moves:
+  measured at 0.014 C/min over a 44-minute burn, so ten minutes is worth a few tenths of
+  error, well inside the ~1.2 C that "room = target" can be wrong by. Past that the
+  comparison flips - an hours-old reading keeps biasing the curve on evidence that is no
+  longer evidence, with no room feedback to notice - so the nominal line becomes the better
+  guess. In practice the window rarely binds: with the room sensor required in
+  `SPACE_HEATING`, the sensor fallback escalates while a dropout is still tens of seconds
+  old, so the hold does its work in the first seconds, which is the failure that actually
+  occurs.
+
+  A **held** reading still earns the room-deviation curve shift. Holding the value and then
+  dropping its correction term would change the curve output during a dropout, which is the
+  one thing the hold exists to prevent. The `target` and `nominal` substitutions skip it,
+  where the deviation is zero by construction anyway.
 - An invalid *outside* reading now returns the flow floor and logs it, instead of feeding
   `TEMP_INVALID` into the same arithmetic. `HeatingControlTask` already refuses to request
   heating while `isOutsideTempValid` is false, so this is a backstop for the room-mode path.
@@ -173,14 +194,27 @@ burner. What the recorder does show:
 ```
 
 `TemperatureSensorFallback` escalated to SHUTDOWN. In `SPACE_HEATING` its
-`hasRequiredSensors()` requires `roomTempValid`, and `INVALID_COUNT_TO_SHUTDOWN` is **1**
+`hasRequiredSensors()` requires `roomTempValid`, and `INVALID_COUNT_TO_SHUTDOWN` was **1**
 with the comment "Was 2 - instant shutdown on sensor fail" - so a single failed check of a
-Modbus room sensor on a shared bus stops the burner, while the surrounding code comments
+Modbus room sensor on a shared bus stopped the burner, while the surrounding code comments
 claim the counters exist to prevent "mode chattering when sensors are intermittently
-failing". The trace above is that chatter, four transitions in five seconds. This will
-recur, and each occurrence costs a burner start. Not changed here: relaxing it changes
-safety behaviour and is a maintainer decision, recorded so it is not rediscovered a third
-time.
+failing". The trace above is that chatter, four transitions in five seconds.
+
+**`INVALID_COUNT_TO_SHUTDOWN` is now 6** (user decision, 2026-10-23). The counter ticks once
+per temperature-update event, which `BurnerControlTask` raises on every sensor read - MB8ART
+every 2.5 s, the room sensor every 5 s - so 6 is roughly **15-30 s** of continuous failure.
+Six rather than the original two because the room sensor's own driver already needs 3
+consecutive failed reads at 5 s each before it marks the value invalid, so by the time
+`roomTempValid` goes false the sensor has been failing ~15 s and a 2-check debounce adds
+little. `VALID_COUNT_TO_ENTER_NORMAL` stays at 1: slow to shut down, immediate to recover.
+
+Known consequence, recorded rather than fixed: the counter is **shared by all required
+sensors**, so a missing boiler-*output* reading - the one that leaves overheat protection
+blind and sets `Error::SENSOR_FAILURE` - now also takes 15-30 s longer to escalate. The
+boiler's own aquastat and manual-reset STB are independent of the firmware, and
+`SafetyInterlocks`' 110.0 C check does not depend on this mode, so the physical safety chain
+is unchanged. Splitting the debounce per sensor class (short for boiler output, long for
+room) is the better shape and is not done here.
 
 Four native tests added (305 -> 309), including the exact field input, both int16 extremes
 on both arguments, `rawOut` saturation, and the fallback-accuracy check above. The

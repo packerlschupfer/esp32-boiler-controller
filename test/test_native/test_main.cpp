@@ -36,6 +36,15 @@ void test_heating_diag_refuses_a_too_small_buffer_instead_of_truncating();
 void test_heating_diag_block_reasons_are_distinct_strings();
 void test_heating_diag_room_mode_and_negative_raw_serialise();
 void test_heating_diag_differs_detects_every_field();
+void test_heating_diag_reports_a_substituted_room_reading_as_such();
+
+// Room temperature fallback (hold the last good reading)
+void test_room_fallback_holds_the_last_reading_through_a_short_dropout();
+void test_room_fallback_expires_the_hold_and_falls_back_to_target();
+void test_room_fallback_with_nothing_remembered_uses_target_then_nominal();
+void test_room_fallback_survives_the_millis_rollover();
+void test_room_fallback_recording_a_new_reading_refreshes_the_age();
+void test_room_fallback_never_returns_an_invalid_marker();
 void test_sensor_offset_map_places_each_field_on_its_channel();
 void test_sensor_offset_map_outside_is_ch3_not_ch6();
 void test_sensor_offset_map_never_offsets_the_pressure_channel();
@@ -572,6 +581,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_heating_diag_block_reasons_are_distinct_strings);
     RUN_TEST(test_heating_diag_room_mode_and_negative_raw_serialise);
     RUN_TEST(test_heating_diag_differs_detects_every_field);
+    RUN_TEST(test_heating_diag_reports_a_substituted_room_reading_as_such);
+
+    RUN_TEST(test_room_fallback_holds_the_last_reading_through_a_short_dropout);
+    RUN_TEST(test_room_fallback_expires_the_hold_and_falls_back_to_target);
+    RUN_TEST(test_room_fallback_with_nothing_remembered_uses_target_then_nominal);
+    RUN_TEST(test_room_fallback_survives_the_millis_rollover);
+    RUN_TEST(test_room_fallback_recording_a_new_reading_refreshes_the_age);
+    RUN_TEST(test_room_fallback_never_returns_an_invalid_marker);
     RUN_TEST(test_sensor_offset_map_places_each_field_on_its_channel);
     RUN_TEST(test_sensor_offset_map_outside_is_ch3_not_ch6);
     RUN_TEST(test_sensor_offset_map_never_offsets_the_pressure_channel);

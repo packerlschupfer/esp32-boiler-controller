@@ -86,12 +86,36 @@ private:
     static uint8_t consecutiveValidCount;    // Count of consecutive valid sensor checks
     static uint8_t consecutiveInvalidCount;  // Count of consecutive invalid sensor checks
 
-    // Hysteresis thresholds (different for entering vs leaving NORMAL mode)
-    // NOTE: Reduced to 1 (disabled) - sensors are stable and accurate in this installation
-    // Original values (Round 4): VALID=3, INVALID=2 for flaky sensor protection
-    // Archived reasoning: Prevent mode oscillation from intermittent Modbus errors
-    static constexpr uint8_t VALID_COUNT_TO_ENTER_NORMAL = 1;   // Was 3 - reduced for faster startup
-    static constexpr uint8_t INVALID_COUNT_TO_SHUTDOWN = 1;     // Was 2 - instant shutdown on sensor fail
+    // Hysteresis thresholds (different for entering vs leaving NORMAL mode). Deliberately
+    // asymmetric: slow to shut down, immediate to recover.
+    //
+    // The counters tick once per temperature-update event, which BurnerControlTask raises on
+    // every sensor read - MB8ART every 2.5 s, the ANDRTF3 room sensor every 5 s - so
+    // INVALID_COUNT_TO_SHUTDOWN = 6 is roughly 15-30 s of continuous failure.
+    //
+    // It was 1, i.e. no hysteresis at all in the shutdown direction, under a comment saying
+    // "sensors are stable and accurate in this installation". They are not: the room sensor
+    // is a Modbus device on a shared bus and it glitches. On 2026-10-23 08:34:14 a single
+    // failed check sent this straight to SHUTDOWN and stopped the burner mid-cycle, then
+    // flapped SHUTDOWN -> NORMAL -> SHUTDOWN -> NORMAL within five seconds - exactly the
+    // "mode oscillation from intermittent Modbus errors" the archived note below says the
+    // original values existed to prevent. The burner restart cost 20 s of MIN_OFF_TIME and
+    // one ignition. (Original Round 4 values: VALID=3, INVALID=2.)
+    //
+    // Why 6 and not 2 (user decision, 2026-10-23): the room sensor's own driver already
+    // marks the reading invalid only after 3 consecutive failed reads at 5 s each, so by the
+    // time roomTempValid goes false the sensor has been failing ~15 s and a 2-check debounce
+    // adds very little. 6 covers a dropout of the length actually observed with margin.
+    //
+    // KNOWN CONSEQUENCE: this counter is shared by all required sensors, so a missing
+    // boiler-OUTPUT reading - the one that leaves overheat protection blind and sets
+    // Error::SENSOR_FAILURE - now also takes ~15-30 s longer to escalate. The boiler's own
+    // aquastat and manual-reset STB are independent of the firmware and unaffected, and
+    // SafetyInterlocks' 110 C check does not depend on this mode. Splitting the debounce
+    // per sensor class (short for boiler output, long for room) is the better shape and is
+    // not done here.
+    static constexpr uint8_t VALID_COUNT_TO_ENTER_NORMAL = 1;   // Was 3 - one good check recovers
+    static constexpr uint8_t INVALID_COUNT_TO_SHUTDOWN = 6;     // ~15-30 s of continuous failure
     
     // Validate sensor readings
     static bool validateSensorReading(Temperature_t temp, Temperature_t minValid = -500, Temperature_t maxValid = 1500);

@@ -530,9 +530,12 @@ static void publishControlDiagnostics() {
     // Evaluate the curve here rather than reusing the last control-loop value.
     // calculateSpaceHeatingTargetTemp() only runs on the turn-on and target-update paths,
     // so with heating OFF the cached values stayed 0 - blank in exactly the situation this
-    // topic is for ("what does the curve want right now?"). It is a const, side-effect-free
-    // computation over the same inputs the control loop uses, so this is the curve's
-    // current answer, not a prediction.
+    // topic is for ("what does the curve want right now?"). It is a const computation over
+    // the same inputs the control loop uses, so this is the curve's current answer, not a
+    // prediction. Not quite side-effect-free since 2026-10-23: it also remembers the last
+    // valid room reading (RoomTempFallbackPolicy). Harmless from here - this task is the
+    // only caller on either path and both pass the same snapshot, so recording from the
+    // diagnostics path records exactly what the control path would have.
     //
     // `cmd` is therefore the clamped CURVE output, which equals the active setpoint while
     // demand is on and is what the curve would ask for while it is off. The actually
@@ -566,7 +569,6 @@ static void publishControlDiagnostics() {
         st.weatherMode = cfg.useWeatherCompensatedControl;
         st.roomTarget = cfg.targetTemperatureInside;
         st.outside = r.outsideTemp;
-        st.room = r.insideTemp;
         effectiveLow = cfg.heating_low_limit;    // h/sLo - the EFFECTIVE floor
         effectiveHigh = cfg.heating_high_limit;  // h/sHi
         curveTarget = heatingState.heatingControl->calculateSpaceHeatingTargetTemp(r, cfg, &dbg);
@@ -574,6 +576,12 @@ static void publishControlDiagnostics() {
     }
     st.rawTarget = dbg.rawTarget;
     st.shift = dbg.shift;
+    // The room value the curve USED, not the raw field: with the sensor invalid those
+    // differ (held / target / nominal substitution), and `raw` and `shift` were computed
+    // from the former. `isrc` says which it was. The raw reading is on
+    // boiler/status/sensors as t.i.
+    st.room = dbg.effectiveInside;
+    st.roomSource = dbg.insideSource;
 
     // Apply the SECOND clamp, the one BurnerRequestManager::setHeatingRequest() does.
     // calculateSpaceHeatingTargetTemp -> HeatingCurve::target() clamps to

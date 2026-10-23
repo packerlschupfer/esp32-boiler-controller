@@ -27,7 +27,7 @@ void test_heating_diag_payload_is_the_agreed_schema() {
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_EQUAL_STRING(
         "{\"mode\":\"weather\",\"dem\":true,\"blk\":\"none\",\"raw\":364,\"shift\":38,"
-        "\"cmd\":400,\"clp\":\"floor\",\"o\":130,\"i\":199,\"tgt\":192}", buf);
+        "\"cmd\":400,\"clp\":\"floor\",\"o\":130,\"i\":199,\"isrc\":\"meas\",\"tgt\":192}", buf);
     TEST_ASSERT_EQUAL_size_t(strlen(buf), n);
 }
 
@@ -41,6 +41,7 @@ void test_heating_diag_fits_the_mqtt_payload_limit() {
     s.clamp = Clamp::AT_FLOOR;
     s.rawTarget = -32768; s.shift = -2000; s.commanded = 32767;
     s.outside = -32768; s.room = -32768; s.roomTarget = -32768;
+    s.roomSource = RoomTempFallbackPolicy::Source::MEASURED;  // "meas", the longest isrc
     char buf[160];
     const size_t n = format(buf, sizeof(buf), s);
     TEST_ASSERT_TRUE(n > 0);
@@ -95,4 +96,30 @@ void test_heating_diag_differs_detects_every_field() {
     t = base; t.outside += 1;                   TEST_ASSERT_TRUE(differs(base, t));
     t = base; t.room += 1;                      TEST_ASSERT_TRUE(differs(base, t));
     t = base; t.roomTarget += 1;                TEST_ASSERT_TRUE(differs(base, t));
+    t = base; t.roomSource = RoomTempFallbackPolicy::Source::HELD;
+                                                TEST_ASSERT_TRUE(differs(base, t));
+}
+
+void test_heating_diag_reports_a_substituted_room_reading_as_such() {
+    // A held or assumed room value is what `raw` and `shift` were computed from, so the
+    // topic publishes it in `i` - and `isrc` is what stops that from being a quiet lie.
+    State s = weatherFloorState();
+    s.room = 199; s.roomSource = RoomTempFallbackPolicy::Source::HELD;
+    char buf[160];
+    TEST_ASSERT_TRUE(format(buf, sizeof(buf), s) > 0);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"i\":199,\"isrc\":\"held\""));
+
+    s.room = 192; s.roomSource = RoomTempFallbackPolicy::Source::TARGET;
+    TEST_ASSERT_TRUE(format(buf, sizeof(buf), s) > 0);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"isrc\":\"tgt\""));
+
+    s.room = 200; s.roomSource = RoomTempFallbackPolicy::Source::NOMINAL;
+    TEST_ASSERT_TRUE(format(buf, sizeof(buf), s) > 0);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"isrc\":\"nom\""));
+
+    // All four strings distinct, or a subscriber cannot tell the cases apart
+    TEST_ASSERT_EQUAL_STRING("meas", RoomTempFallbackPolicy::toString(RoomTempFallbackPolicy::Source::MEASURED));
+    TEST_ASSERT_EQUAL_STRING("held", RoomTempFallbackPolicy::toString(RoomTempFallbackPolicy::Source::HELD));
+    TEST_ASSERT_EQUAL_STRING("tgt",  RoomTempFallbackPolicy::toString(RoomTempFallbackPolicy::Source::TARGET));
+    TEST_ASSERT_EQUAL_STRING("nom",  RoomTempFallbackPolicy::toString(RoomTempFallbackPolicy::Source::NOMINAL));
 }

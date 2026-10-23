@@ -9,6 +9,7 @@
 #include "shared/Temperature.h"
 #include "config/SystemSettings.h"
 #include "core/SystemResourceProvider.h"
+#include "modules/control/RoomTempFallbackPolicy.h"
 
 // Note: Access these through SystemResourceProvider (SRP):
 // - SRP::getSystemSettings() for SystemSettings
@@ -46,6 +47,10 @@ public:
     struct CurveDebug {
         int32_t rawTarget = 0;  // pre-clamp, tenths (can be negative)
         int32_t shift = 0;      // curveShift*10 + room-deviation term, tenths
+        // What the curve actually used as its room temperature, and where it came from.
+        // Needed because a held reading looks exactly like a measured one otherwise.
+        Temperature_t effectiveInside = 0;
+        RoomTempFallbackPolicy::Source insideSource = RoomTempFallbackPolicy::Source::MEASURED;
     };
 
     // Calculate the target temperature for space heating based on shared sensor readings and system settings
@@ -63,6 +68,13 @@ public:
 private:
     // Logging tag
     static constexpr const char* TAG = "HeatingControl";
+
+    // The last valid room reading, so a brief sensor dropout holds the previous value
+    // instead of guessing - see RoomTempFallbackPolicy.h. `mutable` because
+    // calculateSpaceHeatingTargetTemp() is const and is also called by the diagnostics
+    // publisher; both callers live in HeatingControlTask, a single task, and both pass the
+    // same sensor snapshot, so there is nothing to serialise and nothing to disagree about.
+    mutable RoomTempFallbackPolicy::Sample lastRoom_;
 };
 
 #endif // HEATING_CONTROL_MODULE_H

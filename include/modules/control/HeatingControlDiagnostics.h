@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "modules/control/RoomTempFallbackPolicy.h"  // Source, for the `isrc` field
+
 /**
  * @brief Payload for boiler/status/heating/control (header-only, native-testable).
  *
@@ -55,6 +57,12 @@ namespace HeatingControlDiagnostics {
         int16_t outside = 0;     // the values THIS evaluation used, so one payload is
         int16_t room = 0;        // internally consistent rather than needing to be paired
         int16_t roomTarget = 0;  // with separately published sensors
+        // Where `room` came from. The curve substitutes a held, target or nominal value
+        // when the sensor is invalid (RoomTempFallbackPolicy), and a substituted value is
+        // otherwise indistinguishable from a measured one in `room` - which would make this
+        // topic quietly lie about its own inputs. The raw sensor field stays on
+        // boiler/status/sensors as t.i.
+        RoomTempFallbackPolicy::Source roomSource = RoomTempFallbackPolicy::Source::MEASURED;
     };
 
     inline const char* toString(Block b) {
@@ -83,7 +91,7 @@ namespace HeatingControlDiagnostics {
      * @brief Serialise to JSON.
      * @return bytes written, or 0 if the buffer was too small (caller must not publish).
      *
-     * Worst case measured at 119 B against MQTTTask's 319 B payload limit, which since
+     * Worst case measured at 133 B against MQTTTask's 319 B payload limit, which since
      * 2026-10-18 REFUSES an oversized payload rather than truncating it - so a silent cut
      * here would become a dropped publish, not malformed JSON. The 0 return is still checked
      * by the caller rather than trusted.
@@ -94,7 +102,7 @@ namespace HeatingControlDiagnostics {
         }
         const int n = snprintf(buf, size,
             "{\"mode\":\"%s\",\"dem\":%s,\"blk\":\"%s\",\"raw\":%ld,\"shift\":%ld,"
-            "\"cmd\":%ld,\"clp\":\"%s\",\"o\":%d,\"i\":%d,\"tgt\":%d}",
+            "\"cmd\":%ld,\"clp\":\"%s\",\"o\":%d,\"i\":%d,\"isrc\":\"%s\",\"tgt\":%d}",
             s.weatherMode ? "weather" : "room",
             s.demand ? "true" : "false",
             toString(s.block),
@@ -104,6 +112,7 @@ namespace HeatingControlDiagnostics {
             toString(s.clamp),
             static_cast<int>(s.outside),
             static_cast<int>(s.room),
+            RoomTempFallbackPolicy::toString(s.roomSource),
             static_cast<int>(s.roomTarget));
         if (n < 0 || static_cast<size_t>(n) >= size) {
             return 0;  // truncated - refuse rather than publish a fragment
@@ -117,7 +126,8 @@ namespace HeatingControlDiagnostics {
                a.block != b.block || a.clamp != b.clamp ||
                a.rawTarget != b.rawTarget || a.shift != b.shift ||
                a.commanded != b.commanded || a.outside != b.outside ||
-               a.room != b.room || a.roomTarget != b.roomTarget;
+               a.room != b.room || a.roomTarget != b.roomTarget ||
+               a.roomSource != b.roomSource;
     }
 
 } // namespace HeatingControlDiagnostics
