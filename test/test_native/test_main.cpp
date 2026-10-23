@@ -61,7 +61,7 @@ void test_room_diag_reports_the_contention_hypothesis();
 void test_room_diag_age_is_seconds_and_omitted_when_never_read();
 void test_room_diag_worst_case_fits_the_mqtt_payload_limit();
 void test_room_diag_refuses_a_too_small_buffer_instead_of_truncating();
-void test_room_diag_differs_ignores_the_age_but_catches_every_counter();
+void test_room_diag_differs_ignores_age_and_the_success_count();
 void test_room_diag_key_table_matches_the_state_array();
 void test_sensor_offset_map_places_each_field_on_its_channel();
 void test_sensor_offset_map_outside_is_ch3_not_ch6();
@@ -621,7 +621,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_room_diag_age_is_seconds_and_omitted_when_never_read);
     RUN_TEST(test_room_diag_worst_case_fits_the_mqtt_payload_limit);
     RUN_TEST(test_room_diag_refuses_a_too_small_buffer_instead_of_truncating);
-    RUN_TEST(test_room_diag_differs_ignores_the_age_but_catches_every_counter);
+    RUN_TEST(test_room_diag_differs_ignores_age_and_the_success_count);
     RUN_TEST(test_room_diag_key_table_matches_the_state_array);
     RUN_TEST(test_sensor_offset_map_places_each_field_on_its_channel);
     RUN_TEST(test_sensor_offset_map_outside_is_ch3_not_ch6);

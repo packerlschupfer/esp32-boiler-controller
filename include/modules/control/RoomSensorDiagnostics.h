@@ -110,15 +110,24 @@ namespace RoomSensorDiagnostics {
     /**
      * @brief True when something a subscriber cares about changed.
      *
-     * Deliberately ignores `lastGoodAgeMs`: it changes on every evaluation, so including it
-     * would publish every cycle and defeat the point of change detection. The age still goes
-     * out - on the caller's heartbeat, or alongside a counter that did change.
+     * Ignores two fields on purpose, both because they change on every single read and would
+     * turn "on change" into "every cycle":
+     *
+     *  - `lastGoodAgeMs` - moves continuously by construction.
+     *  - `counts[0]`, the SUCCESS count - increments on every good read. Measured on hardware
+     *    2026-10-24: including it published this topic every 5 s, i.e. ~17 000 retained
+     *    publishes a day for a number nobody watches in real time. It is the denominator for
+     *    a failure rate, which only matters when read, not when it ticks.
+     *
+     * So a failure-free sensor publishes only on the caller's heartbeat, and anything that
+     * actually went wrong - any error counter, or the kind of the last read - publishes
+     * immediately.
      */
     inline bool differs(const State& a, const State& b) {
         if (a.available != b.available || a.lastKind != b.lastKind) {
             return true;
         }
-        for (size_t i = 0; i < KIND_KEY_COUNT; ++i) {
+        for (size_t i = 1; i < KIND_KEY_COUNT; ++i) {  // from 1: skip the success count
             if (a.counts[i] != b.counts[i]) {
                 return true;
             }

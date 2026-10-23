@@ -89,9 +89,11 @@ void test_room_diag_refuses_a_too_small_buffer_instead_of_truncating() {
     TEST_ASSERT_EQUAL_size_t(0, format(nullptr, 0, s));
 }
 
-void test_room_diag_differs_ignores_the_age_but_catches_every_counter() {
-    // Age changes on every evaluation; including it would publish every cycle and defeat
-    // change detection. Counters and the last kind must all be caught.
+void test_room_diag_differs_ignores_age_and_the_success_count() {
+    // Both move on every single read, so including either turns "on change" into "every
+    // cycle". Measured on hardware 2026-10-24: with the success count in, this topic
+    // published every 5 s - ~17 000 retained publishes a day for a number nobody watches
+    // live. Every ERROR counter must still trigger immediately.
     const State base = healthy();
     TEST_ASSERT_FALSE(differs(base, base));
 
@@ -99,13 +101,22 @@ void test_room_diag_differs_ignores_the_age_but_catches_every_counter() {
     t.lastGoodAgeMs += 60000;
     TEST_ASSERT_FALSE_MESSAGE(differs(base, t), "age alone must not trigger a publish");
 
-    for (size_t i = 0; i < KIND_KEY_COUNT; ++i) {
+    t = base;
+    t.counts[0] += 1;
+    TEST_ASSERT_FALSE_MESSAGE(differs(base, t), "a successful read must not trigger a publish");
+
+    for (size_t i = 1; i < KIND_KEY_COUNT; ++i) {
         t = base;
         t.counts[i] += 1;
-        TEST_ASSERT_TRUE(differs(base, t));
+        TEST_ASSERT_TRUE_MESSAGE(differs(base, t), "every error kind must trigger a publish");
     }
     t = base; t.lastKind = 3;        TEST_ASSERT_TRUE(differs(base, t));
     t = base; t.available = false;   TEST_ASSERT_TRUE(differs(base, t));
+
+    // The success count still reaches the wire, it just does not force the publish
+    char buf[200];
+    TEST_ASSERT_TRUE(format(buf, sizeof(buf), base) > 0);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ok\":17280"));
 }
 
 void test_room_diag_key_table_matches_the_state_array() {
