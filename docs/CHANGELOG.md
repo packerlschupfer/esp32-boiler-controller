@@ -80,16 +80,29 @@ nothing bounds it above that). The DHW burst structure needs the charge target t
 chasing the tank, which is a separate change.
 
 Safety: the band is applied upstream of `BurnerAntiFlapping`, so `MIN_ON_TIME_MS` and
-`MIN_OFF_TIME_MS` still bound every transition. The 110.0 C `MAX_BOILER_TEMP_C` interlock is
-untouched; at the largest permitted `bandOff` and `heating_high_limit` 75.0 the burner stops
-at 90.0, 20 K below it. Out-of-range values are rejected at `params/set` and fall back as a
-*pair* to the mode's default rather than being half-clamped.
+`MIN_OFF_TIME_MS` still bound every transition. Out-of-range values are rejected at
+`params/set` and fall back as a *pair* to the mode's default rather than being half-clamped.
+
+The OFF edge is additionally capped at `MAX_OFF_THRESHOLD` = **105.0 C**, 5.0 K below the
+110.0 C `MAX_BOILER_TEMP_C` interlock. The first version of this change argued no cap was
+needed because `heating_high_limit` is 75.0 and 75.0 + the widest band is 90.0 - which
+checked the *default* rather than the parameter's *maximum*. `h/sHi` is registered 500-900
+and `w/hHi` 600-1000, `BurnerRequestManager` clamps the target to whichever is configured,
+and the band then adds `bandOff` on top, so the OFF edge could be asked for 105.0 or
+**115.0** - at or above the interlock, and into the boiler's manual-reset STB. Reaching that
+takes several parameters at their extremes simultaneously and no default comes close, but an
+invariant that holds only for today's defaults is not an invariant. Found in review,
+2026-10-23; the cap makes the bound hold for any configuration, and a `static_assert` in
+`BoilerTempController.cpp` ties it to `MAX_BOILER_TEMP_C` (the policy header stays free of
+config includes so it can be tested natively).
 
 The old degree bands (`offHysteresis` +5.0 / `onHysteresis` -3.0 in
 `BoilerTempController::Config`) were already present but read only by the bang-bang path and
 a boot log line. The new parameters take those values as their heating defaults.
 
-Eight native tests added (309 -> 317).
+Eight native tests added (309 -> 317). The interlock test originally asserted the
+75.0-default worst case and so passed against the uncapped code; it now pins `offThreshold()`
+at both configurable maxima, and fails if the cap is removed.
 
 ### An invalid room reading overflowed the heating curve
 

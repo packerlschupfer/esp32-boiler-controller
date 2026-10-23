@@ -14,6 +14,7 @@ using BurnerHysteresisPolicy::Band;
 using BurnerHysteresisPolicy::burnerWanted;
 using BurnerHysteresisPolicy::bandOrDefault;
 using BurnerHysteresisPolicy::bandValid;
+using BurnerHysteresisPolicy::offThreshold;
 
 // The deployed space-heating band, so these tests fail if the defaults move.
 static const Band HEAT = {50, 30};   // +5.0 / -3.0
@@ -90,16 +91,38 @@ void test_band_rejects_a_nonsense_band_as_a_pair() {
 }
 
 void test_band_cannot_push_flow_near_the_safety_interlock() {
-    // Worst case: the largest target heating_high_limit allows (75.0) with the widest
-    // permitted offAbove (15.0) stops the burner at 90.0, which is 20 K below the 110.0
-    // MAX_BOILER_TEMP_C interlock and the boiler's STB.
+    // The default high limit is 75.0, and 75.0 + the widest permitted offAbove (15.0) is
+    // 90.0 - comfortably below the 110.0 interlock. That is what the first version of this
+    // test checked, and it was the wrong number: h/sHi is registered 500-900 and w/hHi
+    // 600-1000, the request manager clamps the target to whichever is configured, and the
+    // band then adds offAbove on top. So the real worst cases are 90.0 + 15.0 = 105.0 and
+    // 100.0 + 15.0 = 115.0, the second of which is PAST the interlock and into the
+    // manual-reset STB. offThreshold() caps the edge; these assertions pin the cap.
     const Band widest = {BurnerHysteresisPolicy::MAX_BAND_EDGE,
                          BurnerHysteresisPolicy::MAX_BAND_EDGE};
     TEST_ASSERT_TRUE(bandValid(widest));
+
+    // Uncapped region: the edge is target + offAbove, exactly as specified.
+    TEST_ASSERT_EQUAL_INT16(900, offThreshold(750, widest));
     TEST_ASSERT_FALSE(burnerWanted(true, 750, 900, widest));
     TEST_ASSERT_TRUE(burnerWanted(true, 750, 899, widest));
-    // No int16 wrap at the ceiling of the target range either
+
+    // Largest h/sHi (90.0): lands exactly on the cap.
+    TEST_ASSERT_EQUAL_INT16(1050, offThreshold(900, widest));
+    // Largest w/hHi (100.0): would ask for 115.0, gets 105.0. Pre-fix this returned true
+    // and the burner would have kept firing through the interlock.
+    TEST_ASSERT_EQUAL_INT16(1050, offThreshold(1000, widest));
+    TEST_ASSERT_FALSE(burnerWanted(true, 1000, 1050, widest));
+    TEST_ASSERT_TRUE(burnerWanted(true, 1000, 1049, widest));
+
+    // And at the absolute target ceiling (MAX_BOILER_TEMP_C) the cap is below the target
+    // itself, so the band simply refuses to fire. No int16 wrap either.
+    TEST_ASSERT_EQUAL_INT16(1050, offThreshold(1100, widest));
+    TEST_ASSERT_FALSE(burnerWanted(true, 1100, 1060, widest));
     TEST_ASSERT_FALSE(burnerWanted(true, 1100, 1250, widest));
+
+    // The cap keeps 5.0 K of margin under the 110.0 interlock.
+    TEST_ASSERT_EQUAL_INT16(1050, BurnerHysteresisPolicy::MAX_OFF_THRESHOLD);
 }
 
 void test_band_restarts_from_off_after_a_request_pause() {

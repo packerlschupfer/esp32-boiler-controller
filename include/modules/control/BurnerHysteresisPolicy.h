@@ -72,9 +72,17 @@
  * is still the PID's percent output through BoilerPowerLevel::fromPidOutput, still gated for
  * space heating by BurnerBoostPolicy (h/boostMin). The band is applied upstream of
  * BurnerAntiFlapping, so MIN_ON_TIME_MS and MIN_OFF_TIME_MS still bound every transition.
- * The 110 °C MAX_BOILER_TEMP_C interlock is untouched and remains the absolute backstop;
- * with heating_high_limit 75.0 and the largest permitted offAbove, commanded flow stays
- * well below it.
+ *
+ * THE CEILING. The 110 °C MAX_BOILER_TEMP_C interlock remains the absolute backstop, but the
+ * band must not be the thing that drives flow into it. The first version of this header
+ * argued it could not, on the grounds that heating_high_limit is 75.0 and 75.0 + 15.0 is
+ * 90.0 - which checked the DEFAULT rather than the parameter's maximum. h/sHi is registered
+ * 500-900 and w/hHi 600-1000 (PersistentStorageTask), the request manager clamps the target
+ * to that limit, and the band then adds offAbove on top, so the OFF edge could be asked for
+ * 105.0 or 115.0: at or above the interlock, and into the manual-reset STB. Reaching it
+ * needs several parameters at their extremes at once and no default comes close, but an
+ * invariant that holds only for today's defaults is not an invariant. offThreshold() caps
+ * the edge at MAX_OFF_THRESHOLD instead, so the bound holds for any configuration.
  */
 namespace BurnerHysteresisPolicy {
 
@@ -88,10 +96,18 @@ namespace BurnerHysteresisPolicy {
     constexpr Temperature_t DEFAULT_WATER_ON_BELOW    = 30;   // -3.0 °C below target -> ON
 
     // Parameter bounds. The floor keeps a band from collapsing to zero (which would chatter
-    // at every sensor tick); the ceiling keeps commanded flow clear of the safety interlock
-    // even at heating_high_limit 75.0.
+    // at every sensor tick); the ceiling bounds how wide a band anyone can ask for.
     constexpr Temperature_t MIN_BAND_EDGE = 5;    // 0.5 °C
     constexpr Temperature_t MAX_BAND_EDGE = 150;  // 15.0 °C
+
+    // Absolute ceiling for the OFF edge, independent of target and band. 5.0 K below
+    // SystemConstants::Temperature::MAX_BOILER_TEMP_C (1100), which is where
+    // SafetyInterlocks trips and just under the boiler's manual-reset STB. Commanding the
+    // burner to keep firing up to the interlock and relying on the interlock to catch it is
+    // a race, not hysteresis - and clearing an STB means a trip to the cellar. A
+    // static_assert in BoilerTempController.cpp keeps this tied to that constant, which this
+    // header deliberately does not include (it stays native-testable with no config deps).
+    constexpr Temperature_t MAX_OFF_THRESHOLD = 1050;  // 105.0 °C
 
     struct Band {
         Temperature_t offAbove;  // turn OFF once flow reaches target + this
@@ -131,6 +147,17 @@ namespace BurnerHysteresisPolicy {
     }
 
     /**
+     * @brief Flow temperature at which the burner must stop, tenths.
+     *
+     * target + offAbove, capped at MAX_OFF_THRESHOLD. Separate from burnerWanted() so a
+     * caller (or a test) can ask where the edge actually is rather than inferring it.
+     */
+    inline Temperature_t offThreshold(Temperature_t flowTarget, const Band& band) {
+        const int32_t raw = static_cast<int32_t>(flowTarget) + static_cast<int32_t>(band.offAbove);
+        return static_cast<Temperature_t>(raw > MAX_OFF_THRESHOLD ? MAX_OFF_THRESHOLD : raw);
+    }
+
+    /**
      * @param currentlyOn  burner is lit right now. After a request pause the caller must
      *                     pass false: BoilerPowerLevel::modulatingCycleStart() restarts
      *                     every request from OFF, so the band must too, otherwise a new
@@ -146,14 +173,16 @@ namespace BurnerHysteresisPolicy {
      *
      * Arithmetic in int32: flowTarget can be 1100 (MAX_BOILER_TEMP_C) and MAX_BAND_EDGE
      * adds 150, which still fits int16, but the sum is computed wide so a future wider
-     * bound cannot silently wrap.
+     * bound cannot silently wrap. The OFF edge is additionally capped - see offThreshold().
+     * The ON edge needs no cap: subtracting from the target can only move it away from the
+     * interlock, and a target already above the cap simply never relights.
      */
     inline bool burnerWanted(bool currentlyOn, Temperature_t flowTarget,
                              Temperature_t flowActual, const Band& band) {
         const int32_t target = static_cast<int32_t>(flowTarget);
         const int32_t actual = static_cast<int32_t>(flowActual);
         if (currentlyOn) {
-            return actual < target + band.offAbove;
+            return actual < static_cast<int32_t>(offThreshold(flowTarget, band));
         }
         return actual <= target - band.onBelow;
     }

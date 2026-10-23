@@ -16,6 +16,13 @@
 static_assert(PIDGainFixedPoint::SCALE == SystemConstants::PID::PID_FIXED_POINT_SCALE,
               "PIDGainFixedPoint::SCALE must match the fixed-point PID scale");
 
+// BurnerHysteresisPolicy.h stays free of config includes so it can be tested natively, so
+// the link back to the interlock is asserted here instead. 5.0 K of margin below the trip
+// point, which is also where the manual-reset STB sits.
+static_assert(BurnerHysteresisPolicy::MAX_OFF_THRESHOLD + 50
+                  <= SystemConstants::Temperature::MAX_BOILER_TEMP_C,
+              "the flow dead band's OFF ceiling must stay clear of the 110 C interlock");
+
 const char* BoilerTempController::TAG = "BoilerTempCtrl";
 
 // Autotune method index (pid/autotune/method): 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben,
