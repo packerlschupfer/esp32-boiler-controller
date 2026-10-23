@@ -706,6 +706,10 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 | Curve coefficient | `heating/curveCoeff` | 0.5-4.0 | 1.4 | Heating curve slope (float) |
 | Curve shift | `heating/curveShift` | -20.0-40.0 (°C) | 0 | Heating curve parallel shift (float) |
 | Stage-2 lock | `h/boostMin` | 380-750 (38.0-75.0°C) | 500 | Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, ~34 kW measured). Water charges and autotune runs are exempt. 380 (= `h/sLo`) lets every heating target boost; 750 is effectively never |
+| Heating dead band, OFF edge | `h/bandOff` | 5-150 (0.5-15.0°C) | 50 | Burner turns OFF once flow reaches `target + this`. With `h/bandOn`, sets the burner start rate: cycle period is proportional to band width, duty is not |
+| Heating dead band, ON edge | `h/bandOn` | 5-150 (0.5-15.0°C) | 30 | Burner relights only once flow falls to `target - this` |
+| Water dead band, OFF edge | `w/bandOff` | 5-150 (0.5-15.0°C) | 40 | As `h/bandOff`, for tank charges. Defaults reproduce measured behaviour rather than changing it |
+| Water dead band, ON edge | `w/bandOn` | 5-150 (0.5-15.0°C) | 30 | As `h/bandOn`, for tank charges |
 | Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
 | Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
 | Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |

@@ -3,6 +3,7 @@
 #define SYSTEM_SETTINGS_STRUCT_H
 
 #include "shared/Temperature.h"
+#include "modules/control/BurnerHysteresisPolicy.h"  // flow dead band defaults
 
 // Syslog compile-time defaults (override via platformio.ini build flags)
 #ifndef SYSLOG_ENABLED_DEFAULT
@@ -54,6 +55,20 @@ struct SystemSettings {
     // See BurnerBoostPolicy.h for why the gate is the flow target and not the outside
     // temperature. 50.0 °C is about +4 °C outside on the 2026-10-19 curve.
     Temperature_t heating_boost_min_target = tempFromFloat(50.0f);
+
+    // Flow dead band on the PID path, per mode (tenths °C). Same reason for default member
+    // initializers as above. The burner turns OFF at target + offAbove and relights only at
+    // target - onBelow; this is what sets the burner start rate. See BurnerHysteresisPolicy.h
+    // for the measurements - the percent thresholds it replaces had no fixed temperature
+    // meaning because they move with Kp and with integral windup.
+    //
+    // Space heating is wide (the room loop governs comfort and the building time constant is
+    // hours). Water reproduces measured behaviour rather than changing it, because widening
+    // it would raise peak flow and the internal tandem thermostat dial is still unread.
+    Temperature_t heatingFlowOffAbove = BurnerHysteresisPolicy::DEFAULT_HEATING_OFF_ABOVE;  // +5.0
+    Temperature_t heatingFlowOnBelow  = BurnerHysteresisPolicy::DEFAULT_HEATING_ON_BELOW;   // -3.0
+    Temperature_t waterFlowOffAbove   = BurnerHysteresisPolicy::DEFAULT_WATER_OFF_ABOVE;    // +4.0
+    Temperature_t waterFlowOnBelow    = BurnerHysteresisPolicy::DEFAULT_WATER_ON_BELOW;     // -3.0
 
     // Water Heating Limits (Mode-Specific)
     Temperature_t water_heating_low_limit;   // Minimum for water heating

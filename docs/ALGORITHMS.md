@@ -940,6 +940,57 @@ Weather mode, room 19.0°C, target 20.0°C, factor 2.0, outside 0.0°C: shift = 
   - Needed = outside cold and room not overheated.
 - **Room mode** (`heating/weatherControl` off): needs a valid room reading and `targetTemp` > 0, otherwise not needed. Start when room < `targetTemp`, stop when room >= `targetTemp` + `hysteresis` (target 20.0°C, hysteresis 0.5°C: stops at 20.5°C). The outside temperature is not used for the decision.
 
+### Burner Dead Band (`BurnerHysteresisPolicy`)
+
+Two nested loops. The **room loop** decides whether heat is requested at all (slow, hours:
+"Room warm enough" / "Too warm outside"); inside one request the **flow loop** switches the
+burner on and off repeatedly (fast, minutes). The flow loop's hysteresis is what sets the
+burner start rate.
+
+Until 2026-10-23 that hysteresis was expressed in percent of PID output, which has no fixed
+temperature meaning. With `output% = 50 + adjustment/10` and
+`adjustment = Kp*error + Ki*integral`, a percent threshold becomes a temperature only after
+dividing by Kp. At the live space-heating gains (Kp 13.222, Ki 0.045334, Kd 0):
+
+| | adjustment | flow vs target |
+|---|---|---|
+| OFF (`< offThreshold` 35 %) | -150 | target **+1.13** |
+| ON (`> halfThreshold + hysteresis` 55 %) | +50 | target **-0.38** |
+| stage 2 (`> fullThreshold` 75 %) | +250 | target -1.89 |
+| back to stage 1 (`< fullThreshold - hysteresis` 65 %) | +150 | target -1.13 |
+
+a 1.51 K band on pure proportional action. **Measured it was 2.9-3.2 K** - OFF at target
++2.3 / +2.4 / +2.4 on three cycles, ON at -0.5 to -0.8. Kd is zero, so the difference is the
+integral: each +100 of integral contribution pushes OFF out by `100/Kp/10` = 0.76 °C, and
+the +167 needed to explain +2.40 is only ~370 s of 1.0 °C error. Anti-windup bounds it (the
+integral freezes whenever output pins at 0 or 100 %, the output limits being ±500, exactly
+where the power mapping saturates) but within those bounds it moves freely, and the PID is
+reset only when a *request* ends, not between burner cycles inside one. The band was
+therefore trajectory-dependent, not fixed.
+
+The band is now in degrees and per mode:
+
+| | OFF edge | ON edge | width |
+|---|---|---|---|
+| space heating (`h/bandOff` / `h/bandOn`) | target +5.0 | target -3.0 | 8.0 K |
+| water (`w/bandOff` / `w/bandOn`) | target +4.0 | target -3.0 | 7.0 K |
+
+`BurnerHysteresisPolicy::burnerWanted()` decides only the ON/OFF bit; stage selection stays
+with `fromPidOutput()` and `BurnerBoostPolicy`. It is applied in `calculateModulating()`
+upstream of `BurnerAntiFlapping`, so `MIN_ON_TIME_MS` / `MIN_OFF_TIME_MS` still bound every
+transition, and mirrored in `predictHeatDemand()` so the prediction agrees with the
+controller. `updateMode()` swaps the band per mode every cycle, like the gains, but does
+**not** reset the PID on a band change - the band gates the output, it is not loop state.
+
+Why the band is the right dial: for hysteresis control on a thermal system, on-time is
+`H·C/(P−L)` and off-time `H·C/L`, so **period ∝ band width while duty = L/P is independent
+of it**. Widening trades flow swing for burner starts at constant gas. Replayed against the
+recorded traces at 20 s resolution, 2026-10-22 goes from 2 ignitions to 1 and 2026-10-19
+from 4 to 1 - though that replay is open-loop (it reuses flow temperatures produced by the
+old controller, which would have run hotter if held on longer), so treat it as an optimistic
+bound. The relight half is sound regardless: flow bottomed at 36.2-37.2 in those gaps and
+never reached the new 35.0 relight edge.
+
 ### Stage-2 Power Selection and the Mild-Weather Lock (`BurnerBoostPolicy`)
 
 The boiler is two-stage: about **19 kW on stage 1 and 34 kW with POWER_BOOST** as measured

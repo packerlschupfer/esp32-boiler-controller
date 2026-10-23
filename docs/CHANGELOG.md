@@ -22,6 +22,75 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### The burner dead band is now in degrees, and mode-aware
+
+New parameters `h/bandOff` / `h/bandOn` (heating, default **+5.0 / -3.0 C**) and
+`w/bandOff` / `w/bandOn` (water, default **+4.0 / -3.0 C**), range 0.5-15.0 C each. The
+burner now turns OFF once flow reaches `target + bandOff` and relights only once flow falls
+to `target - bandOn`. Stage selection (1 vs 2) is unchanged - still the PID's percent output
+through `BoilerPowerLevel::fromPidOutput()`, still gated for space heating by `h/boostMin`.
+
+**Why.** The flow loop's hysteresis sets the burner start rate, and it was specified in
+percent of PID output. A percent threshold only becomes a temperature after dividing by Kp,
+so with the live gains (Kp 13.222, Ki 0.045334, Kd 0) pure proportional action gave OFF at
+target +1.13 and ON at target -0.38 - a 1.51 K band. Measured on hardware it was 2.9-3.2 K:
+the burner shut off at target +2.3, +2.4, +2.4 on three independent cycles and relit at
+-0.5 to -0.8. Kd is zero, so the extra width is integral windup, and each +100 of integral
+contribution moves the OFF point 0.76 C further out. The PID is not reset between burner
+cycles inside one request, only when a request ends, so the band's width and position
+depended on how long the burner had been running. It was not a fixed band but a
+trajectory-dependent one, which is why no amount of tuning the percentages fixed the
+cycling.
+
+**What it cost**, 2026-10-22 17:39-18:19 with the target pinned at the 38.0 floor: a 32m20s
+burn ended at flow 40.4, flow decayed 3.2 K in 3m50s, the burner relit at 37.2 and ran
+3m20s before the *room* loop ended the request at 18:20. 0.11 m3 and one extra ignition for
+a burn the house had not asked for. The inner flow loop cycles far faster than the outer
+room loop that actually knows whether the room is satisfied.
+
+**Why the band and not another dial.** For hysteresis control, on-time is `H*C/(P-L)` and
+off-time `H*C/L`, so cycle period is proportional to band width H while duty is `L/P` and
+independent of it - fewer starts for the same gas. `MIN_ON_TIME_MS` lengthens unwanted burns
+instead of preventing them (2026-10-20: it held the burner on for the last 5 s of a burn the
+room had already finished with). A minimum off-time only postpones the burn while the house
+keeps cooling. `h/sLo` moves where the band sits, not how wide it is. Lowering Kp widens it
+only by detuning the loop.
+
+**Replayed against the recorded traces**, 20 s resolution:
+
+| cycle | actual | with +5.0 / -3.0 |
+|---|---|---|
+| 2026-10-22 17:39-18:21 | 2 ignitions (32m20s + 3m20s) | **1** (17:39:20 -> 18:20:40) |
+| 2026-10-19 19:50-20:45 | 4 ignitions | **1** (19:54:40 -> 20:41:20) |
+
+Caveat on that table: it is an **open-loop** replay of flow temperatures produced by the old
+controller. Holding the burner on longer would have pushed flow higher than recorded, so the
+OFF edge would in reality be crossed sooner than the replay suggests - treat "1 ignition" as
+the optimistic bound. The relight half is sound either way: flow bottomed at 36.2-37.2 in
+those gaps and never came near the new 35.0 relight edge, so those specific afterburns could
+not have happened.
+
+**Mode awareness.** Space heating gets the wide band - the room is governed by the outer loop
+and the building time constant is hours against a band period of tens of minutes, so the
+room barely sees the flow swing. Water defaults to +4.0 / -3.0, chosen to *reproduce*
+measured behaviour rather than change it: a 2026-10-22 charge stopped at target +3.3 and
++5.2 and relit at -2.9. Widening it would raise peak flow and the boiler's internal tandem
+thermostat dial is still unread (flow has reached 66.7 with no cut-out, so above ~67, but
+nothing bounds it above that). The DHW burst structure needs the charge target to stop
+chasing the tank, which is a separate change.
+
+Safety: the band is applied upstream of `BurnerAntiFlapping`, so `MIN_ON_TIME_MS` and
+`MIN_OFF_TIME_MS` still bound every transition. The 110.0 C `MAX_BOILER_TEMP_C` interlock is
+untouched; at the largest permitted `bandOff` and `heating_high_limit` 75.0 the burner stops
+at 90.0, 20 K below it. Out-of-range values are rejected at `params/set` and fall back as a
+*pair* to the mode's default rather than being half-clamped.
+
+The old degree bands (`offHysteresis` +5.0 / `onHysteresis` -3.0 in
+`BoilerTempController::Config`) were already present but read only by the bang-bang path and
+a boot log line. The new parameters take those values as their heating defaults.
+
+Eight native tests added (309 -> 317).
+
 ### An invalid room reading overflowed the heating curve
 
 Found in recorder data, 2026-10-23 08:34:13: the device published

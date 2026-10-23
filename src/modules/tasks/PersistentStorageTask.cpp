@@ -3,6 +3,7 @@
 #include "PersistentStorageTask.h"
 #include "modules/control/AutotuneRelayConfig.h"  // autotune setting ranges
 #include "modules/control/WaterChargePolicy.h"    // charge delta bounds
+#include "modules/control/BurnerHysteresisPolicy.h" // flow dead band bounds
 #include <TaskManager.h>
 #include "LoggingMacros.h"
 #include "core/SystemResourceProvider.h"
@@ -378,6 +379,43 @@ void PersistentStorageTask(void* pvParameters) {
         s.heating_boost_min_target = static_cast<Temperature_t>(boostMinTarget_i32);
     });
 
+    // Flow dead band, per mode (tenths °C). The burner turns OFF at target + offAbove and
+    // relights only at target - onBelow, so these set the burner start rate: cycle period is
+    // proportional to the band width while duty is not, i.e. fewer starts for the same gas.
+    // Measurements and the choice of defaults are in BurnerHysteresisPolicy.h. Bounds match
+    // BurnerHysteresisPolicy::MIN/MAX_BAND_EDGE so an out-of-range set is rejected here
+    // rather than silently replaced at the use site (the mistake fixed in 30a2539).
+    static int32_t heatBandOff_i32 = BurnerHysteresisPolicy::DEFAULT_HEATING_OFF_ABOVE;
+    static int32_t heatBandOn_i32  = BurnerHysteresisPolicy::DEFAULT_HEATING_ON_BELOW;
+    static int32_t waterBandOff_i32 = BurnerHysteresisPolicy::DEFAULT_WATER_OFF_ABOVE;
+    static int32_t waterBandOn_i32  = BurnerHysteresisPolicy::DEFAULT_WATER_ON_BELOW;
+
+    storage->registerInt("h/bandOff", &heatBandOff_i32,
+                         BurnerHysteresisPolicy::MIN_BAND_EDGE, BurnerHysteresisPolicy::MAX_BAND_EDGE,
+                         "Heating: burner OFF at target + this (tenths °C)");
+    storage->registerInt("h/bandOn", &heatBandOn_i32,
+                         BurnerHysteresisPolicy::MIN_BAND_EDGE, BurnerHysteresisPolicy::MAX_BAND_EDGE,
+                         "Heating: burner ON at target - this (tenths °C)");
+    storage->registerInt("w/bandOff", &waterBandOff_i32,
+                         BurnerHysteresisPolicy::MIN_BAND_EDGE, BurnerHysteresisPolicy::MAX_BAND_EDGE,
+                         "Water: burner OFF at target + this (tenths °C)");
+    storage->registerInt("w/bandOn", &waterBandOn_i32,
+                         BurnerHysteresisPolicy::MIN_BAND_EDGE, BurnerHysteresisPolicy::MAX_BAND_EDGE,
+                         "Water: burner ON at target - this (tenths °C)");
+
+    storage->setOnChange("h/bandOff", [](const std::string&, const void*) {
+        SRP::getSystemSettings().heatingFlowOffAbove = static_cast<Temperature_t>(heatBandOff_i32);
+    });
+    storage->setOnChange("h/bandOn", [](const std::string&, const void*) {
+        SRP::getSystemSettings().heatingFlowOnBelow = static_cast<Temperature_t>(heatBandOn_i32);
+    });
+    storage->setOnChange("w/bandOff", [](const std::string&, const void*) {
+        SRP::getSystemSettings().waterFlowOffAbove = static_cast<Temperature_t>(waterBandOff_i32);
+    });
+    storage->setOnChange("w/bandOn", [](const std::string&, const void*) {
+        SRP::getSystemSettings().waterFlowOnBelow = static_cast<Temperature_t>(waterBandOn_i32);
+    });
+
     // Water Heating Limits
     static int32_t water_low_i32 = 400;   // 40.0°C default
     static int32_t water_high_i32 = 900;  // 90.0°C default
@@ -730,6 +768,10 @@ void PersistentStorageTask(void* pvParameters) {
     if (heating_low_i32 == 0) heating_low_i32 = 380;
     if (heating_high_i32 == 0) heating_high_i32 = 750;
     if (boostMinTarget_i32 == 0) boostMinTarget_i32 = 500;
+    if (heatBandOff_i32 == 0) heatBandOff_i32 = BurnerHysteresisPolicy::DEFAULT_HEATING_OFF_ABOVE;
+    if (heatBandOn_i32 == 0) heatBandOn_i32 = BurnerHysteresisPolicy::DEFAULT_HEATING_ON_BELOW;
+    if (waterBandOff_i32 == 0) waterBandOff_i32 = BurnerHysteresisPolicy::DEFAULT_WATER_OFF_ABOVE;
+    if (waterBandOn_i32 == 0) waterBandOn_i32 = BurnerHysteresisPolicy::DEFAULT_WATER_ON_BELOW;
     if (water_low_i32 == 0) water_low_i32 = 400;
     if (water_high_i32 == 0 || water_high_i32 == 1) water_high_i32 = 900;
     // Weather control defaults (15.0°C threshold, 2.0°C overheat margin)
@@ -742,6 +784,10 @@ void PersistentStorageTask(void* pvParameters) {
     settings.heating_low_limit = static_cast<Temperature_t>(heating_low_i32);
     settings.heating_high_limit = static_cast<Temperature_t>(heating_high_i32);
     settings.heating_boost_min_target = static_cast<Temperature_t>(boostMinTarget_i32);
+    settings.heatingFlowOffAbove = static_cast<Temperature_t>(heatBandOff_i32);
+    settings.heatingFlowOnBelow = static_cast<Temperature_t>(heatBandOn_i32);
+    settings.waterFlowOffAbove = static_cast<Temperature_t>(waterBandOff_i32);
+    settings.waterFlowOnBelow = static_cast<Temperature_t>(waterBandOn_i32);
     settings.water_heating_low_limit = static_cast<Temperature_t>(water_low_i32);
     settings.water_heating_high_limit = static_cast<Temperature_t>(water_high_i32);
     settings.outsideTempHeatingThreshold = static_cast<Temperature_t>(outsideHeatingThreshold_i32);

@@ -382,6 +382,22 @@ BoilerTempController::ControlOutput BoilerTempController::calculateModulating(
     };
     PowerLevel desiredLevel = BoilerPowerLevel::fromPidOutput(lastOutput_.powerLevel, pidOutput, thresholds);
 
+    // The flow dead band decides the ON/OFF bit; the PID above decides only the stage.
+    // The percent thresholds have no fixed temperature meaning - they move with Kp and with
+    // integral windup - which is what produced the 2.9-3.2 K measured band and the short
+    // relights after it. BurnerHysteresisPolicy.h carries the measurements and the
+    // period-vs-band argument. Applied here, upstream of anti-flapping, so MIN_ON_TIME_MS
+    // and MIN_OFF_TIME_MS still bound every transition this causes.
+    const bool wasOn = (lastOutput_.powerLevel != PowerLevel::OFF);
+    if (!BurnerHysteresisPolicy::burnerWanted(wasOn, target, current, config_.flowBand)) {
+        desiredLevel = PowerLevel::OFF;
+    } else if (desiredLevel == PowerLevel::OFF) {
+        // Inside the band and already lit: hold the flame at stage 1 rather than letting the
+        // percent mapping cut it. Stage 1 deliberately, never stage 2 - if the PID wanted
+        // OFF, the last thing the boiler needs is full fire.
+        desiredLevel = PowerLevel::HALF;
+    }
+
     // Check anti-flapping before changing power level
     if (desiredLevel != lastOutput_.powerLevel) {
         BurnerAntiFlapping::PowerLevel afLevel;
@@ -494,6 +510,20 @@ bool BoilerTempController::predictHeatDemand(Temperature_t targetTemp, Temperatu
                                                          PIDGainFixedPoint::fromFloat(ki),
                                                          PIDGainFixedPoint::fromFloat(kd),
                                                          thresholds);
+
+        // Mirror calculateModulating()'s dead band, or this prediction would disagree with
+        // the controller it is predicting. `paused` means the next cycle restarts from OFF
+        // (modulatingCycleStart), so the band must start from "not lit" too.
+        const BurnerHysteresisPolicy::Band band = BurnerHysteresisPolicy::bandOrDefault(
+            {waterMode ? settings.waterFlowOffAbove : settings.heatingFlowOffAbove,
+             waterMode ? settings.waterFlowOnBelow  : settings.heatingFlowOnBelow},
+            waterMode);
+        const bool predictWasOn = !paused && (lastLevel != PowerLevel::OFF);
+        if (!BurnerHysteresisPolicy::burnerWanted(predictWasOn, targetTemp, currentTemp, band)) {
+            level = PowerLevel::OFF;
+        } else if (level == PowerLevel::OFF) {
+            level = PowerLevel::HALF;
+        }
     }
 
     wantsHeat = (level != PowerLevel::OFF);
@@ -589,10 +619,27 @@ void BoilerTempController::updateMode() {
     float ki = isWaterMode ? settings.wHeaterKi : settings.spaceHeatingKi;
     float kd = isWaterMode ? settings.wHeaterKd : settings.spaceHeatingKd;
 
+    // The flow dead band follows the mode the same way the gains do, re-read every cycle so
+    // an MQTT change takes effect without a reboot. Unlike the gains a band change does NOT
+    // reset the PID: the band gates the output, it is not part of the loop's state.
+    const BurnerHysteresisPolicy::Band band = BurnerHysteresisPolicy::bandOrDefault(
+        {isWaterMode ? settings.waterFlowOffAbove : settings.heatingFlowOffAbove,
+         isWaterMode ? settings.waterFlowOnBelow  : settings.heatingFlowOnBelow},
+        isWaterMode);
+
     MutexGuard guard(mutex_, MUTEX_TIMEOUT);
     if (!guard.hasLock()) {
         LOG_ERROR(TAG, "updateMode: mutex timeout");
         return;
+    }
+
+    const bool bandChanged = (band.offAbove != config_.flowBand.offAbove) ||
+                             (band.onBelow != config_.flowBand.onBelow);
+    if (bandChanged) {
+        LOG_INFO(TAG, "Flow dead band -> +%.1f / -%.1f (%s)",
+                 tempToFloat(band.offAbove), tempToFloat(band.onBelow),
+                 isWaterMode ? "water" : "space");
+        config_.flowBand = band;
     }
 
     bool gainsChanged = (kp != config_.modKp) || (ki != config_.modKi) || (kd != config_.modKd);

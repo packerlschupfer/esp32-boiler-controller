@@ -7,7 +7,8 @@
 #include "shared/Temperature.h"
 #include "modules/control/PIDControlModuleFixedPoint.h"
 #include "modules/control/PIDAutoTuner.h"
-#include "modules/control/BoilerPowerLevel.h"    // power level mapping shared with the native tests
+#include "modules/control/BoilerPowerLevel.h"      // power level mapping shared with the native tests
+#include "modules/control/BurnerHysteresisPolicy.h" // flow dead band, in degrees
 #include "modules/control/AutotuneClock.h"       // wrap-safe autotune run time
 #include "modules/control/AutotuneGainTarget.h"  // which gain set an autotune result belongs to
 
@@ -68,6 +69,12 @@ public:
         Temperature_t offHysteresis = BoilerPowerLevel::DEFAULT_OFF_HYSTERESIS;            // +5.0°C above target → OFF
         Temperature_t onHysteresis = BoilerPowerLevel::DEFAULT_ON_HYSTERESIS;              // -3.0°C below target → ON (HALF)
         Temperature_t fullPowerThreshold = BoilerPowerLevel::DEFAULT_FULL_POWER_THRESHOLD; // -10.0°C below target → FULL
+
+        // Flow dead band for the PID path, in DEGREES. The bands above are read only by
+        // the bang-bang path and a boot log line; this one gates the burner on/off on the
+        // live modulating path. updateMode() swaps it per mode every cycle, like the gains.
+        // See BurnerHysteresisPolicy.h for why a percent band was the wrong unit.
+        BurnerHysteresisPolicy::Band flowBand = BurnerHysteresisPolicy::heatingDefault();
 
         // Minimum valid target temperature (safety)
         Temperature_t minTargetTemp = 200;      // 20.0°C minimum target

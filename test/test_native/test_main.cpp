@@ -232,6 +232,15 @@ void test_scheduler_unhandled_command_always_replies();
 void test_scheduler_status_lists_active_and_disabled_ids();
 void test_scheduler_status_worst_case_fits_mqtt_payload();
 // Burner boost policy (stage-2 lock-out for mild-weather heating)
+void test_band_keeps_firing_until_the_top_of_the_band();
+void test_band_relights_only_at_the_bottom_of_the_band();
+void test_band_is_asymmetric_which_is_the_whole_point();
+void test_band_width_is_eight_kelvin_for_heating_and_seven_for_water();
+void test_band_tracks_a_moving_target();
+void test_band_rejects_a_nonsense_band_as_a_pair();
+void test_band_cannot_push_flow_near_the_safety_interlock();
+void test_band_restarts_from_off_after_a_request_pause();
+
 void test_boost_denied_for_mild_weather_heating_targets();
 void test_boost_allowed_for_cold_weather_heating_targets();
 void test_boost_threshold_is_inclusive_at_exactly_the_limit();
@@ -765,6 +774,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_scheduler_status_small_buffer_stays_valid_json);
 
     // Burner boost policy (stage-2 lock-out for mild-weather heating)
+    RUN_TEST(test_band_keeps_firing_until_the_top_of_the_band);
+    RUN_TEST(test_band_relights_only_at_the_bottom_of_the_band);
+    RUN_TEST(test_band_is_asymmetric_which_is_the_whole_point);
+    RUN_TEST(test_band_width_is_eight_kelvin_for_heating_and_seven_for_water);
+    RUN_TEST(test_band_tracks_a_moving_target);
+    RUN_TEST(test_band_rejects_a_nonsense_band_as_a_pair);
+    RUN_TEST(test_band_cannot_push_flow_near_the_safety_interlock);
+    RUN_TEST(test_band_restarts_from_off_after_a_request_pause);
     RUN_TEST(test_boost_denied_for_mild_weather_heating_targets);
     RUN_TEST(test_boost_allowed_for_cold_weather_heating_targets);
     RUN_TEST(test_boost_threshold_is_inclusive_at_exactly_the_limit);
