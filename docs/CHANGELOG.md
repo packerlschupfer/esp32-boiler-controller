@@ -210,6 +210,14 @@ and transfer is `UA x (flow - tank)`. A 10.0 delta already produces only a 3.0-3
 flow-return gap on this boiler, measured across a full charge on 2026-10-22. Below ~5.0 the
 boiler would command tank plus a few tenths and could not charge the tank at all.
 
+The two Home Assistant surfaces that set this parameter were left behind by that change
+and are corrected here: the MQTT number entity in `boiler_mqtt_include.yaml` still declared
+`min: 1` and the add-on's panel input `min="3"`. Either one would have let a user set 2.0
+from a slider and get the firmware's rejection with nothing shown anywhere - the same
+silent no-op this entry is about, one layer up. Found in review, 2026-10-23. Both now read
+5, matching `WaterChargePolicy::CHARGE_DELTA_MIN`. The add-on needs a **Rebuild** for the
+template change to take effect.
+
 Out-of-range now fails at `params/set` (`PersistentStorage` returns
 `ERROR_VALIDATION_FAILED`), and an out-of-range value already in NVS loads as the default
 with a warning, so tightening the minimum is safe for existing installs. Four native tests
