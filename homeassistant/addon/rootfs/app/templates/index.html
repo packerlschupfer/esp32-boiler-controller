@@ -675,15 +675,6 @@
                     </div>
                 </div>
                 <div class="param-row">
-                    <span class="param-label has-tooltip" data-tooltip="Max boiler temp for space heating">High Limit</span>
-                    <div class="param-value">
-                        <input type="number" step="0.1" id="heating_highLimit" data-topic="params/h/bHi" min="70" max="110">
-                        <span class="unit">°C</span>
-                        <button class="small" onclick="getParam('params/get/all', 'heating_highLimit')">R</button>
-                        <button class="small save" onclick="setParamFromInput('heating_highLimit')">S</button>
-                    </div>
-                </div>
-                <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Min boiler flow-temp target for space heating (h/sLo)">Space Heating Min</span>
                     <div class="param-value">
                         <input type="number" step="0.1" id="h_sLo" data-topic="params/h/sLo" min="30" max="60">
@@ -754,10 +745,6 @@
                 <h2><span class="icon">🚿</span> Water Heater Settings</h2>
                 <!-- Safety Limits Display -->
                 <div style="display: flex; gap: 16px; margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: 6px;">
-                    <div style="flex: 1; text-align: center;">
-                        <div style="font-size: 11px; color: var(--text-dim);">Safe Low</div>
-                        <div style="font-size: 1.2rem; color: var(--warning);" id="wheater_safeLow">--°C</div>
-                    </div>
                     <div style="flex: 1; text-align: center;">
                         <div style="font-size: 11px; color: var(--text-dim);">Operating Range</div>
                         <div style="font-size: 1.2rem; color: var(--success);" id="wheater_range">-- - --°C</div>
@@ -1221,15 +1208,6 @@
                     </div>
                 </div>
                 <div class="param-row">
-                    <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Water Output reading (sensor/offset/waterOutput, tenths degC)">Water Output Offset</span>
-                    <div class="param-value">
-                        <input type="number" step="0.1" id="offset_waterOutput" data-topic="params/sensor/offset/waterOutput" min="-5" max="5">
-                        <span class="unit">°C</span>
-                        <button class="small" onclick="getParam('params/get/all', 'offset_waterOutput')">R</button>
-                        <button class="small save" onclick="setParamFromInput('offset_waterOutput')">S</button>
-                    </div>
-                </div>
-                <div class="param-row">
                     <span class="param-label has-tooltip" data-tooltip="Calibration offset added to Water Return reading (sensor/offset/waterReturn, tenths degC)">Water Return Offset</span>
                     <div class="param-value">
                         <input type="number" step="0.1" id="offset_waterReturn" data-topic="params/sensor/offset/waterReturn" min="-5" max="5">
@@ -1582,13 +1560,12 @@
                 if (h.roomCurveShiftFactor !== undefined) document.getElementById('heating_roomCurveShiftFactor').placeholder = h.roomCurveShiftFactor;
                 if (h.weatherControl !== undefined) document.getElementById('heating_weatherControl').checked = !!h.weatherControl;
             }
-            // Space-heating/burner clamps (group "h": sLo/sHi/bLo/bHi, tenths degC)
+            // Space-heating/burner clamps (group "h": sLo/sHi/bLo, tenths degC)
             if (state.params.h) {
                 const hg = state.params.h;
                 if (hg.sLo !== undefined) document.getElementById('h_sLo').placeholder = tenthsToDeg(hg.sLo);
                 if (hg.sHi !== undefined) document.getElementById('h_sHi').placeholder = tenthsToDeg(hg.sHi);
                 if (hg.bLo !== undefined) document.getElementById('heating_burnerLowLimit').placeholder = tenthsToDeg(hg.bLo);
-                if (hg.bHi !== undefined) document.getElementById('heating_highLimit').placeholder = tenthsToDeg(hg.bHi);
             }
             // Water boiler-target clamps (group "w": hLo/hHi, tenths degC)
             if (state.params.w) {
@@ -1601,7 +1578,7 @@
                 const sg = state.params.sensor;
                 const off = (k, id, hund) => { const v = sg['offset/' + k]; if (v !== undefined) { const el = document.getElementById(id); if (el) el.placeholder = hund ? hundredthsToVal(v) : tenthsToDeg(v); } };
                 off('boilerOutput','offset_boilerOutput'); off('boilerReturn','offset_boilerReturn');
-                off('waterTank','offset_waterTank'); off('waterOutput','offset_waterOutput');
+                off('waterTank','offset_waterTank');
                 off('waterReturn','offset_waterReturn'); off('heatingReturn','offset_heatingReturn');
                 off('outside','offset_outside'); off('room','offset_room');
                 off('pressure','offset_pressure', true);
@@ -1616,9 +1593,6 @@
                 if (w.heatingRate !== undefined) document.getElementById('wheater_heatingRate').placeholder = w.heatingRate;
                 if (w.priorityEnabled !== undefined) document.getElementById('wheater_priorityEnabled').checked = w.priorityEnabled;
                 // Update safety limits display
-                if (w.tempSafeLimitLow !== undefined) {
-                    document.getElementById('wheater_safeLow').textContent = tenthsToDeg(w.tempSafeLimitLow) + '°C';
-                }
                 if (w.tempSafeLimitHigh !== undefined) {
                     document.getElementById('wheater_safeHigh').textContent = tenthsToDeg(w.tempSafeLimitHigh) + '°C';
                 }
@@ -1716,12 +1690,11 @@
             'heating/roomOverheatMargin',
             'wheater/tempLimitLow',
             'wheater/tempLimitHigh',
-            'wheater/tempSafeLimitLow',
             'wheater/tempSafeLimitHigh',
             'w/hLo', 'w/hHi',
-            'h/sLo', 'h/sHi', 'h/bLo', 'h/bHi',
+            'h/sLo', 'h/sHi', 'h/bLo',
             'sensor/offset/boilerOutput', 'sensor/offset/boilerReturn',
-            'sensor/offset/waterTank', 'sensor/offset/waterOutput',
+            'sensor/offset/waterTank',
             'sensor/offset/waterReturn', 'sensor/offset/heatingReturn',
             'sensor/offset/outside', 'sensor/offset/room',
         ]);
@@ -1987,7 +1960,6 @@
                 { id: 'heating_curveCoeff', topic: 'params/heating/curveCoeff' },
                 { id: 'heating_curveShift', topic: 'params/heating/curveShift' },
                 { id: 'heating_burnerLowLimit', topic: 'params/h/bLo' },
-                { id: 'heating_highLimit', topic: 'params/h/bHi' },
                 { id: 'h_sLo', topic: 'params/h/sLo' },
                 { id: 'h_sHi', topic: 'params/h/sHi' },
                 { id: 'heating_outsideThreshold', topic: 'params/heating/outsideThreshold' },
