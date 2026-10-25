@@ -293,6 +293,23 @@ void test_bsm_step_lost_mode_request_stops_after_grace() {
     TEST_ASSERT_TRUE(sim.last.reason == Reason::NO_MODE_DEMAND);
 }
 
+// =======================================================================================
+// THE THREE FLAME TESTS BELOW EXERCISE A PATH THE FIRMWARE CANNOT TAKE.
+//
+// There is no flame-detection hardware on this boiler. BurnerSafetyChecks::isFlameDetected()
+// returns BurnerSystemController::isActive() - i.e. "the burner relay is commanded on" - so
+// flameDetected() reporting false WHILE the burner is commanded active, which is what every
+// flame-loss test below sets up, cannot happen in the real system. The only flame proof that
+// exists is the Home Assistant gas-meter pulse counter, which is outside the control loop and
+// which caught a 112 s flame loss on 2026-10-24 that the firmware was entirely blind to.
+//
+// They are KEPT, not deleted: the state machine's handling is correct and is what a flame
+// sensor would need. They are labelled because the 2026-10-25 review counted them as tests
+// asserting a safety behaviour the controller does not have, and a passing test named
+// "flame loss bypasses min on time" reads like evidence that it does.
+//
+// Delete this banner the day a flame sensor is wired and isFlameDetected() reads it.
+// =======================================================================================
 void test_bsm_step_flame_loss_bypasses_min_on_time() {
     startBurner(false, false);
     sim.env.turnOffAllowed = false;

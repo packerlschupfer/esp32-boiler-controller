@@ -282,6 +282,9 @@ void test_relay_state_after_error() {
     // Verify we're running
     TEST_ASSERT_EQUAL(BurnerStateMachine::State::RUNNING_HIGH, burnerSM->getCurrentState());
 
+    // NOTE: unreachable in the real firmware - there is no flame sensor, and
+    // BurnerSafetyChecks::isFlameDetected() returns "the burner relay is commanded on". See the
+    // banner in test_burner_transitions.cpp. Kept for the state machine's own sake.
     // Simulate flame loss (error condition) - setFlameDetected handles transition to ERROR
     burnerSM->setFlameDetected(false);
 

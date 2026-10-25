@@ -115,3 +115,157 @@ void test_room_fallback_never_returns_an_invalid_marker() {
     const Substitute held = substitute(stale, 1000, ROOM_TARGET);
     TEST_ASSERT_EQUAL_INT16(195, held.value);
 }
+
+// ---------------------------------------------------------------------------------------
+// resolve() against the REAL SharedSensorReadings struct.
+//
+// The 2026-10-25 review's test-suite finding was that a native test of
+// HeatingControlModule::resolveRoomForControl() "cannot even be written": the module needs
+// FreeRTOS and SRP, and the copied MockSharedSensorReadings was missing insideTempGoodMs, the
+// field the whole timestamp decision turns on. Both halves are now fixed - the decision moved
+// into resolve(), and the real struct compiles natively - so here is that test.
+// ---------------------------------------------------------------------------------------
+
+#include "shared/SharedSensorReadings.h"
+
+static RoomTempFallbackPolicy::Substitute resolveFrom(RoomTempFallbackPolicy::Sample& sample,
+                                                      const SharedSensorReadings& r,
+                                                      uint32_t nowMs, Temperature_t target) {
+    return RoomTempFallbackPolicy::resolve(sample, r.isInsideTempValid, r.insideTemp,
+                                           r.insideTempGoodMs, nowMs, target);
+}
+
+void test_room_resolve_credits_the_sensors_read_time_not_now() {
+    // THE POINT OF insideTempGoodMs. isInsideTempValid stays true through up to three failed
+    // reads (~15 s in ANDRTF3Task), so crediting millis() on every valid-looking cycle would
+    // keep resetting the hold window against data that was already going stale - the 10-minute
+    // hold would then start when the FLAG dropped, not at the last good sample, and run up to
+    // 15 s long.
+    SharedSensorReadings r;
+    RoomTempFallbackPolicy::Sample sample;
+
+    r.isInsideTempValid = true;
+    r.insideTemp = 198;
+    r.insideTempGoodMs = 1000;          // the sensor's last GOOD read
+    (void)resolveFrom(sample, r, 16000, 192);   // ...observed 15 s later, flag still true
+    TEST_ASSERT_EQUAL_UINT32(1000, sample.atMs);
+
+    // So the hold expires 10 minutes after the READ, not after the observation.
+    r.isInsideTempValid = false;
+    const uint32_t lastHeld = 1000 + RoomTempFallbackPolicy::MAX_HOLD_MS;
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::HELD,
+                      resolveFrom(sample, r, lastHeld, 192).source);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::TARGET,
+                      resolveFrom(sample, r, lastHeld + 1, 192).source);
+
+    // Had it credited the observation time (16000) the hold would still be alive here - that
+    // difference is exactly the defect this field exists to prevent.
+    TEST_ASSERT_TRUE(16000u + RoomTempFallbackPolicy::MAX_HOLD_MS > lastHeld);
+}
+
+void test_room_resolve_falls_back_to_now_before_the_driver_ever_wrote() {
+    // insideTempGoodMs == 0 means the sensor driver has never written it - at boot, or with an
+    // older driver. Then there is nothing better than now, and it must NOT be read as "epoch
+    // zero", which would make the sample instantly older than the hold window.
+    SharedSensorReadings r;
+    RoomTempFallbackPolicy::Sample sample;
+    r.isInsideTempValid = true;
+    r.insideTemp = 205;
+    r.insideTempGoodMs = 0;
+
+    const uint32_t now = 900000;  // well past MAX_HOLD_MS
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::MEASURED,
+                      resolveFrom(sample, r, now, 192).source);
+    TEST_ASSERT_EQUAL_UINT32(now, sample.atMs);
+
+    r.isInsideTempValid = false;
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::HELD,
+                      resolveFrom(sample, r, now + 1000, 192).source);
+}
+
+void test_room_resolve_walks_the_whole_ladder_on_a_pulled_sensor() {
+    // The sequence actually observed on 2026-10-25 when the sensor was swapped: a good reading,
+    // then the sensor gone. MEASURED -> HELD -> TARGET, and NOMINAL only when no target is set.
+    SharedSensorReadings r;
+    RoomTempFallbackPolicy::Sample sample;
+
+    r.isInsideTempValid = true;
+    r.insideTemp = 198;
+    r.insideTempGoodMs = 50000;
+    RoomTempFallbackPolicy::Substitute s = resolveFrom(sample, r, 50000, 192);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::MEASURED, s.source);
+    TEST_ASSERT_EQUAL_INT16(198, s.value);
+    TEST_ASSERT_TRUE(RoomTempFallbackPolicy::isMeasurement(s.source));
+
+    // Pulled. Inside the window the last real reading is used, and still counts as a
+    // measurement - which is what keeps the weather-mode backstop armed.
+    r.isInsideTempValid = false;
+    s = resolveFrom(sample, r, 50000 + 60000, 192);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::HELD, s.source);
+    TEST_ASSERT_EQUAL_INT16(198, s.value);
+    TEST_ASSERT_TRUE(RoomTempFallbackPolicy::isMeasurement(s.source));
+
+    // Past the window it is a guess, and must NOT count as a measurement - this is the bit
+    // that stops the curve applying a room-deviation shift to invented data.
+    s = resolveFrom(sample, r, 50000 + RoomTempFallbackPolicy::MAX_HOLD_MS + 1, 192);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::TARGET, s.source);
+    TEST_ASSERT_EQUAL_INT16(192, s.value);
+    TEST_ASSERT_FALSE(RoomTempFallbackPolicy::isMeasurement(s.source));
+
+    // No target configured: the nominal 20.0 C, never TEMP_INVALID - feeding that into the
+    // heating curve overflowed int32 and produced -755418.5 C on 2026-10-23.
+    s = resolveFrom(sample, r, 50000 + RoomTempFallbackPolicy::MAX_HOLD_MS + 1, 0);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::NOMINAL, s.source);
+    TEST_ASSERT_EQUAL_INT16(200, s.value);
+
+    // A recovered sensor goes straight back to MEASURED and re-arms the hold.
+    r.isInsideTempValid = true;
+    r.insideTemp = 201;
+    r.insideTempGoodMs = 700000;
+    s = resolveFrom(sample, r, 700000, 192);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::MEASURED, s.source);
+    TEST_ASSERT_EQUAL_UINT32(700000, sample.atMs);
+}
+
+void test_room_resolve_survives_the_millis_rollover() {
+    // A hold that straddles the 49.7-day wrap. `atMs + MAX_HOLD_MS` would wrap and expire the
+    // hold instantly; the unsigned difference does not.
+    SharedSensorReadings r;
+    RoomTempFallbackPolicy::Sample sample;
+    const uint32_t beforeWrap = 0xFFFFFFFFu - 1000u;
+
+    r.isInsideTempValid = true;
+    r.insideTemp = 196;
+    r.insideTempGoodMs = beforeWrap;
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::MEASURED,
+                      resolveFrom(sample, r, beforeWrap, 192).source);
+
+    r.isInsideTempValid = false;
+    // 2 s later in real time, but a smaller number than the timestamp.
+    const uint32_t afterWrap = beforeWrap + 2000u;  // wraps
+    TEST_ASSERT_TRUE(afterWrap < beforeWrap);
+    RoomTempFallbackPolicy::Substitute s = resolveFrom(sample, r, afterWrap, 192);
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::HELD, s.source);
+    TEST_ASSERT_EQUAL_INT16(196, s.value);
+
+    // And it still expires at the right moment on the far side of the wrap.
+    TEST_ASSERT_EQUAL(RoomTempFallbackPolicy::Source::TARGET,
+                      resolveFrom(sample, r, beforeWrap + RoomTempFallbackPolicy::MAX_HOLD_MS + 1,
+                                  192).source);
+}
+
+void test_room_resolve_real_struct_has_the_field_the_mock_lacked() {
+    // A guard, not a tautology: this suite used to compile against a hand-copied
+    // MockSharedSensorReadings that did NOT have insideTempGoodMs, so every test above would
+    // have been impossible to write and the resolver went untested through two defects. The
+    // mock headers now forward to the real struct; if someone reintroduces a copy, the
+    // assignment below stops compiling rather than silently testing fiction.
+    SharedSensorReadings r;
+    r.insideTempGoodMs = 12345;
+    TEST_ASSERT_EQUAL_UINT32(12345, r.insideTempGoodMs);
+    // Default-constructed, every field has a defined value - no garbage at startup.
+    SharedSensorReadings fresh;
+    TEST_ASSERT_EQUAL_UINT32(0, fresh.insideTempGoodMs);
+    TEST_ASSERT_FALSE(fresh.isInsideTempValid);
+    TEST_ASSERT_FALSE(fresh.isBoilerTempOutputValid);
+}

@@ -2,11 +2,15 @@
 #ifndef SHARED_SENSOR_READINGS_H
 #define SHARED_SENSOR_READINGS_H
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
+// Deliberately only these two. The FreeRTOS headers and ProjectConfig.h were here and UNUSED -
+// the struct has no FreeRTOS members (access goes through SRP, see the note at the bottom) and
+// uses nothing from ProjectConfig - but ProjectConfig pulls in <Arduino.h>, so this struct
+// could not be compiled natively. That is why the native suite carried a hand-copied
+// MockSharedSensorReadings, and why that copy was missing insideTempGoodMs: added 2026-10-23
+// for the room-temperature HOLD, never mirrored. Keeping this header native-safe is what lets
+// the tests use the real struct. 2026-10-25.
 #include "shared/Temperature.h"
 #include "shared/Pressure.h"
-#include "config/ProjectConfig.h"
 
 struct SharedSensorReadings {
     // Boiler temperature readings (in tenths of degrees Celsius)

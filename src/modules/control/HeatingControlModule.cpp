@@ -39,25 +39,21 @@ RoomTempFallbackPolicy::Substitute HeatingControlModule::resolveRoomForControl(
     // HeatingControlTask, a single task.
     static bool insideWarned = false;
 
-    if (readings.isInsideTempValid) {
-        // Timestamp from the SENSOR's last good read, not from millis() here. The flag stays
-        // true through up to three failed reads (~15 s, ANDRTF3Task), so recording "now" on
-        // every valid-looking cycle would keep resetting the hold window against data that
-        // was already going stale. Falls back to millis() only if the field was never set.
-        const uint32_t readAt = (readings.insideTempGoodMs != 0) ? readings.insideTempGoodMs
-                                                                 : millis();
-        RoomTempFallbackPolicy::record(lastRoom_, readings.insideTemp, readAt);
+    // The decision itself lives in RoomTempFallbackPolicy::resolve(), including the
+    // insideTempGoodMs-not-millis() timestamp choice. It moved there on 2026-10-25 so it could
+    // be tested: this function needs FreeRTOS and SRP to reach, which is why the review found
+    // the resolver untestable. What is left here is the edge-triggered logging, which is the
+    // only part that genuinely belongs in the firmware.
+    const RoomTempFallbackPolicy::Substitute sub = RoomTempFallbackPolicy::resolve(
+        lastRoom_, readings.isInsideTempValid, readings.insideTemp,
+        readings.insideTempGoodMs, millis(), roomTarget);
+
+    if (RoomTempFallbackPolicy::Source::MEASURED == sub.source) {
         if (insideWarned) {
             LOG_INFO(TAG, "Room sensor valid again - back on the real reading");
             insideWarned = false;
         }
-        return RoomTempFallbackPolicy::Substitute{readings.insideTemp,
-                                                  RoomTempFallbackPolicy::Source::MEASURED};
-    }
-
-    const RoomTempFallbackPolicy::Substitute sub =
-        RoomTempFallbackPolicy::substitute(lastRoom_, millis(), roomTarget);
-    if (!insideWarned) {
+    } else if (!insideWarned) {
         LOG_WARN(TAG, "Room sensor invalid - using %d (0.1°C) from %s",
                  sub.value, RoomTempFallbackPolicy::toString(sub.source));
         insideWarned = true;

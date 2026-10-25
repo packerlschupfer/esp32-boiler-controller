@@ -34,6 +34,8 @@ test/
 │       ├── MockBurnerRequestManager.h
 │       ├── MockRYN4.h
 │       ├── MockMB8ART.h
+│       ├── MockSystemSettings.h       # forwards to the REAL struct (see below)
+│       ├── MockSharedSensorReadings.h # forwards to the REAL struct (see below)
 │       └── ...
 ├── test_embedded/            # Tests that run on ESP32 hardware
 │   └── test_relay_control.cpp
@@ -416,3 +418,44 @@ void test_80c_safety_limit_blocks_high_power() {
    - Memory usage patterns
    - Communication latencies
    - Control loop response time
+
+---
+
+## What these tests do and do not cover (2026-10-25)
+
+An 18-agent review found that **89 of 350 cases exercised no firmware code**: nine suites
+tested mocks against themselves. Three things were done about it, and one was not.
+
+**Two "mocks" were hand-copied duplicates of production structs, and both had drifted.**
+`MockSystemSettings` claimed "defaults matching real SystemSettings" while carrying
+`heating_curve_shift` 20.0 (real 0.0, changed 2026-09-15), `heating_curve_coeff` 2.0 (real
+1.4) and `heating_low_limit` 40.0 (real 38.0, changed 2026-10-19), and was missing
+`heating_boost_min_target` entirely. A 20-degree curve shift is not a detail. `MockSharedSensorReadings`
+was missing `insideTempGoodMs`, added 2026-10-23 for the room-temperature HOLD - which is
+precisely why the review could say a native test of `resolveRoomForControl()` "cannot even be
+written".
+
+Neither needed to exist. `SystemSettingsStruct.h` already compiled natively;
+`SharedSensorReadings.h` only failed to because of two unused FreeRTOS includes and an unused
+`ProjectConfig.h` (which pulls in `<Arduino.h>`), plus `<Arduino.h>` in `Pressure.h` where
+`<cstdint>`/`<cstdio>` sufficed. Both mock headers now forward to the real structs, so the
+defaults cannot drift again instead of needing a hand re-sync after every change - and the
+resolver has five tests, including the one proving the hold window is credited to the sensor's
+read time rather than to `millis()`.
+
+**The three flame tests assert a behaviour this boiler does not have.** There is no flame
+sensor: `BurnerSafetyChecks::isFlameDetected()` returns "the burner relay is commanded on", so
+flame loss while the burner is commanded active is unreachable. The only flame proof is the
+Home Assistant gas-meter pulse counter, outside the control loop, which caught a 112 s flame
+loss on 2026-10-24 that the firmware was blind to. They are kept - the state machine handling
+is correct and is what a flame sensor would need - and now carry a banner saying so, because a
+passing test called "flame loss bypasses min on time" reads like evidence the controller
+detects flame loss.
+
+**Still open:** the remaining mock-only integration suites
+(`test_control_loop_integration`, `test_mqtt_integration`,
+`test_persistent_storage_integration`, `test_system_e2e`, `test_sensor_integration`,
+`test_relay_integration`) still drive mock objects rather than firmware. They are not useless -
+they pin the intended interactions - but they must not be counted as coverage of the code that
+ships. Converting them needs the same treatment applied above, one dependency at a time: find
+what actually forces the mock, and usually it is an include that was never needed.

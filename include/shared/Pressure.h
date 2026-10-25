@@ -2,7 +2,12 @@
 #ifndef SHARED_PRESSURE_H
 #define SHARED_PRESSURE_H
 
-#include <Arduino.h>
+// <cstdint>/<cstdio> rather than <Arduino.h>: this header needs int16_t, INT16_MIN and
+// snprintf and nothing else from it, and depending on Arduino.h made the whole
+// SharedSensorReadings struct impossible to compile natively - which is why the native suite
+// had a hand-copied MockSharedSensorReadings that then drifted out of date. 2026-10-25.
+#include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <limits.h>
 

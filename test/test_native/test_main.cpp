@@ -462,6 +462,13 @@ void test_scheduler_clock_rejects_an_unset_rtc();
 void test_scheduler_clock_day_of_week_is_sunday_zero_and_local();
 void test_scheduler_clock_transitions_hold_for_later_years();
 
+// Room-temp resolution against the real SharedSensorReadings struct
+void test_room_resolve_credits_the_sensors_read_time_not_now();
+void test_room_resolve_falls_back_to_now_before_the_driver_ever_wrote();
+void test_room_resolve_walks_the_whole_ladder_on_a_pulled_sensor();
+void test_room_resolve_survives_the_millis_rollover();
+void test_room_resolve_real_struct_has_the_field_the_mock_lacked();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -907,6 +914,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_scheduler_clock_rejects_an_unset_rtc);
     RUN_TEST(test_scheduler_clock_day_of_week_is_sunday_zero_and_local);
     RUN_TEST(test_scheduler_clock_transitions_hold_for_later_years);
+
+    // Room-temp resolution against the real SharedSensorReadings struct
+    RUN_TEST(test_room_resolve_credits_the_sensors_read_time_not_now);
+    RUN_TEST(test_room_resolve_falls_back_to_now_before_the_driver_ever_wrote);
+    RUN_TEST(test_room_resolve_walks_the_whole_ladder_on_a_pulled_sensor);
+    RUN_TEST(test_room_resolve_survives_the_millis_rollover);
+    RUN_TEST(test_room_resolve_real_struct_has_the_field_the_mock_lacked);
 
     return UNITY_END();
 }

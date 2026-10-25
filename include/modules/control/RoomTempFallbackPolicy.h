@@ -113,6 +113,48 @@ namespace RoomTempFallbackPolicy {
         return s;
     }
 
+    /**
+     * @brief The instant a valid room reading should be credited to.
+     *
+     * NOT millis(). isInsideTempValid stays true through up to three failed reads (~15 s in
+     * ANDRTF3Task), so crediting "now" on every valid-looking cycle would keep resetting the
+     * hold window against data that was already going stale - the hold would then start from
+     * the moment the FLAG dropped rather than from the last good sample, and could extend the
+     * HELD window by up to 15 s past what the 10-minute limit is meant to allow.
+     *
+     * Falls back to nowMs only when the field was never set, i.e. before the sensor driver has
+     * ever written it.
+     */
+    inline uint32_t readAt(uint32_t insideTempGoodMs, uint32_t nowMs) {
+        return (insideTempGoodMs != 0) ? insideTempGoodMs : nowMs;
+    }
+
+    /**
+     * @brief The whole room-temperature resolution, as one pure step.
+     *
+     * Extracted from HeatingControlModule::resolveRoomForControl() on 2026-10-25 so it can be
+     * tested at all: the 18-agent review's test-suite finding was that a native test of that
+     * resolver "cannot even be written", because the module needs FreeRTOS and SRP and the
+     * copied MockSharedSensorReadings was missing insideTempGoodMs. The module keeps only the
+     * edge-triggered logging now, which is the part that genuinely needs the firmware.
+     *
+     * This resolver is what stands between a pulled room sensor and the burner: on 2026-10-25
+     * the ON/OFF path read isInsideTempValid raw, lost its backstop and turned the burner ON.
+     *
+     * @param sample     updated in place when the reading is valid
+     * @param roomTarget tenths; <= 0 means unset
+     */
+    inline Substitute resolve(Sample& sample, bool insideValid, Temperature_t insideTemp,
+                              uint32_t insideTempGoodMs, uint32_t nowMs,
+                              Temperature_t roomTarget) {
+        if (insideValid) {
+            record(sample, insideTemp, readAt(insideTempGoodMs, nowMs));
+            Substitute s = {insideTemp, Source::MEASURED};
+            return s;
+        }
+        return substitute(sample, nowMs, roomTarget);
+    }
+
     /// True for the two sources that are an actual room measurement, which is what decides
     /// whether the room-deviation curve shift applies.
     inline bool isMeasurement(Source source) {
