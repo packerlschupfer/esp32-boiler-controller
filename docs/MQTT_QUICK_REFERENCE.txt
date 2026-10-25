@@ -33,12 +33,16 @@ Scheduler (JSON, replies on boiler/scheduler/response):
 Safety:
   boiler/cmd/burner_reset    lockout|reset   # Leave burner LOCKOUT (no effect in ERROR)
   boiler/cmd/emergency_reset reset           # Release a latched emergency stop once its causes cleared
+                                             #   also re-enables a boiler left off by sensor recovery
+  boiler/cmd/system          bus_release 900 # Hand the RS485 bus to another master (30-900 s, default 600)
+                                             #   refuses while firing/pumping; ALL relays drop in 10 s
+  boiler/cmd/system          bus_acquire     # Take the bus back early
                                              # Result on boiler/status/burner:
                                              #   emergency_released | emergency_not_active |
                                              #   emergency_release_refused:<temperature_high|sensors_unavailable|system_errors>
 
 Safety Configuration:
-  boiler/cmd/config/sensor_stale_ms    30000-300000
+  boiler/cmd/config/sensor_stale_ms    30000-300000   # default 30000 since 2026-10-25
   boiler/cmd/config/pump_protection_ms 5000-60000
   boiler/cmd/config/post_purge_ms      30000-180000
   boiler/cmd/config/thermal_shock_c    100-600 (tenths °C)

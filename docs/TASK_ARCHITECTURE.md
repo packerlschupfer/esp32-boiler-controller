@@ -596,7 +596,12 @@ Uses same unified `PumpControlModule` with water-specific configuration.
 - See `docs/EQUIPMENT_SPECS.md` for DELAY command details
 
 **Event Groups**:
-- **Relay Status Event Group** (sets): `SYNCHRONIZED`, `COMM_OK`, `COMM_ERROR`
+- **Relay Status Event Group** (sets AND clears): `SYNCHRONIZED`, `COMM_OK`, `COMM_ERROR`.
+  Since 2026-10-25 `SYNCHRONIZED` means "the relays read back what was commanded", not "the bus
+  answered": it is set on a fully clean verification and **cleared** on a persistent mismatch or
+  two consecutive DELAY-renewal failures, and `COMM_ERROR` is cleared on the same clean
+  verification. Before that it was set unconditionally on every successful read and never
+  cleared, so `SafetyInterlocks`' relay-communication term could not fail after boot.
 - **Relay Control Event Group** (sets): `DATA_AVAILABLE`
 
 **Mutexes**:

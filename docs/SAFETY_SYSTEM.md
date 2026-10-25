@@ -29,7 +29,7 @@ There is no runtime limit: the former 1 h continuous / 4 h daily check read coun
 Not checked here: pumps (the pump check was removed; the burner requires an active mode request instead) and anti-flapping (minimum on-time 120 s and off-time 20 s are enforced by the burner state machine, power level changes by `BurnerAntiFlapping` in BoilerTempController).
 
 **Runtime-Configurable Parameters**:
-- **Sensor Staleness Timeout**: 30-300s (default: 60s)
+- **Sensor Staleness Timeout**: 30-300s (default: 30s, tightened from 60s on 2026-10-25)
   - Prevents operation with stale sensor data
   - Adjustable via MQTT: `boiler/cmd/config/sensor_stale_ms`
 
@@ -70,6 +70,33 @@ Not checked here: pumps (the pump check was removed; the burner requires an acti
 
 Pump verification was removed (Round 18/19): SafetyInterlocks does not check the pumps.
 
+**The relay-communication term could not fail before 2026-10-25.** `checkCommunicationStatus()`
+reads `RelayStatus::SYNCHRONIZED`, which RYN4ProcessingTask set **unconditionally on every
+successful relay READ, before the mismatch check**, and which nothing ever cleared - so it meant
+"the bus answered" rather than "the relays are doing what we commanded" and went permanently true
+at the first read. Meanwhile `COMM_ERROR`, which does mean a fault, was set in two places and
+**read by nobody**. Both halves are fixed:
+
+- SYNCHRONIZED is earned per verification: set on a fully clean read-back, cleared on a
+  persistent mismatch and on two consecutive DELAY-renewal failures.
+- COMM_ERROR is cleared on the same clean verification, so it cannot become a second
+  unreleasable latch.
+- `checkCommunicationStatus()` reads **both**, because they fail on different evidence. The
+  DELAY-renewal failure is the case nothing else can see: the relays are still following their
+  last command while every ON relay sits ~2.5 s from a hardware auto-OFF with no post-purge and
+  no pump overrun. Stopping the burn deliberately beats being dropped by the watchdog.
+
+`Error::RELAY` (set after three consecutive relay read-back mismatches, and on a failed emergency
+relay write) likewise had **no reachable clear** until 2026-10-25: its only `xEventGroupClearBits`
+lived in `ErrorRecovery.cpp`, which is dead code - reachable only through the
+`REPORT_ERROR`/`REPORT_WARNING`/`REPORT_CRITICAL` macros declared in its own header, none of
+which is used anywhere in `src/`. Since it is one of the critical error bits above, one flaky-bus
+moment meant **no heat and no remote way back until a power cycle**. It is now cleared in
+RYN4ProcessingTask's read-back handler on a fully clean verification (`realMismatch == 0`) rather
+than on a single relay's success: a still-broken relay must not clear an error raised by another,
+and because escalation zeroes its own failure counter, a per-relay clear would let the bit flap
+between failures and briefly re-permit the burner each time.
+
 **Key Difference from Layer 1**:
 - Layer 1: Pre-operation validation (gate-keeping)
 - Layer 2: Continuous monitoring (real-time protection)
@@ -102,13 +129,48 @@ The burner never switches pumps off: the former `setAllRelays(false)` in `emerge
 
 `CentralizedFailsafe::emergencyStop()` is reached through `SafetyInterlocks::triggerEmergencyShutdown()` (stale sensor data during operation, critical temperature, burner request watchdog) and the EMERGENCY failsafe level. The FRAM emergency record (`CriticalDataStorage`) is written when the failsafe level first reaches CRITICAL or higher: by `triggerFailsafe()` (`saveEmergencyState()`) and, since 2026-09-15, by `emergencyStop()` itself (error code `EMERGENCY_STOP`), so direct stops (critical temperature, stale sensors, request watchdog) leave a record too.
 
+**Failsafe Levels**: NORMAL / WARNING / DEGRADED / CRITICAL / EMERGENCY / SHUTDOWN.
+`triggerFailsafe()` **never downgrades** the level - a one-shot WARNING must not erase the record
+of an unresolved DEGRADED - so a level is **sticky** until a recovery path (`attemptRecovery()`,
+`clearEmergencyStop()`, `releaseAfterSensorRecovery()`) resets it to WARNING.
+
+DEGRADED withholds stage 2, so **the boiler runs at half power until the level clears**. Until
+2026-10-25 that was a `LOG_WARN("Limiting burner to half power")` above a bare
+`// Force low power mode` comment - the log line was the entire implementation. It is now
+enforced where stage 2 is actually decided: `BoilerTempControlTask` ANDs
+`CentralizedFailsafe::fullPowerPermitted()` into the `highPower` term, as a fourth gate beside
+the bang-bang's request, the hot-boiler ceiling and `BurnerBoostPolicy`'s shoulder-season lock.
+That is the only place that can withhold stage 2 without fighting the controller for the relay.
+
+Because the level is sticky and now has a real effect, it is published on
+**`boiler/status/failsafe`** (retained, on change): `{"level":"Normal","fullPower":true}`.
+Before that it was visible nowhere at all - `getFailsafeStatusString()` had no callers - so a
+boiler left permanently at half power would have shown no outward sign. **If the house heats
+slowly for no obvious reason, check this topic first.**
+
+WARNING is log-only by design. `registerSubsystem()` has three callers, all in `initialize()`
+(burner and both pumps); nothing outside CentralizedFailsafe registers a subsystem.
+
 **Emergency Stop Latch**: `EMERGENCY_STOP` stays set until released. BurnerControlTask reads it without clearing and stops the burner once per onset; while it is set the burner stays in ERROR (safety check fails), and `boiler/cmd/system` `on` alone does not restart it. A reboot clears it (event bits are not persisted; the FRAM emergency record is only logged at boot).
 
 **Emergency Stop Release**: `EMERGENCY_STOP` is cleared by `TemperatureSensorFallback` when the sensors return from SHUTDOWN to NORMAL (`CentralizedFailsafe::releaseAfterSensorRecovery()`), but only if stale sensor data caused the stop (`EmergencyStopRelease::Cause::SENSOR_STALE`; a second trigger with another cause while latched makes it non-releasable this way). `BOILER_ENABLED` is not restored on this path. Otherwise it is cleared by the MQTT command `boiler/cmd/emergency_reset` with payload `reset`, which calls `CentralizedFailsafe::clearEmergencyStop()`. The checks, in this order (rules in `include/modules/control/EmergencyStopRelease.h`):
-1. `EMERGENCY_STOP` set, else `emergency_not_active`
+1. `EMERGENCY_STOP` set. If it is **not**, there is one case that still acts: the latch is
+   clear but `BOILER_ENABLED` is clear too while the saved `boilerEnabled` setting is true -
+   which is exactly the state `releaseAfterSensorRecovery()` leaves behind, since it clears the
+   latch and deliberately leaves the boiler off for a human to restart. The boiler is then
+   re-enabled and the result is `boiler_re_enabled`, gated on the **full** safety set below
+   (checks 2-4 via `EmergencyStopRelease::evaluateSafety()`) - re-enabling over a hot boiler or
+   a failed sensor would be worse than the dead end. Any other "not latched" case replies
+   `emergency_not_active` and changes nothing.
+
+   Until 2026-10-25 this check simply returned `emergency_not_active` and did nothing, so after
+   an MB8ART outage longer than `sensorStaleMs` the operator found the latch gone, the boiler
+   dead, and the documented recovery command refusing to help - with Home Assistant still
+   showing the boiler switch ON, because only the bit had been cleared, not the setting. The
+   only way back was to toggle the boiler switch off and on.
 2. Boiler output valid and below 110.0°C (`MAX_BOILER_TEMP_C`), boiler return below it too if valid, else `emergency_release_refused:temperature_high`. The readings are checked directly, not through `SafetyInterlocks::checkTemperatureLimits()`, which would trigger a new emergency shutdown
 3. `TemperatureSensorFallback::canContinueOperation()` and no `SENSOR_FAILURE` error bit, else `emergency_release_refused:sensors_unavailable`
-4. `SafetyInterlocks::checkSystemErrors()` (no SENSOR_FAILURE, MODBUS or RELAY error bit), else `emergency_release_refused:system_errors`
+4. `SafetyInterlocks::checkSystemErrors()` (no SENSOR_FAILURE, MODBUS or RELAY error bit), else `emergency_release_refused:system_errors`. Note `Error::MODBUS` **has no producer anywhere in `src/`** and is deliberately kept in the mask - every real Modbus failure mode already has a better-targeted detector, and inventing a producer would mean deciding that some rate of transient CRC errors should stop the boiler
 
 On release: `EMERGENCY_STOP` cleared, `BOILER_ENABLED` set only if the saved `boilerEnabled` setting is true, failsafe level WARNING, `recoveryAttempts` reset; result `emergency_released`. The result is published (not retained) on `boiler/status/burner`. The burner state machine still waits out its ERROR recovery delay (`SafetyConfig::errorRecoveryMs`, default 5 min). Pumps that were still dissipating keep running until the boiler output is below 60.0°C (without a usable reading at most `pumpCooldownMs`). `CentralizedFailsafe::attemptRecovery()` exists but has no caller.
 
@@ -185,6 +247,70 @@ constexpr uint8_t DELAY_WATCHDOG_SECONDS = 10;  // Auto-OFF timer
 
 ---
 
+### Layer 5: Frost Protection (fires the burner rather than stopping it)
+
+**Purpose**: Keep the water from freezing when nothing else is asking for heat. The only safety
+layer here that *starts* a burn; every other one can only stop one.
+
+**Location**: `include/modules/control/FrostProtectionPolicy.h` (the rules),
+`src/modules/control/FrostProtection.cpp` (the latches and the sensor snapshot).
+
+Before 2026-10-23 there was **none**. `FREEZE_PROTECTION_TEMP_C` (5.0°C, commented "Anti-freeze
+activation") was referenced nowhere, and `wheater/tempSafeLimitLow` ("Safety limit to prevent
+freezing of the boiler") was registered, range-checked, persisted and published while being read
+by nothing - it was removed rather than left as a promise the firmware did not keep. What kept
+the water warm was a side effect of normal operation, and that stops the moment heating and
+water are disabled: a summer setting left on into a cold snap, or a long absence.
+
+**Two independent latches** (split 2026-10-25), both triggering at **5.0°C** and releasing at
+**10.0°C**:
+
+| Latch | Watches | Response | Overrides |
+|-------|---------|----------|-----------|
+| `heatDemand()` | boiler flow **or** room | Space heating at the flow floor (`heating_low_limit`) - *not* the curve, which at frost temperatures would ask for a high flow and heat the house | `HEATING_ENABLED`, the summer override, `HEATING_OFF_OVERRIDE` |
+| `waterDemand()` | DHW tank | A water **charge** | `WATER_ENABLED` |
+
+**Neither overrides `BOILER_ENABLED`**: a drained-for-service system is a likely reason to switch
+the boiler off, and firing a burner into a drained boiler is worse than frost. Neither bypasses
+the sensor fallback, the pressure interlock or anti-flapping.
+
+Until 2026-10-25 the tank asked for **space heating**, which warms the house and does nothing
+whatsoever for the tank - so the tank had the appearance of frost protection and none of the
+substance. The room was not watched at all, though a freezing house is what this guard is
+actually for; the flow reading only notices it indirectly, after the boiler itself has gone cold.
+
+**A reading must be valid AND FRESH to trigger.** This matters more than it sounds: nothing
+clears `isBoilerTempOutputValid` when MB8ART reads simply **stop**, so a dead bus leaves the last
+value flagged valid indefinitely. The guard used to read that flag raw, so a bus failure froze
+the flow reading at whatever it last was - typically 30-40°C just after a burn - and frost
+protection could **never fire again** however cold the house got. It cuts both ways: a frozen
+*cold* reading would have fired forever. Freshness uses per-source timestamps
+(`lastBoilerTempUpdateTimestamp` for flow and tank, `insideTempGoodMs` for the room) against
+`SafetyConfig::sensorStaleMs`.
+
+The asymmetry is deliberate in two directions: a **trigger** needs a usable cold reading (an
+unreadable sensor is not evidence of frost, and `TEMP_INVALID` is `INT16_MIN`, which would read
+as -3276.8°C and fire instantly), while a **release** treats an unusable reading as not blocking,
+so if every reading goes unusable mid-burn the demand drops rather than firing blind.
+
+**What this cannot cover, and why it is not a complete answer**:
+- **A dead controller.** CH1 BURNER_ENABLE is a normally-OPEN relay contact, so with the ESP32
+  unpowered, crashed or in emergency stop the burner circuit is open and the boiler cannot fire
+  at all. The original Vaillant controller is not in the loop, and the STB and tandem thermostat
+  can only ever *stop* the burner. Only a hardware frost thermostat wired around the relay would
+  close that gap - see below.
+- **A dead bus.** By the rule above, stale readings never fire the burner. A frozen house behind
+  a dead MB8ART therefore gets nothing from here either. That is the accepted trade: the firmware
+  never fires on data it cannot vouch for.
+
+**Known behaviour, not fixed**: a frost charge started with the water switch off ends when the
+tank clears the 10.0°C release, so a genuinely freezing tank would cycle 5 -> 10 -> 5 rather than
+charging to the normal target. Each cycle is a multi-minute burn, not chatter, and the state
+should never be reached. A tank-specific release threshold is a comfort/efficiency decision on a
+safety path and is deliberately left open.
+
+---
+
 ### Not Implemented: Hardware Interlocks
 
 **Purpose**: Physical safety sensors independent of software.
@@ -192,7 +318,12 @@ constexpr uint8_t DELAY_WATCHDOG_SECONDS = 10;  // Auto-OFF timer
 **Status**: Not implemented and not counted as a layer. `BurnerSafetyValidator::checkHardwareInterlocks()` is a stub that always returns true (no interlock inputs are wired).
 
 **Possible additions** (not in the code):
-- Physical flame sensor (ionization rod or UV detector)
+- **Hardware frost thermostat wired around the BURNER_ENABLE relay** - the only thing that would
+  protect a dead, crashed or unpowered controller, which is the one case Layer 5 cannot reach
+- Physical flame sensor (ionization rod or UV detector) - there is currently **no flame proof in
+  the control loop at all**: `BurnerSafetyChecks::isFlameDetected()` returns "the burner relay is
+  commanded on". The only real flame evidence is the Home Assistant gas-meter pulse counter,
+  outside the loop, which caught a 112 s flame loss on 2026-10-24 that the firmware was blind to
 - Flow sensor (verify water circulation)
 - Independent pressure switch
 - Redundant temperature sensors
@@ -226,7 +357,7 @@ MQTT: boiler/cmd/config/pump_protection_ms
 #### 2. Sensor Staleness Timeout
 ```cpp
 Range: 30000-300000ms (30-300 seconds)
-Default: 60000ms (60 seconds)
+Default: 30000ms (30 seconds)
 MQTT: boiler/cmd/config/sensor_stale_ms
 ```
 **Purpose**: Maximum age of sensor data before considering it invalid.

@@ -22,6 +22,161 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Added: the RS485 bus can be handed to another master
+
+The room sensor runs open firmware whose maintenance tools - identity, calibration, A/B firmware
+updates over Modbus - all require being the **sole** master. This controller polls that bus
+continuously, so those tools could not run while it was alive. Powering the ESP32 down works and
+is strictly safer, but needs physical access and loses the window's observability.
+
+`boiler/cmd/system` `bus_release [seconds]` / `bus_acquire`, state on `boiler/status/bus`.
+Default 600 s, minimum 30 s, **900 s hard cap**, expiring on-device - with the bus released there
+is no guaranteed path for a remote acquire, so a dropped network must not park the controller.
+
+The design is shaped by two facts that rule out the obvious approach. All three Modbus devices
+share one bus, so "stop polling and let the safety layer stop the burner" is impossible: once
+released, nothing can actuate anything. And **every relay switched ON is held by the RYN4's own
+10 s DELAY watchdog**, renewed per SET tick - withhold the ticks and the board de-energises
+everything by itself, with no cooperation from this firmware. So a released bus converges on the
+same physical state as pulling the controller's power, which is the comparison the feature had to
+beat. Entry therefore **refuses** rather than orchestrating a shutdown: `burner_active`,
+`demand_present`, `pump_active`, `burner_sequencing`, `emergency_latched`.
+
+`pump_active` was added after review, and it was my omission: the first gate asked only whether
+the burner was *firing*, but a pump running with the burner off is the normal state of
+POST_PURGE, the 5-minute `pumpCooldownMs` overrun and emergency dissipation. Releasing then traps
+residual heat with no flow - the one thing all of those exist to prevent. The gate now asks the
+relay mask rather than those four mechanisms, because their state is task-local and the real
+question is "is anything energised that withholding the ticks would kill".
+
+**First real use, 2026-10-25 14:49:40-14:52:59 CET**: 199 s of a 900 s window, room-sensor
+firmware update to v0.1 (0x8001 in slot B) by the peer session. Nothing latched; the controller
+resumed polling with the room sensor reading within one cycle. Also measured in that window: the
+sensor fallback does **not** escalate during a release, because the only thing that re-evaluated
+it while idle was driven *by* MB8ART reads - fixed, and then deliberately suppressed during a
+release, since "stale because we stopped asking" is not the same fault as "stale and we don't
+know why".
+
+### The DS3231 held local time, and nothing had ever written it
+
+Two defects, the second found by the observability added for the first.
+
+`updateRTCFromNTP()` derived the live CET/CEST offset and wrote local wall-clock into the chip.
+That is lossy: a wall-clock reading carries no record of which offset produced it, so when the
+DST rule changes the offset the chip keeps ticking the old one and nothing in the stored fields
+can reveal it - 14:00 and 15:00 are equally plausible times of day. With a network this healed
+inside the hourly sync, which is why it was easy to miss. Without one it did not heal at all, and
+**this controller is required to work with no internet**: every schedule would run an hour off
+from the last Sunday in March to the last Sunday in October, or an hour off the other way for the
+rest of the year.
+
+The RTC now stores **UTC** and local time is derived from the POSIX rule compiled into the
+firmware, so the offset needs no network. All three readers were converting: the two
+system-clock seeds used `mktime(tm_isdst = -1)`, which reads its fields as *local* - correct while
+the chip held local, wrong now - and both now share a hand-rolled `timegm()`. `checkSchedules()`
+also reads the chip once per pass instead of once per schedule, removing a torn read where one
+schedule could be evaluated at 09:59 and the next at 10:00.
+
+New `boiler/status/clock` publishes both halves of the conversion, the stored `utc` epoch and the
+derived `local`. **On its first reading it showed the RTC was 2 h 00 min ahead of true UTC while
+`isNTPSynced()` reported true.** `setNTPRTCCallback()` was guarded by
+`if (ntpMutex && xSemaphoreTake(...))`, and `ntpMutex` is created *inside the NTP task* while
+`main.cpp` starts TimerSchedulerTask - the only caller - **before** NTPTask, deliberately: the
+comment there reads "registers RTC update callback needed by NTPTask". So the `&&`
+short-circuited, the assignment never ran, and `initializeScheduler()` logged
+"Registered NTP RTC update callback" regardless. The ordering arranged to make it work is what
+broke it, for the life of the project. The DS3231 had therefore been free-running since whenever
+it was last set by hand - the measured offset says when: exactly +2 h, CEST wall-clock, set during
+summer time and never touched again. After the fix: within 1 s of true UTC.
+
+### Four safety layers that could not act
+
+All found in an 18-agent review at `c1ed1b0`. Common shape: a check, a level or an event bit
+written at one end and read at neither.
+
+**`Error::RELAY` was an unreleasable latch.** Set after three consecutive relay read-back
+mismatches; its only clear lived in `ErrorRecovery.cpp`, which is dead code - reachable only
+through `REPORT_ERROR`/`REPORT_WARNING`/`REPORT_CRITICAL` macros in its own header, none used
+anywhere in `src/`. Since it is one of `SafetyInterlocks`' critical errors, one flaky-bus moment
+meant no heat and `emergency_reset` refused **until a power cycle**. The same defect was fixed for
+`Error::SENSOR_FAILURE` in `c204a6d`, on the sibling bit set by the very same line; that fix
+found one and left the other. Now cleared on a *fully* clean verification, not one relay's
+success - escalation zeroes its own counter, so a per-relay clear would let the bit flap and
+briefly re-permit the burner between a broken relay's failures.
+
+**The relay-communication interlock could never fail after boot.** `RelayStatus::SYNCHRONIZED`
+was set unconditionally on every successful relay *read*, before the mismatch check, and never
+cleared; `COMM_ERROR` was set in two places and read by nobody. Both now meaningful - see
+SAFETY_SYSTEM.md Layer 2.
+
+**DEGRADED's "limiting burner to half power" was a log line** above a bare
+`// Force low power mode` comment. Now enforced where stage 2 is decided, as a fourth gate in
+`BoilerTempControlTask`. The level is sticky by design and was visible nowhere
+(`getFailsafeStatusString()` had no callers), so it is now published on
+`boiler/status/failsafe`.
+
+**The sensor-fallback debounce counted calls, not samples.** `updateSensorStatus()` is reached
+from eight call sites plus a STARTUP branch that calls it twice, so `INVALID_COUNT_TO_SHUTDOWN = 3`
+could be crossed inside one 2.5 s MB8ART period - silently undoing most of the 2026-10-23 change
+from 1 to 3. Now rate-limited to one step per sample period, gated on **elapsed time** rather
+than sample arrival: a dead MB8ART freezes its timestamp, so a sample-arrival gate would never
+escalate at all, which is the exact failure the layer exists to catch.
+
+`Error::MODBUS` is confirmed to have **no producer anywhere** and is deliberately left in the
+critical mask, reasoning in the code: every real Modbus failure already has a better-targeted
+detector, and inventing a producer would mean deciding that some rate of transient CRC errors
+should stop the boiler.
+
+### An OTA image was rolled back - rebooting the controller - over a dead LAN
+
+Confirmation required `networkConnected`, so an Ethernet link down between uptime 60 s and 600 s
+rolled back a perfectly healthy image and rebooted the controller unattended, with no post-purge
+and no pump overrun if it landed mid-burn. On a controller required to run with no network that
+window was reachable on an ordinary LAN outage - and the rollback was pointless on its own terms,
+since the previous image boots into the same dead LAN. Reading the sensors is the health signal
+that means something: it proves the RS485 bus, the coordinator and the MB8ART driver work.
+Accepted cost, stated in the header: an image that boots and reads sensors but breaks *networking*
+is now kept, and recovery needs the USB path.
+
+### Three control-path defects
+
+**`HEATING_ON` leaked when a start was abandoned.** The `HeatingOff` case called
+`startHeating()` - which only sets that bit - and *then* checked whether the sensors allowed a
+start. The bit is not private: `PumpControlModule` runs the heating pump off it,
+`WheaterControlTask` refuses a water charge while it is set with priority off, and
+SafetyInterlocks and BurnerStateMachine both read it. So a sensor outage ran the pump with no
+burner request and locked out hot water, and nothing cleared it - every clear was keyed on
+`state == HeatingOn`, which it never became. The sensor check moved *before* the start, the
+remaining abandon path undoes it, the `HeatingOff` case heals the invariant, and the
+system-disabled branch keys on the bit as well as the state variable.
+
+**`emergency_reset` was a dead end after a sensor-recovery release.** See TROUBLESHOOTING.md:
+the latch is already clear, so the command answered `emergency_not_active` and changed nothing
+while the boiler stayed dead. It now repairs that mismatch and returns `boiler_re_enabled`.
+
+**Room mode never wrote `g_blockReason` when off-and-satisfied** - the commonest steady state in
+that mode - so `blk` kept whatever reason was there last.
+
+### Two test "mocks" were stale copies of production structs
+
+`MockSystemSettings` claimed "defaults matching real SystemSettings" while carrying
+`heating_curve_shift` 20.0 against the real 0.0 (changed 2026-09-15 with the curve fix),
+`heating_curve_coeff` 2.0 against 1.4, and `heating_low_limit` 40.0 against 38.0 - a 20-degree
+curve shift is not a detail. `MockSharedSensorReadings` was missing `insideTempGoodMs`, which is
+why a native test of `resolveRoomForControl()` "could not be written".
+
+**Neither needed to exist.** Four unnecessary includes were all that stopped the real structs
+compiling natively: two unused FreeRTOS headers and an unused `ProjectConfig.h` (which pulls in
+`<Arduino.h>`) in `SharedSensorReadings.h`, plus `<Arduino.h>` in `Pressure.h` where
+`<cstdint>`/`<cstdio>` sufficed. Both mock headers now forward to the real struct, so the
+defaults cannot drift again instead of needing a hand re-sync that twice did not happen. The
+resolver moved into `RoomTempFallbackPolicy::resolve()` and has five tests. 378 native cases, up
+from 350.
+
+The three flame tests are kept and **labelled**: there is no flame sensor, so flame loss while
+the burner is commanded active is unreachable, and a passing test called "flame loss bypasses min
+on time" reads like evidence the controller detects flame loss.
+
 ### Room sensor read failures are now observable
 
 The 2026-10-23 08:34 dropout cost a burner ignition and its cause is permanently unknown: the
@@ -54,6 +209,43 @@ Two other changes from the same library update:
 
 Seven native tests (331 -> 338), including the worst-case payload against MQTTTask's 319-byte
 refusal threshold and that `age` alone never triggers a publish.
+
+### Frost protection: stale readings, the room, and the tank (2026-10-25)
+
+Three changes to the guard added below, after the staleness implication was raised.
+
+**A stale reading never fires the burner** (user's rule). The guard read
+`isBoilerTempOutputValid` raw, and **nothing clears that flag when MB8ART reads simply stop** - a
+dead bus leaves the last value flagged valid indefinitely. So a bus failure froze the flow
+reading at whatever it last was, typically 30-40 °C just after a burn, and frost protection could
+**never fire again** however cold the house got, with `sf:1` still reporting healthy. It cuts
+both ways: a frozen *cold* reading would have fired forever. Readings now carry usable flags =
+valid AND fresh, with per-source timestamps (`lastBoilerTempUpdateTimestamp` for flow and tank,
+`insideTempGoodMs` for the room) against `SafetyConfig::sensorStaleMs`. Accepted cost: a frozen
+house behind a dead bus gets nothing from here either.
+
+**The room is now a trigger.** A freezing house is what this guard is for; the flow reading only
+notices indirectly, after the boiler itself has gone cold.
+
+**The tank now drives a water charge, not space heating.** It used to ask for heating, which
+warms the house and does nothing whatsoever for the tank - so the tank had the appearance of
+frost protection and none of the substance. There are two independent latches now: flow-or-room
+to heating, tank to a DHW charge, each overriding its own mode switch and neither overriding
+`BOILER_ENABLED`. The latches moved into a `FrostProtection` module because a static inside
+`HeatingControlTask.cpp` was invisible to the water task; the evaluation stays in one place so
+two tasks cannot hold latches that disagree about the same instant.
+
+Left open deliberately: a frost charge with the water switch off ends at the 10 °C release, so a
+genuinely freezing tank would cycle 5 -> 10 -> 5 rather than charging to target. Multi-minute
+burns, not chatter, in a state that should never be reached - a tank-specific release threshold
+is a comfort decision on a safety path.
+
+Also fixed while making these: **`TemperatureSensorFallback`'s room-freshness check read
+`lastUpdateTimestamp`**, which `MB8ARTTasks.cpp` writes every 2.5 s. That is F5's mirror image -
+F5 split the *boiler* side off that shared field because a live room sensor masked a dead MB8ART,
+and left the room side reading it - so a healthy MB8ART kept the room "fresh" however long the
+ANDRTF3 had been silent. And `sensorStaleMs` was tightened 60 s to 30 s (default and the live NVS
+value), 60 s having dated from when the room sensor was the unreliable part.
 
 ### Added: frost protection, which did not exist
 

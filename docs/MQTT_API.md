@@ -254,6 +254,7 @@ build arithmetic on it.
 | `boiler/status/sensor_fallback/recovery` | No | `{"recovered":true}` |
 | `boiler/status/sensor_mode` | Yes | `STARTUP`, `NORMAL` or `SHUTDOWN` |
 | `boiler/status/scheduler/info` | No | `{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}` (reply to `boiler/cmd/scheduler/status`) |
+| `boiler/status/bus` | Yes | `{"released":true,"left":<s>}` / `{"released":false,"end":"timeout"|"command"}` - RS485 bus ownership, on change. `released:true` means the controller is **not polling and not actuating**, and the RYN4 DELAY watchdog has de-energised every relay |
 | `boiler/status/clock` | No | `{"valid":true,"utc":1792928804,"local":"2026-10-25 12:46:44","dow":0,"dst":false,"ntp":true}` - every 60 s. `utc` is the epoch **stored in the DS3231**; `local` is derived from the compiled CET/CEST rule. Both halves are published so a wrong offset is visible: compare `utc` against real UTC and `local` against the wall clock. `valid:false` (then only `utc` and `ntp`) means the RTC is implausible and **schedules are suspended**. |
 | `boiler/status/failsafe` | Yes | `{"level":"Normal","fullPower":false}` - on change. `level` is CentralizedFailsafe's level (Normal/Warning/Degraded/Critical/Emergency/Shutdown). `fullPower:false` means **stage 2 is withheld and the boiler is running at half power** - the level is sticky, so this persists until a recovery path clears it. If the house heats slowly for no obvious reason, check this first. |
 | `boiler/status/error` | No | `unknown_command`, `invalid_numeric_value`, `invalid_config_value` (control/config command errors) |
@@ -408,9 +409,57 @@ mosquitto_pub -t "boiler/cmd/system" -m "enable"
 mosquitto_pub -t "boiler/cmd/system" -m "disable"
 ```
 
-Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`.
+Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`, `bus_release [seconds]`, `bus_acquire`.
 
 Enable/disable of the boiler, heating and water, water `priority_on`/`priority_off` and the heating/water OFF overrides are saved to NVS immediately and survive a reboot (before 2026-09-15 they stayed in RAM until some other parameter save).
+
+#### Hand the RS485 bus to another master
+
+```bash
+mosquitto_pub -t "boiler/cmd/system" -m "bus_release 900"   # seconds; omit for the 600 s default
+mosquitto_pub -t "boiler/cmd/system" -m "bus_acquire"       # give it back early
+```
+
+For running the room sensor's own maintenance tools - identity, calibration, firmware updates
+over Modbus - which all require being the **sole** master. The controller stops polling
+entirely for the window. State is published on `boiler/status/bus` (retained, on change):
+`{"released":true,"left":900}` / `{"released":false,"end":"timeout"|"command"}`.
+
+Window: default 600 s, minimum 30 s, **maximum 900 s (hard cap)**. A `bus_release` while
+already released only ever **extends** the window, never shortens it. The window expires
+on-device, because with the bus released there is no guaranteed path for a remote `bus_acquire`
+to arrive - a dropped network must not be able to leave the controller out of service.
+
+**Read this before using it.** All three Modbus devices share one bus - MB8ART (temperatures),
+ANDRTF3 (room), RYN4 (relays). So during the window nothing can be actuated, and **every relay
+switched ON is de-energised by the RYN4's own 10 s DELAY watchdog within 10 seconds** - burner,
+pumps and all - with no cooperation from the firmware. A released bus converges on the same
+physical state as pulling the controller's power. That is what makes it safe; it is not a
+"pause".
+
+The command **refuses** rather than orchestrating a shutdown, so turn the boiler off first and
+then release. Refusal reasons, in the order they are checked (logged, and the reason is returned):
+
+| Refusal | Meaning |
+|---------|---------|
+| `burner_active` | A firing relay is closed (burner enable or water mode) |
+| `demand_present` | Heat demand is armed - it precedes the relays by a pre-purge, so clear firing bits are not enough |
+| `pump_active` | A circulation pump is running. **Includes the full 5-minute `pumpCooldownMs` overrun after a burn**, post-purge, and emergency heat dissipation - releasing then would trap residual heat with no flow |
+| `burner_sequencing` | The state machine is mid-sequence (pre-purge, ignition, running, mode switch, post-purge). LOCKOUT and ERROR do **not** block |
+| `emergency_latched` | An emergency stop is latched and unacknowledged |
+
+So the practical sequence is: wait for the burner to stop, then wait out the pump overrun, then
+release. Expect `pump_active` for about five minutes after a burn ends.
+
+While released the burner **cannot be armed** (`BurnerStateMachine::setHeatDemand` consults
+this), and the firing bits are forced out of the desired relay mask before bus access resumes,
+so the first write afterwards cannot re-energise the burner on a decision taken from readings
+that went stale mid-window. A reboot during a window is safe by construction: nothing is
+persisted, so the controller comes back fully operational with a busy bus and the other
+master's tool fails visibly, which is the right way round.
+
+Sensors go stale during the window and the sensor fallback is **deliberately not** escalated
+for it - see `include/modules/control/BusReleasePolicy.h`.
 
 #### Enable/Disable Heating
 ```bash
@@ -1020,6 +1069,7 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/scheduler/response` | On command | No | Medium | Command responses |
 | `boiler/status/scheduler/info` | On `status` command | No | Medium | Scheduler status |
 | `boiler/status/clock` | Every 60 s | No | Low | RTC epoch (UTC) + derived local time |
+| `boiler/status/bus` | On change | Yes | High | RS485 bus released to another master |
 | `boiler/status/failsafe` | On change | Yes | High | Failsafe level + whether stage 2 is permitted |
 | `boiler/status/errors/list` | On request | No | Low | Error log dump |
 | `boiler/status/errors/stats` | On request | No | Low | Error statistics |

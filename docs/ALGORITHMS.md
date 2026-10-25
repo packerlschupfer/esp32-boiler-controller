@@ -874,7 +874,7 @@ Next-state decisions of the burner state machine as header-only functions that n
 | Hard timeout | MODE_SWITCHING for `MODE_SWITCH_HARD_TIMEOUT_MS` (30 s) | POST_PURGE |
 | Restart from post-purge | Heat demand and active mode demand, mode not just disabled, safety OK, minimum off-time over | PRE_PURGE |
 | Ignition | No flame after `IGNITION_TIME_MS` (5 s) | Retry via PRE_PURGE; `MAX_IGNITION_RETRIES` (3) → LOCKOUT. The StateMachine timeout `IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS` is a backstop |
-| Power level fault | `setPowerLevel()` fails entering RUNNING_LOW/HIGH | DEGRADED failsafe and POST_PURGE; the third fault within 10 min (`recordPowerFault`) escalates to an emergency stop |
+| Power level fault | `setPowerLevel()` fails entering RUNNING_LOW/HIGH | DEGRADED failsafe and POST_PURGE; the third fault within 10 min (`recordPowerFault`) escalates to an emergency stop. **DEGRADED is sticky and now withholds stage 2**, so the boiler runs at half power until a recovery path clears the level - watch `boiler/status/failsafe` (`fullPower:false`). Until 2026-10-25 the half-power limit was a log line above an empty comment |
 
 ---
 

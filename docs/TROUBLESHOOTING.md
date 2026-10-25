@@ -366,7 +366,14 @@ This path sets `EMERGENCY_STOP` and clears `BOILER_ENABLED`. Other burner faults
 2. Fix underlying issue; let the boiler cool below 110.0°C
 3. Release via MQTT: `mosquitto_pub -t "boiler/cmd/emergency_reset" -m "reset"`. The result is published (not retained) on `boiler/status/burner`:
    - `emergency_released` - `EMERGENCY_STOP` cleared; `BOILER_ENABLED` set again if the boiler is enabled in the saved settings. The burner still leaves ERROR only after `errorRecoveryMs` (default 5 min)
-   - `emergency_not_active` - `EMERGENCY_STOP` is not set
+   - `boiler_re_enabled` - no latch was set, but `BOILER_ENABLED` was clear while the saved
+     setting says the boiler should be on, and the command repaired that. **This is the normal
+     answer after an MB8ART outage longer than `sensorStaleMs`**: sensor recovery clears the
+     latch by itself and deliberately leaves the boiler off for a human to restart. Before
+     2026-10-25 this case replied `emergency_not_active` and did nothing, so the boiler stayed
+     dead with Home Assistant still showing its switch ON - only the bit had been cleared, not
+     the setting - and the only way back was toggling the boiler switch off and on
+   - `emergency_not_active` - `EMERGENCY_STOP` is not set and there was nothing to repair
    - `emergency_release_refused:temperature_high` - boiler output invalid or at/above 110.0°C, or boiler return at/above 110.0°C
    - `emergency_release_refused:sensors_unavailable` - sensor fallback cannot continue operation, or `SENSOR_FAILURE` error bit set
    - `emergency_release_refused:system_errors` - `SENSOR_FAILURE`, `MODBUS` or `RELAY` error bit set
