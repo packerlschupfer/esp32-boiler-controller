@@ -293,6 +293,28 @@ static void evaluateFrostDemand() {
     }
 }
 
+/**
+ * @brief Drop every trace of an active space-heating run.
+ *
+ * Extracted because the four sites that end a run were each open-coding the same four steps,
+ * and the two abandon paths in the HeatingOff case were doing NONE of them - see the invariant
+ * note in that case. HEATING_ON is not a private flag: PumpControlModule runs the heating pump
+ * off it (`modeActiveBit`), WheaterControlTask refuses to start a water charge while it is set
+ * and water priority is off, and SafetyInterlocks/BurnerStateMachine both read it. Leaving it
+ * set with no burner request therefore runs the pump and locks out hot water indefinitely.
+ */
+static void clearHeatingActive(const char* TAG) {
+    if (heatingState.heatingControl != nullptr) {
+        heatingState.heatingControl->stopHeating();
+    } else {
+        LOG_WARN(TAG, "HeatingControlModule unavailable - clearing state only");
+    }
+    SRP::clearSystemStateEventBits(SystemEvents::SystemState::HEATING_ON);
+    SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::True);
+    BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::HEATING);
+    heatingState.state = HeatingOff;
+}
+
 static void processHeatingState(EventBits_t pendingControl) {
     const char* TAG = "HeatingProcess";
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
@@ -304,18 +326,16 @@ static void processHeatingState(EventBits_t pendingControl) {
     if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) || 
         (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) && !g_frostDemand)) {
         
-        // System disabled - turn off heating if on
-        if (heatingState.state == HeatingOn) {
+        // System disabled - turn off heating if on.
+        //
+        // Keyed on the HEATING_ON BIT as well as our own state variable. It used to test
+        // `state == HeatingOn` alone, so a run abandoned mid-start (state still HeatingOff,
+        // bit already set) was invisible here: the boiler could then be switched off with the
+        // heating pump still running off that bit and water charging still locked out.
+        if (heatingState.state == HeatingOn ||
+            (systemStateBits & SystemEvents::SystemState::HEATING_ON)) {
             LOG_INFO(TAG, "System disabled - turning off heating");
-            if (heatingState.heatingControl != nullptr) {
-                heatingState.heatingControl->stopHeating();
-            } else {
-                LOG_WARN(TAG, "HeatingControlModule unavailable - clearing state only");
-            }
-            SRP::clearSystemStateEventBits(SystemEvents::SystemState::HEATING_ON);
-            SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::True);
-            BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::HEATING);
-            heatingState.state = HeatingOff;
+            clearHeatingActive(TAG);
         }
         return;
     }
@@ -327,6 +347,17 @@ static void processHeatingState(EventBits_t pendingControl) {
 
     switch (heatingState.state) {
         case HeatingOff: {
+            // INVARIANT: believing heating is off while the HEATING_ON bit is set is never
+            // correct between invocations, and it is not harmless - the heating pump runs off
+            // that bit and a water charge is refused while it is set with priority off. Heal
+            // it here rather than trusting every exit path to be symmetric, because the two
+            // abandon paths below were not and nothing else in the system clears the bit when
+            // our state says HeatingOff.
+            if (systemStateBits & SystemEvents::SystemState::HEATING_ON) {
+                LOG_WARN(TAG, "HEATING_ON was set while heating is off - clearing");
+                clearHeatingActive(TAG);
+            }
+
             // Check if we should turn on heating. Frost demand is a third reason, alongside
             // the normal room/weather decision and the remote ON override.
             if (checkIfSpaceHeatingNeededEvent() || g_frostDemand ||
@@ -377,6 +408,15 @@ static void processHeatingState(EventBits_t pendingControl) {
                 // Reset deferral flag when we're no longer being deferred
                 heatingState.waterDeferralLogged = false;
 
+                // Checked BEFORE startHeating(), not after. It used to sit after, so a
+                // sensor outage set HEATING_ON and then returned - running the heating pump
+                // and blocking water charging with no burner request behind it, for as long as
+                // the outage lasted. Nothing downstream needs the bit to answer this.
+                if (!TemperatureSensorFallback::canContinueOperation()) {
+                    LOG_WARN(TAG, "Cannot start heating - required sensors unavailable");
+                    return;
+                }
+
                 // Set HEATING_ON bit now that we know water doesn't have priority
                 // (needed for seamless mode switching from water to heating)
                 if (heatingState.heatingControl != nullptr) {
@@ -386,11 +426,6 @@ static void processHeatingState(EventBits_t pendingControl) {
                     return;
                 }
 
-                // Check if we can start heating
-                if (!TemperatureSensorFallback::canContinueOperation()) {
-                    LOG_WARN(TAG, "Cannot start heating - required sensors unavailable");
-                    return;
-                }
                 
                 // Calculate boiler target temperature
                 Temperature_t boilerTargetTemp = DEFAULT_BOILER_TARGET_TEMP;
@@ -417,7 +452,10 @@ static void processHeatingState(EventBits_t pendingControl) {
                             LOG_ERROR(TAG, "Failed to acquire settings mutex - using default target");
                         }
                     } else {
-                        LOG_ERROR(TAG, "Failed to acquire sensor mutex");
+                        // Past startHeating(), so the bit is already set: undo the whole start
+                        // rather than returning with a pump running and no burner request.
+                        LOG_ERROR(TAG, "Failed to acquire sensor mutex - abandoning start");
+                        clearHeatingActive(TAG);
                         return;
                     }
                 }
@@ -524,15 +562,7 @@ static void processHeatingState(EventBits_t pendingControl) {
                 LOG_INFO(TAG, "Deactivating space heating - reason: %s", reason);
                 
                 // Deactivate heating
-                if (heatingState.heatingControl != nullptr) {
-                    heatingState.heatingControl->stopHeating();
-                } else {
-                    LOG_WARN(TAG, "HeatingControlModule unavailable - clearing state only");
-                }
-                SRP::clearSystemStateEventBits(SystemEvents::SystemState::HEATING_ON);
-                SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::True);
-                BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::HEATING);
-                heatingState.state = HeatingOff;
+                clearHeatingActive(TAG);
                 
             } else {
                 // Update boiler target temperature periodically

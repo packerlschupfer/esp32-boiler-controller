@@ -5,8 +5,10 @@
 
 #include <unity.h>
 #include <cstdint>
+#include <cstring>
 
 #include "../../include/modules/control/BusReleasePolicy.h"
+#include "../../include/modules/control/BurnerSMState.h"
 
 // setUp and tearDown are defined in test_main.cpp
 
@@ -27,6 +29,11 @@ void test_bus_release_window_is_clamped_and_capped() {
     TEST_ASSERT_TRUE_MESSAGE(MAX_SECONDS <= 900, "the hard cap must stay short");
 }
 
+// Shorthand for the quiescent case: idle state machine, no latched emergency stop.
+static Refusal quiet(uint8_t relays, bool demand) {
+    return mayRelease(relays, demand, BurnerSMState::IDLE, false);
+}
+
 void test_bus_release_refuses_while_the_boiler_is_busy() {
     // Entry REFUSES rather than orchestrating a shutdown: there is no new stop path to get
     // wrong. The relay mask is the hardware-verified one.
@@ -34,18 +41,116 @@ void test_bus_release_refuses_while_the_boiler_is_busy() {
     const uint8_t water  = 1u << RelayIndex::WATER_MODE;
     const uint8_t pump   = 1u << RelayIndex::HEATING_PUMP;
 
-    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE, mayRelease(burner, false));
-    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE, mayRelease(water, false));
-    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE, mayRelease(burner | water | pump, false));
+    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE, quiet(burner, false));
+    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE, quiet(water, false));
+    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE, quiet(burner | water | pump, false));
 
     // Demand precedes the relays by a pre-purge, so clear firing bits are not enough.
-    TEST_ASSERT_EQUAL(Refusal::DEMAND_PRESENT, mayRelease(0, true));
-    TEST_ASSERT_EQUAL(Refusal::DEMAND_PRESENT, mayRelease(pump, true));
+    TEST_ASSERT_EQUAL(Refusal::DEMAND_PRESENT, quiet(0, true));
+    TEST_ASSERT_EQUAL(Refusal::DEMAND_PRESENT, quiet(pump, true));
 
-    // Idle, or circulating only: allowed. A running pump is harmless and the window is short.
-    TEST_ASSERT_EQUAL(Refusal::NONE, mayRelease(0, false));
-    TEST_ASSERT_EQUAL(Refusal::NONE, mayRelease(pump, false));
-    TEST_ASSERT_EQUAL(Refusal::NONE, mayRelease(1u << RelayIndex::WATER_PUMP, false));
+    // Fully idle: allowed. This is the only state that is.
+    TEST_ASSERT_EQUAL(Refusal::NONE, quiet(0, false));
+}
+
+void test_bus_release_refuses_while_a_pump_is_dissipating_heat() {
+    // THE REGRESSION TEST for the review's finding against my own feature. This case used to
+    // assert the opposite - "a running pump is harmless and the window is short" - which was
+    // wrong in the one way that matters: withholding the RYN4 ticks makes the DELAY watchdog
+    // de-energise the pumps within 10 s, so a release during POST_PURGE, the pumpCooldownMs
+    // overrun, the emergency-dissipation hold or ReturnPreheater's cycling traps residual heat
+    // in the exchanger with no flow. The relay mask is asked instead of those four mechanisms
+    // because their state is task-local in PumpControlModule, and because "is anything
+    // energised that the watchdog would kill" is the actual question - it covers reasons added
+    // later for free.
+    TEST_ASSERT_EQUAL(Refusal::PUMP_ACTIVE, quiet(1u << RelayIndex::HEATING_PUMP, false));
+    TEST_ASSERT_EQUAL(Refusal::PUMP_ACTIVE, quiet(1u << RelayIndex::WATER_PUMP, false));
+    TEST_ASSERT_EQUAL(Refusal::PUMP_ACTIVE,
+                      quiet((1u << RelayIndex::HEATING_PUMP) | (1u << RelayIndex::WATER_PUMP), false));
+
+    // The pump mask must be the two pumps and nothing else. VALVE is excluded deliberately:
+    // it is a diverter, so losing it returns flow to the default circuit rather than trapping
+    // heat - if someone adds it here, that is a decision, not a typo.
+    TEST_ASSERT_EQUAL_UINT8((1u << RelayIndex::HEATING_PUMP) | (1u << RelayIndex::WATER_PUMP),
+                            PUMP_MASK);
+    TEST_ASSERT_EQUAL_UINT8(0, PUMP_MASK & FIRING_MASK);
+    TEST_ASSERT_EQUAL_UINT8(0, PUMP_MASK & (1u << RelayIndex::VALVE));
+
+    // Firing still outranks a pump, so the operator is told the most urgent reason.
+    TEST_ASSERT_EQUAL(Refusal::BURNER_ACTIVE,
+                      quiet((1u << RelayIndex::BURNER_ENABLE) | (1u << RelayIndex::HEATING_PUMP), false));
+    // Relays that are neither firing nor pumps do not block: an alarm or the spare is not a
+    // thermal hazard, and the boost relay without BURNER_ENABLE commands nothing.
+    TEST_ASSERT_EQUAL(Refusal::NONE, quiet(1u << RelayIndex::ALARM, false));
+    TEST_ASSERT_EQUAL(Refusal::NONE, quiet(1u << RelayIndex::SPARE_7, false));
+    TEST_ASSERT_EQUAL(Refusal::NONE, quiet(1u << RelayIndex::POWER_BOOST, false));
+    TEST_ASSERT_EQUAL(Refusal::NONE, quiet(1u << RelayIndex::VALVE, false));
+}
+
+void test_bus_release_refuses_mid_sequence_and_under_a_latched_estop() {
+    // Every state with relay writes due on the next tick must refuse - above all POST_PURGE,
+    // where the burner is already off so the firing mask says nothing.
+    const BurnerSMState busy[] = {BurnerSMState::PRE_PURGE, BurnerSMState::IGNITION,
+                                  BurnerSMState::RUNNING_LOW, BurnerSMState::RUNNING_HIGH,
+                                  BurnerSMState::MODE_SWITCHING, BurnerSMState::POST_PURGE};
+    for (BurnerSMState st : busy) {
+        TEST_ASSERT_TRUE(isSequencing(st));
+        TEST_ASSERT_EQUAL(Refusal::BURNER_SEQUENCING, mayRelease(0, false, st, false));
+    }
+
+    // IDLE is quiescent, and so are the two fault states: the burner is off and no sequence
+    // is running, and a lockout after a failed ignition is a plausible moment to go and work
+    // on the bus. Any dissipation still under way is caught by the pump mask instead.
+    const BurnerSMState quietStates[] = {BurnerSMState::IDLE, BurnerSMState::LOCKOUT,
+                                         BurnerSMState::ERROR};
+    for (BurnerSMState st : quietStates) {
+        TEST_ASSERT_FALSE(isSequencing(st));
+        TEST_ASSERT_EQUAL(Refusal::NONE, mayRelease(0, false, st, false));
+    }
+
+    // A latched emergency stop refuses even once the pumps have stopped: the operator is
+    // mid-diagnosis and emergency_reset's relay writes would not land until the window ended.
+    TEST_ASSERT_EQUAL(Refusal::EMERGENCY_LATCHED, mayRelease(0, false, BurnerSMState::IDLE, true));
+    TEST_ASSERT_EQUAL(Refusal::EMERGENCY_LATCHED, mayRelease(0, false, BurnerSMState::LOCKOUT, true));
+    // ... but a thermal reason still outranks it, because that is the one with a deadline.
+    TEST_ASSERT_EQUAL(Refusal::PUMP_ACTIVE,
+                      mayRelease(1u << RelayIndex::HEATING_PUMP, false, BurnerSMState::IDLE, true));
+
+    // The label is all the operator sees, so every value needs its own and none may fall
+    // through to the "unknown" placeholder - which is what happens if a value is added to the
+    // enum and not to the switch.
+    const Refusal all[] = {Refusal::NONE, Refusal::BURNER_ACTIVE, Refusal::DEMAND_PRESENT,
+                           Refusal::PUMP_ACTIVE, Refusal::BURNER_SEQUENCING,
+                           Refusal::EMERGENCY_LATCHED};
+    const size_t count = sizeof(all) / sizeof(all[0]);
+    for (size_t i = 0; i < count; ++i) {
+        const char* label = toString(all[i]);
+        TEST_ASSERT_NOT_NULL(label);
+        TEST_ASSERT_TRUE(label[0] != '\0');
+        TEST_ASSERT_TRUE_MESSAGE(strcmp(label, "unknown") != 0, "a Refusal has no label");
+        for (size_t j = i + 1; j < count; ++j) {
+            TEST_ASSERT_TRUE_MESSAGE(strcmp(label, toString(all[j])) != 0,
+                                     "two Refusal values share a label");
+        }
+    }
+}
+
+void test_bus_release_extending_a_window_never_shortens_it() {
+    // The extend path stored `now + requested` unconditionally while its comment claimed a
+    // second call "cannot shorten a window someone else is relying on" - so a 30 s request
+    // against a 15-minute window cut it to 30 s. isLater() is what makes the caller keep the
+    // later deadline, and it has to be rollover-safe for the same reason expired() is.
+    TEST_ASSERT_TRUE(isLater(1000, 500));
+    TEST_ASSERT_FALSE(isLater(500, 1000));
+    TEST_ASSERT_FALSE(isLater(1000, 1000));
+
+    // Across the uint32 wrap: a deadline just past the rollover really is later than one just
+    // before it, where a plain `>` would get it backwards and allow the shortening once every
+    // 49.7 days.
+    const uint32_t beforeWrap = 0xFFFFF000u;
+    const uint32_t afterWrap  = 0x00001000u;
+    TEST_ASSERT_TRUE(isLater(afterWrap, beforeWrap));
+    TEST_ASSERT_FALSE(isLater(beforeWrap, afterWrap));
 }
 
 void test_bus_release_firing_mask_tracks_the_relay_indices() {

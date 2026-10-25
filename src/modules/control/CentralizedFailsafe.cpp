@@ -510,17 +510,49 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
                            (errorBits & SystemEvents::Error::SENSOR_FAILURE) == 0;
     conditions.systemErrorsClear = SafetyInterlocks::checkSystemErrors();
 
-    const EmergencyStopRelease::Result result = EmergencyStopRelease::evaluate(conditions);
-    if (result != EmergencyStopRelease::Result::RELEASED) {
-        LOG_WARN(TAG, "Emergency stop release: %s", EmergencyStopRelease::toString(result));
-        return result;
-    }
-
     // emergencyStop() clears BOILER_ENABLED in RAM only; restore the saved user setting
     bool boilerEnabled = true;
     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100)) == pdTRUE) {
         boilerEnabled = SRP::getSystemSettings().boilerEnabled;
         SRP::giveSystemSettingsMutex();
+    }
+
+    const EmergencyStopRelease::Result result = EmergencyStopRelease::evaluate(conditions);
+
+    // "Not active" used to end here, and that was a dead end. releaseAfterSensorRecovery()
+    // clears EMERGENCY_STOP but deliberately leaves the boiler disabled for a human to
+    // restart - so after an MB8ART outage longer than sensorStaleMs the operator finds the
+    // latch gone, the boiler dead, and the documented recovery command answering
+    // "emergency_not_active" while doing nothing. The only way back was to toggle the boiler
+    // switch, which HA already showed as ON because the setting was never cleared.
+    //
+    // So emergency_reset now also repairs that specific mismatch: the user wants the boiler
+    // on, the bit says otherwise, and no latch explains it. Gated on the FULL safety set, not
+    // just on the latch being clear - re-enabling over a hot boiler or a failed sensor would
+    // be worse than the dead end.
+    if (result == EmergencyStopRelease::Result::NOT_ACTIVE) {
+        const bool boilerBitSet =
+            (xEventGroupGetBits(SRP::getSystemStateEventGroup()) &
+             SystemEvents::SystemState::BOILER_ENABLED) != 0;
+        if (!boilerEnabled || boilerBitSet) {
+            LOG_WARN(TAG, "Emergency stop release: %s", EmergencyStopRelease::toString(result));
+            return result;  // nothing latched and nothing to repair
+        }
+        const EmergencyStopRelease::Result safety = EmergencyStopRelease::evaluateSafety(conditions);
+        if (safety != EmergencyStopRelease::Result::RELEASED) {
+            LOG_WARN(TAG, "Boiler stays disabled: %s", EmergencyStopRelease::toString(safety));
+            return safety;
+        }
+        xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
+        currentLevel.store(FailsafeLevel::WARNING);
+        recoveryAttempts = 0;
+        LOG_WARN(TAG, "No emergency latch, but the boiler was left disabled - re-enabled");
+        return EmergencyStopRelease::Result::BOILER_RE_ENABLED;
+    }
+
+    if (result != EmergencyStopRelease::Result::RELEASED) {
+        LOG_WARN(TAG, "Emergency stop release: %s", EmergencyStopRelease::toString(result));
+        return result;
     }
 
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
@@ -552,7 +584,8 @@ bool CentralizedFailsafe::releaseAfterSensorRecovery() {
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
     latchCause_.store(EmergencyStopRelease::Cause::NONE);
     currentLevel.store(FailsafeLevel::WARNING);
-    LOG_WARN(TAG, "Emergency stop released after sensor recovery (boiler stays disabled)");
+    LOG_WARN(TAG, "Emergency stop released after sensor recovery - boiler stays disabled "
+                  "on purpose, restart it with boiler/cmd/emergency_reset");
     return true;
 }
 

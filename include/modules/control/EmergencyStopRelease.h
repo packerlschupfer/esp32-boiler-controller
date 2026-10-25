@@ -18,6 +18,7 @@ namespace EmergencyStopRelease {
     enum class Result : uint8_t {
         RELEASED,
         NOT_ACTIVE,
+        BOILER_RE_ENABLED,      // latch was already clear, but BOILER_ENABLED was not restored
         TEMPERATURE_HIGH,       // boiler output or return at or above the operating limit
         SENSORS_UNAVAILABLE,    // required sensors missing, stale or failing
         SYSTEM_ERRORS           // critical error bits (sensor, Modbus, relay) still set
@@ -30,10 +31,16 @@ namespace EmergencyStopRelease {
         bool systemErrorsClear;
     };
 
-    inline Result evaluate(const Conditions& c) {
-        if (!c.emergencyActive) {
-            return Result::NOT_ACTIVE;
-        }
+    /**
+     * @brief The safety conditions alone, ignoring whether the latch is set.
+     *
+     * Split out 2026-10-25 so re-enabling the boiler can be gated on exactly the same
+     * conditions as releasing the latch. releaseAfterSensorRecovery() clears EMERGENCY_STOP
+     * but deliberately leaves the boiler disabled for a human to restart; the operator's
+     * emergency_reset then has to do that restart, and it must not do it over a hot boiler or
+     * a failed sensor just because the latch happens to be clear.
+     */
+    inline Result evaluateSafety(const Conditions& c) {
         if (!c.temperaturesOk) {
             return Result::TEMPERATURE_HIGH;
         }
@@ -46,10 +53,18 @@ namespace EmergencyStopRelease {
         return Result::RELEASED;
     }
 
+    inline Result evaluate(const Conditions& c) {
+        if (!c.emergencyActive) {
+            return Result::NOT_ACTIVE;
+        }
+        return evaluateSafety(c);
+    }
+
     inline const char* toString(Result r) {
         switch (r) {
             case Result::RELEASED:            return "emergency_released";
             case Result::NOT_ACTIVE:          return "emergency_not_active";
+            case Result::BOILER_RE_ENABLED:   return "boiler_re_enabled";
             case Result::TEMPERATURE_HIGH:    return "emergency_release_refused:temperature_high";
             case Result::SENSORS_UNAVAILABLE: return "emergency_release_refused:sensors_unavailable";
             case Result::SYSTEM_ERRORS:       return "emergency_release_refused:system_errors";

@@ -90,6 +90,9 @@ void test_invalid_count_rate_limit_survives_the_millis_rollover();
 void test_invalid_count_first_observation_is_never_rate_limited();
 void test_bus_release_window_is_clamped_and_capped();
 void test_bus_release_refuses_while_the_boiler_is_busy();
+void test_bus_release_refuses_while_a_pump_is_dissipating_heat();
+void test_bus_release_refuses_mid_sequence_and_under_a_latched_estop();
+void test_bus_release_extending_a_window_never_shortens_it();
 void test_bus_release_firing_mask_tracks_the_relay_indices();
 void test_bus_release_expiry_survives_the_millis_rollover();
 void test_bus_release_seconds_left_rounds_up_and_never_contradicts_released();
@@ -156,6 +159,8 @@ void test_emergency_dissipation_until_boiler_cooled();
 void test_emergency_dissipation_without_usable_output();
 void test_emergency_sensor_recovery_releases_only_stale_sensor_stop();
 void test_emergency_cause_merge_while_latched();
+void test_emergency_safety_split_matches_the_latched_evaluation();
+void test_emergency_safety_refuses_a_re_enable_over_a_hot_boiler();
 void test_emergency_dissipation_continues_after_release_until_cooled();
 
 // Burner transitions (state machine scenarios through BurnerTransitions::step)
@@ -677,6 +682,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_invalid_count_first_observation_is_never_rate_limited);
     RUN_TEST(test_bus_release_window_is_clamped_and_capped);
     RUN_TEST(test_bus_release_refuses_while_the_boiler_is_busy);
+    RUN_TEST(test_bus_release_refuses_while_a_pump_is_dissipating_heat);
+    RUN_TEST(test_bus_release_refuses_mid_sequence_and_under_a_latched_estop);
+    RUN_TEST(test_bus_release_extending_a_window_never_shortens_it);
     RUN_TEST(test_bus_release_firing_mask_tracks_the_relay_indices);
     RUN_TEST(test_bus_release_expiry_survives_the_millis_rollover);
     RUN_TEST(test_bus_release_seconds_left_rounds_up_and_never_contradicts_released);
@@ -747,6 +755,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_emergency_dissipation_without_usable_output);
     RUN_TEST(test_emergency_sensor_recovery_releases_only_stale_sensor_stop);
     RUN_TEST(test_emergency_cause_merge_while_latched);
+    RUN_TEST(test_emergency_safety_split_matches_the_latched_evaluation);
+    RUN_TEST(test_emergency_safety_refuses_a_re_enable_over_a_hot_boiler);
     RUN_TEST(test_emergency_dissipation_continues_after_release_until_cooled);
 
     // Burner transitions (state machine scenarios through BurnerTransitions::step)

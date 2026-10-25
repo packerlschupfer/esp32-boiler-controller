@@ -103,3 +103,62 @@ void test_emergency_dissipation_without_usable_output() {
     TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, false));
     TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, true));
 }
+
+void test_emergency_safety_split_matches_the_latched_evaluation() {
+    // evaluateSafety() was split out of evaluate() so re-enabling the boiler after a
+    // sensor-recovery release can be gated on exactly the same conditions as releasing the
+    // latch. Pin that: with the latch set, the two must agree on every outcome - if they ever
+    // diverge, emergency_reset would re-enable the boiler under a condition that would have
+    // refused the release.
+    EmergencyStopRelease::Conditions c;
+    for (int bits = 0; bits < 8; ++bits) {
+        c.emergencyActive    = true;
+        c.temperaturesOk     = (bits & 1) != 0;
+        c.sensorsOk          = (bits & 2) != 0;
+        c.systemErrorsClear  = (bits & 4) != 0;
+        TEST_ASSERT_EQUAL(EmergencyStopRelease::evaluate(c), EmergencyStopRelease::evaluateSafety(c));
+    }
+
+    // And the ONLY thing evaluate() adds is the latch test: with it clear the answer is
+    // NOT_ACTIVE no matter how good or bad the conditions are.
+    for (int bits = 0; bits < 8; ++bits) {
+        c.emergencyActive    = false;
+        c.temperaturesOk     = (bits & 1) != 0;
+        c.sensorsOk          = (bits & 2) != 0;
+        c.systemErrorsClear  = (bits & 4) != 0;
+        TEST_ASSERT_EQUAL(EmergencyStopRelease::Result::NOT_ACTIVE, EmergencyStopRelease::evaluate(c));
+    }
+}
+
+void test_emergency_safety_refuses_a_re_enable_over_a_hot_boiler() {
+    // The repair path in clearEmergencyStop() calls evaluateSafety() with the latch already
+    // clear. It must still refuse, in priority order, or emergency_reset would turn the boiler
+    // back on over a hot exchanger or a dead sensor just because nothing was latched.
+    EmergencyStopRelease::Conditions c;
+    c.emergencyActive = false;
+
+    c.temperaturesOk = false; c.sensorsOk = true;  c.systemErrorsClear = true;
+    TEST_ASSERT_EQUAL(EmergencyStopRelease::Result::TEMPERATURE_HIGH, EmergencyStopRelease::evaluateSafety(c));
+
+    c.temperaturesOk = true;  c.sensorsOk = false; c.systemErrorsClear = true;
+    TEST_ASSERT_EQUAL(EmergencyStopRelease::Result::SENSORS_UNAVAILABLE, EmergencyStopRelease::evaluateSafety(c));
+
+    c.temperaturesOk = true;  c.sensorsOk = true;  c.systemErrorsClear = false;
+    TEST_ASSERT_EQUAL(EmergencyStopRelease::Result::SYSTEM_ERRORS, EmergencyStopRelease::evaluateSafety(c));
+
+    // Temperature outranks everything: it is the one with a deadline.
+    c.temperaturesOk = false; c.sensorsOk = false; c.systemErrorsClear = false;
+    TEST_ASSERT_EQUAL(EmergencyStopRelease::Result::TEMPERATURE_HIGH, EmergencyStopRelease::evaluateSafety(c));
+
+    // Only an all-clear permits it.
+    c.temperaturesOk = true;  c.sensorsOk = true;  c.systemErrorsClear = true;
+    TEST_ASSERT_EQUAL(EmergencyStopRelease::Result::RELEASED, EmergencyStopRelease::evaluateSafety(c));
+
+    // The new result needs its own label - the operator sees only this string, and
+    // "boiler_re_enabled" is what tells them the command did something after years of
+    // "emergency_not_active" meaning it had not.
+    TEST_ASSERT_EQUAL_STRING("boiler_re_enabled",
+                             EmergencyStopRelease::toString(EmergencyStopRelease::Result::BOILER_RE_ENABLED));
+    TEST_ASSERT_EQUAL_STRING("emergency_not_active",
+                             EmergencyStopRelease::toString(EmergencyStopRelease::Result::NOT_ACTIVE));
+}

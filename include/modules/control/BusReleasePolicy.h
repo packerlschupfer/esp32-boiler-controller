@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "config/RelayIndices.h"  // single source of truth for the relay bit positions
+#include "modules/control/BurnerSMState.h"
 
 /**
  * @brief Rules for deliberately handing the RS485 bus to another master.
@@ -75,6 +76,27 @@ namespace BusReleasePolicy {
     constexpr uint8_t FIRING_MASK =
         static_cast<uint8_t>((1u << RelayIndex::BURNER_ENABLE) | (1u << RelayIndex::WATER_MODE));
 
+    /// Relay bits meaning "a circulation pump is energised".
+    ///
+    /// Added 2026-10-25, after the review found the omission in my own feature: the original
+    /// gate asked only whether the burner was FIRING, and a pump running with the burner off
+    /// is the normal state of heat dissipation - POST_PURGE, the pumpCooldownMs overrun, the
+    /// emergency-stop dissipation hold, and ReturnPreheater's cycling all look like that.
+    /// Release during any of them and the DELAY watchdog de-energises the pumps within 10 s,
+    /// trapping residual heat in the exchanger with no flow - the one thing every one of those
+    /// mechanisms exists to prevent.
+    ///
+    /// Asking the RELAY MASK rather than those four mechanisms is deliberate: their state is
+    /// task-local inside PumpControlModule and not queryable, and the real question is not why
+    /// a pump is running but whether anything is energised that withholding the ticks would
+    /// kill. The hardware-verified mask answers that for all of them at once, including
+    /// reasons added later.
+    ///
+    /// VALVE is excluded on purpose: it is a diverter, so losing it returns flow to the
+    /// default circuit rather than trapping heat.
+    constexpr uint8_t PUMP_MASK =
+        static_cast<uint8_t>((1u << RelayIndex::HEATING_PUMP) | (1u << RelayIndex::WATER_PUMP));
+
     /// 0 means "unspecified", which takes the default rather than the minimum.
     inline uint32_t clampSeconds(uint32_t requested) {
         if (requested == 0) {
@@ -90,10 +112,40 @@ namespace BusReleasePolicy {
     }
 
     enum class Refusal : uint8_t {
-        NONE,            // may release
-        BURNER_ACTIVE,   // a firing relay is closed
-        DEMAND_PRESENT   // heat demand is armed, so the burner is about to fire
+        NONE,                // may release
+        BURNER_ACTIVE,       // a firing relay is closed
+        DEMAND_PRESENT,      // heat demand is armed, so the burner is about to fire
+        PUMP_ACTIVE,         // a circulation pump is running - heat is being dissipated
+        BURNER_SEQUENCING,   // the state machine is mid-sequence (purge, ignition, mode switch)
+        EMERGENCY_LATCHED    // emergency stop is latched and unacknowledged
     };
+
+    /**
+     * @brief Is the burner state machine in the middle of something?
+     *
+     * IDLE is quiescent. So are LOCKOUT and ERROR - the burner is off and no sequence is
+     * running - so they do NOT block a release: a lockout after a failed ignition is a
+     * plausible moment to go and work on the bus, and the pump mask still protects any
+     * dissipation that is under way. Everything else is a sequence with relay writes due on
+     * the next tick, including POST_PURGE, where the burner is already off but the pumps are
+     * deliberately still running.
+     */
+    inline bool isSequencing(BurnerSMState state) {
+        switch (state) {
+            case BurnerSMState::IDLE:
+            case BurnerSMState::LOCKOUT:
+            case BurnerSMState::ERROR:
+                return false;
+            case BurnerSMState::PRE_PURGE:
+            case BurnerSMState::IGNITION:
+            case BurnerSMState::RUNNING_LOW:
+            case BurnerSMState::RUNNING_HIGH:
+            case BurnerSMState::MODE_SWITCHING:
+            case BurnerSMState::POST_PURGE:
+                return true;
+        }
+        return true;  // an unknown state is not a safe one
+    }
 
     /**
      * @brief May the bus be released right now?
@@ -104,21 +156,37 @@ namespace BusReleasePolicy {
      *        because demand precedes the relays by a pre-purge, so firing bits can be clear
      *        while an ignition is seconds away.
      */
-    inline Refusal mayRelease(uint8_t relaysActual, bool heatDemand) {
+    inline Refusal mayRelease(uint8_t relaysActual, bool heatDemand,
+                              BurnerSMState burnerState, bool emergencyLatched) {
         if ((relaysActual & FIRING_MASK) != 0) {
             return Refusal::BURNER_ACTIVE;
         }
         if (heatDemand) {
             return Refusal::DEMAND_PRESENT;
         }
+        if ((relaysActual & PUMP_MASK) != 0) {
+            return Refusal::PUMP_ACTIVE;
+        }
+        if (isSequencing(burnerState)) {
+            return Refusal::BURNER_SEQUENCING;
+        }
+        // A latched emergency stop is the wrong moment to hand the bus away even once the
+        // pumps have stopped: the operator is mid-diagnosis, and emergency_reset's relay
+        // writes would not land until the window ended.
+        if (emergencyLatched) {
+            return Refusal::EMERGENCY_LATCHED;
+        }
         return Refusal::NONE;
     }
 
     inline const char* toString(Refusal r) {
         switch (r) {
-            case Refusal::NONE:           return "ok";
-            case Refusal::BURNER_ACTIVE:  return "burner_active";
-            case Refusal::DEMAND_PRESENT: return "demand_present";
+            case Refusal::NONE:              return "ok";
+            case Refusal::BURNER_ACTIVE:     return "burner_active";
+            case Refusal::DEMAND_PRESENT:    return "demand_present";
+            case Refusal::PUMP_ACTIVE:       return "pump_active";
+            case Refusal::BURNER_SEQUENCING: return "burner_sequencing";
+            case Refusal::EMERGENCY_LATCHED: return "emergency_latched";
         }
         return "unknown";
     }
@@ -133,6 +201,13 @@ namespace BusReleasePolicy {
      */
     inline bool expired(uint32_t nowMs, uint32_t deadlineMs) {
         return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
+    }
+
+    /// Is `candidate` later than `reference`? Rollover-safe, same reasoning as expired():
+    /// a plain `>` would call a deadline just past the uint32 wrap "earlier" and let a short
+    /// request shorten a long window exactly once every 49.7 days.
+    inline bool isLater(uint32_t candidate, uint32_t reference) {
+        return static_cast<int32_t>(candidate - reference) > 0;
     }
 
     /// Rounded UP, so a window with 200 ms left reports 1 rather than 0: reporting 0 while

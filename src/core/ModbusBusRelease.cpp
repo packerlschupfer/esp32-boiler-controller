@@ -5,6 +5,8 @@
 #include <atomic>
 
 #include "LoggingMacros.h"
+#include "core/SystemResourceProvider.h"
+#include "events/SystemEventsGenerated.h"
 #include "modules/control/BurnerStateMachine.h"
 #include "shared/RelayState.h"
 #include "shared/Temperature.h"
@@ -47,13 +49,22 @@ namespace ModbusBusRelease {
 
 BusReleasePolicy::Refusal release(uint32_t seconds) {
     if (s_released.load(std::memory_order_acquire)) {
-        // Already released: extend rather than refuse, so a second call cannot shorten a
-        // window someone else is relying on by accident.
-        const uint32_t extended = BusReleasePolicy::clampSeconds(seconds);
-        s_deadlineMs.store(millis() + extended * 1000u, std::memory_order_release);
-        s_changed.store(true, std::memory_order_release);
-        LOG_WARN(TAG, "Bus already released - window extended to %lu s",
-                 static_cast<unsigned long>(extended));
+        // Already released: extend, never shorten. The comment here used to claim exactly
+        // that while the code did the opposite - it stored `now + requested` unconditionally,
+        // so a second call with a small value clamped up to MIN_SECONDS and cut a 15-minute
+        // window down to 30 s under whoever was using it. Keep the later deadline.
+        const uint32_t requested = BusReleasePolicy::clampSeconds(seconds);
+        const uint32_t current = s_deadlineMs.load(std::memory_order_acquire);
+        const uint32_t proposed = millis() + requested * 1000u;
+        const bool longer = BusReleasePolicy::isLater(proposed, current);
+        if (longer) {
+            s_deadlineMs.store(proposed, std::memory_order_release);
+            s_changed.store(true, std::memory_order_release);
+        }
+        LOG_WARN(TAG, "Bus already released - window %s (%lu s left)",
+                 longer ? "extended" : "kept, request was shorter",
+                 static_cast<unsigned long>(BusReleasePolicy::secondsLeft(
+                     millis(), s_deadlineMs.load(std::memory_order_acquire))));
         return BusReleasePolicy::Refusal::NONE;
     }
 
@@ -69,10 +80,16 @@ BusReleasePolicy::Refusal release(uint32_t seconds) {
         return BusReleasePolicy::Refusal::DEMAND_PRESENT;
     }
 
-    const BusReleasePolicy::Refusal refusal = BusReleasePolicy::mayRelease(actual, demand);
+    const BurnerSMState burnerState = BurnerStateMachine::getCurrentState();
+    const bool emergencyLatched =
+        (SRP::getSystemStateEventBits() & SystemEvents::SystemState::EMERGENCY_STOP) != 0;
+
+    const BusReleasePolicy::Refusal refusal =
+        BusReleasePolicy::mayRelease(actual, demand, burnerState, emergencyLatched);
     if (refusal != BusReleasePolicy::Refusal::NONE) {
-        LOG_WARN(TAG, "Bus release refused (%s): relays=0x%02X demand=%d",
-                 BusReleasePolicy::toString(refusal), actual, demand ? 1 : 0);
+        LOG_WARN(TAG, "Bus release refused (%s): relays=0x%02X demand=%d sm=%d estop=%d",
+                 BusReleasePolicy::toString(refusal), actual, demand ? 1 : 0,
+                 static_cast<int>(burnerState), emergencyLatched ? 1 : 0);
         return refusal;
     }
 
