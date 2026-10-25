@@ -53,7 +53,18 @@ static bool checkIfSpaceHeatingNeededEvent();
 // Diagnostics for boiler/status/heating/control. Written only by this task
 // (checkIfSpaceHeatingNeededEvent and processHeatingState both run on it), so no
 // synchronisation is needed; published by publishControlDiagnostics() below.
-static HeatingControlDiagnostics::Block g_blockReason = HeatingControlDiagnostics::Block::OK;
+//
+// SENSOR_INVALID, not OK, is the honest initial value. Block::OK *means* "heating is
+// wanted", so initialising to it made this topic claim heating was wanted for the ~4 s
+// between boot and the first run of checkIfSpaceHeatingNeededEvent(). Measured at the
+// 2026-10-25 01:48:04 UTC boot: `dem:false blk:"none" i:192 isrc:"tgt"`, then four seconds
+// later the first real evaluation gave `blk:"backstop" i:204 isrc:"meas"`. Nothing actuated
+// - dem stayed false and every relay is de-energised at boot - but this is the one topic
+// that exists so "why is heating off" can be answered from the firmware's own state, and
+// for those seconds it answered wrongly. At boot there genuinely is no reading yet, which
+// is exactly what SENSOR_INVALID says.
+static HeatingControlDiagnostics::Block g_blockReason =
+    HeatingControlDiagnostics::Block::SENSOR_INVALID;
 static HeatingControlModule::CurveDebug g_curveDebug;
 static Temperature_t g_commandedTarget = 0;
 static void publishControlDiagnostics();
