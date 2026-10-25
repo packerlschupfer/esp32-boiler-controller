@@ -254,6 +254,7 @@ build arithmetic on it.
 | `boiler/status/sensor_fallback/recovery` | No | `{"recovered":true}` |
 | `boiler/status/sensor_mode` | Yes | `STARTUP`, `NORMAL` or `SHUTDOWN` |
 | `boiler/status/scheduler/info` | No | `{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}` (reply to `boiler/cmd/scheduler/status`) |
+| `boiler/status/clock` | No | `{"valid":true,"utc":1792928804,"local":"2026-10-25 12:46:44","dow":0,"dst":false,"ntp":true}` - every 60 s. `utc` is the epoch **stored in the DS3231**; `local` is derived from the compiled CET/CEST rule. Both halves are published so a wrong offset is visible: compare `utc` against real UTC and `local` against the wall clock. `valid:false` (then only `utc` and `ntp`) means the RTC is implausible and **schedules are suspended**. |
 | `boiler/status/error` | No | `unknown_command`, `invalid_numeric_value`, `invalid_config_value` (control/config command errors) |
 | `boiler/status/config/warning` | Yes | JSON warning after `boiler_pid_enabled` or `syslog_enabled` (reboot required) |
 | `boiler/diagnostics/modbus/<addr>` | No | Modbus error counters per device address (hex), every 30 min |
@@ -1017,6 +1018,7 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/scheduler/event` | On event | No | Medium | Schedule start/end |
 | `boiler/scheduler/response` | On command | No | Medium | Command responses |
 | `boiler/status/scheduler/info` | On `status` command | No | Medium | Scheduler status |
+| `boiler/status/clock` | Every 60 s | No | Low | RTC epoch (UTC) + derived local time |
 | `boiler/status/errors/list` | On request | No | Low | Error log dump |
 | `boiler/status/errors/stats` | On request | No | Low | Error statistics |
 | `boiler/status/errors/critical` | On request | No | Low | Critical errors |
@@ -1381,10 +1383,15 @@ mqtt:
 
 ### Schedules Not Activating
 **Check**:
-1. RTC time correct: Check device logs for "DS3231 initialized"
+1. RTC time correct: subscribe to `boiler/status/clock` (every 60 s). `local` must match the
+   wall clock and `utc` must match real UTC - do not check only one, since a stale offset
+   shows up as the two disagreeing. `valid:false` means schedules are suspended entirely.
 2. Schedule enabled: List schedules and verify
 3. Days array correct: 0=Sunday, 1=Monday ... 6=Saturday (7 is rejected)
-4. Time zone: System uses CET/CEST
+4. Time zone: schedule times are LOCAL. The DS3231 stores **UTC**; local time is derived from
+   the POSIX rule compiled into the firmware (`SchedulerClock::TZ_RULE`, CET/CEST), so the
+   DST offset is correct with no network. `ntp:false` means the crystal is uncorrected and
+   drifting, not that the offset is wrong.
 
 ---
 

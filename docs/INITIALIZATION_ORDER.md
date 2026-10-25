@@ -91,7 +91,9 @@ Logger::getInstance().setMaxLogsPerSecond(200);
    - Modbus RTU: RX=36, TX=4, 9600 baud
    - Serial console: 921600 baud
 
-4. **Timezone**: `setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3")`
+4. **Timezone**: `SchedulerClock::applyTimezone()` (the rule itself lives in
+   `include/modules/scheduler/SchedulerClock.h`, one copy). Must run **before** the RTC is
+   read, because the DS3231 stores UTC and the scheduler derives local time from this rule.
 
 Ethernet is not started here; see Stage 5.
 
