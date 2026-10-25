@@ -11,7 +11,9 @@ void NTPTask(void* parameter);
 using NTPSyncCallback = std::function<void(time_t)>;
 
 // Public API functions
-void setNTPRTCCallback(NTPSyncCallback callback);
+// Returns false if the callback could NOT be stored - the caller must not report
+// success on its own. Registering before the NTP task starts is the normal path.
+bool setNTPRTCCallback(NTPSyncCallback callback);
 bool forceNTPSync();
 bool isNTPSynced();
 time_t getLastNTPSyncTime();

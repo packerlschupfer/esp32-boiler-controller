@@ -144,9 +144,15 @@ static bool initializeScheduler() {
         return false;
     }
 
-    // Register NTP callback to update RTC when time syncs
-    setNTPRTCCallback(updateRTCFromNTP);
-    LOG_INFO(TAG, "Registered NTP RTC update callback");
+    // Register NTP callback to update RTC when time syncs. main.cpp starts this task before
+    // NTPTask precisely so this lands first; log what actually happened rather than assuming,
+    // because for the life of this project the registration was silently discarded and this
+    // line claimed success anyway.
+    if (setNTPRTCCallback(updateRTCFromNTP)) {
+        LOG_INFO(TAG, "Registered NTP RTC update callback");
+    } else {
+        LOG_ERROR(TAG, "NTP RTC callback NOT registered - the RTC will never be corrected");
+    }
 
     // Get RuntimeStorage (initialized early in SystemInitializer::initializeHardware)
     runtimeStorage = SRP::getRuntimeStorage();

@@ -12,7 +12,9 @@ void NTPTask(void* parameter);
 typedef std::function<void(time_t epochTime)> NTPSyncCallback;
 
 // Set RTC update callback (called when NTP successfully syncs)
-void setNTPRTCCallback(NTPSyncCallback callback);
+// Returns false if the callback could NOT be stored - the caller must not report
+// success on its own. Registering before the NTP task starts is the normal path.
+bool setNTPRTCCallback(NTPSyncCallback callback);
 
 // Force immediate NTP sync (returns success/failure)
 bool forceNTPSync();

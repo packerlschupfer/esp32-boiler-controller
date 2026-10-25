@@ -563,11 +563,34 @@ void NTPTask(void* parameter) {
 }
 
 // Public API functions remain the same
-void setNTPRTCCallback(NTPSyncCallback callback) {
-    if (ntpMutex && xSemaphoreTake(ntpMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+bool setNTPRTCCallback(NTPSyncCallback callback) {
+    // THIS GUARD USED TO SILENTLY DROP EVERY REGISTRATION, and with it every RTC update this
+    // firmware has ever tried to make. ntpMutex is created inside the NTP TASK, and main.cpp
+    // starts TimerSchedulerTask - the only caller - before NTPTask, on purpose: the comment
+    // there reads "registers RTC update callback needed by NTPTask". So at registration time
+    // the mutex does not exist yet, `ntpMutex &&` was false, the assignment never happened,
+    // and performNTPSync()'s `if (rtcUpdateCallback)` was never true. The DS3231 was left
+    // free-running: measured 2 h 00 min ahead of true UTC on 2026-10-25 while isNTPSynced()
+    // reported true, which is what exposed this.
+    //
+    // No mutex means the NTP task has not started, so there is no second accessor and the
+    // plain assignment is safe - that is the NORMAL path, not an edge case. Once the task is
+    // up, rtcUpdateCallback is read from inside performNTPSync() under ntpMutex, so a late
+    // registration must take it rather than race a std::function assignment.
+    if (!ntpMutex) {
+        rtcUpdateCallback = callback;
+        return true;
+    }
+    if (xSemaphoreTake(ntpMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         rtcUpdateCallback = callback;
         xSemaphoreGive(ntpMutex);
+        return true;
     }
+    // The NTP task holds this mutex across a whole sync, which can take seconds - so a
+    // registration arriving then would have been dropped by the old code as well. Report it
+    // instead of letting the caller log success.
+    LOG_WARN(TAG, "RTC callback NOT registered - ntpMutex busy");
+    return false;
 }
 
 bool forceNTPSync() {
