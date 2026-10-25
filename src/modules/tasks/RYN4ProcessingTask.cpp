@@ -264,6 +264,29 @@ static void handleReadTick(RYN4* ryn4) {
             static_cast<uint8_t>(i + 1), !relayMismatch, s_relayHealthFailures);
     }
 
+    // Error::RELAY had NO reachable clear. Its only xEventGroupClearBits lives in
+    // ErrorRecovery.cpp:403, and ErrorRecovery is dead code - reachable only through the
+    // REPORT_ERROR/REPORT_WARNING/REPORT_CRITICAL macros in its own header, none of which is
+    // used anywhere in src/. So one escalation from checkRelayHealthAndEscalate() latched the
+    // bit until a power cycle, and Error::RELAY is one of SafetyInterlocks' CRITICAL_ERRORS
+    // (SafetyInterlocks.cpp:362-366): every later ignition failed SAFETY_FAILED and
+    // boiler/cmd/emergency_reset was refused. A flaky-bus moment therefore meant no heat and
+    // no remote way back. Exactly the defect fixed for Error::SENSOR_FAILURE in c204a6d, on
+    // the sibling bit set by the very same line (BurnerSystemController.cpp:220). Found by
+    // the 2026-10-25 review.
+    //
+    // Cleared only on a FULLY clean verification - every relay's read-back matching what was
+    // commanded - rather than on one relay's success. That matters twice: a still-broken
+    // relay cannot clear an error raised by another, and because escalation deliberately
+    // zeroes its own failure counter, a per-relay clear would let the bit flap on and off
+    // between a broken relay's failures, briefly re-permitting the burner each time.
+    if (realMismatch == 0) {
+        EventGroupHandle_t errorGroup = SRP::getErrorNotificationEventGroup();
+        if (errorGroup) {
+            xEventGroupClearBits(errorGroup, SystemEvents::Error::RELAY);
+        }
+    }
+
     if (realMismatch != 0) {
         // We have real mismatches (energized relays that failed to actuate, or
         // OFF relays that failed to release)

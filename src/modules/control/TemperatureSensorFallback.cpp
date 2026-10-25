@@ -3,6 +3,7 @@
 #include "modules/control/SafetyInterlocks.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "core/SystemResourceProvider.h"
+#include "config/SystemConstants.h"  // MB8ART_SENSOR_READ_INTERVAL_MS: the invalid-count rate limit
 #include "shared/SharedSensorReadings.h"
 #include "shared/Temperature.h"  // For tempToFloat
 #include "events/SystemEventsGenerated.h"
@@ -218,15 +219,43 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
     FallbackMode previousMode = currentStatus.currentMode;
     bool sensorsCurrentlyValid = hasRequiredSensors();
 
-    // Update hysteresis counters
+    // Update hysteresis counters.
+    //
+    // THE INVALID COUNTER IS RATE-LIMITED TO ONE STEP PER SENSOR SAMPLE PERIOD, because it
+    // used to count CALLS and was documented as counting samples. updateSensorStatus() is
+    // reached from canContinueOperation(), which is called from BurnerControlTask (3 sites),
+    // WheaterControlTask (4), CentralizedFailsafe and more - and its STARTUP branch calls it
+    // twice in one go. So INVALID_COUNT_TO_SHUTDOWN = 3 could be crossed inside a single
+    // 2.5 s MB8ART period, and how much debounce it actually bought depended on how many
+    // tasks happened to ask that cycle, which varies with mode. That silently undid most of
+    // the 2026-10-23 change from 1 -> 3, whose whole purpose was to stop a brief dropout
+    // killing a burn. Found by the 2026-10-25 review.
+    //
+    // Deliberately gated on ELAPSED TIME, not on a new sample arriving
+    // (lastBoilerTempUpdateTimestamp changing): a completely dead MB8ART stops advancing
+    // that timestamp, so a sample-arrival gate would never escalate at all - the exact
+    // failure this layer exists to catch. Time keeps passing either way.
+    // A separate flag rather than a 0 sentinel on the timestamp: millis() really is 0 for the
+    // first millisecond after boot, and this function runs during STARTUP.
+    static bool invalidCounting = false;
+    static uint32_t lastInvalidCountMs = 0;
     if (sensorsCurrentlyValid) {
         consecutiveValidCount++;
         consecutiveInvalidCount = 0;
+        invalidCounting = false;  // next failure counts immediately
         if (consecutiveValidCount > 100) consecutiveValidCount = 100;  // Prevent overflow
     } else {
-        consecutiveInvalidCount++;
+        // First invalid observation counts at once - the sample that revealed it has just
+        // been evaluated. Then at most one step per sample period, so three steps span about
+        // 2 x MB8ART_SENSOR_READ_INTERVAL_MS = 5 s regardless of caller count.
+        if (shouldCountInvalid(invalidCounting, now, lastInvalidCountMs,
+                               SystemConstants::Timing::MB8ART_SENSOR_READ_INTERVAL_MS)) {
+            invalidCounting = true;
+            lastInvalidCountMs = now;
+            consecutiveInvalidCount++;
+            if (consecutiveInvalidCount > 100) consecutiveInvalidCount = 100;
+        }
         consecutiveValidCount = 0;
-        if (consecutiveInvalidCount > 100) consecutiveInvalidCount = 100;
 
         // Track which sensors are missing for error reporting
         currentStatus.missingBoilerOutput = !currentStatus.boilerOutputValid;

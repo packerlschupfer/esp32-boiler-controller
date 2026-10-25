@@ -72,6 +72,33 @@ public:
     // Check if all required sensors are available for current operation mode
     static bool hasRequiredSensors();
     
+    /**
+     * @brief May the invalid-sample counter take another step?
+     *
+     * Pure, so the rate limit that the 2026-10-25 fix depends on is actually testable - the
+     * surrounding updateSensorStatusLocked() needs FreeRTOS mutexes and shared readings, and
+     * the native MockSharedSensorReadings is too stale to stand in for them.
+     *
+     * @param counting  false until the first invalid observation since the last valid one
+     * @param nowMs     millis()
+     * @param lastMs    when the counter last stepped
+     * @param intervalMs the sensor sample period (MB8ART_SENSOR_READ_INTERVAL_MS)
+     *
+     * The subtraction is done in uint32_t so it stays correct across the 49.7-day millis()
+     * rollover, where `lastMs + intervalMs` would wrap and stall the counter for 49 days -
+     * i.e. it would stop escalating a dead sensor exactly once every 49 days.
+     */
+    // Public because it is part of this component's observable contract - the native tests
+    // pin the ~5 s shutdown debounce against it rather than against a copied literal that
+    // would silently drift if the threshold changed.
+    static constexpr uint8_t INVALID_COUNT_TO_SHUTDOWN = 3;     // ~5 s: 3 rate-limited steps
+
+    static bool shouldCountInvalid(bool counting, uint32_t nowMs, uint32_t lastMs,
+                                   uint32_t intervalMs) {
+        return !counting || (nowMs - lastMs) >= intervalMs;
+    }
+
+
 private:
     static SensorStatus currentStatus;
     static uint32_t initializationTime;
@@ -89,18 +116,28 @@ private:
     // Hysteresis thresholds (different for entering vs leaving NORMAL mode). Deliberately
     // asymmetric: slow to shut down, immediate to recover.
     //
-    // The counters tick once per evaluation, and evaluation is driven by BurnerControlTask's
-    // TEMP_UPDATE_BITS - which is MB8ART channels ONLY (BOILER_RETURN, WATER_TANK and the
-    // three error bits, set on every read). The ANDRTF3 room sensor raises
-    // SensorUpdate::INSIDE / INSIDE_ERROR and neither is in that mask, so the room sensor's
-    // own 5 s cycle does NOT tick this counter: a room failure is noticed on the next
-    // MB8ART read like everything else. MB8ART_SENSOR_READ_INTERVAL_MS is 2500, so the tick
-    // is 2.5 s and INVALID_COUNT_TO_SHUTDOWN = 3 is about 7.5 s of continuous failure.
+    // The INVALID counter is RATE-LIMITED to one step per MB8ART_SENSOR_READ_INTERVAL_MS
+    // (2500), so INVALID_COUNT_TO_SHUTDOWN = 3 really is about 5 s of continuous failure -
+    // the first invalid observation counts at once, then one step per sample period.
     //
-    // (Other callers can evaluate out of band - the idle refresh every 30 s, and each
-    // setOperationMode() change alters WHICH sensors are required, which is part of why the
-    // 2026-10-23 trace flapped within milliseconds. Those make the debounce stricter, not
-    // looser, since any valid evaluation resets the invalid count.)
+    // THIS COMMENT USED TO CLAIM THE COUNTER TICKED ONCE PER MB8ART READ, AND IT DID NOT.
+    // The old text argued that evaluation is driven by BurnerControlTask's TEMP_UPDATE_BITS,
+    // that the room sensor's own 5 s cycle therefore could not tick it, and - the part that
+    // was actually backwards - that extra out-of-band callers "make the debounce stricter,
+    // not looser, since any valid evaluation resets the invalid count". That only considered
+    // VALID evaluations. An extra caller evaluating while sensors are INVALID increments the
+    // counter again, so more callers made the debounce LOOSER. And there are many:
+    // updateSensorStatus() is reached from canContinueOperation(), called from
+    // BurnerControlTask (3 sites), WheaterControlTask (4), CentralizedFailsafe and others,
+    // and its STARTUP branch calls it twice in a single call. The threshold could therefore
+    // be crossed inside one 2.5 s period, and the debounce actually obtained depended on how
+    // many tasks happened to ask that cycle - which varies with mode. That silently undid
+    // most of the 2026-10-23 change from 1 -> 3. Fixed and re-documented 2026-10-25 after
+    // the review found it; the rate limit is in updateSensorStatusLocked().
+    //
+    // The rate limit is on ELAPSED TIME, not on a new sample arriving: a completely dead
+    // MB8ART stops advancing lastBoilerTempUpdateTimestamp, so gating on sample arrival
+    // would never escalate at all - the exact failure this layer exists to catch.
     //
     // It was 1, i.e. no hysteresis at all in the shutdown direction, under a comment saying
     // "sensors are stable and accurate in this installation". They are not: the room sensor
@@ -126,7 +163,6 @@ private:
     // per sensor class (short for boiler output, long for room) is the better shape and is
     // not done here.
     static constexpr uint8_t VALID_COUNT_TO_ENTER_NORMAL = 1;   // Was 3 - one good check recovers
-    static constexpr uint8_t INVALID_COUNT_TO_SHUTDOWN = 3;     // ~7.5 s at the 2.5 s tick
     
     // Validate sensor readings
     static bool validateSensorReading(Temperature_t temp, Temperature_t minValid = -500, Temperature_t maxValid = 1500);
