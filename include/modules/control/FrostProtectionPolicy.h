@@ -36,6 +36,11 @@
  *    requires roomTempValid, so a room-sensor failure stops the burner however cold the water
  *    is. This guard deliberately does not bypass the sensor fallback: firing autonomously on
  *    an unvalidated sensor set is a worse failure than the one it would prevent.
+ *  - **STALE readings, as of 2026-10-25.** A sensor that has stopped answering is treated
+ *    exactly like an invalid one: it never triggers a burn. That is the user's call and it
+ *    matches the asymmetry below - an unreadable sensor is not evidence of frost. The cost is
+ *    that a frozen house behind a dead bus gets no protection from here either; what it buys
+ *    is that the firmware never fires the burner on data it cannot vouch for.
  *
  * So this covers exactly one scenario - the system is healthy and simply is not heating -
  * which is also the likely one.
@@ -61,33 +66,57 @@ namespace FrostProtectionPolicy {
 
     static_assert(RELEASE_TENTHS > TRIGGER_TENTHS, "frost release must be above the trigger");
 
+    /**
+     * @brief The three readings, each with a USABLE flag.
+     *
+     * "Usable" means valid AND FRESH, and the caller is responsible for folding staleness in -
+     * see evaluateFrostDemand(). That matters because nothing clears
+     * SharedSensorReadings::isBoilerTempOutputValid when reads simply STOP: a dead MB8ART
+     * leaves the last value flagged valid forever. Before 2026-10-25 this guard read that flag
+     * raw, so a bus failure froze the flow reading at whatever it last was - typically 30-40 °C
+     * after a burn - and frost protection could never fire again however cold the house got,
+     * with boiler/status/sensors still reporting sf:1. Measured during the first bus-release
+     * window; see [[sensor-fallback-blind-when-idle]].
+     *
+     * Per-source timestamps, not one shared one: flow and tank come from the MB8ART
+     * (lastBoilerTempUpdateTimestamp), room from the ANDRTF3 (insideTempGoodMs). Using the
+     * shared lastUpdateTimestamp for the room would let a live MB8ART mask a dead room sensor,
+     * which is the same mistake F5 fixed on the boiler side.
+     */
     struct Readings {
-        Temperature_t flow = 0;   // boiler output
-        bool flowValid = false;
-        Temperature_t tank = 0;   // DHW tank
-        bool tankValid = false;
+        Temperature_t flow = 0;   // boiler output, MB8ART
+        bool flowUsable = false;
+        Temperature_t tank = 0;   // DHW tank, MB8ART
+        bool tankUsable = false;
+        Temperature_t room = 0;   // inside, ANDRTF3
+        bool roomUsable = false;
     };
 
-    /// Which reading pulled the trigger, for the log line. Only meaningful while demanding.
-    enum class Source : uint8_t { NONE, FLOW, TANK, BOTH };
+    /// Which readings are cold, as a bitmask - three sensors would need seven enum values.
+    constexpr uint8_t COLD_FLOW = 1u << 0;
+    constexpr uint8_t COLD_TANK = 1u << 1;
+    constexpr uint8_t COLD_ROOM = 1u << 2;
 
-    inline Source coldSource(const Readings& r) {
-        const bool flowCold = r.flowValid && r.flow <= TRIGGER_TENTHS;
-        const bool tankCold = r.tankValid && r.tank <= TRIGGER_TENTHS;
-        if (flowCold && tankCold) return Source::BOTH;
-        if (flowCold) return Source::FLOW;
-        if (tankCold) return Source::TANK;
-        return Source::NONE;
+    inline uint8_t coldMask(const Readings& r) {
+        uint8_t m = 0;
+        if (r.flowUsable && r.flow <= TRIGGER_TENTHS) m |= COLD_FLOW;
+        if (r.tankUsable && r.tank <= TRIGGER_TENTHS) m |= COLD_TANK;
+        if (r.roomUsable && r.room <= TRIGGER_TENTHS) m |= COLD_ROOM;
+        return m;
     }
 
-    inline const char* toString(Source s) {
-        switch (s) {
-            case Source::FLOW: return "flow";
-            case Source::TANK: return "tank";
-            case Source::BOTH: return "flow+tank";
-            case Source::NONE: return "none";
+    /// Fixed strings for the log line - every combination, so no buffer is needed.
+    inline const char* describe(uint8_t mask) {
+        switch (mask & (COLD_FLOW | COLD_TANK | COLD_ROOM)) {
+            case 0:                                    return "none";
+            case COLD_FLOW:                            return "flow";
+            case COLD_TANK:                            return "tank";
+            case COLD_ROOM:                            return "room";
+            case COLD_FLOW | COLD_TANK:                return "flow+tank";
+            case COLD_FLOW | COLD_ROOM:                return "flow+room";
+            case COLD_TANK | COLD_ROOM:                return "tank+room";
+            default:                                   return "flow+tank+room";
         }
-        return "unknown";
     }
 
     /**
@@ -105,13 +134,47 @@ namespace FrostProtectionPolicy {
      *    the safe direction when the controller can no longer see what it is heating, and the
      *    sensor-failure machinery is better placed to react than this guard is.
      */
-    inline bool demand(bool currentlyDemanding, const Readings& r) {
+    /// One latch, over a chosen subset of the sensors. Trigger needs a usable cold reading;
+    /// release treats an unusable reading as "not blocking", so a burn stops rather than
+    /// continuing blind.
+    inline bool latch(bool currentlyDemanding, const Readings& r, uint8_t watch) {
         if (!currentlyDemanding) {
-            return coldSource(r) != Source::NONE;
+            return (coldMask(r) & watch) != 0;
         }
-        const bool flowClear = !r.flowValid || r.flow >= RELEASE_TENTHS;
-        const bool tankClear = !r.tankValid || r.tank >= RELEASE_TENTHS;
-        return !(flowClear && tankClear);
+        bool clear = true;
+        if (watch & COLD_FLOW) clear = clear && (!r.flowUsable || r.flow >= RELEASE_TENTHS);
+        if (watch & COLD_TANK) clear = clear && (!r.tankUsable || r.tank >= RELEASE_TENTHS);
+        if (watch & COLD_ROOM) clear = clear && (!r.roomUsable || r.room >= RELEASE_TENTHS);
+        return !clear;
+    }
+
+    /**
+     * @brief Space-heating frost demand: the boiler's own water, or the house.
+     *
+     * ROOM was added 2026-10-25 (user decision). The house freezing is the thing this guard is
+     * actually for - "in case someone disabled something or set some values too low" - and the
+     * flow reading only sees it indirectly, after the boiler itself has gone cold.
+     */
+    inline bool heatDemand(bool currentlyDemanding, const Readings& r) {
+        return latch(currentlyDemanding, r, COLD_FLOW | COLD_ROOM);
+    }
+
+    /**
+     * @brief DHW frost demand: the tank, which the heating circuit cannot reach.
+     *
+     * Split from the heating latch 2026-10-25. The tank used to trigger heating demand, which
+     * warms the house and does nothing whatsoever for the tank - so the tank had no frost
+     * protection at all, only the appearance of it. A cold tank needs a water CHARGE: the
+     * water-mode relay, the valve and the water pump.
+     *
+     * This essentially never fires. Normal operation recharges the tank below
+     * wheater/tempLimitLow, 40.0 on this installation, so 35 K above freezing; reaching 5 °C
+     * means water heating was off for a very long time in a very cold house. A spurious
+     * trigger is also cheap: the 10 °C release stops the charge almost at once, and the normal
+     * DHW limits still bound it.
+     */
+    inline bool waterDemand(bool currentlyDemanding, const Readings& r) {
+        return latch(currentlyDemanding, r, COLD_TANK);
     }
 
 } // namespace FrostProtectionPolicy

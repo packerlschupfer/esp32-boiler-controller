@@ -15,6 +15,7 @@
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
 #include "core/SystemResourceProvider.h"
+#include "modules/control/FrostProtection.h"
 #include "core/SharedResourceManager.h"
 #include <TaskManager.h>
 
@@ -280,9 +281,16 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
 
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
     
-    // Check if both boiler and water heating are enabled
-    if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) || 
-        !(systemStateBits & SystemEvents::SystemState::WATER_ENABLED)) {
+    // Check if both boiler and water heating are enabled. Frost demand on the TANK overrides
+    // the water switch - being switched off is exactly when the tank freezes - but never
+    // BOILER_ENABLED, for the same reason the heating side does not: a drained-for-service
+    // system is a likely reason to switch the boiler off. Added 2026-10-25, when the tank
+    // trigger was split out of the heating latch; before that a cold tank asked for SPACE
+    // heating, which warms the house and does nothing at all for the tank, so the tank had
+    // only the appearance of frost protection. See FrostProtectionPolicy::waterDemand().
+    if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) ||
+        (!(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) &&
+         !FrostProtection::waterDemand())) {
         
         // System disabled - turn off water heating if on
         if (waterState.state == WheaterOn) {
@@ -316,7 +324,8 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
     switch (waterState.state) {
         case WheaterOff: {
             // Check if we should turn on water heating
-            if (checkIfWaterHeatingNeededEvent() || (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE)) {
+            if (checkIfWaterHeatingNeededEvent() || FrostProtection::waterDemand() ||
+                (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE)) {
                 // Check if we can start water heating
                 if (!TemperatureSensorFallback::canContinueOperation()) {
                     LOG_WARN(TAG, "Cannot start water heating - required sensors unavailable");

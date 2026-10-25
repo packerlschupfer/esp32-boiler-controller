@@ -11,7 +11,14 @@ namespace SafetyConfig {
     // Compile-time defaults
     namespace Defaults {
         constexpr uint32_t PUMP_PROTECTION_MS = 15000;      // 15s
-        constexpr uint32_t SENSOR_STALE_MS = 60000;         // 60s
+        // 30 s, tightened from 60 s on 2026-10-25 (user decision, "tighten the ship").
+        // 60 s was set when the room sensor was the unreliable part; with the replaced ANDRTF3
+        // on its own firmware that margin is no longer needed. The MB8ART is read every 2.5 s,
+        // so 30 s is still 12 missed reads before anything is called stale, and the room
+        // sensor's own driver flags a reading invalid after 3 failed reads (~15 s) regardless.
+        // This is now the single threshold for "too old to act on": TemperatureSensorFallback
+        // and the frost guard both use it.
+        constexpr uint32_t SENSOR_STALE_MS = 30000;         // 30s
         constexpr uint32_t POST_PURGE_MS = 90000;           // 90s
         constexpr uint32_t ERROR_RECOVERY_MS = 300000;      // 5min (M4: configurable error recovery delay)
         constexpr uint32_t THERMAL_SHOCK_DIFFERENTIAL_C = 450; // 45.0°C (tenths of °C) - cast iron boiler, raised from 30°C

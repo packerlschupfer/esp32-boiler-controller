@@ -3,6 +3,7 @@
 #include "modules/tasks/BurnerControlTask.h"
 
 #include "config/SystemConstants.h"
+#include "core/ModbusBusRelease.h"
 #include "config/SystemSettingsStruct.h"
 #include "modules/control/BurnerSystemController.h"
 #include "modules/control/BurnerStateMachine.h"
@@ -77,6 +78,7 @@ static struct {
 static void stateTimeoutCallback(TimerHandle_t xTimer);
 static void processBurnerRequest();
 static void processTemperatureUpdate();
+static void refreshIdleFallback(EventBits_t requestBits);
 static void processSafetyEvent(EventBits_t safetyBits);
 static void updateBurnerState(bool heatDemand, bool isWaterMode, Temperature_t targetTemp, bool highPower);
 
@@ -361,6 +363,9 @@ void BurnerControlTask(void* parameter) {
             processTemperatureUpdate();
             // Bits already cleared atomically by xEventGroupWaitBits
         }
+        // Unconditional, and that is the point: this loop wakes on its timeout whether or not
+        // any sensor answered, so it is the only place that can notice reads having stopped.
+        refreshIdleFallback(xEventGroupGetBits(cachedHandles.burnerRequestEventGroup));
         (void)SRP::getTaskManager().feedWatchdog();
 
         // 4. Burner requests - process if we got a change event.
@@ -440,6 +445,41 @@ static TemperatureSensorFallback::OperationMode operationModeForRequests(EventBi
     return TemperatureSensorFallback::OperationMode::NONE;
 }
 
+/**
+ * @brief Re-evaluate the sensor fallback while idle, on a TIMER rather than on sensor reads.
+ *
+ * Called from the task loop, which wakes every 1-3 s regardless of whether any sensor answered
+ * - that heartbeat already existed, which is why this fix is a move rather than a new timer.
+ *
+ * Reporting only in the sense that nothing ARMS from here; it is not side-effect free. A
+ * NORMAL -> SHUTDOWN transition sets Error::SENSOR_FAILURE when the boiler output is the
+ * missing reading, and that bit is one of SafetyInterlocks' CRITICAL_ERRORS - so it refuses a
+ * later ignition (correct: the sensors really are gone) and refuses emergency_reset with
+ * `system_errors` until reads resume. It self-heals on the first good read.
+ *
+ * SUPPRESSED DURING A DELIBERATE BUS RELEASE. Otherwise every window over ~150 s would escalate
+ * - the gate allows up to 900 s - and flag a sensor fault for handing the bus to another master
+ * on purpose. "Stale because we stopped asking" is not the same fault as "stale and we do not
+ * know why", and only the second one is worth telling anyone about. The window itself cannot
+ * hide a real fault: entry requires an idle boiler, and the first read after it resumes
+ * re-evaluates this honestly.
+ */
+static void refreshIdleFallback(EventBits_t requestBits) {
+    static constexpr uint32_t IDLE_FALLBACK_REFRESH_MS = 30000;
+    static uint32_t lastIdleRefreshMs = 0;
+
+    if (ModbusBusRelease::isReleased()) {
+        return;
+    }
+    const uint32_t nowMs = millis();
+    if (lastIdleRefreshMs != 0 && (nowMs - lastIdleRefreshMs) < IDLE_FALLBACK_REFRESH_MS) {
+        return;
+    }
+    lastIdleRefreshMs = nowMs;
+    TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
+    (void)TemperatureSensorFallback::canContinueOperation();
+}
+
 static void processTemperatureUpdate() {
     const char* TAG = "BurnerTempUpdate";
 
@@ -464,18 +504,12 @@ static void processTemperatureUpdate() {
     }
     if (!BurnerDemandGate::sensorFallbackCheckNeeded(modeRequested, demandArmed)) {
         sensorFailure = SensorFailureConfirm::State();
-        // Idle: refresh the reported mode at most every IDLE_FALLBACK_REFRESH_MS, so the `sf`
-        // field of boiler/status/sensors and the retained boiler/status/sensor_mode match
-        // reality (idle kept the startup value) without the per-read flapping. Reporting only:
-        // nothing arms from here, a new request is checked by processBurnerRequest() first.
-        static constexpr uint32_t IDLE_FALLBACK_REFRESH_MS = 30000;
-        static uint32_t lastIdleRefreshMs = 0;
-        const uint32_t nowMs = millis();
-        if (lastIdleRefreshMs == 0 || (nowMs - lastIdleRefreshMs) >= IDLE_FALLBACK_REFRESH_MS) {
-            lastIdleRefreshMs = nowMs;
-            TemperatureSensorFallback::setOperationMode(operationModeForRequests(requestBits));
-            (void)TemperatureSensorFallback::canContinueOperation();
-        }
+        // The idle refresh moved to refreshIdleFallback(), called from the task loop. It was
+        // here, and this function only runs when a TEMP_UPDATE bit is set - i.e. it is driven
+        // BY MB8ART reads. So the one case it most needed to catch, reads stopping altogether,
+        // was the one case it could not: no reads, no call, and the fallback silently held its
+        // last value. Measured 2026-10-25 over a 199 s bus-release window - every sensor dark,
+        // sf stayed 1, no transition published at all.
         return;
     }
 

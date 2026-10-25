@@ -10,7 +10,7 @@
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"
 #include "modules/control/TemperatureSensorFallback.h"
-#include "modules/control/FrostProtectionPolicy.h"  // frost demand, in degrees
+#include "modules/control/FrostProtection.h"  // the two frost latches
 #include "modules/control/SpaceHeatingPolicy.h"
 #include "modules/control/RoomTempFallbackPolicy.h"  // the room value the backstop may use
 #include "modules/control/HeatingControlDiagnostics.h"
@@ -239,16 +239,12 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
     }
 }
 
-// FrostProtectionPolicy's trigger is the constant that used to have no logic behind it.
-static_assert(FrostProtectionPolicy::TRIGGER_TENTHS ==
-                  SystemConstants::Temperature::FREEZE_PROTECTION_TEMP_C,
-              "frost trigger must stay equal to FREEZE_PROTECTION_TEMP_C");
-
 /**
- * @brief Is the water cold enough that the burner must run regardless of the heating switch?
+ * @brief Is it cold enough that the burner must run regardless of the heating switch?
  *
- * Latched here rather than in the policy so the policy stays stateless and testable. Called
- * once per processHeatingState() pass; `g_frostDemand` is read by the gates below.
+ * The evaluation and the latch moved to FrostProtection (2026-10-25): a cold DHW TANK needs a
+ * water charge, not space heating, and the water task cannot see a static in this file. The
+ * static_assert tying the trigger to FREEZE_PROTECTION_TEMP_C moved with it.
  *
  * Deliberately NOT a bypass of anything except HEATING_ENABLED and the summer override. It
  * does not override BOILER_ENABLED (a drained-for-service system is a likely reason to
@@ -257,40 +253,8 @@ static_assert(FrostProtectionPolicy::TRIGGER_TENTHS ==
  * FrostProtectionPolicy.h for what it therefore cannot protect against - a dead controller
  * above all, since CH1 BURNER_ENABLE is normally open.
  */
-static bool g_frostDemand = false;
-
-static void evaluateFrostDemand() {
-    FrostProtectionPolicy::Readings r;
-    {
-        auto guard = MutexRetryHelper::acquireGuard(SRP::getSensorReadingsMutex(),
-                                                    "SensorReadings-Frost");
-        if (!guard) {
-            return;  // no snapshot: leave the latch as it is rather than guessing
-        }
-        const SharedSensorReadings& sr = SRP::getSensorReadings();
-        r.flow = sr.boilerTempOutput;
-        r.flowValid = sr.isBoilerTempOutputValid;
-        r.tank = sr.waterHeaterTempTank;
-        r.tankValid = sr.isWaterHeaterTempTankValid;
-    }
-
-    const bool wanted = FrostProtectionPolicy::demand(g_frostDemand, r);
-    if (wanted == g_frostDemand) {
-        return;
-    }
-    g_frostDemand = wanted;
-    char flowBuf[16], tankBuf[16];
-    formatTemp(flowBuf, sizeof(flowBuf), r.flow);
-    formatTemp(tankBuf, sizeof(tankBuf), r.tank);
-    if (wanted) {
-        LOG_WARN("HeatingFrost",
-                 "FROST PROTECTION ON (%s cold) - flow %s°C valid=%d, tank %s°C valid=%d; "
-                 "requesting minimum flow regardless of the heating switch",
-                 FrostProtectionPolicy::toString(FrostProtectionPolicy::coldSource(r)),
-                 flowBuf, r.flowValid ? 1 : 0, tankBuf, r.tankValid ? 1 : 0);
-    } else {
-        LOG_WARN("HeatingFrost", "Frost protection off - flow %s°C, tank %s°C", flowBuf, tankBuf);
-    }
+static inline bool frostDemand() {
+    return FrostProtection::heatDemand();
 }
 
 /**
@@ -319,12 +283,12 @@ static void processHeatingState(EventBits_t pendingControl) {
     const char* TAG = "HeatingProcess";
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
 
-    evaluateFrostDemand();
+    FrostProtection::evaluate();
 
     // Check if both boiler and heating are enabled. Frost demand overrides the HEATING
     // switch - that is exactly when freezing happens - but never BOILER_ENABLED.
     if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) || 
-        (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) && !g_frostDemand)) {
+        (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) && !frostDemand())) {
         
         // System disabled - turn off heating if on.
         //
@@ -360,7 +324,7 @@ static void processHeatingState(EventBits_t pendingControl) {
 
             // Check if we should turn on heating. Frost demand is a third reason, alongside
             // the normal room/weather decision and the remote ON override.
-            if (checkIfSpaceHeatingNeededEvent() || g_frostDemand ||
+            if (checkIfSpaceHeatingNeededEvent() || frostDemand() ||
                 (controlBits & SystemEvents::ControlRequest::HEATING_ON_OVERRIDE)) {
                 // Check settings for water priority (race prevention)
                 // H2 fix: snapshot bool setting under mutex before use
@@ -465,7 +429,7 @@ static void processHeatingState(EventBits_t pendingControl) {
                 // and heat the house - the opposite of the intent, which is to get the water
                 // off 5 °C and stop. setHeatingRequest clamps to heating_low_limit anyway,
                 // so requesting anything lower would be clamped back up to it.
-                if (g_frostDemand && !checkIfSpaceHeatingNeededEvent()) {
+                if (frostDemand() && !checkIfSpaceHeatingNeededEvent()) {
                     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                         boilerTargetTemp = SRP::getSystemSettings().heating_low_limit;
                         SRP::giveSystemSettingsMutex();
@@ -536,10 +500,10 @@ static void processHeatingState(EventBits_t pendingControl) {
             // Frost demand suppresses the three "nobody wants heat" reasons - the remote
             // override, the heating switch and the room being satisfied - and nothing else.
             // A sensor failure, a disabled boiler or water priority still stop the burn.
-            if (((controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) && !g_frostDemand) ||
+            if (((controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) && !frostDemand()) ||
                 !(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) ||
-                (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) && !g_frostDemand) ||
-                (!heatingStillNeeded && !g_frostDemand) ||
+                (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) && !frostDemand()) ||
+                (!heatingStillNeeded && !frostDemand()) ||
                 !sensorsAvailable ||
                 mustYieldToWater) {
                 
@@ -590,7 +554,7 @@ static void processHeatingState(EventBits_t pendingControl) {
 
                 // Same floor substitution as the turn-on path, or a frost burn that outlived
                 // one target refresh would silently switch to the weather curve.
-                if (g_frostDemand && !heatingStillNeeded) {
+                if (frostDemand() && !heatingStillNeeded) {
                     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                         newBoilerTarget = SRP::getSystemSettings().heating_low_limit;
                         SRP::giveSystemSettingsMutex();

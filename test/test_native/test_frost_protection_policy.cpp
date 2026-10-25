@@ -11,16 +11,21 @@
 // setUp and tearDown are defined in test_main.cpp
 
 using FrostProtectionPolicy::Readings;
-using FrostProtectionPolicy::Source;
-using FrostProtectionPolicy::demand;
-using FrostProtectionPolicy::coldSource;
+using FrostProtectionPolicy::heatDemand;
+using FrostProtectionPolicy::waterDemand;
+using FrostProtectionPolicy::coldMask;
+using FrostProtectionPolicy::describe;
+using FrostProtectionPolicy::COLD_FLOW;
+using FrostProtectionPolicy::COLD_TANK;
+using FrostProtectionPolicy::COLD_ROOM;
 using FrostProtectionPolicy::TRIGGER_TENTHS;
 using FrostProtectionPolicy::RELEASE_TENTHS;
 
 static Readings normalHouse() {
     Readings r;
-    r.flow = 350; r.flowValid = true;   // 35.0, a typical idle flow
-    r.tank = 453; r.tankValid = true;   // 45.3, the charge floor
+    r.flow = 350; r.flowUsable = true;   // 35.0, a typical idle flow
+    r.tank = 453; r.tankUsable = true;   // 45.3, the charge floor
+    r.room = 198; r.roomUsable = true;   // 19.8, the measured room
     return r;
 }
 
@@ -29,30 +34,40 @@ void test_frost_is_inert_in_a_working_system() {
     // safe to add to the heating path at all. These are the real readings from the evening
     // this was written.
     const Readings r = normalHouse();
-    TEST_ASSERT_FALSE(demand(false, r));
-    TEST_ASSERT_FALSE(demand(true, r));   // even latched, it releases immediately
-    TEST_ASSERT_TRUE(coldSource(r) == Source::NONE);
+    TEST_ASSERT_FALSE(heatDemand(false, r));
+    TEST_ASSERT_FALSE(heatDemand(true, r));   // even latched, it releases immediately
+    TEST_ASSERT_EQUAL_UINT8(0, coldMask(r));
 }
 
 void test_frost_triggers_on_either_reading() {
     Readings r = normalHouse();
     r.flow = TRIGGER_TENTHS;              // exactly 5.0 - inclusive
-    TEST_ASSERT_TRUE(demand(false, r));
-    TEST_ASSERT_TRUE(coldSource(r) == Source::FLOW);
+    TEST_ASSERT_TRUE(heatDemand(false, r));
+    TEST_ASSERT_EQUAL_UINT8(COLD_FLOW, coldMask(r));
 
+    // The TANK no longer drives space heating - it drives a CHARGE. Split 2026-10-25,
+    // because running the heating circuit does precisely nothing for the tank.
     r = normalHouse();
     r.tank = TRIGGER_TENTHS;
-    TEST_ASSERT_TRUE(demand(false, r));
-    TEST_ASSERT_TRUE(coldSource(r) == Source::TANK);
+    TEST_ASSERT_FALSE(heatDemand(false, r));
+    TEST_ASSERT_TRUE(waterDemand(false, r));
+    TEST_ASSERT_EQUAL_UINT8(COLD_TANK, coldMask(r));
+
+    // The ROOM does drive heating, and is the reason this guard exists at all.
+    r = normalHouse();
+    r.room = TRIGGER_TENTHS;
+    TEST_ASSERT_TRUE(heatDemand(false, r));
+    TEST_ASSERT_FALSE(waterDemand(false, r));
+    TEST_ASSERT_EQUAL_UINT8(COLD_ROOM, coldMask(r));
 
     r = normalHouse();
     r.flow = 40; r.tank = 20;
-    TEST_ASSERT_TRUE(coldSource(r) == Source::BOTH);
+    TEST_ASSERT_EQUAL_UINT8(COLD_FLOW | COLD_TANK, coldMask(r));
 
     // One tenth above the trigger is not frost
     r = normalHouse();
     r.flow = TRIGGER_TENTHS + 1;
-    TEST_ASSERT_FALSE(demand(false, r));
+    TEST_ASSERT_FALSE(heatDemand(false, r));
 }
 
 void test_frost_holds_through_the_hysteresis_band() {
@@ -60,32 +75,32 @@ void test_frost_holds_through_the_hysteresis_band() {
     // moment the water clears the trigger - otherwise it chatters the burner at ~5 °C.
     Readings r = normalHouse();
     r.flow = 30;
-    TEST_ASSERT_TRUE(demand(false, r));          // trigger at 3.0
+    TEST_ASSERT_TRUE(heatDemand(false, r));          // trigger at 3.0
 
     r.flow = 80;                                  // 8.0 - above trigger, below release
-    TEST_ASSERT_TRUE(demand(true, r));            // still demanding
-    TEST_ASSERT_FALSE(demand(false, r));          // but would not have started here
+    TEST_ASSERT_TRUE(heatDemand(true, r));            // still demanding
+    TEST_ASSERT_FALSE(heatDemand(false, r));          // but would not have started here
 
     r.flow = RELEASE_TENTHS;                      // exactly 10.0 - inclusive release
-    TEST_ASSERT_FALSE(demand(true, r));
+    TEST_ASSERT_FALSE(heatDemand(true, r));
 }
 
 void test_frost_never_triggers_on_an_invalid_reading() {
     // The whole reason the trigger needs the validity flag: TEMP_INVALID is INT16_MIN, which
     // reads as -3276.8 °C and would fire the burner instantly and permanently.
     Readings r;
-    r.flow = TEMP_INVALID; r.flowValid = false;
-    r.tank = TEMP_INVALID; r.tankValid = false;
-    TEST_ASSERT_FALSE(demand(false, r));
-    TEST_ASSERT_TRUE(coldSource(r) == Source::NONE);
+    r.flow = TEMP_INVALID; r.flowUsable = false;
+    r.tank = TEMP_INVALID; r.tankUsable = false;
+    TEST_ASSERT_FALSE(heatDemand(false, r));
+    TEST_ASSERT_EQUAL_UINT8(0, coldMask(r));
 
     // A cold value that is marked invalid is still not evidence of frost
-    r.flow = 0; r.flowValid = false;
-    TEST_ASSERT_FALSE(demand(false, r));
+    r.flow = 0; r.flowUsable = false;
+    TEST_ASSERT_FALSE(heatDemand(false, r));
 
     // ... and the same value marked valid IS
-    r.flowValid = true;
-    TEST_ASSERT_TRUE(demand(false, r));
+    r.flowUsable = true;
+    TEST_ASSERT_TRUE(heatDemand(false, r));
 }
 
 void test_frost_releases_rather_than_firing_blind() {
@@ -94,15 +109,15 @@ void test_frost_releases_rather_than_firing_blind() {
     // sensor fallback are better placed to react than this guard.
     Readings r = normalHouse();
     r.flow = 20;
-    TEST_ASSERT_TRUE(demand(false, r));           // burning
+    TEST_ASSERT_TRUE(heatDemand(false, r));           // burning
 
-    r.flowValid = false; r.tankValid = false;     // both sensors drop out
-    TEST_ASSERT_FALSE(demand(true, r));           // release, do not fire blind
+    r.flowUsable = false; r.roomUsable = false;    // both heat-latch sensors drop out
+    TEST_ASSERT_FALSE(heatDemand(true, r));           // release, do not fire blind
 
     // One surviving cold sensor still holds the demand, though
     r = normalHouse();
-    r.flow = 20; r.tankValid = false;
-    TEST_ASSERT_TRUE(demand(true, r));
+    r.flow = 20; r.roomUsable = false;
+    TEST_ASSERT_TRUE(heatDemand(true, r));
 }
 
 void test_frost_one_cold_sensor_holds_while_the_other_is_warm() {
@@ -110,10 +125,10 @@ void test_frost_one_cold_sensor_holds_while_the_other_is_warm() {
     // cold. A warm tank must not release a demand the flow still justifies.
     Readings r = normalHouse();
     r.flow = 25;                                   // 2.5 °C in the heating circuit
-    TEST_ASSERT_TRUE(demand(false, r));
-    TEST_ASSERT_TRUE(demand(true, r));             // tank 45.3 does not release it
+    TEST_ASSERT_TRUE(heatDemand(false, r));
+    TEST_ASSERT_TRUE(heatDemand(true, r));             // room 19.8 does not release it
     r.flow = RELEASE_TENTHS + 5;
-    TEST_ASSERT_FALSE(demand(true, r));            // both clear now
+    TEST_ASSERT_FALSE(heatDemand(true, r));            // both clear now
 }
 
 void test_frost_thresholds_are_the_agreed_numbers() {
@@ -121,4 +136,105 @@ void test_frost_thresholds_are_the_agreed_numbers() {
     // FREEZE_PROTECTION_TEMP_C constant, 10.0 gives 5 K of hysteresis.
     TEST_ASSERT_EQUAL_INT16(50, TRIGGER_TENTHS);
     TEST_ASSERT_EQUAL_INT16(100, RELEASE_TENTHS);
+}
+
+// --------------------------------------------------------------------------------------
+// Staleness and the heat/water split (2026-10-25, user decision)
+// --------------------------------------------------------------------------------------
+
+void test_frost_a_stale_reading_never_fires_the_burner() {
+    // THE USER'S RULE: "we should not fire the burner if the sensor data is stale."
+    //
+    // The policy cannot see timestamps - the caller folds freshness into the *Usable flags
+    // (FrostProtection::evaluate). What this pins is that an unusable reading is treated
+    // exactly like an invalid one, however cold it is, so a stale value can never trigger.
+    //
+    // This is the defect that made it necessary: nothing clears isBoilerTempOutputValid when
+    // MB8ART reads STOP, so a dead bus froze the flow reading at its last value and left it
+    // flagged valid forever. That cut both ways - a frozen WARM value meant frost protection
+    // could never fire, and a frozen COLD one would have fired forever.
+    Readings r = normalHouse();
+    r.flow = 0;  r.flowUsable = false;   // 0.0 C but stale
+    r.room = 10; r.roomUsable = false;   // 1.0 C but stale
+    r.tank = 0;  r.tankUsable = false;
+    TEST_ASSERT_FALSE(heatDemand(false, r));
+    TEST_ASSERT_FALSE(waterDemand(false, r));
+    TEST_ASSERT_EQUAL_UINT8(0, coldMask(r));
+
+    // And the same readings, fresh, fire immediately - so the flag really is what decides,
+    // not the value.
+    r.flowUsable = true; r.roomUsable = true; r.tankUsable = true;
+    TEST_ASSERT_TRUE(heatDemand(false, r));
+    TEST_ASSERT_TRUE(waterDemand(false, r));
+}
+
+void test_frost_the_two_latches_are_independent() {
+    // A cold tank must not start space heating, and a cold house must not start a DHW charge.
+    // Before the split, the tank asked for heating - which warms the house and leaves the tank
+    // exactly as cold as it was, so the tank's protection was decorative.
+    Readings coldTank = normalHouse();
+    coldTank.tank = 20;
+    TEST_ASSERT_FALSE(heatDemand(false, coldTank));
+    TEST_ASSERT_TRUE(waterDemand(false, coldTank));
+
+    Readings coldRoom = normalHouse();
+    coldRoom.room = 20;
+    TEST_ASSERT_TRUE(heatDemand(false, coldRoom));
+    TEST_ASSERT_FALSE(waterDemand(false, coldRoom));
+
+    Readings coldFlow = normalHouse();
+    coldFlow.flow = 20;
+    TEST_ASSERT_TRUE(heatDemand(false, coldFlow));
+    TEST_ASSERT_FALSE(waterDemand(false, coldFlow));
+
+    // Each latch releases on its own evidence: a warm tank does not release a heat demand the
+    // room still justifies, and vice versa.
+    Readings r = normalHouse();
+    r.room = 20; r.tank = 20;
+    TEST_ASSERT_TRUE(heatDemand(false, r));
+    TEST_ASSERT_TRUE(waterDemand(false, r));
+    r.tank = RELEASE_TENTHS + 50;                 // tank recovered
+    TEST_ASSERT_TRUE(heatDemand(true, r));        // house still cold
+    TEST_ASSERT_FALSE(waterDemand(true, r));
+    r.room = RELEASE_TENTHS + 50;                 // house recovered too
+    TEST_ASSERT_FALSE(heatDemand(true, r));
+}
+
+void test_frost_room_trigger_cannot_fire_in_a_lived_in_house() {
+    // The room trigger is new, and it is the one with a sensor that reads plausible values all
+    // day - so prove it cannot fire at any temperature a house is actually kept at. 5.0 C is
+    // nearly 15 K below the lowest target this installation uses.
+    Readings r = normalHouse();
+    for (int16_t room = 150; room <= 250; room += 1) {   // 15.0 to 25.0 C
+        r.room = room;
+        TEST_ASSERT_FALSE_MESSAGE(heatDemand(false, r), "frost must be inert at living temps");
+    }
+    // Even a cold empty house in winter is well clear of it.
+    r.room = 100;   // 10.0 C
+    TEST_ASSERT_FALSE(heatDemand(false, r));
+    r.room = 51;    // 5.1 C - one tenth above
+    TEST_ASSERT_FALSE(heatDemand(false, r));
+    r.room = 50;    // 5.0 C - inclusive
+    TEST_ASSERT_TRUE(heatDemand(false, r));
+}
+
+void test_frost_cold_mask_describes_every_combination() {
+    // The mask replaced a 4-value enum because three sensors need seven combinations; the log
+    // line is the only record of WHY a frost burn started, so no combination may fall through.
+    Readings r = normalHouse();
+    TEST_ASSERT_EQUAL_STRING("none", describe(coldMask(r)));
+    r.flow = 20;
+    TEST_ASSERT_EQUAL_STRING("flow", describe(coldMask(r)));
+    r.tank = 20;
+    TEST_ASSERT_EQUAL_STRING("flow+tank", describe(coldMask(r)));
+    r.room = 20;
+    TEST_ASSERT_EQUAL_STRING("flow+tank+room", describe(coldMask(r)));
+    r = normalHouse(); r.tank = 20;
+    TEST_ASSERT_EQUAL_STRING("tank", describe(coldMask(r)));
+    r = normalHouse(); r.room = 20;
+    TEST_ASSERT_EQUAL_STRING("room", describe(coldMask(r)));
+    r = normalHouse(); r.tank = 20; r.room = 20;
+    TEST_ASSERT_EQUAL_STRING("tank+room", describe(coldMask(r)));
+    r = normalHouse(); r.flow = 20; r.room = 20;
+    TEST_ASSERT_EQUAL_STRING("flow+room", describe(coldMask(r)));
 }

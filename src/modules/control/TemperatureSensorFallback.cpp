@@ -183,7 +183,15 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
             // the ANDRTF3 (lastUpdateTimestamp). Gating boiler validity on the
             // shared timestamp let a live room sensor mask a dead MB8ART.
             bool boilerDataFresh = isSensorDataFresh(readings.lastBoilerTempUpdateTimestamp, SafetyConfig::sensorStaleMs);
-            bool roomDataFresh   = isSensorDataFresh(readings.lastUpdateTimestamp, SafetyConfig::sensorStaleMs);
+            // insideTempGoodMs, NOT lastUpdateTimestamp. F5 split the boiler side off the
+            // shared timestamp because a live room sensor masked a dead MB8ART - but left the
+            // room side reading that same shared field, which MB8ARTTasks.cpp:480 also writes.
+            // So the mirror image was still live: a healthy MB8ART every 2.5 s kept
+            // roomDataFresh true however long the ANDRTF3 had been silent. insideTempGoodMs is
+            // written only by ANDRTF3Task, and only on a successful read, which is exactly
+            // what this needs - isInsideTempValid stays true through ~15 s of failed reads.
+            // Found 2026-10-25 while adding staleness to the frost guard.
+            bool roomDataFresh   = isSensorDataFresh(readings.insideTempGoodMs, SafetyConfig::sensorStaleMs);
 
             if (boilerDataFresh) {
                 // Update sensor validity - pass Temperature_t directly, no conversion needed
