@@ -24,7 +24,11 @@ static const char* TAG = "CentralizedFailsafe";
 // Static member definitions
 SemaphoreHandle_t CentralizedFailsafe::stateMutex_ = nullptr;  // Round 20 Issue #10
 std::atomic<CentralizedFailsafe::FailsafeLevel> CentralizedFailsafe::currentLevel{FailsafeLevel::NORMAL};
-std::atomic<bool> CentralizedFailsafe::levelChanged_{false};
+// true, so the FIRST publisher pass emits the level even though nothing has changed yet.
+// Initialised false at first, and the retained topic then stayed empty until something went
+// wrong - which for a health indicator is the one state where it had to be present. Caught on
+// hardware: boiler/status/failsafe simply did not exist after the flash.
+std::atomic<bool> CentralizedFailsafe::levelChanged_{true};
 std::atomic<EmergencyStopRelease::Cause> CentralizedFailsafe::latchCause_{EmergencyStopRelease::Cause::NONE};
 SystemError CentralizedFailsafe::lastError = SystemError::SUCCESS;
 uint32_t CentralizedFailsafe::failsafeStartTime = 0;
