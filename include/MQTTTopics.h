@@ -16,6 +16,10 @@
 #define MQTT_STATUS_SENSORS             MQTT_STATUS_PREFIX "/sensors"
 #define MQTT_STATUS_HOTWATER            MQTT_STATUS_PREFIX "/hotwater"
 
+// RS485 bus ownership. Retained, published on every transition: a released bus means the
+// controller is deliberately out of service, and that must not be invisible.
+#define MQTT_STATUS_BUS                 MQTT_STATUS_PREFIX "/bus"
+
 // Boiler system status topics
 #define MQTT_STATUS_SYSTEM              MQTT_STATUS_PREFIX "/system"
 #define MQTT_STATUS_HEATING             MQTT_STATUS_PREFIX "/heating"

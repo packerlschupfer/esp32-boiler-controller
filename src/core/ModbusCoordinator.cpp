@@ -1,5 +1,6 @@
 // src/core/ModbusCoordinator.cpp
 #include "ModbusCoordinator.h"
+#include "core/ModbusBusRelease.h"  // the deliberate hand-over of the bus
 #include "utils/MutexRetryHelper.h"
 #include <algorithm>
 
@@ -133,6 +134,23 @@ void ModbusCoordinator::timerCallback(TimerHandle_t xTimer) {
 }
 
 void ModbusCoordinator::processTick() {
+    // THE BUS GATE. While the bus is deliberately released to another master, notify nobody:
+    // every Modbus transaction in this firmware - sensor reads AND relay writes - is started
+    // by a task woken from here, and none of them falls back to reading on its own (the
+    // direct-read fallbacks were removed precisely because they fought this scheduler). So
+    // withholding notifications is sufficient for true bus silence, with no task suspension
+    // and therefore no watchdog or resume-ordering hazards.
+    //
+    // Expiry is checked HERE because this is the only place that can grant bus access: a
+    // window cannot outlive its deadline even if the network, the broker or the whole MQTT
+    // stack is gone. See BusReleasePolicy.h.
+    ModbusBusRelease::expireIfDue();
+    if (ModbusBusRelease::isReleased()) {
+        // Keep advancing so a tick stays a unit of time rather than of bus activity.
+        currentTick = (currentTick + 1) % TICKS_PER_CYCLE;
+        return;
+    }
+
     // Check which device should operate at this tick
     SensorType nextSensor = getNextSensor(currentTick);
 

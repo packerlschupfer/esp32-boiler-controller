@@ -2,6 +2,8 @@
 #include "MQTTPublisher.h"
 #include "modules/tasks/MQTTTask.h"
 #include "core/SystemResourceProvider.h"
+#include "core/ModbusBusRelease.h"  // bus-release expiry backstop and its status topic
+#include "MQTTTopics.h"  // centralized topic macros - see the note below
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
 #include "shared/Temperature.h"
@@ -18,16 +20,50 @@
 
 static const char* TAG = "MQTTPub";
 
-// MQTT topic constants (avoid including MQTTTopics.h due to macro conflicts)
-#define MQTT_STATUS_HEALTH   "boiler/status/health"
-#define MQTT_STATUS_SENSORS  "boiler/status/sensors"
+// Topics come from MQTTTopics.h. This file used to redefine them as hardcoded literals
+// ("avoid including MQTTTopics.h due to macro conflicts"), which is the very string drift
+// that header exists to prevent - rename a topic centrally and this publisher would have
+// kept publishing to the old one. Including it builds clean, so the duplicates are gone
+// (2026-10-25). Both former values were byte-identical to the central ones.
 
 namespace MQTTPublisher {
 
 void publishSystemStatus() {
+    // Backstop for the bus-release window, and the only place its end gets reported.
+    //
+    // Expiry normally happens in ModbusCoordinator::processTick(), which is the right place
+    // because it is the one thing that can grant bus access. This second call covers the case
+    // where the coordinator itself is stopped - then no tick would ever notice the deadline
+    // and the window would never end. Cheap: two atomic loads when not released.
+    //
+    // The transition is logged and published HERE rather than at the point of expiry because
+    // that point is a FreeRTOS timer callback, and a single LOG_* costs ~1312 B of stack on
+    // this project.
+    // Runs unconditionally, BEFORE the connectivity check: ending the window is a control
+    // action, not a reporting one, and it must not depend on the broker being reachable.
+    ModbusBusRelease::expireIfDue();
+
     auto mqttManager = SRP::getMQTTManager();
     if (!mqttManager || !mqttManager->isConnected()) {
         return;
+    }
+
+    // Only consumed once connected, so a transition that happens while the broker is down is
+    // still reported on reconnect rather than swallowed by consumeStateChange().
+    if (ModbusBusRelease::consumeStateChange()) {
+        char busBuf[96];
+        if (ModbusBusRelease::isReleased()) {
+            snprintf(busBuf, sizeof(busBuf), "{\"released\":true,\"left\":%lu}",
+                     static_cast<unsigned long>(ModbusBusRelease::secondsLeft()));
+        } else {
+            const bool timedOut = ModbusBusRelease::lastEnd() == ModbusBusRelease::Ended::BY_TIMEOUT;
+            snprintf(busBuf, sizeof(busBuf), "{\"released\":false,\"end\":\"%s\"}",
+                     timedOut ? "timeout" : "command");
+            if (timedOut) {
+                LOG_WARN(TAG, "RS485 bus release expired - polling resumed, burner re-armable");
+            }
+        }
+        MQTTTask::publish(MQTT_STATUS_BUS, busBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
     }
 
     auto mqttMutex = SRP::getMQTTMutex();

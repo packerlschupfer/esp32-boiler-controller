@@ -8,6 +8,7 @@
 #include "modules/control/BurnerPowerController.h"  // Round 21: Extracted power control
 #include "modules/control/BurnerRuntimeTracker.h"  // Round 21: Extracted runtime tracking
 #include "modules/tasks/RelayControlTask.h"
+#include "core/ModbusBusRelease.h"  // no arming while the bus belongs to another master
 #include "modules/tasks/MQTTTask.h"  // H15: For error recovery notification
 #include "MQTTTopics.h"  // C1: Centralized topic macros (prevents hardcoded string drift)
 #include "shared/SharedResources.h"
@@ -227,11 +228,20 @@ bool BurnerStateMachine::setHeatDemand(bool demand, Temperature_t target, bool h
     // setHeatDemand(false): an arm is either refused here or overwritten by that OFF.
     // Check and write are BurnerDemandGate::applyDemandWrite(), which the native tests
     // interleave with revokes; the permission must be read here, under demandMutex.
+    // While the RS485 bus is released to another master, demand may not be ARMED. Nothing
+    // could reach the relays anyway - RYN4 writes ride the same bus - but without this the
+    // state machine would walk through PRE_PURGE into IGNITION on stale readings and have
+    // its relay writes land the instant the bus came back, with its minimum-on-time already
+    // part spent. OFF stays permitted, as always. See BusReleasePolicy.h.
+    const bool busReleased = ModbusBusRelease::isReleased();
     BurnerDemandGate::DemandSlot slot = {heatDemand, targetTemperature, requestedHighPower};
     const BurnerDemandGate::WriteResult result =
-        BurnerDemandGate::applyDemandWrite(slot, demand, target, highPower, demandPermitted.load());
+        BurnerDemandGate::applyDemandWrite(slot, demand, target, highPower,
+                                           demandPermitted.load() && !busReleased);
     if (result == BurnerDemandGate::WriteResult::REFUSED) {
-        LOG_INFO(TAG, "Heat demand ON refused - burner demand not permitted");
+        LOG_INFO(TAG, "Heat demand ON refused - %s",
+                 busReleased ? "RS485 bus released to another master"
+                             : "burner demand not permitted");
         return false;
     }
 
