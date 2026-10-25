@@ -255,6 +255,7 @@ build arithmetic on it.
 | `boiler/status/sensor_mode` | Yes | `STARTUP`, `NORMAL` or `SHUTDOWN` |
 | `boiler/status/scheduler/info` | No | `{"active":true,"count":3,"activeIds":[1],"disabledIds":[2]}` (reply to `boiler/cmd/scheduler/status`) |
 | `boiler/status/clock` | No | `{"valid":true,"utc":1792928804,"local":"2026-10-25 12:46:44","dow":0,"dst":false,"ntp":true}` - every 60 s. `utc` is the epoch **stored in the DS3231**; `local` is derived from the compiled CET/CEST rule. Both halves are published so a wrong offset is visible: compare `utc` against real UTC and `local` against the wall clock. `valid:false` (then only `utc` and `ntp`) means the RTC is implausible and **schedules are suspended**. |
+| `boiler/status/failsafe` | Yes | `{"level":"Normal","fullPower":false}` - on change. `level` is CentralizedFailsafe's level (Normal/Warning/Degraded/Critical/Emergency/Shutdown). `fullPower:false` means **stage 2 is withheld and the boiler is running at half power** - the level is sticky, so this persists until a recovery path clears it. If the house heats slowly for no obvious reason, check this first. |
 | `boiler/status/error` | No | `unknown_command`, `invalid_numeric_value`, `invalid_config_value` (control/config command errors) |
 | `boiler/status/config/warning` | Yes | JSON warning after `boiler_pid_enabled` or `syslog_enabled` (reboot required) |
 | `boiler/diagnostics/modbus/<addr>` | No | Modbus error counters per device address (hex), every 30 min |
@@ -1019,6 +1020,7 @@ mosquitto_pub -t "system/status" -r -n
 | `boiler/scheduler/response` | On command | No | Medium | Command responses |
 | `boiler/status/scheduler/info` | On `status` command | No | Medium | Scheduler status |
 | `boiler/status/clock` | Every 60 s | No | Low | RTC epoch (UTC) + derived local time |
+| `boiler/status/failsafe` | On change | Yes | High | Failsafe level + whether stage 2 is permitted |
 | `boiler/status/errors/list` | On request | No | Low | Error log dump |
 | `boiler/status/errors/stats` | On request | No | Low | Error statistics |
 | `boiler/status/errors/critical` | On request | No | Low | Critical errors |
