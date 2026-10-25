@@ -446,6 +446,16 @@ void tearDown(void) {
     // Common teardown - individual tests can add their own teardown
 }
 
+// Scheduler clock (RTC UTC -> local schedule wall-clock, DST rule)
+void test_scheduler_clock_spring_forward_skips_an_hour();
+void test_scheduler_clock_fall_back_repeats_an_hour();
+void test_scheduler_clock_is_the_dst_fix_a_schedule_holds_its_wall_clock();
+void test_scheduler_clock_epoch_from_utc_fields_matches_known_instants();
+void test_scheduler_clock_epoch_from_utc_fields_applies_no_timezone();
+void test_scheduler_clock_rejects_an_unset_rtc();
+void test_scheduler_clock_day_of_week_is_sunday_zero_and_local();
+void test_scheduler_clock_transitions_hold_for_later_years();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -875,6 +885,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_boost_gate_degenerate_ends_of_the_parameter_range);
     RUN_TEST(test_boost_denied_for_invalid_or_zero_target);
     RUN_TEST(test_boost_water_and_autotune_override_an_invalid_target);
+
+    // Scheduler clock (RTC UTC -> local schedule wall-clock, DST rule)
+    RUN_TEST(test_scheduler_clock_spring_forward_skips_an_hour);
+    RUN_TEST(test_scheduler_clock_fall_back_repeats_an_hour);
+    RUN_TEST(test_scheduler_clock_is_the_dst_fix_a_schedule_holds_its_wall_clock);
+    RUN_TEST(test_scheduler_clock_epoch_from_utc_fields_matches_known_instants);
+    RUN_TEST(test_scheduler_clock_epoch_from_utc_fields_applies_no_timezone);
+    RUN_TEST(test_scheduler_clock_rejects_an_unset_rtc);
+    RUN_TEST(test_scheduler_clock_day_of_week_is_sunday_zero_and_local);
+    RUN_TEST(test_scheduler_clock_transitions_hold_for_later_years);
 
     return UNITY_END();
 }

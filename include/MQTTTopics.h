@@ -104,6 +104,13 @@
 #define MQTT_STATUS_SCHEDULER_ACTIVE    MQTT_STATUS_SCHEDULER_PREFIX "/active"
 #define MQTT_STATUS_SCHEDULER_NEXT      MQTT_STATUS_SCHEDULER_PREFIX "/next"
 
+// Clock: the RTC's stored instant AND the local wall-clock derived from it. Added 2026-10-25
+// with the DST fix, because the RTC was not observable from outside at all - which is how a
+// schedule could run an hour off for half the year without anything showing it. Publishing
+// both halves makes the conversion checkable: compare `utc` against real UTC and `local`
+// against the wall clock, and a stale or mis-derived offset has nowhere to hide.
+#define MQTT_STATUS_CLOCK               MQTT_STATUS_PREFIX "/clock"
+
 // Scheduler response and event topics
 #define MQTT_TOPIC_SCHEDULER_RESPONSE   MQTT_BASE_PREFIX "/scheduler/response"
 #define MQTT_TOPIC_SCHEDULER_EVENT      MQTT_BASE_PREFIX "/scheduler/event"

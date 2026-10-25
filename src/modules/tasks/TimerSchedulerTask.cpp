@@ -23,6 +23,7 @@
 #include "modules/scheduler/SchedulerResponseFormatter.h"
 #include "modules/scheduler/SchedulerContext.h"
 #include "modules/scheduler/SchedulerCommandPolicy.h"
+#include "modules/scheduler/SchedulerClock.h"
 #include "utils/MQTTValidator.h"
 #include "modules/tasks/NTPTask.h"  // For NTP RTC callback
 #include "utils/ResourceGuard.h"  // For TaskCleanupHandler
@@ -66,39 +67,19 @@ static void updateRTCFromNTP(time_t utcTime) {
         return;
     }
     
-    // Calculate timezone offset for CET/CEST
-    struct tm localTm, utcTm;
-    localtime_r(&utcTime, &localTm);
-    gmtime_r(&utcTime, &utcTm);
-    
-    // F37: compute the timezone offset from the full calendar-field difference
-    // between the two representations of the SAME instant, NOT a tm_mday compare.
-    // The old handling inverted at month/year boundaries (local mday 1 is not
-    // > utc mday 31), so at e.g. UTC Jan 31 23:30 -> local Feb 1 00:30 it
-    // subtracted 24h instead of adding it, setting the RTC ~47h off. A timezone
-    // offset is always < 24h, so the instant straddles at most one day boundary:
-    // use tm_yday within a year and +/-1 day across a year boundary. (timegm()
-    // would be cleaner but is not declared in this toolchain.)
-    int dayDiff;
-    if (localTm.tm_year != utcTm.tm_year) {
-        dayDiff = (localTm.tm_year > utcTm.tm_year) ? 1 : -1;
-    } else {
-        dayDiff = localTm.tm_yday - utcTm.tm_yday;
-    }
-    int32_t tzOffset = static_cast<int32_t>(dayDiff) * 86400
-                     + (localTm.tm_hour - utcTm.tm_hour) * 3600
-                     + (localTm.tm_min  - utcTm.tm_min)  * 60
-                     + (localTm.tm_sec  - utcTm.tm_sec);
-    
-    // Use explicit casting to avoid format string issues
-    LOG_INFO(TAG, "Updating RTC from NTP: UTC epoch=%ld, offset=%d (%+d hours)", 
-             (long)utcTime, (int)tzOffset, (int)(tzOffset / 3600));
-    
-    // Update RTC with timezone-aware method
-    if (rtcController->setTimeFromUTC(utcTime, tzOffset)) {
+    // The RTC stores UTC, so the offset is zero by construction - see SchedulerClock.h for
+    // why. This used to derive the live CET/CEST offset here and write local wall-clock into
+    // the chip, which lost the offset and left every schedule an hour off across a DST change
+    // on a device with no network. It also meant this one function had to get calendar
+    // arithmetic right: F37 was a tm_mday comparison that inverted the sign at month and year
+    // boundaries (local mday 1 is not > utc mday 31), setting the RTC ~47 h off at UTC Jan 31
+    // 23:30. Storing UTC deletes the arithmetic rather than fixing it again.
+    LOG_INFO(TAG, "Updating RTC from NTP (UTC): epoch=%ld", (long)utcTime);
+
+    if (rtcController->setTimeFromUTC(static_cast<uint32_t>(utcTime), 0)) {
         // Verify the update
         DateTime now = rtcController->now();
-        LOG_INFO(TAG, "RTC updated successfully: %04d-%02d-%02d %02d:%02d:%02d",
+        LOG_INFO(TAG, "RTC updated successfully (UTC): %04d-%02d-%02d %02d:%02d:%02d",
                  now.year(), now.month(), now.day(),
                  now.hour(), now.minute(), now.second());
     } else {
@@ -108,15 +89,22 @@ static void updateRTCFromNTP(time_t utcTime) {
 static uint32_t lastPersistTime = 0;
 static bool schedulesModified = false;
 
+// Clock publish cadence. Rollover-safe: compared as an unsigned difference, never as
+// (last + interval) which wraps once every 49.7 days.
+static constexpr uint32_t CLOCK_PUBLISH_INTERVAL_MS = 60000;
+static uint32_t lastClockPublish = 0;
+
 // Forward declarations
 static void checkSchedules();
-static void checkSchedule(TimerSchedule& schedule);
+static void checkSchedule(TimerSchedule& schedule,
+                          const SchedulerClock::WallClock& nowLocal);
 static void activateSchedule(TimerSchedule& schedule);
 static void deactivateSchedule(TimerSchedule& schedule);
 static void cleanupScheduler();
 static IScheduleAction* getActionHandler(ScheduleType type);
 static uint8_t getNextFreeId();
 static void publishSchedulerStatus();
+static void publishClock();
 static void saveSchedules();
 static void loadSchedules();
 
@@ -216,18 +204,32 @@ static void checkSchedules() {
     static uint32_t checkCount = 0;
     checkCount++;
 
-    // S1: Validate RTC time before schedule evaluation
-    // If NTP failed and RTC battery died, time is invalid
-    if (rtcController) {
-        DateTime now = rtcController->now();
-        if (now.year() < 2020) {
-            static uint32_t lastRtcWarn = 0;
-            if (millis() - lastRtcWarn > 60000) {  // Warn once per minute
-                LOG_ERROR(TAG, "RTC time invalid (year=%d) - schedules suspended", now.year());
-                lastRtcWarn = millis();
-            }
-            return;  // Skip all schedule checks
+    if (!rtcController) {
+        return;  // initializeScheduler() refuses to start without an RTC, so this cannot fire
+    }
+
+    // The RTC holds UTC; the wall-clock a schedule is written in is DERIVED from it with the
+    // compiled DST rule - see SchedulerClock.h for why the chip no longer stores local time.
+    //
+    // Read the chip ONCE per pass and hand the same instant to every schedule. It used to be
+    // read inside checkSchedule(), i.e. once per schedule over an I2C bus, so a pass that
+    // straddled a minute boundary could evaluate one schedule at 09:59 and the next at 10:00.
+    // At a handover - schedule A ending at 10:00, B starting at 10:00 - that is how you get
+    // both running at once, or neither.
+    //
+    // S1: an implausible instant means the RTC lost its battery and NTP has never run. There
+    // is no trustworthy time, so no schedule may be evaluated. (Note this leaves an already
+    // active schedule active; that is the pre-existing behaviour and is not changed here.)
+    const SchedulerClock::WallClock nowLocal =
+        SchedulerClock::localWallClock(static_cast<int64_t>(rtcController->now().unixtime()));
+    if (!nowLocal.valid) {
+        static uint32_t lastRtcWarn = 0;
+        if (millis() - lastRtcWarn > 60000) {  // Warn once per minute
+            LOG_ERROR(TAG, "RTC time invalid (year=%d) - schedules suspended",
+                      rtcController->now().year());
+            lastRtcWarn = millis();
         }
+        return;  // Skip all schedule checks
     }
 
     // Round 14 Issue #5: Acquire mutex before accessing schedules
@@ -241,14 +243,14 @@ static void checkSchedules() {
     }
 
     for (auto& schedule : timerSchedules) {
-        checkSchedule(schedule);
+        checkSchedule(schedule, nowLocal);
     }
 
     xSemaphoreGive(schedulesMutex);
 }
 
-// Check a single schedule
-static void checkSchedule(TimerSchedule& schedule) {
+// Check a single schedule against the instant resolved by checkSchedules()
+static void checkSchedule(TimerSchedule& schedule, const SchedulerClock::WallClock& nowLocal) {
     if (!schedule.enabled) {
         // If disabled but active, deactivate
         if (activeSchedules[schedule.id]) {
@@ -256,9 +258,9 @@ static void checkSchedule(TimerSchedule& schedule) {
         }
         return;
     }
-    
-    DateTime now = rtcController->now();
-    bool shouldBeActive = schedule.isActiveNow(now.hour(), now.minute(), now.dayOfTheWeek());
+
+    bool shouldBeActive = schedule.isActiveNow(nowLocal.hour, nowLocal.minute,
+                                               nowLocal.dayOfWeek);
     bool isActive = activeSchedules[schedule.id];
     
     if (shouldBeActive && !isActive) {
@@ -430,6 +432,13 @@ void TimerSchedulerTask(void* parameter) {
             lastPersistTime = millis();
         }
         
+        // Publish the clock on a slow cadence - it is a diagnostic, and each publish costs an
+        // I2C read of the DS3231 on the bus the FRAM shares.
+        if ((millis() - lastClockPublish) >= CLOCK_PUBLISH_INTERVAL_MS) {
+            lastClockPublish = millis();
+            publishClock();
+        }
+
         // Check if we need to auto-save schedules
         if (schedulesModified && (millis() - lastPersistTime) > SchedulerConstants::PERSIST_INTERVAL_MS) {
             LOG_DEBUG(TAG, "Auto-saving schedules after timeout");
@@ -441,6 +450,43 @@ void TimerSchedulerTask(void* parameter) {
         // Feed watchdog
         (void)SRP::getTaskManager().feedWatchdog();
     }
+}
+
+// Publish the clock: the RTC's stored instant and the local wall-clock derived from it.
+//
+// This runs from the scheduler task because the task already owns the DS3231 reads - the
+// chip sits on the shared I2C bus with the FRAM, and reading it from the MQTT task instead
+// would put a second reader on that bus for a diagnostic.
+//
+// Deliberately NOT folded into publishSchedulerStatus(): nothing sets
+// SCHEDULER_EVENT_PUBLISH_STATUS, so that function is only ever reached from the MQTT command
+// reply path and a clock published there would only appear when someone asked for it.
+static void publishClock() {
+    if (!rtcController) {
+        return;
+    }
+    const int64_t utc = static_cast<int64_t>(rtcController->now().unixtime());
+    const SchedulerClock::WallClock w = SchedulerClock::localWallClock(utc);
+
+    char payload[160];
+    if (!w.valid) {
+        // Say so explicitly rather than publishing a plausible-looking 1970. An invalid clock
+        // means schedules are suspended, which is worth being able to see from outside.
+        snprintf(payload, sizeof(payload),
+                 "{\"valid\":false,\"utc\":%lld,\"ntp\":%s}",
+                 static_cast<long long>(utc), isNTPSynced() ? "true" : "false");
+    } else {
+        snprintf(payload, sizeof(payload),
+                 "{\"valid\":true,\"utc\":%lld,"
+                 "\"local\":\"%04d-%02d-%02d %02d:%02d:%02d\","
+                 "\"dow\":%u,\"dst\":%s,\"ntp\":%s}",
+                 static_cast<long long>(utc),
+                 w.year, w.month, w.day, w.hour, w.minute, w.second,
+                 static_cast<unsigned>(w.dayOfWeek),
+                 w.dst ? "true" : "false",
+                 isNTPSynced() ? "true" : "false");
+    }
+    MQTTTask::publish(MQTT_STATUS_CLOCK, payload);
 }
 
 // Publish scheduler status

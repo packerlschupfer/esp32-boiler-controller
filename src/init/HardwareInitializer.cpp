@@ -17,6 +17,7 @@
 #include "core/SystemResourceProvider.h"
 #include "shared/SharedI2CInitializer.h"
 #include "DS3231Controller.h"
+#include "modules/scheduler/SchedulerClock.h"
 
 
 static const char* TAG = "HardwareInitializer";
@@ -115,15 +116,11 @@ Result<void> HardwareInitializer::initializeModbus() {
 }
 
 void HardwareInitializer::initializeTimezone() {
-    // Set system timezone
-    // CET-1CEST,M3.5.0,M10.5.0/3 means:
-    // - CET (Central European Time) UTC+1
-    // - CEST (Central European Summer Time) UTC+2
-    // - DST starts last Sunday in March at 2:00
-    // - DST ends last Sunday in October at 3:00
-    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
-    tzset();
-    LOG_INFO(TAG, "System timezone set to CET/CEST");
+    // The rule itself lives in SchedulerClock.h, which also derives the schedule's local
+    // wall-clock from the RTC's UTC: one copy, so the system clock's idea of local time and
+    // the scheduler's cannot drift apart.
+    SchedulerClock::applyTimezone();
+    LOG_INFO(TAG, "System timezone set to %s", SchedulerClock::TZ_RULE);
 }
 
 bool HardwareInitializer::initializeRTC(DS3231Controller*& ds3231) {
@@ -150,26 +147,26 @@ bool HardwareInitializer::initializeRTC(DS3231Controller*& ds3231) {
         return false;
     }
 
-    LOG_INFO(TAG, "DS3231 initialized: %04d-%02d-%02d %02d:%02d:%02d",
+    LOG_INFO(TAG, "DS3231 initialized, holds UTC: %04d-%02d-%02d %02d:%02d:%02d",
              checkTime.year(), checkTime.month(), checkTime.day(),
              checkTime.hour(), checkTime.minute(), checkTime.second());
 
-    // Set system time from RTC
-    struct tm timeinfo;
-    timeinfo.tm_year = checkTime.year() - 1900;
-    timeinfo.tm_mon = checkTime.month() - 1;
-    timeinfo.tm_mday = checkTime.day();
-    timeinfo.tm_hour = checkTime.hour();
-    timeinfo.tm_min = checkTime.minute();
-    timeinfo.tm_sec = checkTime.second();
-    timeinfo.tm_isdst = -1;  // Let system determine DST
-
-    time_t rtcTime = mktime(&timeinfo);
-    // Set system time from RTC
-    // Note: DS3231 RTC only has 1-second resolution, so tv_usec will be 0
+    // Seed the system clock, which is a UTC epoch, from the RTC - which also holds UTC
+    // (SchedulerClock.h). This is the ONLY time source until NTP first succeeds, and on a
+    // device with no network it is the only one ever, so it has to be right on its own.
+    //
+    // It used to be mktime(tm_isdst = -1), correct only while the chip held local time; now
+    // that would subtract the CET/CEST offset from fields that never carried it. Note the
+    // DS3231 is read here at boot and in NTPTask's tryRTCFallback() - both convert the same
+    // way, through the same function, on purpose.
+    //
+    // Note: the DS3231 has 1-second resolution, so tv_usec is 0.
+    const time_t rtcTime = static_cast<time_t>(SchedulerClock::epochFromUtcFields(
+        checkTime.year(), checkTime.month(), checkTime.day(),
+        checkTime.hour(), checkTime.minute(), checkTime.second()));
     struct timeval tv = { .tv_sec = rtcTime, .tv_usec = 0 };
     if (settimeofday(&tv, nullptr) == 0) {
-        LOG_INFO(TAG, "System time set from RTC (sub-second precision: 0)");
+        LOG_INFO(TAG, "System time set from RTC UTC (sub-second precision: 0)");
     } else {
         LOG_WARN(TAG, "Failed to set system time from RTC");
     }

@@ -14,6 +14,7 @@
 #include "events/SystemEventsGenerated.h"
 #include <freertos/timers.h>
 #include "hal/HardwareAbstractionLayer.h"
+#include "modules/scheduler/SchedulerClock.h"
 
 static const char* TAG = "NTPTask";
 
@@ -118,17 +119,16 @@ static bool tryRTCFallback() {
         return false;
     }
 
-    // Convert to time_t
-    struct tm timeinfo = {0};
-    timeinfo.tm_year = dt.year - 1900;
-    timeinfo.tm_mon = dt.month - 1;
-    timeinfo.tm_mday = dt.day;
-    timeinfo.tm_hour = dt.hour;
-    timeinfo.tm_min = dt.minute;
-    timeinfo.tm_sec = dt.second;
-    timeinfo.tm_isdst = -1;  // Let system determine DST
-
-    time_t rtcTime = mktime(&timeinfo);
+    // The RTC holds UTC (SchedulerClock.h), and the system clock is a UTC epoch, so this is
+    // a plain timegm() - no offset either way.
+    //
+    // It used to be mktime(tm_isdst = -1), which was right while the chip held local time and
+    // is wrong now: mktime() would subtract the CET/CEST offset from fields that never had it.
+    // mktime() was also the lossy half of the DST bug in the fall-back direction - inside the
+    // repeated hour it has two valid answers and picks one, so "let the system determine DST"
+    // was a coin flip the caller could not see.
+    time_t rtcTime = static_cast<time_t>(SchedulerClock::epochFromUtcFields(
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second));
 
     if (rtcTime < 1577836800) {  // Jan 1, 2020
         // time_t is 64-bit on this toolchain - %ld would read half the vararg and
@@ -143,7 +143,7 @@ static bool tryRTCFallback() {
     struct timeval tv = { .tv_sec = rtcTime, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
 
-    LOG_INFO(TAG, "System time set from RTC fallback: %04d-%02d-%02d %02d:%02d:%02d (sub-second precision: 0)",
+    LOG_INFO(TAG, "System time set from RTC fallback (UTC): %04d-%02d-%02d %02d:%02d:%02d (sub-second precision: 0)",
              dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
 
     return true;
