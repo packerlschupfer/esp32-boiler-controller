@@ -3,7 +3,8 @@
 #include "modules/tasks/MQTTTask.h"
 #include "core/SystemResourceProvider.h"
 #include "core/ModbusBusRelease.h"  // bus-release expiry backstop and its status topic
-#include "MQTTTopics.h"  // centralized topic macros - see the note below
+#include "MQTTTopics.h"
+#include "modules/control/CentralizedFailsafe.h"  // centralized topic macros - see the note below
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
 #include "shared/Temperature.h"
@@ -64,6 +65,19 @@ void publishSystemStatus() {
             }
         }
         MQTTTask::publish(MQTT_STATUS_BUS, busBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
+    }
+
+    // The failsafe level, which until 2026-10-25 was visible nowhere at all -
+    // getFailsafeStatusString() had no callers. It matters now because the level is sticky and
+    // DEGRADED withholds stage 2 for real, so a boiler left at half power has to be something
+    // an operator can see. Retained, and consumed only while connected for the same reason the
+    // bus state is: a transition during an outage must survive to the reconnect.
+    if (CentralizedFailsafe::consumeLevelChange()) {
+        char fsBuf[96];
+        snprintf(fsBuf, sizeof(fsBuf), "{\"level\":\"%s\",\"fullPower\":%s}",
+                 CentralizedFailsafe::getFailsafeStatusString(),
+                 CentralizedFailsafe::fullPowerPermitted() ? "true" : "false");
+        MQTTTask::publish(MQTT_STATUS_FAILSAFE, fsBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
     }
 
     auto mqttMutex = SRP::getMQTTMutex();

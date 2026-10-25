@@ -24,6 +24,7 @@ static const char* TAG = "CentralizedFailsafe";
 // Static member definitions
 SemaphoreHandle_t CentralizedFailsafe::stateMutex_ = nullptr;  // Round 20 Issue #10
 std::atomic<CentralizedFailsafe::FailsafeLevel> CentralizedFailsafe::currentLevel{FailsafeLevel::NORMAL};
+std::atomic<bool> CentralizedFailsafe::levelChanged_{false};
 std::atomic<EmergencyStopRelease::Cause> CentralizedFailsafe::latchCause_{EmergencyStopRelease::Cause::NONE};
 SystemError CentralizedFailsafe::lastError = SystemError::SUCCESS;
 uint32_t CentralizedFailsafe::failsafeStartTime = 0;
@@ -50,7 +51,7 @@ void CentralizedFailsafe::initialize() {
         }
     }
 
-    currentLevel.store(FailsafeLevel::NORMAL);
+    setLevel(FailsafeLevel::NORMAL);
     lastError = SystemError::SUCCESS;
     failsafeStartTime = 0;
     recoveryAttempts = 0;
@@ -76,7 +77,7 @@ void CentralizedFailsafe::initialize() {
 
 void CentralizedFailsafe::cleanup() {
     subsystemCallbacks.clear();
-    currentLevel.store(FailsafeLevel::NORMAL);
+    setLevel(FailsafeLevel::NORMAL);
     lastError = SystemError::SUCCESS;
     failsafeStartTime = 0;
     recoveryAttempts = 0;
@@ -129,7 +130,7 @@ void CentralizedFailsafe::triggerFailsafe(FailsafeLevel level, SystemError reaso
 
     // Update state
     FailsafeLevel previousLevel = currentLevel.load();
-    currentLevel.store(level);
+    setLevel(level);
     lastError = reason;
 
     if (failsafeStartTime == 0) {
@@ -229,9 +230,15 @@ void CentralizedFailsafe::defaultBurnerFailsafe(FailsafeLevel level) {
             break;
             
         case FailsafeLevel::DEGRADED:
-            // Reduce burner power
-            LOG_WARN(TAG, "Limiting burner to half power");
-            // Force low power mode
+            // Reduce burner power. The limit itself is enforced where stage 2 is decided -
+            // BoilerTempControlTask ANDs CentralizedFailsafe::fullPowerPermitted() into the
+            // highPower term - because that is the only place that can withhold it without
+            // fighting the controller for the relay.
+            //
+            // This used to be this LOG_WARN above a bare `// Force low power mode` comment,
+            // i.e. the log line was the whole implementation, for the life of the project.
+            // Found by the 2026-10-25 review.
+            LOG_WARN(TAG, "Limiting burner to half power (stage 2 withheld while DEGRADED)");
             break;
             
         case FailsafeLevel::CRITICAL:
@@ -303,7 +310,7 @@ void CentralizedFailsafe::emergencyStop(const char* reason, EmergencyStopRelease
     latchCause_.store(EmergencyStopRelease::mergeCause(alreadyLatched, latchCause_.load(), cause));
 
     const bool enteringCritical = currentLevel.load() < FailsafeLevel::CRITICAL;
-    currentLevel.store(FailsafeLevel::EMERGENCY);
+    setLevel(FailsafeLevel::EMERGENCY);
 
     // 1. Immediately shut down burner via BurnerSystemController
     BurnerSystemController* controller = SRP::getBurnerSystemController();
@@ -349,7 +356,7 @@ void CentralizedFailsafe::emergencyStop(const char* reason, EmergencyStopRelease
 void CentralizedFailsafe::orderlyShutdown(const char* reason) {
     LOG_INFO(TAG, "Orderly shutdown initiated: %s", reason);
 
-    currentLevel.store(FailsafeLevel::SHUTDOWN);
+    setLevel(FailsafeLevel::SHUTDOWN);
     
     // 1. Save current state
     saveEmergencyState();
@@ -478,7 +485,7 @@ bool CentralizedFailsafe::attemptRecovery() {
                         SystemEvents::SystemState::EMERGENCY_STOP);
 
     // Reset to warning level (not NORMAL) to allow monitoring
-    currentLevel.store(FailsafeLevel::WARNING);
+    setLevel(FailsafeLevel::WARNING);
 
     // Re-enable system
     xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
@@ -544,7 +551,7 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
             return safety;
         }
         xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
-        currentLevel.store(FailsafeLevel::WARNING);
+        setLevel(FailsafeLevel::WARNING);
         recoveryAttempts = 0;
         LOG_WARN(TAG, "No emergency latch, but the boiler was left disabled - re-enabled");
         return EmergencyStopRelease::Result::BOILER_RE_ENABLED;
@@ -563,7 +570,7 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
 
     // triggerFailsafe() never downgrades the level; without this a later failsafe
     // trigger at a lower level would be ignored after the release
-    currentLevel.store(FailsafeLevel::WARNING);
+    setLevel(FailsafeLevel::WARNING);
     recoveryAttempts = 0;
 
     LOG_WARN(TAG, "Emergency stop released by command (boiler %s)", boilerEnabled ? "re-enabled" : "stays disabled");
@@ -583,10 +590,23 @@ bool CentralizedFailsafe::releaseAfterSensorRecovery() {
 
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
     latchCause_.store(EmergencyStopRelease::Cause::NONE);
-    currentLevel.store(FailsafeLevel::WARNING);
+    setLevel(FailsafeLevel::WARNING);
     LOG_WARN(TAG, "Emergency stop released after sensor recovery - boiler stays disabled "
                   "on purpose, restart it with boiler/cmd/emergency_reset");
     return true;
+}
+
+void CentralizedFailsafe::setLevel(FailsafeLevel level) {
+    // The only writer. Nine sites used to store currentLevel directly, which is exactly how
+    // many places a publish flag would have had to be remembered.
+    const FailsafeLevel previous = currentLevel.exchange(level);
+    if (previous != level) {
+        levelChanged_.store(true, std::memory_order_release);
+    }
+}
+
+bool CentralizedFailsafe::consumeLevelChange() {
+    return levelChanged_.exchange(false, std::memory_order_acq_rel);
 }
 
 const char* CentralizedFailsafe::getFailsafeStatusString() {

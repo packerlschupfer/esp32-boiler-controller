@@ -800,10 +800,12 @@ void RelayControlTask::updateSharedRelayReadings(uint8_t relayIndex, bool state)
         // Also set the relay event bit to notify other tasks
         SRP::setRelayEventBits(SystemEvents::RelayControl::DATA_AVAILABLE);
         
-        // Set relay status synchronized bit to indicate communication is OK
+        // COMM_OK only. This is a single-relay cache update, which says nothing about whether
+        // the relays match what was commanded - and SYNCHRONIZED now means exactly that, so
+        // setting it here would re-break the interlock RYN4ProcessingTask maintains.
         EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
         if (relayStatusEventGroup) {
-            xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::SYNCHRONIZED | SystemEvents::RelayStatus::COMM_OK);
+            xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::COMM_OK);
         }
         
         LOG_DEBUG(TAG, "SharedRelayReadings updated for relay %d = %s",

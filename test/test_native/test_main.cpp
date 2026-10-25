@@ -111,8 +111,9 @@ void test_error_context_small_buffer_shortens_description();
 
 // OTA validation policy (confirm or roll back an updated image)
 void test_ota_validation_waits_for_min_uptime();
-void test_ota_validation_needs_sensors_and_network();
+void test_ota_validation_needs_sensors_only();
 void test_ota_validation_rolls_back_after_max_wait();
+void test_ota_validation_never_reboots_a_healthy_controller_over_a_dead_lan();
 
 // Sensor failure confirmation (burner stop on persistently missing sensors)
 void test_sensor_failure_single_glitch_does_not_stop();
@@ -703,8 +704,9 @@ int main(int argc, char **argv) {
 
     // OTA validation policy
     RUN_TEST(test_ota_validation_waits_for_min_uptime);
-    RUN_TEST(test_ota_validation_needs_sensors_and_network);
+    RUN_TEST(test_ota_validation_needs_sensors_only);
     RUN_TEST(test_ota_validation_rolls_back_after_max_wait);
+    RUN_TEST(test_ota_validation_never_reboots_a_healthy_controller_over_a_dead_lan);
 
     // Sensor failure confirmation
     RUN_TEST(test_sensor_failure_single_glitch_does_not_stop);

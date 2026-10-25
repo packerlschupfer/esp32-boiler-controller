@@ -111,6 +111,11 @@
 // against the wall clock, and a stale or mis-derived offset has nowhere to hide.
 #define MQTT_STATUS_CLOCK               MQTT_STATUS_PREFIX "/clock"
 
+// Failsafe level, retained, published on change. Added 2026-10-25 with the DEGRADED fix: the
+// level was a sticky atomic that nothing published and nothing acted on, so a boiler running
+// permanently at half power would have shown no outward sign at all.
+#define MQTT_STATUS_FAILSAFE            MQTT_STATUS_PREFIX "/failsafe"
+
 // Scheduler response and event topics
 #define MQTT_TOPIC_SCHEDULER_RESPONSE   MQTT_BASE_PREFIX "/scheduler/response"
 #define MQTT_TOPIC_SCHEDULER_EVENT      MQTT_BASE_PREFIX "/scheduler/event"

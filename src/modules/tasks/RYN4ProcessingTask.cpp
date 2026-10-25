@@ -172,9 +172,16 @@ static void handleSetTick(RYN4* ryn4) {
                 s_renewalRetryPending = true;
                 if (++s_renewalMissCount >= 2) {
                     LOG_ERROR(TAG, "DELAY renewal failed %d consecutive times - relay auto-OFF risk", s_renewalMissCount);
+                    // This is the case nothing else covers, and the reason COMM_ERROR is now
+                    // read by SafetyInterlocks: two missed renewals means every ON relay is
+                    // about 2.5 s from a hardware auto-OFF with no post-purge and no pump
+                    // overrun. Stopping the burn deliberately beats being dropped by the
+                    // watchdog. Relay read-back verification cannot see this at all - the
+                    // relays are still following their last command, for now.
                     EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
                     if (relayStatusEventGroup) {
                         xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::COMM_ERROR);
+                        xEventGroupClearBits(relayStatusEventGroup, SystemEvents::RelayStatus::SYNCHRONIZED);
                     }
                 }
             }
@@ -234,11 +241,16 @@ static void handleReadTick(RYN4* ryn4) {
         SRP::setRelayEventBits(SystemEvents::RelayControl::DATA_AVAILABLE);
     }
 
-    // Set relay status bits
+    // COMM_OK means "the read came back", which is all we know at this point.
+    //
+    // SYNCHRONIZED used to be set here too, unconditionally, BEFORE the mismatch check below -
+    // so it meant "a read succeeded" rather than "the relays are doing what we commanded", was
+    // never cleared by anything, and therefore made SafetyInterlocks' `communicationOk` term
+    // permanently true from the first successful read onwards. The 2026-10-25 review found it.
+    // It is now earned per verification, in the two branches below.
     EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
     if (relayStatusEventGroup) {
-        xEventGroupSetBits(relayStatusEventGroup,
-            SystemEvents::RelayStatus::SYNCHRONIZED | SystemEvents::RelayStatus::COMM_OK);
+        xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::COMM_OK);
     }
 
     // Check for mismatch - compare against 'sent' (what we commanded).
@@ -285,6 +297,14 @@ static void handleReadTick(RYN4* ryn4) {
         if (errorGroup) {
             xEventGroupClearBits(errorGroup, SystemEvents::Error::RELAY);
         }
+        // The same reasoning applies to the relay-status bits, and for the same reason: a
+        // COMM_ERROR nobody clears would be a second unreleasable latch, which is the defect
+        // this block exists to fix. Set and cleared together on a fully clean verification.
+        EventGroupHandle_t statusGroup = SRP::getRelayStatusEventGroup();
+        if (statusGroup) {
+            xEventGroupClearBits(statusGroup, SystemEvents::RelayStatus::COMM_ERROR);
+            xEventGroupSetBits(statusGroup, SystemEvents::RelayStatus::SYNCHRONIZED);
+        }
     }
 
     if (realMismatch != 0) {
@@ -311,10 +331,14 @@ static void handleReadTick(RYN4* ryn4) {
                 }
             }
 
-            // Set communication error event bit
+            // Set communication error event bit AND drop SYNCHRONIZED. Setting COMM_ERROR
+            // alone was inert: no code read that bit, and the one term that could have
+            // noticed - SafetyInterlocks' `communicationOk` - reads SYNCHRONIZED, which was
+            // set unconditionally above and never cleared.
             EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
             if (relayStatusEventGroup) {
                 xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::COMM_ERROR);
+                xEventGroupClearBits(relayStatusEventGroup, SystemEvents::RelayStatus::SYNCHRONIZED);
             }
         }
 

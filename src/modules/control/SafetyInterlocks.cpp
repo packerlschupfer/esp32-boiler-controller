@@ -359,7 +359,17 @@ bool SafetyInterlocks::checkSystemErrors() {
     // Check error notification bits
     EventBits_t errorBits = xEventGroupGetBits(SRP::getErrorNotificationEventGroup());
     
-    // Critical errors that should block burner operation
+    // Critical errors that should block burner operation.
+    //
+    // Error::MODBUS HAS NO PRODUCER - nothing in src/ ever sets it (2026-10-25 review).
+    // Deliberately kept in the mask anyway: every real Modbus failure mode already has a
+    // dedicated detector that is better targeted than a single bus-wide bit would be -
+    // TemperatureSensorFallback for sensor reads, the stale-sensor emergency stop in
+    // continuousSafetyMonitor(), and Error::RELAY plus the relay-status bits in
+    // checkCommunicationStatus() for the RYN4. Inventing a producer here would mean deciding
+    // that some rate of transient CRC errors should stop the boiler, which would trade real
+    // no-heat risk for a check that is already covered three ways. Keeping the term costs one
+    // OR against a bit that is always zero, and means a future producer blocks by default.
     const EventBits_t CRITICAL_ERRORS = 
         SystemEvents::Error::SENSOR_FAILURE | 
         SystemEvents::Error::MODBUS | 
@@ -382,18 +392,33 @@ bool SafetyInterlocks::checkCommunicationStatus() {
     EventBits_t sensorBits = xEventGroupGetBits(SRP::getSensorEventGroup());
     bool sensorCommOk = (sensorBits & SystemEvents::SensorUpdate::DATA_AVAILABLE) != 0;
     
-    // Check relay communication
+    // Check relay communication.
+    //
+    // This term could never fail before 2026-10-25: SYNCHRONIZED was set unconditionally on
+    // every successful relay READ, before verification, and was never cleared - so it meant
+    // "the bus answered" and went permanently true at boot. COMM_ERROR, which does mean a
+    // fault, was set by RYN4ProcessingTask in two places and read by nobody. The review found
+    // both halves. SYNCHRONIZED is now earned per verification and COMM_ERROR is read here.
+    //
+    // Both are checked rather than just one, because they fail on different evidence:
+    // SYNCHRONIZED drops when the relays stop matching what was commanded, COMM_ERROR is also
+    // set when the RYN4 DELAY renewal fails twice - and that one nothing else can see, because
+    // the relays are still following their last command while being ~2.5 s from a hardware
+    // auto-OFF with no post-purge.
     EventBits_t relayBits = xEventGroupGetBits(SRP::getRelayStatusEventGroup());
-    bool relayCommOk = (relayBits & SystemEvents::RelayStatus::SYNCHRONIZED) != 0;
-    
+    bool relaySynced = (relayBits & SystemEvents::RelayStatus::SYNCHRONIZED) != 0;
+    bool relayCommErr = (relayBits & SystemEvents::RelayStatus::COMM_ERROR) != 0;
+    bool relayCommOk = relaySynced && !relayCommErr;
+
     bool allOk = sensorCommOk && relayCommOk;
-    
+
     if (!allOk) {
-        LOG_ERROR(TAG, "Communication failure - Sensors: %s, Relays: %s",
+        LOG_ERROR(TAG, "Communication failure - Sensors: %s, Relays: %s (synced=%d commErr=%d)",
                  sensorCommOk ? "OK" : "FAIL",
-                 relayCommOk ? "OK" : "FAIL");
+                 relayCommOk ? "OK" : "FAIL",
+                 relaySynced ? 1 : 0, relayCommErr ? 1 : 0);
     }
-    
+
     return allOk;
 }
 

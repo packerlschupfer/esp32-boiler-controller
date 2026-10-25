@@ -953,6 +953,14 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     if (currentTemp < setpoint) {
                         heatingNeeded = true;
                         g_blockReason = HeatingControlDiagnostics::Block::OK;
+                    } else {
+                        // OFF and the room is at or above target: the commonest steady state
+                        // in room mode, and it used to write nothing at all - so `blk` on
+                        // boiler/status/heating/control kept whatever reason happened to be
+                        // there last, which after a boot was the initial value. Found by the
+                        // review of c1ed1b0, which changed that initial value and made the
+                        // staleness visible.
+                        g_blockReason = HeatingControlDiagnostics::Block::ROOM_SATISFIED;
                     }
                 } else {
                     // Currently ON - turn OFF if temperature rises above (setpoint + hysteresis)

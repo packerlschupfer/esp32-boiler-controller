@@ -5,6 +5,7 @@
 #include "config/SystemConstants.h"
 #include "modules/control/BoilerTempController.h"
 #include "modules/control/BurnerBoostPolicy.h"
+#include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/BurnerStateMachine.h"
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/BurnerSafetyValidator.h"  // F2: validate before arming demand
@@ -531,8 +532,15 @@ void BoilerTempControlTask(void* parameter) {
                     const bool boostAllowed = BurnerBoostPolicy::fullPowerAllowed(
                         controller.isWaterMode(), controller.isAutoTuning(), targetTemp,
                         SRP::getSystemSettings().heating_boost_min_target);
+                    // Fourth gate: a DEGRADED-or-worse failsafe withholds stage 2. This is
+                    // where "limiting burner to half power" actually happens - in
+                    // CentralizedFailsafe it was a log line above an empty comment until the
+                    // 2026-10-25 review. Enforced here because this is the only place that can
+                    // withhold stage 2 without fighting the controller for the relay.
+                    const bool failsafeAllowsFull = CentralizedFailsafe::fullPowerPermitted();
                     const bool highPower = (output.powerLevel == BoilerTempController::PowerLevel::FULL) &&
-                                           permission.highPowerAllowed && boostAllowed;
+                                           permission.highPowerAllowed && boostAllowed &&
+                                           failsafeAllowsFull;
                     static bool boostDeniedLogged = false;
                     if (output.powerLevel == BoilerTempController::PowerLevel::FULL && !boostAllowed) {
                         if (!boostDeniedLogged) {
@@ -543,6 +551,17 @@ void BoilerTempControlTask(void* parameter) {
                         }
                     } else {
                         boostDeniedLogged = false;
+                    }
+                    static bool failsafeDeniedLogged = false;
+                    if (output.powerLevel == BoilerTempController::PowerLevel::FULL && !failsafeAllowsFull) {
+                        if (!failsafeDeniedLogged) {
+                            LOG_WARN(TAG, "Stage 2 withheld: failsafe level %s - the boiler runs "
+                                          "at half power until this clears",
+                                     CentralizedFailsafe::getFailsafeStatusString());
+                            failsafeDeniedLogged = true;
+                        }
+                    } else {
+                        failsafeDeniedLogged = false;
                     }
                     // The state machine re-checks the permission under its demand mutex:
                     // `permission` is a snapshot from the start of this cycle (bsm-6)

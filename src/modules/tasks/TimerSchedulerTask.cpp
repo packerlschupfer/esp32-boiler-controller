@@ -104,6 +104,7 @@ static void cleanupScheduler();
 static IScheduleAction* getActionHandler(ScheduleType type);
 static uint8_t getNextFreeId();
 static void publishSchedulerStatus();
+static void requestStatusPublish();
 static void publishClock();
 static void saveSchedules();
 static void loadSchedules();
@@ -287,6 +288,7 @@ static void activateSchedule(TimerSchedule& schedule) {
     LOG_INFO(TAG, "Activating schedule %d '%s'", schedule.id, schedule.name.c_str());
     handler->onScheduleStart(schedule);
     activeSchedules[schedule.id] = true;
+    requestStatusPublish();
     
     // Publish MQTT event
     JsonDocument doc;  // ArduinoJson v7
@@ -308,6 +310,7 @@ static void deactivateSchedule(TimerSchedule& schedule) {
     LOG_INFO(TAG, "Deactivating schedule %d '%s'", schedule.id, schedule.name.c_str());
     handler->onScheduleEnd(schedule);
     activeSchedules[schedule.id] = false;
+    requestStatusPublish();
 
     // Publish MQTT event
     JsonDocument doc;  // ArduinoJson v7
@@ -455,6 +458,20 @@ void TimerSchedulerTask(void* parameter) {
 
         // Feed watchdog
         (void)SRP::getTaskManager().feedWatchdog();
+    }
+}
+
+// Ask the task loop to publish the scheduler status.
+//
+// SCHEDULER_EVENT_PUBLISH_STATUS was defined, waited on, and handled - and SET BY NOTHING, so
+// publishSchedulerStatus() was unreachable and boiler/status/scheduler/info only ever appeared
+// as a reply to an explicit `status` command. Noticed 2026-10-25 while placing publishClock(),
+// which is why that went into the task loop instead. Driving the bit from here rather than
+// from the four `schedulesModified` sites and the two activate/deactivate sites individually
+// is the point: one function to call, nothing to forget at a seventh site later.
+static void requestStatusPublish() {
+    if (schedulerEventGroup) {
+        xEventGroupSetBits(schedulerEventGroup, SchedulerEvents::SCHEDULER_EVENT_PUBLISH_STATUS);
     }
 }
 
@@ -743,6 +760,7 @@ void processMQTTCommand(const String& command, const String& payload) {
         timerSchedules.push_back(schedule);
         activeSchedules[schedule.id] = false;
         schedulesModified = true;
+        requestStatusPublish();
 
         xSemaphoreGive(schedulesMutex);
 
@@ -813,6 +831,7 @@ void processMQTTCommand(const String& command, const String& payload) {
                 activeSchedules.erase(id);
                 found = true;
                 schedulesModified = true;
+                requestStatusPublish();
                 break;
             }
         }
@@ -910,6 +929,7 @@ void processMQTTCommand(const String& command, const String& payload) {
                 LOG_INFO(TAG, "Schedule %d '%s' %s", id, schedule.name.c_str(),
                          enable ? "enabled" : "disabled");
                 schedulesModified = true;
+                requestStatusPublish();
             }
             changed = decision.changed;
             found = true;
@@ -958,6 +978,7 @@ void processMQTTCommand(const String& command, const String& payload) {
         timerSchedules.clear();
         activeSchedules.clear();
         schedulesModified = true;
+        requestStatusPublish();
 
         xSemaphoreGive(schedulesMutex);
 

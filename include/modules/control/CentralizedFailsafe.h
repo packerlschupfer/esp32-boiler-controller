@@ -70,6 +70,27 @@ public:
 
     // Get current failsafe level
     static FailsafeLevel getCurrentLevel() { return currentLevel.load(); }
+
+    /**
+     * @brief May the burner use stage 2 (full power)?
+     *
+     * DEGRADED's documented action - "limiting burner to half power" - was a LOG LINE above an
+     * empty comment reading "// Force low power mode" for the life of the project
+     * (2026-10-25 review). This is what makes it true: BoilerTempControlTask ANDs it into the
+     * stage-2 decision alongside the bang-bang's request, the state machine's hot-boiler
+     * ceiling and BurnerBoostPolicy's shoulder-season lock.
+     *
+     * Note the level is STICKY by design - triggerFailsafe() never downgrades, so a fault must
+     * be cleared through a recovery path. That makes a half-power lock-out persistent, which is
+     * the intent, and is why the level is now published on boiler/status/failsafe: before this
+     * it was visible nowhere.
+     */
+    static bool fullPowerPermitted() { return currentLevel.load() < FailsafeLevel::DEGRADED; }
+
+    /// True once per level change, for the publisher. Same shape as
+    /// ModbusBusRelease::consumeStateChange(), and for the same reason: the level changes in
+    /// contexts that must not do MQTT or logging work.
+    static bool consumeLevelChange();
     
     // Attempt system recovery
     static bool attemptRecovery();
@@ -103,6 +124,12 @@ private:
     // attemptRecovery/clearEmergencyStop (which run outside stateMutex_) cannot
     // tear against triggerFailsafe's guarded read-modify-write of the level.
     static std::atomic<FailsafeLevel> currentLevel;
+    /// Set by setLevel() on every real change, consumed by the publisher.
+    static std::atomic<bool> levelChanged_;
+
+    /// The ONLY writer of currentLevel. Added so the change flag cannot be forgotten at one of
+    /// the six sites that used to store it directly.
+    static void setLevel(FailsafeLevel level);
     static std::atomic<EmergencyStopRelease::Cause> latchCause_;
     static SystemError lastError;
     static uint32_t failsafeStartTime;
