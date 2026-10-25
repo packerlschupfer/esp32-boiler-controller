@@ -2,7 +2,23 @@
 
 ## Overview
 
-The boiler controller implements a **4-layer safety architecture**: three software layers (BurnerSafetyValidator, SafetyInterlocks, CentralizedFailsafe) and the hardware DELAY watchdog of the RYN4 relay module. The burner state machine runs the software checks in its states (see Burner State Machine Integration). Hardware interlocks are not implemented (see below).
+The boiler controller implements a **5-layer safety architecture**: three software layers that
+stop the burner (BurnerSafetyValidator, SafetyInterlocks, CentralizedFailsafe), the hardware
+DELAY watchdog of the RYN4 relay module, and frost protection - the only layer that *starts* a
+burn. The burner state machine runs the software checks in its states (see Burner State Machine
+Integration). Hardware interlocks are not implemented (see below).
+
+| Layer | Mechanism | Direction |
+|-------|-----------|-----------|
+| 1 | BurnerSafetyValidator | refuses to start |
+| 2 | SafetyInterlocks | stops a running burn |
+| 3 | CentralizedFailsafe | coordinated shutdown, and the sticky failsafe level |
+| 4 | RYN4 DELAY watchdog (hardware) | de-energises everything if the controller goes silent |
+| 5 | FrostProtection | **starts** a burn when nothing else will |
+
+Layer 4 is the only one that survives a dead controller, and it can only ever switch things
+**off** - which is why Layer 5 cannot protect against a dead controller either, and why a
+hardware frost thermostat remains the only answer to that case.
 
 **Design Philosophy**: Defense in depth - multiple independent safety checks ensure that failure of one layer does not compromise overall system safety.
 
