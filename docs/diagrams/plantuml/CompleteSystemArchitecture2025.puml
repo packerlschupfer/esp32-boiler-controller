@@ -71,6 +71,9 @@ node "ESP32" {
         [PIDControlModule] as PIDCtrl
         [WheaterControlModule] as WaterCtrl
         [PumpControlModule] as PumpCtrl
+        [FrostProtection\ntwo latches: flow/room, tank] as FrostCtrl
+        [ModbusBusRelease\nRS485 ownership window] as BusRelease
+        [SchedulerClock\nUTC in the RTC, local via TZ_RULE] as SchedClock
     }
 
     package "Shared Data\n(Mutex Protected)" STORAGE {

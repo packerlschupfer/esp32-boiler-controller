@@ -14,7 +14,24 @@ skinparam database {
     FontColor #ffffff
 }
 
-title Safety and Error Handling - Four-Layer Protection\nCritical Safety Interlocks with FRAM Logging
+title Safety and Error Handling - Five-Layer Protection\nCritical Safety Interlocks with FRAM Logging
+
+note as LayerModel
+  Five layers now: frost protection (FrostProtection.puml) is
+  the fifth and the only one that STARTS a burn. The table of
+  all five, with the direction each acts in, is in
+  SAFETY_SYSTEM.md - deliberately not copied here, because a
+  second copy is a second thing to forget: the "half-power limit
+  is not implemented" text this diagram carried until today had
+  been false for the life of the project.
+
+  The one point worth having at hand while reading this diagram:
+  layer 4, the RYN4 DELAY watchdog, is the only layer that
+  survives a dead controller - and it can only ever switch things
+  OFF. Which is why layer 5 cannot protect against a dead
+  controller either, and why a hardware frost thermostat is still
+  the only answer to that case.
+end note
 
 package "Error Detection Sources" {
     component [Temperature Sensors\nMB8ART Errors\nTimeouts] as TempSensor
@@ -30,7 +47,7 @@ package "Error Classification System" {
 
     storage "CRITICAL / EMERGENCY\nCRITICAL: burner emergencyShutdown()\nEMERGENCY: CentralizedFailsafe::emergencyStop()" as Critical
 
-    storage "DEGRADED\nlogged; half-power limit\nis logged but not implemented" as Major
+    storage "DEGRADED\nlogged; withholds burner stage 2\nenforced in BoilerTempControlTask\nsticky: triggerFailsafe never downgrades" as Major
 
     storage "WARNING\nlog only" as Minor
 
@@ -50,7 +67,7 @@ package "Safety Monitors" {
 package "Error Actions" {
     component [Emergency Shutdown\nBurner relays R1-R3 OFF\nPumps stay with PumpControlModule] as EmergencyStop
 
-    component [Degraded Mode\nHalf power operation\nWiden limits\nFallback control\nContinue monitoring] as DegradedMode
+    component [Degraded Mode\nStage 2 withheld (half power)\nWiden limits\nFallback control\nContinue monitoring] as DegradedMode
 
     component [Error Logging\nConsole output\nFRAM storage\nMQTT publish\nIncrement counters] as LogError
 }
@@ -83,6 +100,7 @@ package "Failsafe States" {
 
 package "Error Reporting" {
     component [MQTT Report\nJSON Details] as MQTTReport
+    component [boiler/status/failsafe\nretained, on change\n{"level":"Normal","fullPower":true}] as FailsafeStatus
     component [FRAM Log\nFull Details] as FRAMLog
     component [Error Context\nErrorContextCapture snapshot\n(critical errors, 30 s limit)\nMQTTTask: boiler/error/context\nretained] as ErrorContext
     component [LED_BUILTIN\non = running\nblinking = init failure\nno error codes] as LEDStatus
@@ -90,7 +108,7 @@ package "Error Reporting" {
 
 ' Error Flow
 TempSensor --> ErrorHandler : SENSOR_FAILURE\nTIMEOUT\nOUT_OF_RANGE
-RelaySensor --> ErrorHandler : RELAY_NOT_RESPONDING\nCOMM_ERROR
+RelaySensor --> ErrorHandler : RELAY_NOT_RESPONDING\nCOMM_ERROR (now read)
 CommErrors --> ErrorHandler : MODBUS_TIMEOUT\nMQTT_DISCONNECT
 SystemErrors --> ErrorHandler : TASK_WATCHDOG\nMEMORY_LOW
 SafetySensors --> ErrorHandler : FLAME_LOST\nOVERTEMP
@@ -147,14 +165,56 @@ CommErrors --> CommFailsafe : on failure
 
 ' Reporting
 ErrorHandler --> MQTTReport
+ErrorHandler --> FailsafeStatus : level change
 ErrorHandler --> FRAMLog
 Critical --> MQTTReport : urgent
 ErrorHandler --> ErrorContext : logError()
 
+note bottom of RelaySensor
+  Relay evidence, corrected 2026-10-25 (7cde437, 5521222):
+
+  SYNCHRONIZED is EARNED per verification - set on a clean
+  read-back, cleared on a persistent mismatch and on two
+  consecutive DELAY-renewal failures. It used to be set on
+  every successful READ before the mismatch check and never
+  cleared, so it meant "the bus answered" and went
+  permanently true at boot.
+
+  COMM_ERROR is cleared on the same clean verification. It
+  used to be set in two places and read by nobody.
+
+  SafetyInterlocks::checkCommunicationStatus() now reads BOTH,
+  because they fail on different evidence: SYNCHRONIZED drops
+  when the relays stop matching what was commanded, COMM_ERROR
+  also covers a failed DELAY renewal - the case nothing else
+  can see, where the relays still follow their last command
+  while every ON relay sits ~2.5 s from a hardware auto-OFF
+  with no post-purge.
+
+  Error::RELAY is cleared in RYN4ProcessingTask on a FULLY
+  clean verification (realMismatch == 0), not on one relay's
+  success. Its only previous clear was in ErrorRecovery, which
+  is dead code - so one escalation latched it until a power
+  cycle, and because it is in SafetyInterlocks::CRITICAL_ERRORS
+  every later ignition failed and emergency_reset was refused.
+end note
+
+note bottom of AutoRecovery
+  "Auto recovery" here means the per-subsystem retries
+  (sensor reinit, MQTT backoff), NOT ErrorRecovery.cpp:
+  that module is reachable only through REPORT_ERROR /
+  REPORT_WARNING / REPORT_CRITICAL in its own header, and
+  nothing in src/ uses them. Treat it as dead code.
+end note
+
 note right of ErrorHandler
   Failsafe levels (CentralizedFailsafe):
   WARNING: log only
-  DEGRADED: logged; half-power limit not implemented
+  DEGRADED: logged; withholds burner stage 2. Enforced in
+    BoilerTempControlTask, NOT here: fullPowerPermitted()
+    (currentLevel < DEGRADED) is ANDed into the highPower
+    term as a FOURTH gate, beside the bang-bang request,
+    permission.highPowerAllowed and BurnerBoostPolicy.
   CRITICAL: burner emergencyShutdown()
   EMERGENCY: emergencyStop() - burner off, pumps ON,
     EMERGENCY_STOP set, BOILER_ENABLED cleared
@@ -165,7 +225,13 @@ note right of ErrorHandler
   - RelayVerificationManager: CRITICAL or WARNING
   - Power level relay fault: DEGRADED
   - SafetyInterlocks mutex failures: DEGRADED
-  Levels are never downgraded by triggerFailsafe.
+  Levels are never downgraded by triggerFailsafe, which is
+  why a DEGRADED half-power lock-out persists until a
+  recovery path clears it.
+
+  Error::MODBUS is in CRITICAL_ERRORS and has NO producer at
+  all - deliberately kept; reasoning in SafetyInterlocks.cpp.
+  Nothing in this diagram should be read as setting it.
 end note
 
 note right of EmergencyStop

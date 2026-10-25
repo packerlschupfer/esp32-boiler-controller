@@ -1,0 +1,89 @@
+@startuml FrostProtection
+!include theme.puml
+
+' File-local: the theme has no activity colours, so stock PlantUML draws light
+' activity boxes and diamonds under the theme's white text. Same fix
+' HeatingControlLogic.puml uses.
+skinparam activity {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+    DiamondBackgroundColor #36648B
+    DiamondBorderColor #ffffff
+    DiamondFontColor #ffffff
+}
+
+title Frost Protection - Two Independent Latches\nFlow or room protects the house; tank charges the cylinder
+
+start
+
+:Readings from the sensor set\n(flow, room, tank);
+
+:Mark each reading USABLE = valid AND fresh\n(per reading, independently);
+note right
+  PER READING, not a single gate on all three. A stale tank
+  does not disable room-based protection - only the tank's
+  own trigger. Freshness uses per-source timestamps:
+  lastBoilerTempUpdateTimestamp for flow and tank,
+  insideTempGoodMs for the room.
+
+  Staleness is a trigger condition, not a detail. Nothing
+  clears isBoilerTempOutputValid when MB8ART reads STOP, so
+  a dead bus left the last value flagged valid forever - a
+  frozen warm reading meant frost could never fire again,
+  and a frozen cold one would have fired forever.
+
+  An unusable reading can never TRIGGER. On RELEASE it
+  counts as "not blocking", so a burn stops rather than
+  continuing blind.
+end note
+
+if (Any usable reading below 5.0 °C?) then (no)
+  if (Latched and every watched reading clear of 10.0 °C?) then (yes)
+    :Release the latch;
+    stop
+  else (no)
+    :Hold current state;
+    stop
+  endif
+else (yes)
+endif
+
+fork
+  :flow OR room cold\n-> heatDemand();
+  :Space heating demand\nOVERRIDES heating_enabled;
+fork again
+  :tank cold\n-> waterDemand();
+  :DHW CHARGE\nOVERRIDES water_enabled;
+  note right
+    The tank used to ask for SPACE heating, which
+    warms the house and does nothing for the tank.
+  end note
+end fork
+
+:Latched until the release threshold;
+
+stop
+
+floating note right
+  Thresholds (FrostProtectionPolicy.h):
+    TRIGGER_TENTHS = 50   (5.0 °C)
+    RELEASE_TENTHS = 100  (10.0 °C)
+  Latching, with a static_assert that release is
+  above trigger.
+
+  The two latches are INDEPENDENT:
+    heatDemand()  watches flow OR room -> space heating
+    waterDemand() watches tank         -> DHW charge
+
+  NEITHER overrides boiler_enabled. A drained-for-service
+  system is a likely reason to switch the boiler off, and
+  firing into a drained boiler is worse than frost.
+
+  Source: include/modules/control/FrostProtectionPolicy.h
+          include/modules/control/FrostProtection.h
+          src/modules/control/FrostProtection.cpp
+  Shipped in 9bf6be5. Demand side: HeatingControlLogic.puml.
+end note
+
+@enduml

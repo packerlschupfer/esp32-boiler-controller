@@ -126,6 +126,19 @@ state EmergencyStop {
 
 EmergencyStop --> SystemIdle : EMERGENCY_STOP released\n(MQTT emergency_reset once causes cleared,\nor sensor recovery after a stale-sensor stop)
 
+note bottom of EmergencyStop
+  emergency_reset returns a result now. After a
+  sensor-recovery release the latch is clear but
+  BOILER_ENABLED is NOT restored, and the command used to
+  answer "emergency_not_active" and do nothing - so the
+  documented recovery was a dead end.
+
+  It now repairs that specific mismatch (user wants the
+  boiler on, the bit says otherwise, and no latch explains
+  it), gated on the full safety set, answering
+  "boiler_re_enabled".
+end note
+
 state SystemError {
     SystemError : Entry: ErrorHandler::enterFailsafeMode()
     SystemError : Do: CRITICAL failsafe (burner shut down)

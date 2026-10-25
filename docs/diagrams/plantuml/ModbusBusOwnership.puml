@@ -1,0 +1,118 @@
+@startuml ModbusBusOwnership
+!include theme.puml
+
+' File-local: stock PlantUML gives storage a light fill, which leaves the
+' theme's white text unreadable. Same fix the other diagrams use.
+skinparam storage {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
+title RS485 Bus Ownership - Release and Reacquire\nOne bus, three devices: releasing it means nothing can actuate
+
+package "The physical constraint" {
+    component [ModbusCoordinator\n500 ms ticks, 10-tick / 5 s cycle\nschedules every device on the SAME bus] as Coordinator
+
+    storage "MB8ART\ntemperatures" as MB8ART
+    storage "ANDRTF3\nroom sensor" as ANDRTF3
+    storage "RYN4\nrelays - burner and pumps" as RYN4
+
+    storage "RYN4 DELAY watchdog\n10 s per energised relay\nrenewed on every RYN4_SET tick" as Watchdog
+
+    Coordinator --> MB8ART : reads
+    Coordinator --> ANDRTF3 : reads
+    Coordinator --> RYN4 : RYN4_SET\n+ DELAY renewal
+    Watchdog --> RYN4 : de-energises EVERYTHING\nwithin 10 s, unaided
+}
+
+note bottom of Coordinator
+  All three share one RS485 bus, so the obvious design -
+  "stop polling and let the safety layer stop the burner" -
+  is impossible: once the bus is released, nothing can
+  actuate anything. The release has to be refused up front
+  instead, and the hardware has to be able to finish the job
+  without us.
+end note
+
+package "Ownership lifecycle" {
+    storage "Bus HELD (normal)\nModbusCoordinator owns the bus" as Held
+    storage "Bus RELEASED\nanother master owns it" as Released
+}
+
+Held --> Released : bus_release [seconds]\nonly if mayRelease() == NONE
+Released --> Held : bus_acquire\nor on-device expiry
+
+note right of Held
+  Entry REFUSES, it does not orchestrate.
+  BusReleasePolicy::mayRelease() returns a reason,
+  checked in this priority order:
+
+  1. BURNER_ACTIVE      a firing relay is closed
+  2. DEMAND_PRESENT     demand is armed - it precedes
+                        the relays by a pre-purge
+  3. PUMP_ACTIVE        any pump relay is closed
+  4. BURNER_SEQUENCING  SM not in IDLE / LOCKOUT / ERROR
+  5. EMERGENCY_LATCHED  emergency stop latched
+
+  PUMP_ACTIVE is there because releasing during
+  post-purge, pump overrun or emergency dissipation
+  would trap residual heat with no flow.
+end note
+
+note right of Released
+  While released:
+  - the burner CANNOT be armed -
+    BurnerStateMachine::setHeatDemand consults the policy
+  - firing bits are forced out of the DESIRED mask BEFORE
+    bus access resumes
+  - the sensor fallback does not escalate: the only thing
+    that re-evaluated it was driven BY MB8ART reads, and
+    "stale because we stopped asking" is not the same
+    fault as "stale and we don't know why" (9bf6be5)
+
+  The window expires ON-DEVICE: with the bus released there
+  is no guaranteed path for a remote acquire, so a dropped
+  network must not park the controller.
+  Default 600 s, min 30 s, max 900 s hard cap.
+  Extending only ever lengthens, never shortens.
+
+  A reboot mid-window is safe by construction: nothing is
+  persisted, so the controller comes back with a busy bus
+  and the other master's tool fails visibly.
+end note
+
+Released --> Watchdog : ticks withheld
+
+note bottom of Watchdog
+  This is what makes the whole feature safe, and it was NOT
+  designed for it. Every relay switched ON is held by an RYN4
+  DELAY watchdog, renewed on each RYN4_SET tick. Withhold the
+  ticks and the board drops burner, pumps and all by itself -
+  no cooperation from the firmware required.
+
+  So a released bus converges on the same physical state as
+  pulling the controller's power.
+end note
+
+package "Observability" {
+    component "boiler/status/bus\nretained, published on change\nreleased + seconds left, or the end reason\n(timeout or command)" as BusStatus
+    component "boiler/cmd/system\npayload: bus_release <seconds>\npayload: bus_acquire" as BusCmd
+}
+
+BusCmd --> Held : bus_release
+Released --> BusStatus : publishes
+
+legend right
+  Source of truth:
+  include/modules/control/BusReleasePolicy.h (read the
+  header comment - it explains the why)
+  src/core/ModbusBusRelease.cpp
+  src/core/ModbusCoordinator.cpp
+
+  Shipped in a4fc936. First real use 2026-10-25
+  14:49:40-14:52:59 CET: 199 s of a 900 s window for a
+  room-sensor firmware update. Nothing latched.
+endlegend
+
+@enduml

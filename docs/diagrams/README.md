@@ -10,8 +10,10 @@ All sources are PlantUML files in `plantuml/`; each one includes the shared dark
 - `BurnerSystemController.puml` - BurnerSystemController class, burner relays R1-R3 and pump separation
 - `CompleteSystemArchitecture2025.puml` - Deployment view: 19 tasks, shared resources, Modbus, storage, network, MQTT topics
 - `ControlRequestFlow.puml` - Sequence: heating/water requests, water priority, demand arming, burner relays
+- `FrostProtection.puml` - Activity: the two frost latches (flow/room to heating, tank to a DHW charge), the valid-AND-fresh trigger rule
 - `HeatingControlLogic.puml` - Activity: HeatingControlTask, weather vs room mode, heating curve, burner request
 - `HotWaterScheduler.puml` - Aspirational pre-heating scheduler (not implemented; TimerSchedulerTask exists)
+- `ModbusBusOwnership.puml` - RS485 bus release: one bus three devices, the refusal reasons, and the DELAY watchdog that makes it safe
 - `LibraryEcosystem.puml` - Custom libraries and their dependencies
 - `ParameterManagementFlow.puml` - Component view: MQTT parameter topics, PersistentStorage, NVS
 - `ParameterUpdateSequence.puml` - Sequence: parameter set, save, get/list

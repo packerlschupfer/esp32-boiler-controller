@@ -39,9 +39,16 @@ state IDLE {
 
 IDLE --> CHECK_SCHEDULES : Timer fired
 
+note top of CHECK_SCHEDULES
+  The DS3231 stores UTC, not local time. Local is derived
+  from the compiled POSIX rule (SchedulerClock::TZ_RULE),
+  so DST needs no network. boiler/status/clock publishes
+  both halves.
+end note
+
 state CHECK_SCHEDULES {
     [*] --> ReadRTC
-    ReadRTC --> ValidateTime : DS3231 now()
+    ReadRTC --> ValidateTime : DS3231 now() - UTC
     ValidateTime --> CheckVacation : Valid time
     ValidateTime --> IDLE : Invalid RTC
 

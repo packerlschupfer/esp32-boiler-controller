@@ -18,6 +18,11 @@ start
 
 :HeatingControlTask\n(5 s timer and control events);
 
+if (HEATING_ON set while state is HeatingOff?) then (yes)
+  :Invariant heal - clearHeatingActive()\n(a leaked flag ran the pump with no burner request);
+else (no)
+endif
+
 if (Boiler and heating enabled?) then (no)
   :stopHeating() - clear HEATING_ON\nclearRequest(HEATING);
   stop
@@ -37,7 +42,7 @@ else (no)
   endif
 endif
 
-if (Heating needed or HEATING_ON_OVERRIDE?) then (no)
+if (Heating needed, FROST demand, or HEATING_ON_OVERRIDE?) then (no)
   :If heating: stopHeating()\nclearRequest(HEATING);
   stop
 else (yes)
@@ -48,6 +53,26 @@ if (Water request active and WATER_PRIORITY set?) then (yes)
   stop
 else (no)
 endif
+
+if (Required sensors available?) then (no)
+  :Heating not started\n(HEATING_ON stays clear);
+  stop
+else (yes)
+endif
+note right
+  Checked BEFORE startHeating() since b3f3b06.
+  It used to sit AFTER, and HEATING_ON is not a
+  private flag: PumpControlModule runs the heating
+  pump off it (modeActiveBit), WheaterControlTask
+  refuses a water charge while it is set with water
+  priority off, and SafetyInterlocks and
+  BurnerStateMachine both read it.
+
+  So a sensor outage ran the pump with no burner
+  request behind it and locked out hot water - and
+  nothing cleared it, because every clear was keyed
+  on state == HeatingOn, which it never became.
+end note
 
 :startHeating() - set HEATING_ON;
 
@@ -72,6 +97,12 @@ note right
      to the boiler's own minimum
 end note
 
+if (Curve calculation got the mutex?) then (no)
+  :clearHeatingActive()\n- undoes the whole start;
+  stop
+else (yes)
+endif
+
 :BurnerRequestManager::setHeatingRequest(target)\nHEATING + POWER_LOW + target in bits 16-23;
 note right
   Example: 70 °C = 0x00460001
@@ -93,6 +124,16 @@ note right
 end note
 
 stop
+
+floating note right
+  Frost protection is a demand source for this task
+  and overrides HEATING_ENABLED. It has its own
+  diagram: FrostProtection.puml.
+
+  All four teardown sites call one clearHeatingActive()
+  helper, so HEATING_ON and the request always clear
+  together.
+end note
 
 floating note right
   heating_hysteresis (default 0.5 °C):
