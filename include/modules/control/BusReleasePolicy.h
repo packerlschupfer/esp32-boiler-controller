@@ -45,8 +45,22 @@
  * so the controller comes back fully operational with a busy bus. The other master's tool
  * fails visibly, which is the right way round.
  *
- * Sensors go stale during the window and the fallback escalates as it would for a bus fault -
- * that path is unchanged and already exercised.
+ * Sensors go stale during the window, and - MEASURED 2026-10-25, during the first real window -
+ * the fallback does NOT escalate. I had written here that it "escalates as it would for a bus
+ * fault"; it does not, and the reason is structural rather than lucky. While the boiler is idle
+ * the only thing that re-evaluates TemperatureSensorFallback is the refresh inside
+ * BurnerControlTask's processTemperatureUpdate(), and that function is driven BY MB8ART reads.
+ * No bus, no reads, no evaluation - so the fallback holds its last value for the whole window.
+ *
+ * That is in this feature's favour: no SENSOR_FAILURE to clear, no latch to release, nothing to
+ * recover afterwards, and it cannot be otherwise while the entry gate guarantees an idle boiler.
+ * Arming stays independently gated - a new heat request calls canContinueOperation() from the
+ * heating and water tasks, which run on their own cadence rather than on sensor reads, so the
+ * burner cannot light on stale data.
+ *
+ * But do not read it as a property of this window: `sf` and the retained
+ * boiler/status/sensor_mode are equally blind to a REAL idle MB8ART outage, which looks exactly
+ * the same from outside. That gap is independent of this feature and is recorded separately.
  *
  * THE RELAY BOARD MAKES THIS FAIL-SAFE IN HARDWARE, which is the strongest property here and
  * was not designed for this feature at all. Every relay switched ON is held by an RYN4 DELAY
