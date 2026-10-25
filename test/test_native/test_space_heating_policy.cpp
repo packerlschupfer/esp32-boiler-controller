@@ -38,3 +38,69 @@ void test_space_heating_outside_noise_does_not_toggle() {
     TEST_ASSERT_EQUAL_INT(0, stops);
     TEST_ASSERT_TRUE(heating);
 }
+
+// ---------------------------------------------------------------------------
+// Room backstop and the full weather decision (2026-10-25)
+// ---------------------------------------------------------------------------
+
+void test_space_heating_room_backstop_is_asymmetric() {
+    // Target 19.2, margin 1.0 -> limit 20.2; hysteresis 0.5 -> restart test at 19.7.
+    // While heating: stop only ABOVE the limit.
+    TEST_ASSERT_FALSE(roomAtBackstop(202, 192, 10, 5, true));
+    TEST_ASSERT_TRUE(roomAtBackstop(203, 192, 10, 5, true));
+    // While off: the predicate is the RESTART test, so the deadband satisfies it.
+    TEST_ASSERT_TRUE(roomAtBackstop(197, 192, 10, 5, false));
+    TEST_ASSERT_FALSE(roomAtBackstop(196, 192, 10, 5, false));
+    // The live numbers from the swap: the room sat at 19.8, one tenth inside the backstop,
+    // which is why heating was off and why losing the term turned it on.
+    TEST_ASSERT_TRUE(roomAtBackstop(198, 192, 10, 5, false));
+}
+
+void test_space_heating_unknown_room_must_not_license_heating() {
+    // THE REGRESSION. 2026-10-25 00:44 UTC: pulling the room sensor fired the burner for two
+    // minutes. The backstop was computed only for a valid reading and defaulted to "not
+    // overheated", so an unreadable room sensor removed the only term holding heating off.
+    // Outside cold, room target configured, no usable room value -> must NOT heat.
+    const WeatherDecision d = weatherDecision(true, true, false, false);
+    TEST_ASSERT_FALSE_MESSAGE(d.heat, "a missing room reading must never turn heating ON");
+    TEST_ASSERT_EQUAL(WeatherBlock::ROOM_UNKNOWN, d.block);
+}
+
+void test_space_heating_target_substitution_would_have_reopened_the_hole() {
+    // The curve falls back to "room = target" when the hold expires, which is fine for a flow
+    // setpoint but not here: target 19.2 is BELOW the 19.7 restart limit, so a TARGET
+    // substitution reads as "not at backstop" and would license heating exactly as the
+    // original bug did. Hence the decision keys on isMeasurement(), not on having a number.
+    TEST_ASSERT_FALSE(roomAtBackstop(192, 192, 10, 5, false));          // target alone: not blocking
+    TEST_ASSERT_FALSE(weatherDecision(true, true, false, false).heat);  // but the decision blocks
+}
+
+void test_space_heating_weather_decision_outside_gate_is_reported_first() {
+    // 2026-10-18: at 20 C outside against a 13 C threshold the topic said "backstop", which
+    // sent the user after a room margin that was not the cause. The gate wins the reason even
+    // when the room is also at its limit, and even when the room reading is missing.
+    TEST_ASSERT_EQUAL(WeatherBlock::OUTSIDE, weatherDecision(false, true, true, true).block);
+    TEST_ASSERT_EQUAL(WeatherBlock::OUTSIDE, weatherDecision(false, true, false, false).block);
+    TEST_ASSERT_FALSE(weatherDecision(false, true, true, false).heat);
+}
+
+void test_space_heating_weather_decision_heats_and_blocks_on_the_room() {
+    // The two normal outcomes with a working sensor.
+    const WeatherDecision on = weatherDecision(true, true, true, false);
+    TEST_ASSERT_TRUE(on.heat);
+    TEST_ASSERT_EQUAL(WeatherBlock::NONE, on.block);
+
+    const WeatherDecision off = weatherDecision(true, true, true, true);
+    TEST_ASSERT_FALSE(off.heat);
+    TEST_ASSERT_EQUAL(WeatherBlock::ROOM_BACKSTOP, off.block);
+}
+
+void test_space_heating_no_room_target_keeps_weather_only_control() {
+    // With no room target there is no backstop to evaluate, and weather-only control is the
+    // intended mode - so a missing room reading must NOT stop heating here. Without this
+    // carve-out the fix would silently disable heating for anyone running without a room
+    // target configured.
+    TEST_ASSERT_TRUE(weatherDecision(true, false, false, false).heat);
+    TEST_ASSERT_TRUE(weatherDecision(true, false, false, true).heat);
+    TEST_ASSERT_FALSE(weatherDecision(false, false, false, false).heat);
+}

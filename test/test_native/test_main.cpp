@@ -83,6 +83,12 @@ void test_param_save_coalesces_a_burst_of_clicks();
 void test_param_save_survives_the_millis_wrap();
 void test_space_heating_outside_threshold_start_and_stop_limits();
 void test_space_heating_outside_noise_does_not_toggle();
+void test_space_heating_room_backstop_is_asymmetric();
+void test_space_heating_unknown_room_must_not_license_heating();
+void test_space_heating_target_substitution_would_have_reopened_the_hole();
+void test_space_heating_weather_decision_outside_gate_is_reported_first();
+void test_space_heating_weather_decision_heats_and_blocks_on_the_room();
+void test_space_heating_no_room_target_keeps_weather_only_control();
 
 // Error context (compact boiler/error/context JSON)
 void test_error_context_worst_case_fits_mqtt_payload();
@@ -643,6 +649,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_param_save_survives_the_millis_wrap);
     RUN_TEST(test_space_heating_outside_threshold_start_and_stop_limits);
     RUN_TEST(test_space_heating_outside_noise_does_not_toggle);
+    RUN_TEST(test_space_heating_room_backstop_is_asymmetric);
+    RUN_TEST(test_space_heating_unknown_room_must_not_license_heating);
+    RUN_TEST(test_space_heating_target_substitution_would_have_reopened_the_hole);
+    RUN_TEST(test_space_heating_weather_decision_outside_gate_is_reported_first);
+    RUN_TEST(test_space_heating_weather_decision_heats_and_blocks_on_the_room);
+    RUN_TEST(test_space_heating_no_room_target_keeps_weather_only_control);
 
     // Error context (compact boiler/error/context JSON)
     RUN_TEST(test_error_context_worst_case_fits_mqtt_payload);

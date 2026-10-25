@@ -28,6 +28,43 @@ void HeatingControlModule::initialize() {
     LOG_INFO(TAG, "HeatingControlModule initialized.");
 }
 
+RoomTempFallbackPolicy::Substitute HeatingControlModule::resolveRoomForControl(
+    const SharedSensorReadings& readings, Temperature_t roomTarget) const {
+    // The warnings below are edge-triggered. This runs on the ~1 Hz diagnostics path and on
+    // the ON/OFF decision path (both HeatingControlTask), so a plain LOG_WARN would repeat
+    // for as long as the fault lasts - from boot until the first successful read, and
+    // forever with an unplugged sensor. One line when it breaks and one when it recovers is
+    // the whole signal; the repetition only buys log pressure on a device where a single
+    // LOG_* costs ~1312 B of stack. Statics are safe here: every caller is
+    // HeatingControlTask, a single task.
+    static bool insideWarned = false;
+
+    if (readings.isInsideTempValid) {
+        // Timestamp from the SENSOR's last good read, not from millis() here. The flag stays
+        // true through up to three failed reads (~15 s, ANDRTF3Task), so recording "now" on
+        // every valid-looking cycle would keep resetting the hold window against data that
+        // was already going stale. Falls back to millis() only if the field was never set.
+        const uint32_t readAt = (readings.insideTempGoodMs != 0) ? readings.insideTempGoodMs
+                                                                 : millis();
+        RoomTempFallbackPolicy::record(lastRoom_, readings.insideTemp, readAt);
+        if (insideWarned) {
+            LOG_INFO(TAG, "Room sensor valid again - back on the real reading");
+            insideWarned = false;
+        }
+        return RoomTempFallbackPolicy::Substitute{readings.insideTemp,
+                                                  RoomTempFallbackPolicy::Source::MEASURED};
+    }
+
+    const RoomTempFallbackPolicy::Substitute sub =
+        RoomTempFallbackPolicy::substitute(lastRoom_, millis(), roomTarget);
+    if (!insideWarned) {
+        LOG_WARN(TAG, "Room sensor invalid - using %d (0.1°C) from %s",
+                 sub.value, RoomTempFallbackPolicy::toString(sub.source));
+        insideWarned = true;
+    }
+    return sub;
+}
+
 Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     const SharedSensorReadings& readings, const SystemSettings& settings,
     CurveDebug* debugOut) const {
@@ -55,33 +92,10 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     // whole signal; the repetition only buys log pressure on a device where a single LOG_*
     // costs ~1312 B of stack. Statics are safe here: every caller of this function is
     // HeatingControlTask, a single task.
-    Temperature_t effectiveInside = readings.insideTemp;
-    RoomTempFallbackPolicy::Source insideSource = RoomTempFallbackPolicy::Source::MEASURED;
-    static bool insideWarned = false;
-    if (readings.isInsideTempValid) {
-        // Timestamp from the SENSOR's last good read, not from millis() here. The flag stays
-        // true through up to three failed reads (~15 s, ANDRTF3Task), so recording "now" on
-        // every valid-looking cycle would keep resetting the hold window against data that
-        // was already going stale. Falls back to millis() only if the field was never set.
-        const uint32_t readAt = (readings.insideTempGoodMs != 0) ? readings.insideTempGoodMs
-                                                                 : millis();
-        RoomTempFallbackPolicy::record(lastRoom_, readings.insideTemp, readAt);
-        if (insideWarned) {
-            LOG_INFO(TAG, "Room sensor valid again - heating curve back on the real reading");
-            insideWarned = false;
-        }
-    } else {
-        const RoomTempFallbackPolicy::Substitute sub =
-            RoomTempFallbackPolicy::substitute(lastRoom_, millis(),
-                                               settings.targetTemperatureInside);
-        effectiveInside = sub.value;
-        insideSource = sub.source;
-        if (!insideWarned) {
-            LOG_WARN(TAG, "Room sensor invalid - heating curve using %d (0.1°C) from %s",
-                     effectiveInside, RoomTempFallbackPolicy::toString(insideSource));
-            insideWarned = true;
-        }
-    }
+    const RoomTempFallbackPolicy::Substitute room =
+        resolveRoomForControl(readings, settings.targetTemperatureInside);
+    Temperature_t effectiveInside = room.value;
+    RoomTempFallbackPolicy::Source insideSource = room.source;
 
     // Weather-compensated mode: apply room temp deviation curve shift (Parallelverschiebung)
     // If room is cold relative to target → shift curve UP (more heat)

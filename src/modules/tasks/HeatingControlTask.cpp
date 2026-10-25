@@ -12,6 +12,7 @@
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/FrostProtectionPolicy.h"  // frost demand, in degrees
 #include "modules/control/SpaceHeatingPolicy.h"
+#include "modules/control/RoomTempFallbackPolicy.h"  // the room value the backstop may use
 #include "modules/control/HeatingControlDiagnostics.h"
 #include "modules/tasks/MQTTTask.h"   // publishControlDiagnostics
 #include "MQTTTopics.h"
@@ -800,21 +801,37 @@ static bool checkIfSpaceHeatingNeededEvent() {
                 // Room overheat protection (Begrenzung) WITH HYSTERESIS
                 // Stop at: target + margin, Restart at: target + margin - hysteresis
                 // This prevents short-cycling when room temp oscillates near limit
-                bool roomOverheated = false;
-                if (readings.isInsideTempValid && ss.targetInside > 0) {
-                    Temperature_t overheatLimit = tempAdd(ss.targetInside, ss.overheatMargin);
-                    if (currentlyHeating) {
-                        // When heating: stop if room exceeds target + margin
-                        roomOverheated = readings.insideTemp > overheatLimit;
-                    } else {
-                        // When not heating: restart when room drops below (limit - hysteresis)
-                        // Uses heating_hysteresis setting (default 0.5°C)
-                        Temperature_t restartLimit = tempSub(overheatLimit, ss.hysteresis);
-                        roomOverheated = readings.insideTemp >= restartLimit;
-                    }
+                //
+                // The room value comes from the SAME resolver the curve uses, so a brief
+                // Modbus dropout holds the backstop on the last measurement instead of
+                // deleting it. Before 2026-10-25 this block was gated on
+                // `readings.isInsideTempValid` and `roomOverheated` simply stayed false when
+                // the sensor was invalid - which removed the only term holding heating off
+                // and fired the burner when the sensor was pulled. See
+                // SpaceHeatingPolicy::weatherDecision().
+                RoomTempFallbackPolicy::Substitute room{readings.insideTemp,
+                                                        RoomTempFallbackPolicy::Source::MEASURED};
+                if (heatingState.heatingControl != nullptr) {
+                    room = heatingState.heatingControl->resolveRoomForControl(readings,
+                                                                             ss.targetInside);
+                } else if (!readings.isInsideTempValid) {
+                    // No module to ask: treat the reading as unusable rather than as a
+                    // measurement, so the decision below still fails safe.
+                    room.source = RoomTempFallbackPolicy::Source::TARGET;
                 }
 
-                if (outsideCold && !roomOverheated) {
+                const bool roomIsMeasurement = RoomTempFallbackPolicy::isMeasurement(room.source);
+                const bool roomOverheated =
+                    roomIsMeasurement && ss.targetInside > 0 &&
+                    SpaceHeatingPolicy::roomAtBackstop(room.value, ss.targetInside,
+                                                       ss.overheatMargin, ss.hysteresis,
+                                                       currentlyHeating);
+
+                const SpaceHeatingPolicy::WeatherDecision decision =
+                    SpaceHeatingPolicy::weatherDecision(outsideCold, ss.targetInside > 0,
+                                                        roomIsMeasurement, roomOverheated);
+
+                if (decision.heat) {
                     heatingNeeded = true;
                     g_blockReason = HeatingControlDiagnostics::Block::OK;
                 } else {
@@ -828,9 +845,30 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     // (room >= limit - hysteresis), so a room merely sitting in the
                     // deadband at 19.9 set it true. Reporting the room limit then invites
                     // the user to adjust a margin that is not the cause.
-                    g_blockReason = !outsideCold
-                                        ? HeatingControlDiagnostics::Block::OUTSIDE_GATE
-                                        : HeatingControlDiagnostics::Block::ROOM_BACKSTOP;
+                    //
+                    // ROOM_UNKNOWN reuses the existing SENSOR_INVALID reason ("sensor" on
+                    // the wire), which already documents itself as "outside or room reading
+                    // invalid - weather mode fails safe". Which sensor is unreadable is not
+                    // ambiguous on the topic: `isrc` reads tgt/nom exactly when it is the
+                    // room one.
+                    switch (decision.block) {
+                        case SpaceHeatingPolicy::WeatherBlock::OUTSIDE:
+                            g_blockReason = HeatingControlDiagnostics::Block::OUTSIDE_GATE;
+                            break;
+                        case SpaceHeatingPolicy::WeatherBlock::ROOM_UNKNOWN:
+                            g_blockReason = HeatingControlDiagnostics::Block::SENSOR_INVALID;
+                            break;
+                        case SpaceHeatingPolicy::WeatherBlock::ROOM_BACKSTOP:
+                        case SpaceHeatingPolicy::WeatherBlock::NONE:
+                            g_blockReason = HeatingControlDiagnostics::Block::ROOM_BACKSTOP;
+                            break;
+                    }
+                    if (decision.block == SpaceHeatingPolicy::WeatherBlock::ROOM_UNKNOWN &&
+                        currentlyHeating) {
+                        LOG_WARN(TAG, "Heating stopped: no usable room reading (%s) - backstop "
+                                      "cannot be evaluated",
+                                 RoomTempFallbackPolicy::toString(room.source));
+                    }
                     if (!outsideCold && currentlyHeating) {
                         char outBuf[16], threshBuf[16];
                         formatTemp(outBuf, sizeof(outBuf), outsideTemp);
@@ -840,7 +878,9 @@ static bool checkIfSpaceHeatingNeededEvent() {
                                 outBuf, threshBuf);
                     } else if (roomOverheated && currentlyHeating) {
                         char roomBuf[16], limitBuf[16];
-                        formatTemp(roomBuf, sizeof(roomBuf), readings.insideTemp);
+                        // room.value, not readings.insideTemp: on a held reading those differ
+                        // and the log has to name the number the decision actually used.
+                        formatTemp(roomBuf, sizeof(roomBuf), room.value);
                         Temperature_t overheatLimit = tempAdd(ss.targetInside, ss.overheatMargin);
                         formatTemp(limitBuf, sizeof(limitBuf), overheatLimit);
                         LOG_INFO(TAG, "Heating stopped: room %s°C > overheat limit %s°C",

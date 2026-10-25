@@ -53,6 +53,29 @@ public:
         RoomTempFallbackPolicy::Source insideSource = RoomTempFallbackPolicy::Source::MEASURED;
     };
 
+    /**
+     * @brief The room temperature to control on, and where it came from.
+     *
+     * One resolver for both consumers of the room reading: the curve's base temperature and
+     * the weather-mode ON/OFF backstop. They used to disagree - the curve held the last
+     * reading through a dropout (2026-10-23) while the ON/OFF decision read
+     * isInsideTempValid raw and silently dropped its backstop, which turned the burner ON
+     * when the sensor was pulled (2026-10-25). Sharing lastRoom_ is the point: a second
+     * remembered sample could age differently from this one.
+     *
+     * Records the reading when valid, substitutes per RoomTempFallbackPolicy when not.
+     * Callers that must not act on a guess check RoomTempFallbackPolicy::isMeasurement().
+     *
+     * Takes the room target as a plain value, not the SystemSettings reference: the ON/OFF
+     * caller runs holding the sensor mutex with its settings already snapshotted, and
+     * reaching back for SystemSettings there would either read it unsynchronised or nest the
+     * settings mutex inside the sensor mutex - the H2 ordering this task deliberately avoids.
+     *
+     * @param roomTarget heating/targetTemperatureInside, tenths; <= 0 means unset
+     */
+    RoomTempFallbackPolicy::Substitute resolveRoomForControl(const SharedSensorReadings& readings,
+                                                             Temperature_t roomTarget) const;
+
     // Calculate the target temperature for space heating based on shared sensor readings and system settings
     Temperature_t calculateSpaceHeatingTargetTemp(const SharedSensorReadings& readings,
                                                   const SystemSettings& settings,
