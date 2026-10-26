@@ -51,6 +51,19 @@ previously had to be established out of band.
 Not retained, unlike `sensors/room`: a point-in-time answer to a command would be read months
 later as current. The payload carries the sensor's uptime so the period is always visible.
 
+First reading on the wall unit, which is the measurement this was built for: `fail` **0** over
+84845 readings in 23.6 h (`good` 19309 plus one 65536 wrap, against an uptime of 84844 s at 1 s
+sampling - essentially every sample succeeded), zero ADC timeouts, range errors and overflows,
+and zero parity/noise/overrun errors on the line. Against the stock-firmware baseline of 12
+faults in 8198 reads over 11.4 h.
+
+Two caveats are documented with the field table because both could make a future reading
+misleading. `fail` is 16-bit and increments on every failed 1 s reading, so a **sustained**
+fault (dead ADC, broken PT1000 wire) wraps it in ~18 h - it is a glitch rate, not a fault flag;
+for a fault use status bit 0 clear or register 53, which saturates instead of wrapping. And
+`blen` is not independent of `bfrm`/`bpar`/`bnoi`: it also counts every UART-error-poisoned
+frame, so a framing error increments both.
+
 ### Fixed: health.stack_min read 0 for the first 30 minutes of every boot
 
 `health.stack_min` / `stack_min_task` were published from the per-task scan in

@@ -43,7 +43,11 @@ namespace RoomSensorRegisterReport {
 
         uint32_t uptimeSeconds = 0;    ///< 58/59 - the denominator, since 54 wraps
         uint16_t goodReadings = 0;     ///< 54 - WRAPS at 65536 (~18 h at 1 s)
-        uint16_t failedReadings = 0;   ///< 55 - the raw failure count
+        uint16_t failedReadings = 0;   ///< 55 - the raw failure count. 16-bit: a SUSTAINED
+                                       ///< failure increments it every second and wraps it in
+                                       ///< ~18 h, so it is a glitch RATE, not a fault flag.
+                                       ///< For a fault use status bit 0 clear, or
+                                       ///< secondsSinceGood, which saturates instead.
         uint16_t lastFailReason = 0;   ///< 56 - 1 ADC timeout, 2 overflow, 3 range
         uint16_t adcTimeouts = 0;      ///< 60
         uint16_t rangeErrors = 0;      ///< 61
@@ -57,7 +61,9 @@ namespace RoomSensorRegisterReport {
         uint16_t busFrames = 0;        ///< 65 - frames seen on the bus, any address
         uint16_t busHandled = 0;       ///< 66 - frames for this sensor with a good CRC
         uint16_t busCrcErrors = 0;     ///< 67 - NOT a line metric, see the note in format()
-        uint16_t busBadLength = 0;     ///< 68
+        uint16_t busBadLength = 0;     ///< 68 - NOT independent: counts < 4 B frames, >= 256 B
+                                       ///< frames, AND every UART-error-poisoned frame, so
+                                       ///< each 69/70/71 error also lands here
         uint16_t busFramingErrors = 0; ///< 69
         uint16_t busParityErrors = 0;  ///< 70
         uint16_t busNoiseErrors = 0;   ///< 71
@@ -177,8 +183,13 @@ namespace RoomSensorRegisterReport {
 
         // Bus health AS THE SENSOR SEES IT, which is the half we have never been able to see.
         // `bcrc` (reg 67) counts a foreign request+reply pair seen as one frame, so it is NOT
-        // a line-quality metric and is expected to be non-zero on this shared bus - do not
-        // read it as noise. `bexc` is exception responses the sensor itself sent.
+        // a line-quality metric and is expected to be large on this shared bus - do not read it
+        // as noise. `bexc` is exception responses the sensor itself sent.
+        //
+        // `bf` (reg 65) counts every frame on the bus and is 16-bit, so it wraps several times
+        // a day here and is UNINTERPRETABLE to an occasional reader. `bh` counts only frames
+        // for this sensor, stays under the wrap at our 5 s poll, and is the useful one: `bh`
+        // falling short of our own poll count is what a real wiring fault looks like.
         put("bf", s.busFrames, true);
         put("bh", s.busHandled, true);
         put("bcrc", s.busCrcErrors, true);

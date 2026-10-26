@@ -274,7 +274,7 @@ a reader can always see which period the counters cover.
 | `slot` | 74 | running flash slot, `A` or `B` |
 | `up` | 58/59 | sensor uptime in seconds - **the denominator**, because `good` wraps |
 | `good` | 54 | successful readings. **Wraps at 65536**, i.e. every ~18 h at 1 s - use `up` for a rate |
-| `fail` | 55 | **raw** failed readings, the number `flt` above cannot give you |
+| `fail` | 55 | **raw** failed readings, the number `flt` above cannot give you. 16-bit: safe for any realistic glitch rate, but see the warning below |
 | `lastfail` | 56 | reason of the last failure: 1 ADC timeout, 2 overflow, 3 range |
 | `adct` / `rng` / `ovf` | 60/61/62 | ADC timeouts / range errors / overflows |
 | `age` | 53 | seconds since the last good reading (`0xFFFF` = never) |
@@ -283,10 +283,21 @@ a reader can always see which period the counters cover.
 | `tc` | 57 | last good temperature, unfiltered, 0.01 °C, as a raw 16-bit value |
 | `bf` / `bh` | 65/66 | frames seen on the bus (any address) / frames for this sensor with a good CRC |
 | `bcrc` | 67 | **not a line-quality metric** - a foreign request+reply pair is seen as one frame, so this is expected to be non-zero on this shared bus |
-| `blen` / `bfrm` / `bpar` / `bnoi` / `bovr` | 68-72 | bad length / framing / parity / noise / overrun errors |
+| `blen` / `bfrm` / `bpar` / `bnoi` / `bovr` | 68-72 | bad length / framing / parity / noise / overrun errors. **`blen` is not independent**: it counts frames under 4 bytes, frames of 256 bytes or more, **and every frame poisoned by a UART error**, so each framing/parity/noise error also increments `blen`. A few per hour of short junk on a 4-device bus is normal - a stray byte as a transceiver's driver enables reads as a 1-byte frame after the 4 ms silence |
 | `bexc` | 73 | exception responses the sensor sent |
 | `rst` | 64 | reset cause, `RCC_CSR` bits 31..24: `0x20` IWDG, `0x10` soft, `0x0C` power-on, `0x04` pin |
 | `blv` | 77 | bootloader version (0 = none) |
+
+**`fail` cannot be trusted to detect a SUSTAINED failure.** It is 16-bit and increments on
+every failed 1 s reading, so a dead ADC or a broken PT1000 wire wraps it in about 18 h. For
+that case the trustworthy signals are `st` bit 0 **clear**, `age` (register 53, which
+**saturates** at `0xFFFF` instead of wrapping) and register 50 reading 0. Use `fail` for a
+glitch rate, not as a fault flag.
+
+**What a real wiring problem would look like**, so a noisy-looking report is not misread: `bpar`
+/ `bnoi` non-zero, and above all **failed transactions of your own** - `bh` falling short of
+your own poll count. Non-zero `blen` / `bfrm` with zero parity and noise errors and a matching
+`bh` is short junk on the line, not a fault.
 
 `fw`, `slot`, `up`, `good` and `fail` are always present; every other counter is **omitted
 when zero**, same convention as 6b. `fail` is emitted even at zero, because "zero failures" is
