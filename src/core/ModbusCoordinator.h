@@ -104,6 +104,10 @@ private:
     // Tick schedule (which device operates at which tick)
     static constexpr uint32_t ANDRTF3_TICKS[] = {0};       // Room temp every 5s
     static constexpr uint32_t RYN4_SET_TICKS[] = {1, 6};   // Relay write every 2.5s
-    static constexpr uint32_t MB8ART_TICKS[] = {2, 5};     // Boiler temps every 2.5s
+    // Ticks 2 and 5 of ten, so the gaps ALTERNATE 1.5 s then 3.5 s - a 2.5 s AVERAGE, not a
+    // 2.5 s period. Anything reasoning about "the sample interval" has to use the 1.5 s
+    // minimum or the 3.5 s maximum, not the mean; the sensor-fallback debounce got this wrong
+    // (TemperatureSensorFallback.h). Corrected 2026-10-26.
+    static constexpr uint32_t MB8ART_TICKS[] = {2, 5};     // Boiler temps, 1.5 s / 3.5 s apart
     static constexpr uint32_t RYN4_READ_TICKS[] = {3, 8};  // Relay verify every 2.5s
 };

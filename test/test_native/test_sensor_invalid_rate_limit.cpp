@@ -40,9 +40,15 @@ void test_invalid_count_steps_once_per_sample_not_once_per_caller() {
     TEST_ASSERT_EQUAL_INT_MESSAGE(1, steps, "extra callers must not advance the debounce");
 }
 
-void test_invalid_count_reaches_shutdown_in_about_five_seconds() {
-    // Three steps = first sample + two further periods = ~5 s, which is what the constant's
-    // comment now claims. Simulate a caller asking every 500 ms for 6 s.
+void test_invalid_count_floor_under_uniform_polling() {
+    // The predicate's FLOOR: with a caller asking faster than the rate limit, three steps can
+    // never land sooner than first-sample + 2 x TICK = 5 s.
+    //
+    // This test used to be named "...in_about_five_seconds" and its message claimed 3 steps
+    // span about 5 s in the real system. They do not - see the schedule test below. 5 s is a
+    // lower bound that only a UNIFORM caller achieves, and the MB8ART is not uniform. Renamed
+    // and re-scoped 2026-10-26; the old name was the kind of claim that makes a passing test
+    // read as evidence for something it never measured.
     bool counting = false;
     uint32_t last = 0;
     int steps = 0;
@@ -55,7 +61,48 @@ void test_invalid_count_reaches_shutdown_in_about_five_seconds() {
             }
         }
     }
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(5000, shutdownAtMs, "3 steps should span about 5 s");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(5000, shutdownAtMs,
+                                     "uniform polling floor: 3 steps cannot beat 2 x TICK");
+}
+
+void test_invalid_count_on_the_real_mb8art_schedule_is_eight_to_ten_seconds() {
+    // THE REAL NUMBER. The MB8ART is read on ModbusCoordinator ticks {2,5} of a 10-tick 500 ms
+    // cycle, so samples arrive 1.5 s then 3.5 s apart - a 2.5 s average, never a 2.5 s period.
+    // A sample 1.5 s after a counted one fails the >= 2500 ms test and is skipped, so three
+    // steps take longer than the 5 s that three samples would suggest.
+    //
+    // Driven from the actual tick schedule rather than a synthetic uniform caller, because the
+    // uniform version is what hid this for a day.
+    const int startTicks[2] = {2, 5};
+    for (int si = 0; si < 2; ++si) {
+        const int startTick = startTicks[si];
+        bool counting = false;
+        uint32_t last = 0;
+        int steps = 0;
+        uint32_t shutdownAtMs = 0;
+        bool seen = false;
+        // 60 s of ticks; MB8ART reads on tick 2 and tick 5 of every 10.
+        for (uint32_t t = 0; t <= 60000; t += 500) {
+            const int tick = static_cast<int>((t / 500) % 10);
+            if (tick != 2 && tick != 5) continue;        // no sample on this tick
+            if (!seen) {
+                if (tick != startTick) continue;          // align the first failure
+                seen = true;
+            }
+            if (TemperatureSensorFallback::shouldCountInvalid(counting, t, last, TICK)) {
+                counting = true; last = t; steps++;
+                if (steps == TemperatureSensorFallback::INVALID_COUNT_TO_SHUTDOWN && shutdownAtMs == 0) {
+                    shutdownAtMs = t;
+                    break;
+                }
+            }
+        }
+        // From tick 5: steps at +0, +3.5, +8.5 (the +5.0 sample is skipped). From tick 2:
+        // steps at +0, +5.0, +10.0 (the +1.5 sample is skipped).
+        const uint32_t span = shutdownAtMs - (startTick == 5 ? 2500u : 1000u);
+        TEST_ASSERT_TRUE_MESSAGE(span >= 8500 && span <= 10000,
+                                 "3 steps span 8.5-10 s on the real schedule, not 5 s");
+    }
 }
 
 void test_invalid_count_still_escalates_when_the_sensor_is_completely_dead() {

@@ -117,8 +117,24 @@ private:
     // asymmetric: slow to shut down, immediate to recover.
     //
     // The INVALID counter is RATE-LIMITED to one step per MB8ART_SENSOR_READ_INTERVAL_MS
-    // (2500), so INVALID_COUNT_TO_SHUTDOWN = 3 really is about 5 s of continuous failure -
-    // the first invalid observation counts at once, then one step per sample period.
+    // (2500). The first invalid observation counts at once, then at most one step per 2.5 s.
+    //
+    // MEASURED CONSEQUENCE, 2026-10-26 review: that is NOT "about 5 s", which is what this
+    // comment used to claim. The MB8ART is read on coordinator ticks {2,5} of ten, so samples
+    // arrive 1.5 s then 3.5 s apart - a 2.5 s average, never a 2.5 s period. A sample landing
+    // 1.5 s after a counted one is therefore always discarded, and three steps span
+    // **8.5-10 s** depending on which tick the failure starts near, not 5 s.
+    //
+    // LEFT AS IS, deliberately. The alternative is a predicate that counts sample ARRIVALS
+    // with a time-based fallback for a dead sensor, and that is more machinery on a safety
+    // path to recover 3.5 s. The exposure during those seconds is a burner running without a
+    // trustworthy boiler-output reading - and that is independently covered: the boiler's own
+    // aquastat and manual-reset STB are outside this firmware, SafetyInterlocks' 110 C check
+    // does not depend on this mode, and the 5 s full safety check sees the missing output via
+    // Error::SENSOR_FAILURE. So the number is documented rather than engineered.
+    //
+    // Uneven sampling also means "three samples" can never be one wall-clock figure. Quoting
+    // the range is the honest form.
     //
     // THIS COMMENT USED TO CLAIM THE COUNTER TICKED ONCE PER MB8ART READ, AND IT DID NOT.
     // The old text argued that evaluation is driven by BurnerControlTask's TEMP_UPDATE_BITS,

@@ -254,8 +254,12 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
         if (consecutiveValidCount > 100) consecutiveValidCount = 100;  // Prevent overflow
     } else {
         // First invalid observation counts at once - the sample that revealed it has just
-        // been evaluated. Then at most one step per sample period, so three steps span about
-        // 2 x MB8ART_SENSOR_READ_INTERVAL_MS = 5 s regardless of caller count.
+        // been evaluated. Then at most one step per MB8ART_SENSOR_READ_INTERVAL_MS regardless
+        // of caller count, which is the property that matters here.
+        //
+        // It is NOT 5 s of wall clock: MB8ART samples alternate 1.5 s / 3.5 s apart (ticks
+        // {2,5} of ten), so the 1.5 s sample after a counted one is always skipped and three
+        // steps span 8.5-10 s. See the header for why that is documented rather than fixed.
         if (shouldCountInvalid(invalidCounting, now, lastInvalidCountMs,
                                SystemConstants::Timing::MB8ART_SENSOR_READ_INTERVAL_MS)) {
             invalidCounting = true;

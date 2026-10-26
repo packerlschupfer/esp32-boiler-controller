@@ -68,6 +68,32 @@ BusReleasePolicy::Refusal release(uint32_t seconds) {
         return BusReleasePolicy::Refusal::NONE;
     }
 
+    // CLAIM THE WINDOW FIRST, then validate, and roll back if refused.
+    //
+    // The checks below used to run before this store, which left a hole: setHeatDemand()
+    // refuses arming by reading isReleased() under demandMutex, so an arm landing between
+    // getHeatDemandState() returning false and this store was neither seen by the check nor
+    // refused by the gate - and it is a real race, not a theoretical one. release() runs on
+    // MQTTTask at priority 2; both callers of setHeatDemand(true) (BurnerControlTask and
+    // BoilerTempControlTask) are priority 4, so they preempt it at any point in that span, or
+    // run concurrently on the other core. BusReleasePolicy.h's claim that "the state machine
+    // cannot walk into an ignition sequence" depended on closing it. Found by the 2026-10-26
+    // review.
+    //
+    // Claiming first inverts the race: an arm during validation is refused, which is the safe
+    // direction, and a refusal rolls the flag straight back. The cost is that the coordinator
+    // may skip one 500 ms tick while we validate - and withholding one tick is exactly what
+    // the DELAY watchdog tolerates ten of, so it changes nothing physically.
+    //
+    // The DEADLINE is written before the flag, not after. Otherwise expireIfDue() - which runs
+    // on the timer task and on MQTTTask - would see the PREVIOUS deadline, long in the past,
+    // and end the window during validation: a spurious BY_TIMEOUT publish for a window that
+    // had not started. Future deadline first, then the claim, and that cannot happen.
+    const uint32_t window = BusReleasePolicy::clampSeconds(seconds);
+    s_deadlineMs.store(millis() + window * 1000u, std::memory_order_release);
+    s_lastEnd.store(static_cast<uint8_t>(Ended::NOT_YET), std::memory_order_release);
+    s_released.store(true, std::memory_order_release);
+
     // The hardware-verified mask, not the desired one: what the boiler is doing.
     const uint8_t actual = g_relayState.actual.load(std::memory_order_acquire);
 
@@ -76,6 +102,7 @@ BusReleasePolicy::Refusal release(uint32_t seconds) {
     if (!BurnerStateMachine::getHeatDemandState(demand, target)) {
         // Could not read the demand under its mutex. Refuse: an unknown demand is not a
         // cleared one, and this is an operator convenience, never urgent.
+        s_released.store(false, std::memory_order_release);
         LOG_WARN(TAG, "Bus release refused - heat demand state unreadable");
         return BusReleasePolicy::Refusal::DEMAND_PRESENT;
     }
@@ -87,16 +114,14 @@ BusReleasePolicy::Refusal release(uint32_t seconds) {
     const BusReleasePolicy::Refusal refusal =
         BusReleasePolicy::mayRelease(actual, demand, burnerState, emergencyLatched);
     if (refusal != BusReleasePolicy::Refusal::NONE) {
+        s_released.store(false, std::memory_order_release);
         LOG_WARN(TAG, "Bus release refused (%s): relays=0x%02X demand=%d sm=%d estop=%d",
                  BusReleasePolicy::toString(refusal), actual, demand ? 1 : 0,
                  static_cast<int>(burnerState), emergencyLatched ? 1 : 0);
         return refusal;
     }
 
-    const uint32_t window = BusReleasePolicy::clampSeconds(seconds);
-    s_deadlineMs.store(millis() + window * 1000u, std::memory_order_release);
-    s_lastEnd.store(static_cast<uint8_t>(Ended::NOT_YET), std::memory_order_release);
-    s_released.store(true, std::memory_order_release);
+    // Deadline, lastEnd and the flag were all set before validation - see the claim above.
     s_changed.store(true, std::memory_order_release);
     LOG_WARN(TAG, "RS485 bus RELEASED to another master for %lu s - no polling, no relay "
                   "writes, burner cannot be armed",
