@@ -481,6 +481,16 @@ void test_power_fault_first_fault_must_not_degrade();
 void test_invalid_count_boiler_output_escalates_sooner_than_the_shared_count();
 void test_flow_limits_inverted_pair_is_ordered_not_defaulted();
 
+// Room sensor register report (ANDRTF3 open firmware regs 50..77)
+void test_report_no_device_is_not_a_zero_reading();
+void test_report_distinguishes_stock_firmware_from_a_failed_read();
+void test_report_always_emits_zero_failures_explicitly();
+void test_report_carries_the_firmware_slot_and_uptime();
+void test_report_failure_breakdown_is_published();
+void test_report_fits_the_payload_with_every_counter_set();
+void test_report_marks_truncation_instead_of_losing_the_tail();
+void test_report_refuses_rather_than_emit_half_a_payload();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -968,6 +978,16 @@ int main(int argc, char **argv) {
     // Debounce split + flow-limit ordering (2026-10-26)
     RUN_TEST(test_invalid_count_boiler_output_escalates_sooner_than_the_shared_count);
     RUN_TEST(test_flow_limits_inverted_pair_is_ordered_not_defaulted);
+
+    // Sensor-side counters, on demand (2026-10-26)
+    RUN_TEST(test_report_no_device_is_not_a_zero_reading);
+    RUN_TEST(test_report_distinguishes_stock_firmware_from_a_failed_read);
+    RUN_TEST(test_report_always_emits_zero_failures_explicitly);
+    RUN_TEST(test_report_carries_the_firmware_slot_and_uptime);
+    RUN_TEST(test_report_failure_breakdown_is_published);
+    RUN_TEST(test_report_fits_the_payload_with_every_counter_set);
+    RUN_TEST(test_report_marks_truncation_instead_of_losing_the_tail);
+    RUN_TEST(test_report_refuses_rather_than_emit_half_a_payload);
 
     return UNITY_END();
 }

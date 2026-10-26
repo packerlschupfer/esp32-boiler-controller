@@ -239,6 +239,73 @@ reads cannot tear, but the sweep across kinds is **not** a coherent snapshot: th
 not sum to the total number of reads if one completes mid-sweep. Fine for diagnostics; do not
 build arithmetic on it.
 
+**These counters are the CONTROLLER's view, and since the open sensor firmware that is no
+longer the same as the sensor's view.** The open firmware samples every 1 s and bridges up to
+two consecutive bad readings: register 50 keeps the last good value with status bit 5 set, and
+only goes to 0 from the third consecutive failure on. So `flt` now counts **sustained**
+failures (>= 3 s), not raw ones - a single glitch is invisible here by design. The old
+stock firmware wrote a raw 0 for one ~2.2 s cycle per bad reading, which is where the
+"44 % catch rate" correction came from; it **no longer applies**, and comparing an `flt` count
+against a stock-firmware baseline overstates the improvement. For the raw rate, read the
+sensor's own registers - see 6c.
+
+### 6c. Room Sensor Register Report (on demand)
+
+**Command**: `boiler/cmd/diagnostics` with payload `room_sensor`
+**Topic**: `boiler/status/sensors/room/diag` - **not retained**, QoS 0, LOW priority.
+
+Input registers 50..77 of the ANDRTF3 open firmware: the sensor's OWN counters. One FC04
+transaction, **no bus-release window needed** - it is an ordinary request to an ordinary
+slave. The reply is **asynchronous**: the command only raises a flag, and ANDRTF3Task does the
+read after its next temperature read, so the payload arrives within about one sensor interval
+(~5 s). It does **not** go to `boiler/status/diagnostics/report` like `health` does.
+
+Not retained on purpose: this is a point-in-time answer to a command, and a retained copy
+would be read later as if it were current. The payload carries the sensor's uptime instead, so
+a reader can always see which period the counters cover.
+
+```json
+{"fw":"0x8001","slot":"B","up":74000,"good":61000,"fail":0,"st":"0x0001","res":10384,"tc":2017,"bf":54321,"bh":14803,"rst":"0x0C","blv":1}
+```
+
+| Key | Reg | Meaning |
+|-----|-----|---------|
+| `fw` | 2 | firmware version, raw. Bit 15 set = open firmware; `0x8001` is the current build |
+| `slot` | 74 | running flash slot, `A` or `B` |
+| `up` | 58/59 | sensor uptime in seconds - **the denominator**, because `good` wraps |
+| `good` | 54 | successful readings. **Wraps at 65536**, i.e. every ~18 h at 1 s - use `up` for a rate |
+| `fail` | 55 | **raw** failed readings, the number `flt` above cannot give you |
+| `lastfail` | 56 | reason of the last failure: 1 ADC timeout, 2 overflow, 3 range |
+| `adct` / `rng` / `ovf` | 60/61/62 | ADC timeouts / range errors / overflows |
+| `age` | 53 | seconds since the last good reading (`0xFFFF` = never) |
+| `st` | 51 | status bits |
+| `res` | 52 | PT1000 resistance in 0.1 Ohm (0 = not measurable) |
+| `tc` | 57 | last good temperature, unfiltered, 0.01 °C, as a raw 16-bit value |
+| `bf` / `bh` | 65/66 | frames seen on the bus (any address) / frames for this sensor with a good CRC |
+| `bcrc` | 67 | **not a line-quality metric** - a foreign request+reply pair is seen as one frame, so this is expected to be non-zero on this shared bus |
+| `blen` / `bfrm` / `bpar` / `bnoi` / `bovr` | 68-72 | bad length / framing / parity / noise / overrun errors |
+| `bexc` | 73 | exception responses the sensor sent |
+| `rst` | 64 | reset cause, `RCC_CSR` bits 31..24: `0x20` IWDG, `0x10` soft, `0x0C` power-on, `0x04` pin |
+| `blv` | 77 | bootloader version (0 = none) |
+
+`fw`, `slot`, `up`, `good` and `fail` are always present; every other counter is **omitted
+when zero**, same convention as 6b. `fail` is emitted even at zero, because "zero failures" is
+the answer rather than the absence of one. All 24 counters do not fit 320 bytes at once, so
+fields are ordered by importance and a report that lost its tail carries `"trunc":1` - a
+truncated report says so instead of looking complete.
+
+Error replies on the same topic, so a caller always gets an answer:
+
+| Payload | Meaning |
+|---------|---------|
+| `{"err":"no_device"}` | no ANDRTF3 device was ever created |
+| `{"err":"not_open_firmware","fw":"0x0007"}` | the stock Andivi firmware answered; registers 50..77 do not exist there |
+| `{"err":"read_failed","fw":"0x8001"}` | open firmware, but the transaction failed |
+
+`ANDRTF3::readDiagnostics()` had been in the library since the start and nothing in this
+project ever called it - 28 registers available for one request and never read, the same shape
+as the sensor offsets and the parameter-save debounce.
+
 ### 7. Other Status Topics
 
 | Topic | Retained | Payload |
@@ -517,6 +584,7 @@ On release `EMERGENCY_STOP` is cleared, `BOILER_ENABLED` is set only if the save
 | `boiler/cmd/status` | any | Logged only, nothing is published |
 | `boiler/cmd/diagnostics` | `memory`, `tasks`, `events`, `sensors`, `relays`, `network` | Runtime diagnostics text dump on `boiler/status/diagnostics/report`, split into 320-byte chunks (at most 8, newline-separated lines). `mutexes`, `modbus` and `selftest` exist but are stubs and reply `not_implemented`; any other payload replies `unknown_command`; an empty payload replies `missing_payload` - all on `boiler/status/diagnostics/error`. A dump cut off by the chunk cap also publishes `truncated` there. Read-only: no reboot/watchdog/error-injection command is reachable from this topic |
 | `boiler/cmd/diagnostics` | `health` | Compact `HealthMonitor` JSON on `boiler/status/diagnostics/report`, always a single payload (never chunked): `{"st":..,"up":..,"blk":..,"min":..,"nc":..,"nd":..,"na":..,"nt":..,"sub":{..},"n":..}`. `st` overall status (`excellent`/`good`/`warning`/`critical`/`failed`); `up` uptime in seconds; `blk` largest free DRAM block right now and `min` the lowest free DRAM since boot (`heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)`, the same source as `heap_dram_min` on `boiler/status/health`), in bytes - both are real DRAM, deliberately **not** the IRAM-inflated `ESP.getFreeHeap()` family; `af` allocation failures, **omitted when zero**; `nc` network connected 0/1, `nd` disconnect count, `na` availability as fixed point (10000 = 100%); `sub` contains **only** subsystems that are unhealthy or have recorded errors, unhealthy first, each `{"e":<errors>,"r":<error rate, 10000 = 100%>,"h":<healthy 0/1>}`; `nt` is how many subsystems were notable and `n` how many fit the payload, so `n < nt` means the list was trimmed. Replies `unavailable` on `boiler/status/diagnostics/error` if `HealthMonitor` has not initialised yet, `dropped` if the publish queue rejected the report. Task metrics are absent: `HealthMonitor`'s task-monitoring members were removed outright because nothing ever registered a task with it (unrelated to `health.tasks`/`health.stack_min` on `boiler/status/health`, which are unaffected) |
+| `boiler/cmd/diagnostics` | `room_sensor` | The ANDRTF3 open firmware's own counters (input registers 50..77) on **`boiler/status/sensors/room/diag`**, not on `diagnostics/report`. **Asynchronous**: the command raises a flag and ANDRTF3Task does the read after its next temperature read (~5 s), because `boiler/cmd/+` handlers run in the esp-mqtt task and must not touch the shared RS485 bus. One FC04, no bus-release window. This is the only way to get the sensor's **raw** failure count (register 55) - the `flt` counter on `boiler/status/sensors/room` counts sustained failures only. Always answers: `{"err":"no_device"}`, `{"err":"not_open_firmware",...}` or `{"err":"read_failed",...}` on the same topic. See 6c for every field |
 | `boiler/cmd/fram` | `status` | `boiler/status/fram/status`: `{"connected":true,"size":..,"integrity":true}` |
 | `boiler/cmd/fram` | `counters` | `boiler/status/fram/counters`: `{"b":..,"h":..,"w":..,"e":..}` (burner starts, heating pump starts, water pump starts, errors) |
 | `boiler/cmd/fram` | `runtime` | `boiler/status/fram/runtime`: `{"t":..,"h":..,"w":..,"b":..}` (hours total, heating, water, burner) |

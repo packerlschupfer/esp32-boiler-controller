@@ -22,6 +22,45 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Added: the room sensor's own counters, on demand
+
+`boiler/cmd/diagnostics` with payload `room_sensor` reads input registers 50..77 of the ANDRTF3
+open firmware - one FC04, no bus-release window - and publishes them to
+`boiler/status/sensors/room/diag`.
+
+This closes a measurement gap that had already produced a wrong conclusion. The counters on
+`boiler/status/sensors/room` are the CONTROLLER's view, and the open firmware changed what that
+view means: it samples every 1 s and bridges up to two consecutive bad readings, so register 50
+only reads 0 from the third consecutive failure on. Our `flt` counter therefore counts
+**sustained** failures (>= 3 s), while the stock-firmware baseline it was being compared against
+counted single glitches. "Zero faults in 7118 reads" was read as a large improvement when what
+it actually says is "no sustained failure in 10.3 h"; the raw rate only exists in the sensor, in
+register 55.
+
+`ANDRTF3::readDiagnostics()` had been in the library from the start with no caller - 28
+registers of sensor-side counters, bus error counters, reset cause and running slot, available
+for one request and never read. Same shape as the sensor offsets and the parameter-save
+debounce, both of which were also wired at one end only.
+
+The reply is asynchronous by necessity: `boiler/cmd/+` handlers run in the esp-mqtt task, which
+must not issue a transaction on the shared half-duplex RS485 bus, so the command raises a flag
+and ANDRTF3Task does the read after its next temperature read. It also runs `detectFirmware()`
+once, so the report names the firmware build that produced the counters - attribution that
+previously had to be established out of band.
+
+Not retained, unlike `sensors/room`: a point-in-time answer to a command would be read months
+later as current. The payload carries the sensor's uptime so the period is always visible.
+
+### Fixed: health.stack_min read 0 for the first 30 minutes of every boot
+
+`health.stack_min` / `stack_min_task` were published from the per-task scan in
+`logAllTasks()`, which runs only on the 30-minute detailed-report timer. The field was
+therefore 0 and empty for the first half hour after every boot - useless exactly on a device
+that is rebooting. The scan is now driven from the 5-second health check (first pass, then
+every 12th), so the figure is real within ~5 s. The `LOW STACK` warning came along and is now
+at most ~60 s late instead of 30 minutes, with its repeat interval held at 30 minutes so the
+log volume is unchanged.
+
 ### Added: the RS485 bus can be handed to another master
 
 The room sensor runs open firmware whose maintenance tools - identity, calibration, A/B firmware

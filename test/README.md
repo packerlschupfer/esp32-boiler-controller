@@ -452,7 +452,7 @@ is correct and is what a flame sensor would need - and now carry a banner saying
 passing test called "flame loss bypasses min on time" reads like evidence the controller
 detects flame loss.
 
-**Measured again 2026-10-26: it is 45 cases of 384, not 89 of 350.** The old figure predates
+**Measured again 2026-10-26: it is 45 cases of 392, not 89 of 350.** The old figure predates
 the struct swap above. The test runner now prints a banner before the group, so a green run
 cannot be mistaken for firmware coverage.
 

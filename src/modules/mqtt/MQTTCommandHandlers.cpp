@@ -21,6 +21,7 @@
 #include "core/StateManager.h"
 #include "core/ModbusBusRelease.h"  // boiler/cmd/system -> bus_release / bus_acquire
 #include "monitoring/HealthMonitor.h"  // boiler/cmd/diagnostics -> "health"
+#include "modules/tasks/ANDRTF3Task.h"   // boiler/cmd/diagnostics -> "room_sensor"
 #include <nvs_flash.h>  // For nvs_flash_erase()
 #include "MQTTTopics.h"
 #include "utils/MemoryPool.h"
@@ -751,6 +752,18 @@ void handleDiagnosticsCommand(const char* payload) {
             return;
         }
         LOG_INFO(TAG_CMD, "Published health report (%u B)", static_cast<unsigned>(len));
+        return;
+    }
+
+    // "room_sensor" is likewise not a RuntimeDiagnostics command: it needs a Modbus
+    // transaction, and this handler runs in the esp-mqtt task, which must not touch the
+    // shared RS485 bus. So it only raises a request flag; ANDRTF3Task does the read after its
+    // next temperature read and publishes to boiler/status/sensors/room/diag. The reply is
+    // therefore asynchronous and arrives within one sensor interval (~5 s), not on
+    // MQTT_STATUS_DIAGNOSTICS_REPORT.
+    if (strcmp(payload, "room_sensor") == 0) {
+        ANDRTF3Task_requestDiagnostics();
+        LOG_INFO(TAG_CMD, "Room sensor register read requested");
         return;
     }
 

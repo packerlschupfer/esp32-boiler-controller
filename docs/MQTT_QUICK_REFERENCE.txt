@@ -82,12 +82,19 @@ Status Topics:
   boiler/status/sensor_mode      # STARTUP|NORMAL|SHUTDOWN (retained)
   boiler/error/context           # Critical error snapshot (retained, max every 30 s)
   boiler/status/device/firmware  # Firmware version
+  boiler/status/sensors/room     # Room sensor read counters, CONTROLLER's view (retained, 60 s)
+  boiler/status/sensors/room/diag # Sensor's OWN registers 50..77 (reply to room_sensor, not retained)
   boiler/status/online           # Online / LWT
 
 Monitor All Topics:
   mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD -t "boiler/#" -v
 
 Diagnostics:
+  boiler/cmd/diagnostics  health       # One-payload HealthMonitor JSON on status/diagnostics/report
+  boiler/cmd/diagnostics  room_sensor  # ANDRTF3 sensor-side counters -> status/sensors/room/diag
+                                       #   async, arrives in ~5 s; reg 55 = RAW failures, the
+                                       #   flt counter on sensors/room counts sustained ones only
+  boiler/cmd/diagnostics  memory|tasks|events|sensors|relays|network   # Chunked text dump
   scripts/diagnose_mqtt.sh
 
 Full reference: docs/MQTT_API.md

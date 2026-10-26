@@ -144,4 +144,60 @@ RoomSensorStats getRoomSensorStats() {
     return stats;
 }
 
+// The register map our Snapshot assumes, pinned where both headers are in scope. If the
+// library's decode order ever changes, this fails to compile instead of silently publishing
+// the wrong counter under the right name - the failure mode that makes a diagnostic worse
+// than no diagnostic. Same approach as the KIND_KEYS assert in ANDRTF3Task.cpp.
+static_assert(andrtf3::DIAG_FIRST == 50, "Snapshot documents registers 50..77");
+static_assert(andrtf3::DIAG_COUNT == 28, "Snapshot documents registers 50..77");
+
+RoomSensorRegisterReport::Snapshot readRoomSensorDiagnostics() {
+    RoomSensorRegisterReport::Snapshot snap;
+    andrtf3::ANDRTF3* dev = g_roomSensorDevice;
+    if (dev == nullptr) {
+        return snap;  // available stays false
+    }
+    snap.available = true;
+
+    // One-time detection, so the report can name the firmware that produced the counters.
+    // readDiagnostics() would attempt the read anyway while the firmware is UNKNOWN, but then
+    // `fw` would be 0 and the whole point is attributing numbers to a build.
+    if (dev->getFirmware() == andrtf3::ANDRTF3::Firmware::UNKNOWN) {
+        (void)dev->detectFirmware();  // a false here just leaves openFirmware false below
+    }
+    snap.firmwareVersion = dev->getFirmwareVersion();
+    snap.openFirmware = (dev->getFirmware() == andrtf3::ANDRTF3::Firmware::OPEN);
+
+    andrtf3::Diagnostics d;
+    if (!dev->readDiagnostics(d)) {
+        return snap;  // ok stays false; the formatter reports which of the two reasons it was
+    }
+    snap.ok = true;
+
+    snap.uptimeSeconds     = d.uptimeSeconds;
+    snap.goodReadings      = d.goodReadings;
+    snap.failedReadings    = d.failedReadings;
+    snap.lastFailReason    = d.lastFailReason;
+    snap.adcTimeouts       = d.adcTimeouts;
+    snap.rangeErrors       = d.rangeErrors;
+    snap.adcOverflows      = d.adcOverflows;
+    snap.secondsSinceGood  = d.secondsSinceGood;
+    snap.status            = d.status;
+    snap.resistance        = d.resistance;
+    snap.temperatureCenti  = d.temperatureCenti;
+    snap.busFrames         = d.busFrames;
+    snap.busHandled        = d.busHandled;
+    snap.busCrcErrors      = d.busCrcErrors;
+    snap.busBadLength      = d.busBadLength;
+    snap.busFramingErrors  = d.busFramingErrors;
+    snap.busParityErrors   = d.busParityErrors;
+    snap.busNoiseErrors    = d.busNoiseErrors;
+    snap.busOverruns       = d.busOverruns;
+    snap.busExceptions     = d.busExceptions;
+    snap.resetCause        = d.resetCause;
+    snap.runningSlot       = d.runningSlot;
+    snap.bootloaderVersion = d.bootloaderVersion;
+    return snap;
+}
+
 } // namespace HAL

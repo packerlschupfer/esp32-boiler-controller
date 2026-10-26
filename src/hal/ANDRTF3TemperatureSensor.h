@@ -4,6 +4,7 @@
 #pragma once
 
 #include "hal/HardwareAbstractionLayer.h"
+#include "modules/control/RoomSensorRegisterReport.h"
 #include <ANDRTF3.h>
 
 namespace HAL {
@@ -96,6 +97,25 @@ struct RoomSensorStats {
  * total number of reads. That is fine for diagnostics and must not be relied on for more.
  */
 RoomSensorStats getRoomSensorStats();
+
+/**
+ * @brief Read the sensor's OWN counters - input registers 50..77 of the open firmware.
+ *
+ * One FC04 transaction through the library's normal bus mutex, so it is safe only from a task
+ * that already owns the Modbus client path: call it from ANDRTF3Task, not from the MQTT task.
+ * Needs no bus-release window - it is an ordinary request to an ordinary slave.
+ *
+ * Runs `detectFirmware()` once on first use if the firmware is still UNKNOWN, so the report can
+ * say WHICH sensor firmware answered. That matters: attributing an error rate to a firmware
+ * build is impossible without it, and this project had to ask elsewhere for the install
+ * timeline once already.
+ *
+ * On-demand only, never on a cadence. The counters are cumulative since the SENSOR's last boot,
+ * so one read gives the whole period - polling it buys nothing and costs a bus slot.
+ *
+ * @return a snapshot whose `available` / `ok` flags say whether the numbers mean anything
+ */
+RoomSensorRegisterReport::Snapshot readRoomSensorDiagnostics();
 
 /**
  * @brief Factory function to create ANDRTF3 temperature sensor HAL

@@ -17,9 +17,11 @@
 #include "hal/HardwareAbstractionLayer.h"
 #include "hal/ANDRTF3TemperatureSensor.h"       // getRoomSensorStats()
 #include "modules/control/RoomSensorDiagnostics.h"
+#include "modules/control/RoomSensorRegisterReport.h"
 #include "modules/tasks/MQTTTask.h"
 #include "MQTTTopics.h"
 #include <climits>  // For ULONG_MAX
+#include <atomic>
 
 static const char* TAG = "ANDRTF3";
 
@@ -28,6 +30,11 @@ static TaskHandle_t andrtf3TaskHandle = nullptr;
 
 // Flag to enable/disable coordinator mode
 static constexpr bool USE_MODBUS_COORDINATOR = true;
+
+// Set by ANDRTF3Task_requestDiagnostics() from whatever task handled the MQTT command,
+// consumed by this task. Requests coalesce: the flag is a single bool, so two commands
+// arriving before the next read produce one report.
+static std::atomic<bool> s_diagRequested{false};
 
 // The key table in RoomSensorDiagnostics is a hand-kept mirror of the library's enum order,
 // so pin the two together here, where both headers are in scope.
@@ -82,6 +89,49 @@ static void publishReadDiagnostics() {
         lastPublishMs = now;
         everPublished = true;
     }
+}
+
+void ANDRTF3Task_requestDiagnostics() {
+    s_diagRequested.store(true, std::memory_order_relaxed);
+}
+
+/**
+ * @brief Serve a pending diagnostics request: one FC04 50..77, then publish it.
+ *
+ * On-demand only. The counters are cumulative since the sensor's last boot, so a single read
+ * covers the whole period and polling would buy nothing while costing a bus slot on a shared
+ * half-duplex line.
+ *
+ * NOT retained, unlike `sensors/room`: this is a point-in-time answer to a command, and a
+ * retained copy would be read months later as if it were current. The payload carries the
+ * sensor's uptime, so a reader can always see which period the counters cover.
+ */
+static void serveDiagnosticsRequest() {
+    if (!s_diagRequested.exchange(false, std::memory_order_relaxed)) {
+        return;
+    }
+
+    const RoomSensorRegisterReport::Snapshot snap = HAL::readRoomSensorDiagnostics();
+
+    char payload[sizeof(MQTTPublishRequest::payload)];
+    const size_t len = RoomSensorRegisterReport::format(payload, sizeof(payload), snap);
+    if (len == 0) {
+        LOG_WARN(TAG, "Sensor register report did not fit - not publishing");
+        return;
+    }
+
+    if (!MQTTTask::publish(MQTT_STATUS_PREFIX "/sensors/room/diag", payload, 0, false,
+                           MQTTPriority::PRIORITY_LOW)) {
+        // Someone asked and will otherwise wait forever: LOW priority lands in the 5-slot
+        // normal queue with drop-oldest, so a refusal here is real.
+        LOG_WARN(TAG, "Sensor register report dropped by the publish queue");
+        return;
+    }
+    LOG_INFO(TAG, "Published sensor registers: fw=0x%04X ok=%d fail=%u good=%u up=%lus",
+             snap.firmwareVersion, snap.ok ? 1 : 0,
+             static_cast<unsigned>(snap.failedReadings),
+             static_cast<unsigned>(snap.goodReadings),
+             static_cast<unsigned long>(snap.uptimeSeconds));
 }
 
 // Process temperature reading through HAL
@@ -325,6 +375,12 @@ void ANDRTF3Task(void* parameter) {
 
             // Counters have just been updated by the read above, success or failure
             publishReadDiagnostics();
+
+            // After the temperature read, not before: the control path gets the bus first,
+            // and the watchdog has just been fed, so a second transaction here has the full
+            // interval of margin rather than competing with the read we actually need.
+            serveDiagnosticsRequest();
+            (void)SRP::getTaskManager().feedWatchdog();
         }
 
         // Check if we should report statistics
