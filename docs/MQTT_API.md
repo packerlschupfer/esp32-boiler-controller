@@ -1265,8 +1265,14 @@ There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagno
 - `health.stack_min` / `health.stack_min_task`: **minimum free stack across the tasks this project
   controls**, and which task it is, from MonitoringTask's last pass. Framework-owned stacks (IDLE,
   ipc) are excluded - their sizes are not ours to set and IDLE's ~456 B free is normal, so
-  including them would permanently mask our own tightest task. `stack_min` is 0 before the first
-  monitoring pass; the name may be one pass behind the number.
+  including them would permanently mask our own tightest task. The scan runs on the 5-second
+  health check (every 12th, so every 60 s, and immediately on the first one), so `stack_min` is
+  only 0 for the first ~5 s after boot; the name may be one pass behind the number.
+
+  The scan was driven from the 30-minute detailed report for exactly one firmware (`68c45fb`),
+  where this field read 0 for the first half hour of every boot - useless precisely on a device
+  that keeps rebooting. The same change made the `LOW STACK` warning 60 s late instead of 30 min
+  late; the warning itself still repeats only every 30 min, so its log volume is unchanged.
 
   This replaced `stack_hwm` on 2026-10-26, which was `uxTaskGetStackHighWaterMark(NULL)` - the
   **publishing task's own** headroom. The description here always said so, but the field NAME read

@@ -251,7 +251,11 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 
 **Monitoring Intervals**:
 - **Health check**: 5s (basic heap, tasks, connectivity)
-- **Detailed diagnostics**: 30 minutes (`DETAILED_MONITOR_INTERVAL_MS`; stack HWM, error logs)
+- **Stack scan**: 60s (every 12th health check, plus the first one; publishes
+  `health.stack_min` and raises the `LOW STACK` warning, which itself repeats at most every
+  30 min)
+- **Detailed diagnostics**: 30 minutes (`DETAILED_MONITOR_INTERVAL_MS`; per-task table, error
+  logs, Modbus error stats)
 - **MQTT health publish**: 60s (via MQTTTask)
 
 **Diagnostics**:
@@ -935,8 +939,9 @@ All tasks register cleanup handlers via `TaskCleanupHandler`:
 
 **Stack Analysis**:
 ```cpp
-MonitoringTask logs task status every 30 minutes
-Check log for "Stack HWM" values
+MonitoringTask scans every task's stack every 60 s and publishes the minimum as
+health.stack_min / health.stack_min_task on boiler/status/health.
+The full per-task table is logged (LOG_DEBUG) with the 30-minute detailed report.
 ```
 
 **Heap Monitoring**:

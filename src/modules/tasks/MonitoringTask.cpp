@@ -34,6 +34,16 @@
 static const char* TAG = "Monitoring";
 
 // Timer handles for different monitoring intervals
+// How often the stack scan runs, expressed in health checks (5 s each) - so 12 = 60 s.
+// Deliberately not a new timer: the health check already wakes this task on a cadence that is
+// both frequent enough to be useful and slow enough that a ~1.3 kB transient allocation and a
+// 32-task enumeration are free in practice.
+static constexpr uint32_t STACK_SCAN_EVERY_N_CHECKS = 12;
+
+// Repeat interval for the persistent LOW STACK warning, so raising the scan rate 30x does not
+// raise the log rate 30x. Matches the old detailed-report cadence.
+static constexpr uint32_t LOW_STACK_WARN_REPEAT_MS = 1800000;  // 30 min
+
 static TimerHandle_t healthCheckTimer = nullptr;
 static TimerHandle_t detailedMonitorTimer = nullptr;
 
@@ -61,7 +71,7 @@ static void logNetworkStatus();
 static void logSensorStatus();
 static void logRelayStatus();
 static void logCompactStatus();
-static void logAllTasks();
+static void scanTaskStacks(bool verbose);
 static void publishModbusErrorStats();
 static void dumpErrorLog(size_t maxErrors = 10);
 
@@ -330,6 +340,15 @@ void MonitoringTaskEventDriven(void* pvParameters) {
                          static_cast<unsigned>(freeDram), static_cast<unsigned>(largestBlock));
             }
             
+            // Task stack minimum for boiler/status/health, plus the low-stack warning.
+            // First health check after boot scans immediately so the published figure is real
+            // within ~5 s; after that every STACK_SCAN_EVERY_N_CHECKS.
+            static uint32_t stackScanCounter = 0;
+            if (stackScanCounter++ % STACK_SCAN_EVERY_N_CHECKS == 0) {
+                scanTaskStacks(false);
+                (void)SRP::getTaskManager().feedWatchdog();
+            }
+
             // Log health check completion every 10th time (50 seconds)
             static uint32_t healthCheckCount = 0;
             if (++healthCheckCount % 10 == 0) {
@@ -346,11 +365,11 @@ void MonitoringTaskEventDriven(void* pvParameters) {
             LOG_DEBUG(TAG, "=== DETAILED MONITOR REPORT ===");
 
             // Compact status report with yields between sections to prevent starving other tasks
-            // This is important because logAllTasks() iterates through all 32 tasks
+            // This is important because scanTaskStacks() iterates through all 32 tasks
             logCompactStatus();
             taskYIELD();
 
-            logAllTasks();
+            scanTaskStacks(true);  // verbose: the full per-task table
             (void)SRP::getTaskManager().feedWatchdog();  // Feed after heavy task iteration
             taskYIELD();
 
@@ -664,9 +683,12 @@ static void logCompactStatus() {
     LOG_DEBUG(TAG, "Tasks: %d", taskCount);
 }
 
-// Minimum stack free across the tasks WE control, from the last logAllTasks() pass, for
-// boiler/status/health. 0 means "not measured yet" - logAllTasks() runs on the monitoring
-// cadence, so the first health publish after boot may precede it.
+// Minimum stack free across the tasks WE control, from the last scanTaskStacks() pass, for
+// boiler/status/health. 0 means "not measured yet", which now only covers the first ~5 s after
+// boot: the scan is driven from the 5-second health check (see STACK_SCAN_EVERY_N_CHECKS),
+// not from the 30-minute detailed report. It was driven from the detailed report for exactly
+// one firmware (68c45fb), where the field read 0 for the first half hour of every boot - so a
+// device in a reboot loop, the case you most want the number for, would never publish it.
 //
 // This exists because the health payload used to publish uxTaskGetStackHighWaterMark(NULL),
 // which is the MQTT TASK'S OWN headroom under the name `stack_hwm` - a figure that reads like a
@@ -683,16 +705,30 @@ const char* MonitoringTask_getMinTaskStackName() {
     return s_minStackTask;
 }
 
-static void logAllTasks() {
+/**
+ * @brief Enumerate every live task, publish the stack minimum and warn on low stacks.
+ *
+ * @param verbose also print the per-task table (LOG_DEBUG, detailed report only)
+ *
+ * uxTaskGetSystemState() is the only SAFE way to enumerate here. The TaskManager registry
+ * would need no allocation, but a dozen task bodies bail out with vTaskDelete(NULL) on an init
+ * failure and the registry keeps the stale handle - reading a freed TCB to print a diagnostic
+ * is not a trade worth making. The transient ~1.3 kB allocation is the price of that safety;
+ * a static array of the same size would cost it permanently, and DRAM is the scarce resource
+ * on this board, not cycles.
+ */
+static void scanTaskStacks(bool verbose) {
     // Get number of tasks
     UBaseType_t taskCount = uxTaskGetNumberOfTasks();
-    LOG_DEBUG(TAG, "=== TASKS (%u) ===", taskCount);
+    if (verbose) {
+        LOG_DEBUG(TAG, "=== TASKS (%u) ===", taskCount);
+    }
     
     // Allocate array for task status
     TaskStatus_t* taskStatusArray = (TaskStatus_t*)pvPortMalloc(taskCount * sizeof(TaskStatus_t));
     if (taskStatusArray == nullptr) {
         LOG_ERROR(TAG, "Alloc fail");
-        return;
+        return;  // leaves s_minStackFree at its previous value, not at 0
     }
     
     // Get task status
@@ -717,7 +753,9 @@ static void logAllTasks() {
     char minStackTaskThisPass[13] = {0};
     
     // Log header
-    LOG_DEBUG(TAG, "Name          St Pri Stack Core");
+    if (verbose) {
+        LOG_DEBUG(TAG, "Name          St Pri Stack Core");
+    }
     
     // Display each task (no sorting - keep creation order)
     // Yield periodically to prevent starving other tasks during this long iteration
@@ -741,15 +779,17 @@ static void logAllTasks() {
         // Get stack free in bytes
         size_t stackFreeBytes = taskStatusArray[i].usStackHighWaterMark * sizeof(StackType_t);
 
-        // Get core ID
-        int coreId = xTaskGetCoreID(taskStatusArray[i].xHandle);
-
-        // Format core ID
+        // Core ID, formatted only when it is going to be printed - two snprintf calls per
+        // task on a 60-second cadence are pointless when nothing reads the result.
         char coreStr[16];  // Increased size to handle any int value safely
-        if (coreId == tskNO_AFFINITY) {
-            snprintf(coreStr, sizeof(coreStr), "%s", "ANY");
-        } else {
-            snprintf(coreStr, sizeof(coreStr), "%d", coreId);
+        coreStr[0] = '\0';
+        if (verbose) {
+            int coreId = xTaskGetCoreID(taskStatusArray[i].xHandle);
+            if (coreId == tskNO_AFFINITY) {
+                snprintf(coreStr, sizeof(coreStr), "%s", "ANY");
+            } else {
+                snprintf(coreStr, sizeof(coreStr), "%d", coreId);
+            }
         }
 
         // Truncate task name to 12 chars
@@ -782,36 +822,50 @@ static void logAllTasks() {
             }
         }
 
-        LOG_DEBUG(TAG, "%-12s %3s %2d %5u %3s%s",
-                 shortName,
-                 stateStr,
-                 taskStatusArray[i].uxCurrentPriority,
-                 stackFreeBytes,
-                 coreStr,
-                 warning);
+        if (verbose) {
+            LOG_DEBUG(TAG, "%-12s %3s %2d %5u %3s%s",
+                     shortName,
+                     stateStr,
+                     taskStatusArray[i].uxCurrentPriority,
+                     stackFreeBytes,
+                     coreStr,
+                     warning);
 
-        // Yield every 4 tasks to let other tasks run (prevents starving lower priority tasks)
-        if ((i + 1) % 4 == 0) {
-            taskYIELD();
+            // Yield every 4 tasks to let other tasks run (prevents starving lower priority
+            // tasks). Only needed on the verbose path: the logging is what makes the loop long.
+            if ((i + 1) % 4 == 0) {
+                taskYIELD();
+            }
         }
     }
-    
-    LOG_DEBUG(TAG, "=== END ===");
 
-    // Log issues summary
-    LOG_DEBUG(TAG, "Issues: L%d B%d S%d",
-             lowStackCount, blockedCount, suspendedCount);
+    if (verbose) {
+        LOG_DEBUG(TAG, "=== END ===");
+
+        // Log issues summary
+        LOG_DEBUG(TAG, "Issues: L%d B%d S%d",
+                 lowStackCount, blockedCount, suspendedCount);
+    }
 
     // A task within LOW_STACK_WARN_BYTES of overflow is a real hazard on this device -
     // an overflow in a pump or relay task leaves actuators in an arbitrary state. Warn at
     // a level that survives every build mode, and name the offender and its margin so the
-    // report is actionable without a debug build. Deliberately re-warned on every detailed
-    // cycle: the condition is persistent, not an edge, and staying quiet about it is what
-    // let the pump tasks run at 288 B for months.
+    // report is actionable without a debug build.
+    //
+    // The condition is persistent, not an edge, so this is deliberately re-warned rather than
+    // latched - staying quiet about it is what let the pump tasks run at 288 B for months. But
+    // the scan now runs every 60 s instead of every 30 min, so repeat the warning on the old
+    // cadence: a permanently low task would otherwise emit 1440 identical WARN lines a day.
     if (lowStackCount > 0) {
-        LOG_WARN(TAG, "LOW STACK: %d task(s) below %u B; worst %s at %u B free",
-                 lowStackCount, (unsigned)SystemConstants::System::LOW_STACK_WARN_BYTES,
-                 worstStackTask, (unsigned)worstStackFree);
+        static uint32_t lastLowStackWarnMs = 0;
+        const uint32_t nowMs = millis();
+        if (verbose || lastLowStackWarnMs == 0 ||
+            (nowMs - lastLowStackWarnMs) >= LOW_STACK_WARN_REPEAT_MS) {
+            lastLowStackWarnMs = nowMs;
+            LOG_WARN(TAG, "LOW STACK: %d task(s) below %u B; worst %s at %u B free",
+                     lowStackCount, (unsigned)SystemConstants::System::LOW_STACK_WARN_BYTES,
+                     worstStackTask, (unsigned)worstStackFree);
+        }
     }
 
     // Free memory
