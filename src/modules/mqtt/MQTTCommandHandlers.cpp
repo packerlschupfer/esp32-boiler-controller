@@ -1138,20 +1138,36 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
             "{\"message\":\"Syslog enable change requires reboot\"}",
             0, true, MQTTPriority::PRIORITY_HIGH);
     }
+    // THE FOUR HANDLERS BELOW GO THROUGH PersistentStorageTask_SetParameter, NOT through
+    // SystemSettings directly. Their registered values are int32 SHADOWS
+    // (syslog_serverIP0..3, syslog_port, syslog_facility, syslog_minLevel in
+    // PersistentStorageTask.cpp), so writing SystemSettings here left the shadow stale and the
+    // RequestSave() below then persisted the OLD value - the setting reverted on reboot. Same
+    // bug family as the room target fixed in 57d6456, in the syslog corner that was missed;
+    // the warning is written on PersistentStorageTask_SetParameter itself. Found in the
+    // 2026-10-23 review, fixed 2026-10-26.
+    //
+    // `syslog_enabled` is deliberately NOT in this list: registerBool("syslog/enabled") binds
+    // directly to settings.syslogEnabled with no shadow, so writing the field IS writing the
+    // registered value. Checked rather than assumed.
     else if (strstr(topic, "syslog_server_ip") != nullptr) {
         // Parse IP address from payload (e.g., "192.168.20.100")
         IPAddress ip;
         if (ip.fromString(payload)) {
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SystemSettings& settings = SRP::getSystemSettings();
-                settings.syslogServerIP[0] = ip[0];
-                settings.syslogServerIP[1] = ip[1];
-                settings.syslogServerIP[2] = ip[2];
-                settings.syslogServerIP[3] = ip[3];
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            char octet[8];
+            bool queued = true;
+            for (int i = 0; i < 4 && queued; ++i) {
+                char name[20];
+                snprintf(name, sizeof(name), "syslog/serverIP%d", i);
+                snprintf(octet, sizeof(octet), "%u", static_cast<unsigned>(ip[i]));
+                queued = PersistentStorageTask_SetParameter(name, octet);
+            }
+            if (!queued) {
+                LOG_ERROR(TAG_CMD, "Syslog server IP not stored - parameter queue refused");
+                return;
+            }
             success = true;
-            syslogSettingChanged = true;
+            storedAsParameter = true;  // SetParameter already saved
             LOG_INFO(TAG_CMD, "Syslog server IP: %s", payload);
         } else {
             LOG_WARN(TAG_CMD, "Invalid IP address: %s", payload);
@@ -1159,39 +1175,36 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     }
     else if (strstr(topic, "syslog_port") != nullptr) {
         if (value > 0 && value <= 65535) {
-            auto newVal = static_cast<uint16_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().syslogPort = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!PersistentStorageTask_SetParameter("syslog/port", payload)) {
+                LOG_ERROR(TAG_CMD, "Syslog port not stored - parameter queue refused");
+                return;
+            }
             success = true;
-            syslogSettingChanged = true;
-            LOG_INFO(TAG_CMD, "Syslog port: %u", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Syslog port: %lu", static_cast<unsigned long>(value));
         }
     }
     else if (strstr(topic, "syslog_facility") != nullptr) {
         if (value <= 23) {  // Valid facility range 0-23
-            auto newVal = static_cast<uint8_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().syslogFacility = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!PersistentStorageTask_SetParameter("syslog/facility", payload)) {
+                LOG_ERROR(TAG_CMD, "Syslog facility not stored - parameter queue refused");
+                return;
+            }
             success = true;
-            syslogSettingChanged = true;
-            LOG_INFO(TAG_CMD, "Syslog facility: %u", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Syslog facility: %lu", static_cast<unsigned long>(value));
         }
     }
     else if (strstr(topic, "syslog_min_level") != nullptr) {
         // ESP_LOG levels: 0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG, 5=VERBOSE
         if (value <= ESP_LOG_VERBOSE) {
-            auto newVal = static_cast<uint8_t>(value);
-            if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                SRP::getSystemSettings().syslogMinLevel = newVal;
-                SRP::giveSystemSettingsMutex();
-            } else { LOG_ERROR(TAG_CMD, "Failed to acquire settings mutex"); return; }
+            if (!PersistentStorageTask_SetParameter("syslog/minLevel", payload)) {
+                LOG_ERROR(TAG_CMD, "Syslog min level not stored - parameter queue refused");
+                return;
+            }
             success = true;
-            syslogSettingChanged = true;
-            LOG_INFO(TAG_CMD, "Syslog min level: %u", newVal);
+            storedAsParameter = true;
+            LOG_INFO(TAG_CMD, "Syslog min level: %lu", static_cast<unsigned long>(value));
             // Also update runtime if syslog is active
             if (auto* syslog = SRP::getSyslog()) {
                 syslog->setMinLevel(static_cast<esp_log_level_t>(value));

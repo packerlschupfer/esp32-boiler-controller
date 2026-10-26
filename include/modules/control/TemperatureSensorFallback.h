@@ -124,6 +124,9 @@ private:
     // Hysteresis counters to prevent mode chattering on flaky sensors
     static uint8_t consecutiveValidCount;    // Count of consecutive valid sensor checks
     static uint8_t consecutiveInvalidCount;  // Count of consecutive invalid sensor checks
+    // Steps with a missing BOILER OUTPUT specifically, so it can escalate on its own shorter
+    // threshold. Reset whenever the boiler output is readable, even if another sensor is not.
+    static uint8_t boilerOutputInvalidCount;
 
     // Hysteresis thresholds (different for entering vs leaving NORMAL mode). Deliberately
     // asymmetric: slow to shut down, immediate to recover.
@@ -183,14 +186,35 @@ private:
     // (08:34:14.9 to 08:34:19.9), i.e. 2 ticks, so 3 covers it with a tick to spare while
     // keeping the shared-counter delay below (~7.5 s) as short as it can be and still work.
     //
-    // KNOWN CONSEQUENCE: this counter is shared by all required sensors, so a missing
-    // boiler-OUTPUT reading - the one that leaves overheat protection blind and sets
-    // Error::SENSOR_FAILURE - now also takes ~7.5 s longer to escalate. The boiler's own
-    // aquastat and manual-reset STB are independent of the firmware and unaffected, and
-    // SafetyInterlocks' 110 C check does not depend on this mode. Splitting the debounce
-    // per sensor class (short for boiler output, long for room) is the better shape and is
-    // not done here.
+    // SPLIT PER SENSOR CLASS, 2026-10-26. This counter used to be shared by all required
+    // sensors, so a missing boiler-OUTPUT reading - the one that leaves overheat protection
+    // blind and sets Error::SENSOR_FAILURE - waited as long as a room dropout. The comment
+    // here called the split "the better shape" and left it undone; the boiler output is the
+    // most important reading in the system, so it now has its own shorter count below.
     static constexpr uint8_t VALID_COUNT_TO_ENTER_NORMAL = 1;   // Was 3 - one good check recovers
+
+public:
+    /**
+     * @brief Steps of a MISSING BOILER OUTPUT before SHUTDOWN - shorter than the shared count.
+     *
+     * 2 instead of 3. On the real MB8ART schedule (ticks {2,5} of ten, so samples 1.5 s / 3.5 s
+     * apart) that is 3.5-5 s rather than 8.5-10 s, while still rejecting a single bad read -
+     * which is what the 2026-10-23 change from 1 to 3 was for, after one failed room check
+     * stopped a burn mid-cycle.
+     *
+     * Why this reading and not the others: without it the overheat protection in this layer is
+     * blind, and it is the one that sets Error::SENSOR_FAILURE. A missing room, tank or return
+     * reading is degraded operation - the mode task stops the burner normally and
+     * BurnerControlTask's 10 s SensorFailureConfirm handles a demand that persists - so those
+     * keep the longer count, which exists to ride out the ANDRTF3's known dropouts.
+     *
+     * Still not instant, and the layers that are: the boiler's own aquastat and manual-reset
+     * STB are outside this firmware entirely, and SafetyInterlocks' 110 C check does not depend
+     * on this mode.
+     */
+    static constexpr uint8_t BOILER_OUTPUT_COUNT_TO_SHUTDOWN = 2;
+
+private:
     
     // Validate sensor readings
     static bool validateSensorReading(Temperature_t temp, Temperature_t minValid = -500, Temperature_t maxValid = 1500);

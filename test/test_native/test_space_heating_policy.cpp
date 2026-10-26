@@ -104,3 +104,38 @@ void test_space_heating_no_room_target_keeps_weather_only_control() {
     TEST_ASSERT_TRUE(weatherDecision(true, false, false, true).heat);
     TEST_ASSERT_FALSE(weatherDecision(false, false, false, false).heat);
 }
+
+void test_flow_limits_inverted_pair_is_ordered_not_defaulted() {
+    // h/sLo (30.0-60.0) and h/sHi (50.0-90.0) have OVERLAPPING registered ranges and no
+    // cross-field validator, so an inverted pair is accepted one key at a time - each value
+    // individually legal, only the pair nonsense. BurnerRequestManager clamps low-then-high, so
+    // with low > high the second clamp always won and every target landed on the LOWER of the
+    // two: failing safe, but honouring neither configured bound and saying nothing.
+    int16_t low = 600, high = 500;          // 60.0 / 50.0 - inverted, both in range
+    TEST_ASSERT_FALSE(SpaceHeatingPolicy::flowLimitsValid(low, high));
+    TEST_ASSERT_TRUE(SpaceHeatingPolicy::orderFlowLimits(low, high));
+    TEST_ASSERT_EQUAL_INT16(500, low);
+    TEST_ASSERT_EQUAL_INT16(600, high);
+    TEST_ASSERT_TRUE(SpaceHeatingPolicy::flowLimitsValid(low, high));
+
+    // SWAPPING, not falling back to defaults: it preserves both magnitudes the user actually
+    // typed and cannot invent a bound they did not. A fallback to the absolute safety limits
+    // would RAISE a configured 75.0 ceiling to the 110.0 hard limit, which is the wrong
+    // direction, and restating the struct defaults here would have added a fourth definition of
+    // a value that already had three.
+    int16_t ok_low = 380, ok_high = 750;
+    TEST_ASSERT_FALSE_MESSAGE(SpaceHeatingPolicy::orderFlowLimits(ok_low, ok_high),
+                              "a valid pair must be left alone and report no swap");
+    TEST_ASSERT_EQUAL_INT16(380, ok_low);
+    TEST_ASSERT_EQUAL_INT16(750, ok_high);
+
+    // Equal is not inverted - nothing to swap, and the caller must not warn about it.
+    int16_t eq_low = 500, eq_high = 500;
+    TEST_ASSERT_FALSE(SpaceHeatingPolicy::orderFlowLimits(eq_low, eq_high));
+    // ...but it is not a usable range either, so validity and orderedness are separate questions.
+    TEST_ASSERT_FALSE(SpaceHeatingPolicy::flowLimitsValid(eq_low, eq_high));
+
+    // Zero or negative is rejected by validity regardless of order (an unset pair).
+    TEST_ASSERT_FALSE(SpaceHeatingPolicy::flowLimitsValid(0, 750));
+    TEST_ASSERT_FALSE(SpaceHeatingPolicy::flowLimitsValid(380, 0));
+}

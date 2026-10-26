@@ -91,6 +91,7 @@ TemperatureSensorFallback::SensorStatus TemperatureSensorFallback::currentStatus
 uint32_t TemperatureSensorFallback::initializationTime = 0;
 uint8_t TemperatureSensorFallback::consecutiveValidCount = 0;
 uint8_t TemperatureSensorFallback::consecutiveInvalidCount = 0;
+uint8_t TemperatureSensorFallback::boilerOutputInvalidCount = 0;
 
 void TemperatureSensorFallback::initialize() {
     LOG_INFO(TAG, "Initializing temperature sensor fallback system with hysteresis");
@@ -106,6 +107,7 @@ void TemperatureSensorFallback::initialize() {
     initializationTime = millis();
     consecutiveValidCount = 0;
     consecutiveInvalidCount = 0;
+    boilerOutputInvalidCount = 0;
 
     // Start in STARTUP mode
     currentStatus.currentMode = FallbackMode::STARTUP;
@@ -122,6 +124,7 @@ void TemperatureSensorFallback::cleanup() {
     initializationTime = 0;
     consecutiveValidCount = 0;
     consecutiveInvalidCount = 0;
+    boilerOutputInvalidCount = 0;
     if (locked) {
         giveFallbackMutex();
     }
@@ -272,6 +275,7 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
     if (sensorsCurrentlyValid) {
         consecutiveValidCount++;
         consecutiveInvalidCount = 0;
+        boilerOutputInvalidCount = 0;
         invalidCounting = false;  // next failure counts immediately
         if (consecutiveValidCount > 100) consecutiveValidCount = 100;  // Prevent overflow
     } else {
@@ -288,6 +292,22 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
             lastInvalidCountMs = now;
             consecutiveInvalidCount++;
             if (consecutiveInvalidCount > 100) consecutiveInvalidCount = 100;
+
+            // The boiler output gets its own, shorter count (2 rather than 3): it is the
+            // reading that blinds this layer's overheat protection and the one that sets
+            // Error::SENSOR_FAILURE. Stepped inside the SAME rate limit, so both counters
+            // advance once per sample and the thresholds differ only in how many samples they
+            // need. See BOILER_OUTPUT_COUNT_TO_SHUTDOWN.
+            if (!currentStatus.boilerOutputValid) {
+                boilerOutputInvalidCount++;
+                if (boilerOutputInvalidCount > 100) boilerOutputInvalidCount = 100;
+            }
+        }
+        // Reset the boiler counter whenever that reading is back, even while another required
+        // sensor is still missing - otherwise a long room dropout would carry a stale boiler
+        // count and escalate on the short threshold for the wrong reason.
+        if (currentStatus.boilerOutputValid) {
+            boilerOutputInvalidCount = 0;
         }
         consecutiveValidCount = 0;
 
@@ -304,6 +324,13 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
                                         currentStatus.currentOperationMode == OperationMode::BOTH);
     }
 
+    // Either threshold can trigger SHUTDOWN: the shared count for the required-sensor set, or
+    // the shorter boiler-output count. Whichever fires first wins - that is the point of the
+    // split (2026-10-26, user: "boiler temp is most important").
+    const bool shutdownDue =
+        consecutiveInvalidCount >= INVALID_COUNT_TO_SHUTDOWN ||
+        boilerOutputInvalidCount >= BOILER_OUTPUT_COUNT_TO_SHUTDOWN;
+
     // Apply hysteresis to mode transitions
     bool inStartupPeriod = (now - initializationTime) < STARTUP_PERIOD_MS;
 
@@ -313,7 +340,7 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
             if (consecutiveValidCount >= VALID_COUNT_TO_ENTER_NORMAL) {
                 currentStatus.currentMode = FallbackMode::NORMAL;
                 LOG_INFO(TAG, "Sensors stable - transitioning to NORMAL mode");
-            } else if (!inStartupPeriod && consecutiveInvalidCount >= INVALID_COUNT_TO_SHUTDOWN) {
+            } else if (!inStartupPeriod && shutdownDue) {
                 // After startup period, if sensors consistently invalid, go to SHUTDOWN
                 currentStatus.currentMode = FallbackMode::SHUTDOWN;
             }
@@ -321,7 +348,7 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
 
         case FallbackMode::NORMAL:
             // From NORMAL: need INVALID_COUNT_TO_SHUTDOWN consecutive invalid readings to shutdown
-            if (consecutiveInvalidCount >= INVALID_COUNT_TO_SHUTDOWN) {
+            if (shutdownDue) {
                 currentStatus.currentMode = FallbackMode::SHUTDOWN;
                 LOG_WARN(TAG, "Sensors failed %d consecutive checks - transitioning to SHUTDOWN",
                          consecutiveInvalidCount);

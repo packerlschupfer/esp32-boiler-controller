@@ -1,6 +1,7 @@
 // src/modules/control/BurnerRequestManager.cpp
 #include "modules/control/BurnerRequestManager.h"
 #include "core/SystemResourceProvider.h"
+#include "modules/control/SpaceHeatingPolicy.h"
 #include "config/SystemConstants.h"
 #include "utils/MutexRetryHelper.h"
 #include "LoggingMacros.h"
@@ -152,8 +153,26 @@ bool BurnerRequestManager::setHeatingRequest(Temperature_t targetTemp, bool high
     SystemSettings& settings = SRP::getSystemSettings();
 
     // Level 1: Space heating operational limits (mode-specific)
-    Temperature_t minTemp = settings.heating_low_limit;   // e.g., 40°C
-    Temperature_t maxTemp = settings.heating_high_limit;  // e.g., 75°C
+    Temperature_t minTemp = settings.heating_low_limit;
+    Temperature_t maxTemp = settings.heating_high_limit;
+
+    // An inverted pair is accepted by the registry one key at a time (overlapping ranges, no
+    // cross-field validator), and the low-then-high clamp below would then always land on the
+    // LOWER of the two - honouring neither bound, silently. Order them and say so.
+    static bool invertedLoggedHeating = false;
+    if (SpaceHeatingPolicy::orderFlowLimits(minTemp, maxTemp)) {
+        if (!invertedLoggedHeating) {
+            char loBuf[16], hiBuf[16];
+            formatTemp(loBuf, sizeof(loBuf), maxTemp);   // as configured: low was the larger
+            formatTemp(hiBuf, sizeof(hiBuf), minTemp);
+            LOG_WARN(TAG, "Heating flow limits are inverted (lo %s°C > hi %s°C) - using them "
+                          "swapped; fix the parameters", loBuf, hiBuf);
+            invertedLoggedHeating = true;
+        }
+    } else if (invertedLoggedHeating) {
+        LOG_INFO(TAG, "Heating flow limits consistent again");
+        invertedLoggedHeating = false;
+    }
 
     // Level 2: Enforce absolute safety limits (constants)
     if (minTemp < SystemConstants::Temperature::MIN_BOILER_TEMP_C) {
@@ -216,8 +235,26 @@ bool BurnerRequestManager::setWaterRequest(Temperature_t targetTemp, bool highPo
     SystemSettings& settings = SRP::getSystemSettings();
 
     // Level 1: Water heating operational limits (mode-specific)
-    Temperature_t minTemp = settings.water_heating_low_limit;   // e.g., 40°C
-    Temperature_t maxTemp = settings.water_heating_high_limit;  // e.g., 90°C
+    Temperature_t minTemp = settings.water_heating_low_limit;
+    Temperature_t maxTemp = settings.water_heating_high_limit;
+
+    // An inverted pair is accepted by the registry one key at a time (overlapping ranges, no
+    // cross-field validator), and the low-then-high clamp below would then always land on the
+    // LOWER of the two - honouring neither bound, silently. Order them and say so.
+    static bool invertedLoggedWater = false;
+    if (SpaceHeatingPolicy::orderFlowLimits(minTemp, maxTemp)) {
+        if (!invertedLoggedWater) {
+            char loBuf[16], hiBuf[16];
+            formatTemp(loBuf, sizeof(loBuf), maxTemp);   // as configured: low was the larger
+            formatTemp(hiBuf, sizeof(hiBuf), minTemp);
+            LOG_WARN(TAG, "Water flow limits are inverted (lo %s°C > hi %s°C) - using them "
+                          "swapped; fix the parameters", loBuf, hiBuf);
+            invertedLoggedWater = true;
+        }
+    } else if (invertedLoggedWater) {
+        LOG_INFO(TAG, "Water flow limits consistent again");
+        invertedLoggedWater = false;
+    }
 
     // Level 2: Enforce absolute safety limits (constants)
     if (minTemp < SystemConstants::Temperature::MIN_BOILER_TEMP_C) {

@@ -452,10 +452,19 @@ is correct and is what a flame sensor would need - and now carry a banner saying
 passing test called "flame loss bypasses min on time" reads like evidence the controller
 detects flame loss.
 
+**Measured again 2026-10-26: it is 45 cases of 384, not 89 of 350.** The old figure predates
+the struct swap above. The test runner now prints a banner before the group, so a green run
+cannot be mistaken for firmware coverage.
+
 **Still open:** the remaining mock-only integration suites
 (`test_control_loop_integration`, `test_mqtt_integration`,
 `test_persistent_storage_integration`, `test_system_e2e`, `test_sensor_integration`,
 `test_relay_integration`) still drive mock objects rather than firmware. They are not useless -
 they pin the intended interactions - but they must not be counted as coverage of the code that
-ships. Converting them needs the same treatment applied above, one dependency at a time: find
-what actually forces the mock, and usually it is an include that was never needed.
+ships. Converting them is NOT the same job as the struct swap, which is worth saying plainly: those
+needed four unnecessary includes removed, whereas these need the real BurnerStateMachine, the
+real drivers and the real storage library to compile and run on the host - a FreeRTOS/NVS shim.
+That is a project, not a cleanup. What remains is behavioural mocks (MockBurnerStateMachine,
+MockBurnerRequestManager, MockHeatingControl, MockTemperatureSensorFallback, MockMB8ART,
+MockRYN4, MockTime) plus a MockPersistentStorage defined inline inside its own test file, which
+tests that local mock against itself.

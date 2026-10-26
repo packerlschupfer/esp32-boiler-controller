@@ -478,6 +478,9 @@ void test_policy_frost_latch_keeps_a_burn_alive_with_the_switch_off();
 void test_policy_frost_never_overrides_a_disabled_boiler();
 void test_power_fault_first_fault_must_not_degrade();
 
+void test_invalid_count_boiler_output_escalates_sooner_than_the_shared_count();
+void test_flow_limits_inverted_pair_is_ordered_not_defaulted();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -503,6 +506,27 @@ int main(int argc, char **argv) {
     RUN_TEST(test_different_pool_sizes);
     RUN_TEST(test_allocation_pattern_stress);
     
+    // ---------------------------------------------------------------------------------
+    // THE SIX "INTEGRATION" SUITES BELOW DRIVE MOCK OBJECTS, NOT FIRMWARE.
+    //
+    // 45 of this file's cases, measured 2026-10-26. They pin the INTENDED interactions and are
+    // worth keeping, but a green run here says nothing about the code that ships - so the
+    // banner is printed into the test output, where someone reading a pass will see it.
+    //
+    // The 2026-10-25 review counted "89 of 350"; that figure predates 610016f, which turned
+    // MockSystemSettings and MockSharedSensorReadings into forwarding headers onto the REAL
+    // structs. What remains is BEHAVIOURAL mocks: MockBurnerStateMachine,
+    // MockBurnerRequestManager, MockHeatingControl, MockTemperatureSensorFallback, MockMB8ART,
+    // MockRYN4, MockTime, and a MockPersistentStorage defined inline in its own test file.
+    //
+    // Converting these is not the same job as the struct swap was. Those needed four
+    // unnecessary includes removed; these need the real BurnerStateMachine, drivers and storage
+    // library to compile and run on the host, i.e. a FreeRTOS/NVS shim. That is a project, not
+    // a cleanup, and half-doing it would be worse than the honest label.
+    // ---------------------------------------------------------------------------------
+    UnityPrint("--- mock-driven suites follow (45 cases): they exercise NO firmware code ---");
+    UNITY_PRINT_EOL();
+
     // Sensor integration tests
     RUN_TEST(test_sensor_normal_data_flow);
     RUN_TEST(test_sensor_timeout_handling);
@@ -940,6 +964,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_policy_frost_latch_keeps_a_burn_alive_with_the_switch_off);
     RUN_TEST(test_policy_frost_never_overrides_a_disabled_boiler);
     RUN_TEST(test_power_fault_first_fault_must_not_degrade);
+
+    // Debounce split + flow-limit ordering (2026-10-26)
+    RUN_TEST(test_invalid_count_boiler_output_escalates_sooner_than_the_shared_count);
+    RUN_TEST(test_flow_limits_inverted_pair_is_ordered_not_defaulted);
 
     return UNITY_END();
 }

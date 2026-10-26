@@ -143,3 +143,44 @@ void test_invalid_count_first_observation_is_never_rate_limited() {
     TEST_ASSERT_FALSE(TemperatureSensorFallback::shouldCountInvalid(true, 0u, 0u, TICK));
     TEST_ASSERT_FALSE(TemperatureSensorFallback::shouldCountInvalid(true, 123456u, 123456u, TICK));
 }
+
+void test_invalid_count_boiler_output_escalates_sooner_than_the_shared_count() {
+    // The debounce is SPLIT per sensor class (2026-10-26). The shared count rides out the
+    // ANDRTF3's known room dropouts; the boiler OUTPUT - the reading that blinds this layer's
+    // overheat protection and sets Error::SENSOR_FAILURE - gets a shorter one.
+    //
+    // The thresholds must stay ordered, and the boiler one must still reject a SINGLE bad read,
+    // which is what the 2026-10-23 change from 1 to 3 was for after one failed check stopped a
+    // burn mid-cycle. Both are pinned here because "shorter" and "not instant" are the two
+    // properties that make the split safe rather than a revert.
+    TEST_ASSERT_TRUE_MESSAGE(
+        TemperatureSensorFallback::BOILER_OUTPUT_COUNT_TO_SHUTDOWN <
+        TemperatureSensorFallback::INVALID_COUNT_TO_SHUTDOWN,
+        "the boiler output must escalate sooner than the shared required-sensor count");
+    TEST_ASSERT_TRUE_MESSAGE(
+        TemperatureSensorFallback::BOILER_OUTPUT_COUNT_TO_SHUTDOWN >= 2,
+        "a single bad boiler read must not shut down - that was the 2026-10-23 regression");
+
+    // On the real MB8ART schedule (ticks {2,5} of ten) two steps land 3.5-5 s apart against the
+    // 8.5-10 s of three, so the split roughly halves the blind window.
+    const int startTicks[2] = {2, 5};
+    for (int si = 0; si < 2; ++si) {
+        bool counting = false;
+        uint32_t last = 0;
+        int steps = 0;
+        uint32_t atMs = 0;
+        bool seen = false;
+        for (uint32_t t = 0; t <= 60000; t += 500) {
+            const int tick = static_cast<int>((t / 500) % 10);
+            if (tick != 2 && tick != 5) continue;
+            if (!seen) { if (tick != startTicks[si]) continue; seen = true; }
+            if (TemperatureSensorFallback::shouldCountInvalid(counting, t, last, TICK)) {
+                counting = true; last = t; steps++;
+                if (steps == TemperatureSensorFallback::BOILER_OUTPUT_COUNT_TO_SHUTDOWN) { atMs = t; break; }
+            }
+        }
+        const uint32_t span = atMs - (startTicks[si] == 5 ? 2500u : 1000u);
+        TEST_ASSERT_TRUE_MESSAGE(span >= 3500 && span <= 5000,
+                                 "2 steps span 3.5-5 s on the real schedule");
+    }
+}

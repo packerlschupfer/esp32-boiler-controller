@@ -6,27 +6,19 @@
 SystemSettings currentSettings = getDefaultSystemSettings();
 
 SystemSettings getDefaultSystemSettings() {
-    return SystemSettings(
-        true,  // wheaterPriorityEnabled
-        tempFromFloat(45.0f),  // wHeaterConfTempLimitLow (start heating when tank drops below this)
-        tempFromFloat(65.0f),  // wHeaterConfTempLimitHigh (stop heating when tank rises above this)
-        10.0f,  // wHeaterConfTempChargeDelta (kept as float)
-        tempFromFloat(80.0f),  // wHeaterConfTempSafeLimitHigh
-        1.0f,   // waterHeatingRate (°C per minute)
-        tempFromFloat(18.0f),  // targetTemperatureInside
-        0.0f,   // heating_curve_shift (kept as float) - was 20.0 with the 10x too weak curve
-        1.4f,   // heating_curve_coeff (kept as float) - was 2.0
-        tempFromFloat(0.5f),   // heating_hysteresis (0.5°C)
-        tempFromFloat(38.0f),  // burner_low_limit - safe for oil burners (gas can go lower)
-        tempFromFloat(40.0f),  // heating_low_limit
-        tempFromFloat(75.0f),  // heating_high_limit
-        tempFromFloat(40.0f),  // water_heating_low_limit
-        tempFromFloat(90.0f),  // water_heating_high_limit
-        1.0f,  // spaceHeatingKp
-        0.5f,  // spaceHeatingKi
-        0.1f,  // spaceHeatingKd
-        1.0f,  // wHeaterKp
-        0.5f,  // wHeaterKi
-        0.1f   // wHeaterKd
-    );
+    // Default-construct, so the struct's own constructor defaults are the SINGLE definition.
+    //
+    // This used to be a 21-argument positional list restating every value, which made it a
+    // second definition of all of them - and they had already drifted apart on one:
+    // `heating_low_limit` was 40.0 here against 38.0 in the struct. That gave the value THREE
+    // definitions (40.0 here, 38.0 in the constructor, 380 in the parameter registration), and
+    // the registration wins post-load, so the 40.0 was dead weight that only applied to a
+    // factory-fresh device between boot and the first NVS load. Found in the 2026-10-23 review;
+    // collapsing the list rather than correcting the number removes the whole class.
+    //
+    // Verified before collapsing: the positional list and the constructor defaults agreed on
+    // every other field, and the list already omitted the last four parameters
+    // (useBoilerTempPID, autotuneRelayAmplitude, autotuneHysteresis, autotuneMethod) and so was
+    // already relying on the constructor for those.
+    return SystemSettings{};
 }

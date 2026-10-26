@@ -542,6 +542,27 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
     // just on the latch being clear - re-enabling over a hot boiler or a failed sensor would
     // be worse than the dead end.
     if (result == EmergencyStopRelease::Result::NOT_ACTIVE) {
+        // No latch, but the LEVEL may still be elevated with nothing able to lower it.
+        // triggerFailsafe(CRITICAL) from ErrorHandler::enterFailsafeMode or
+        // RelayVerificationManager sets no EMERGENCY_STOP, and triggerFailsafe never
+        // downgrades - so a bare CRITICAL was unclearable except by reboot, the same shape as
+        // the DEGRADED half-power lock fixed in 3674614.
+        //
+        // attemptRecovery() is the right tool and existed all along with NO CALLER: it verifies
+        // the root cause against lastError (memory still low? sensor bits still set? comms
+        // still down?) before clearing anything, and it is self-limiting - MAX_RECOVERY_ATTEMPTS
+        // 3 and RECOVERY_DELAY_MS 30 s. Wired here, to the OPERATOR's command, rather than to a
+        // periodic caller: it re-enables the boiler, it has never run on this hardware, and an
+        // autonomous path through never-exercised code that turns the boiler back on is not a
+        // trade worth making. A human asking is the right trigger for a first outing.
+        if (currentLevel.load() >= FailsafeLevel::CRITICAL) {
+            const bool recovered = attemptRecovery();
+            LOG_WARN(TAG, "No emergency latch but level %s - recovery %s",
+                     getFailsafeStatusString(), recovered ? "succeeded" : "refused");
+            return recovered ? EmergencyStopRelease::Result::BOILER_RE_ENABLED
+                             : EmergencyStopRelease::Result::SYSTEM_ERRORS;
+        }
+
         const bool boilerBitSet =
             (xEventGroupGetBits(SRP::getSystemStateEventGroup()) &
              SystemEvents::SystemState::BOILER_ENABLED) != 0;

@@ -104,6 +104,43 @@ namespace SpaceHeatingPolicy {
         return WeatherDecision{true, WeatherBlock::NONE};
     }
 
+    /**
+     * @brief Is a flow min/max pair usable, and if not, what to do with it.
+     *
+     * `h/sLo`/`h/sHi` (30.0-60.0 / 50.0-90.0) and `w/hLo`/`w/hHi` have OVERLAPPING registered
+     * ranges, so an inverted pair is accepted one key at a time - each value is individually
+     * legal and only the pair is nonsense. There is no cross-field validator in the parameter
+     * registry: `registerInt()` range-checks a single key and `setOnChange` fires after the
+     * store, so it can only react, not reject. The tank pair got `WaterChargePolicy::
+     * limitsValid()` after the 2026-09-14 incident; the two FLOW pairs never did.
+     *
+     * The harm was silent rather than dangerous. BurnerRequestManager clamps low-then-high, so
+     * with low > high the second clamp always wins and every target landed on the LOWER of the
+     * two - failing safe, but honouring neither configured bound and saying nothing.
+     *
+     * SWAPPING is the response rather than falling back to defaults. It is the overwhelmingly
+     * likely intent (the two keys typed the wrong way round), it preserves both magnitudes the
+     * user actually entered, and it cannot produce a bound they did not type - which a
+     * fallback to MIN_BOILER_TEMP_C/MAX_BOILER_TEMP_C would, by raising the ceiling from a
+     * configured 75.0 to the 110.0 hard limit. Restating the struct defaults here would also
+     * have added a fourth definition of a value that already has three (see
+     * heating_low_limit).
+     */
+    inline bool flowLimitsValid(int16_t low, int16_t high) {
+        return low > 0 && high > 0 && low < high;
+    }
+
+    /// Order a flow pair, returning true if it had to be swapped so the caller can warn.
+    inline bool orderFlowLimits(int16_t& low, int16_t& high) {
+        if (low <= high) {
+            return false;
+        }
+        const int16_t t = low;
+        low = high;
+        high = t;
+        return true;
+    }
+
 } // namespace SpaceHeatingPolicy
 
 #endif // SPACE_HEATING_POLICY_H
