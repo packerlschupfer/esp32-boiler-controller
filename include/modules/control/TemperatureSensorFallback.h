@@ -22,7 +22,19 @@ public:
         NONE,             // No operation active
         SPACE_HEATING,    // Space heating only
         WATER_HEATING,    // Water heating only
-        BOTH              // Both heating modes active
+        BOTH,             // Both heating modes active
+        // Frost protection only: nothing but the frost latch authorised this burn.
+        //
+        // Needs the boiler OUTPUT and nothing else, because a frost burn heats to the flow
+        // FLOOR rather than to a room target - the room reading is not an input to it. Added
+        // 2026-10-26 after the review found a start/stop loop: the start check ran under mode
+        // NONE (boiler output only) and passed, then BurnerControlTask applied SPACE_HEATING,
+        // which requires roomTempValid, so a frost burn with a dead room sensor had its
+        // request dropped ~5 s in, the mode reverted to NONE, the fallback recovered, and it
+        // started again - a 10-15 s loop with the fallback flapping NORMAL/SHUTDOWN. Frost is
+        // the only path that starts heating while the room is not a measurement, which is why
+        // nothing else exposed this.
+        FROST_PROTECTION
     };
     
     struct SensorStatus {

@@ -142,45 +142,45 @@ void test_policy_mode_switch_exit_records_power_level() {
 // honour it.
 // ---------------------------------------------------------------------------------------
 
-// Mirrors BurnerStateMachine's Environment: the switch OR the matching frost latch.
-static bool effectiveEnable(bool switchOn, bool frostLatched) {
+// Mirrors BurnerStateMachine's Environment: the HEATING switch OR the frost latch. There is
+// one latch and one response, so only the heating side has a frost term - waterEnabled() is
+// the raw bit (the tank-driven DHW charge was reverted 2026-10-26).
+static bool effectiveHeatingEnable(bool switchOn, bool frostLatched) {
     return switchOn || frostLatched;
 }
 
 void test_policy_frost_latch_keeps_a_burn_alive_with_the_switch_off() {
-    const bool heatingSwitchOff = false;
-    const bool waterSwitchOff = false;
     const bool boilerOn = true;
+    const bool waterSwitchOff = false;
 
-    // Heating running, switch OFF, frost heat demand latched: must NOT stop.
+    // Heating running, switch OFF, frost latched: must NOT stop.
     TEST_ASSERT_FALSE(stopForExplicitDisable(
-        false, boilerOn, effectiveEnable(heatingSwitchOff, true), effectiveEnable(waterSwitchOff, false)));
+        false, boilerOn, effectiveHeatingEnable(false, true), waterSwitchOff));
 
-    // Same, without the frost latch: stops. This is the pre-fix behaviour and must stay for a
-    // genuinely switched-off system.
+    // Same, without the latch: stops. This is the behaviour a genuinely switched-off system
+    // must keep.
     TEST_ASSERT_TRUE(stopForExplicitDisable(
-        false, boilerOn, effectiveEnable(heatingSwitchOff, false), effectiveEnable(waterSwitchOff, false)));
+        false, boilerOn, effectiveHeatingEnable(false, false), waterSwitchOff));
 
-    // Water running on a frost TANK latch with the water switch off: must NOT stop.
+    // The frost latch must NOT keep a WATER burn alive: its response is space heating, and
+    // waterEnabled() carries no frost term. A latch that authorised the other circuit would be
+    // the autonomous DHW path coming back by accident.
+    TEST_ASSERT_TRUE(stopForExplicitDisable(
+        true, boilerOn, effectiveHeatingEnable(false, true), waterSwitchOff));
+
+    // With the water switch on, a water burn runs regardless of the frost latch.
     TEST_ASSERT_FALSE(stopForExplicitDisable(
-        true, boilerOn, effectiveEnable(heatingSwitchOff, false), effectiveEnable(waterSwitchOff, true)));
-
-    // The latches are per mode: a frost HEAT latch must not keep a WATER burn alive, and the
-    // reverse. Getting this wrong would let either latch authorise the other circuit.
-    TEST_ASSERT_TRUE(stopForExplicitDisable(
-        true, boilerOn, effectiveEnable(heatingSwitchOff, true), effectiveEnable(waterSwitchOff, false)));
-    TEST_ASSERT_TRUE(stopForExplicitDisable(
-        false, boilerOn, effectiveEnable(heatingSwitchOff, false), effectiveEnable(waterSwitchOff, true)));
+        true, boilerOn, effectiveHeatingEnable(false, true), true));
 }
 
 void test_policy_frost_never_overrides_a_disabled_boiler() {
     // BOILER_ENABLED is deliberately NOT part of the effective enable. A drained-for-service
     // system is a likely reason to switch the boiler off, and firing into a drained boiler is
     // worse than frost. Both latches set, boiler off -> still stops, both modes.
-    TEST_ASSERT_TRUE(stopForExplicitDisable(false, false, effectiveEnable(false, true),
-                                            effectiveEnable(false, true)));
-    TEST_ASSERT_TRUE(stopForExplicitDisable(true, false, effectiveEnable(false, true),
-                                            effectiveEnable(false, true)));
+    TEST_ASSERT_TRUE(stopForExplicitDisable(false, false, effectiveHeatingEnable(false, true),
+                                            false));
+    TEST_ASSERT_TRUE(stopForExplicitDisable(true, false, effectiveHeatingEnable(false, true),
+                                            true));
     // And the boiler check outranks everything: switches on, latches set, boiler off -> stop.
     TEST_ASSERT_TRUE(stopForExplicitDisable(false, false, true, true));
 }

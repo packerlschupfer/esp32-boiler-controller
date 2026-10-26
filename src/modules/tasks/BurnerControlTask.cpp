@@ -12,6 +12,7 @@
 #include "modules/control/BurnerRequestManager.h"
 #include "modules/control/SafetyInterlocks.h"
 #include "modules/control/CentralizedFailsafe.h"
+#include "modules/control/FrostProtection.h"
 #include "modules/control/ReturnPreheater.h"
 #include "modules/control/SensorFailureConfirm.h"
 #include "modules/control/SensorErrorBitPolicy.h"
@@ -437,6 +438,21 @@ static TemperatureSensorFallback::OperationMode operationModeForRequests(EventBi
         return TemperatureSensorFallback::OperationMode::BOTH;
     }
     if (heatingRequested) {
+        // A burn that NOTHING BUT FROST authorised needs the boiler output and nothing else:
+        // it heats to the flow floor, so the room reading is not an input. Reporting
+        // SPACE_HEATING for it required roomTempValid, which a frost burn cannot promise -
+        // frost is the only path that starts heating while the room is not a measurement - and
+        // that turned a frost burn with a dead room sensor into a 10-15 s start/stop loop with
+        // the fallback flapping NORMAL/SHUTDOWN. Found by the 2026-10-26 review.
+        //
+        // Same discriminator as the frost FLOOR decision in HeatingControlTask: the heating
+        // switch being off is what makes a burn frost-only. With the switch on, normal space
+        // heating is happening and the room genuinely is required.
+        const bool heatingSwitchOn =
+            (SRP::getSystemStateEventBits() & SystemEvents::SystemState::HEATING_ENABLED) != 0;
+        if (!heatingSwitchOn && FrostProtection::demand()) {
+            return TemperatureSensorFallback::OperationMode::FROST_PROTECTION;
+        }
         return TemperatureSensorFallback::OperationMode::SPACE_HEATING;
     }
     if (waterRequested) {

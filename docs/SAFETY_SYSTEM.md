@@ -278,22 +278,41 @@ by nothing - it was removed rather than left as a promise the firmware did not k
 the water warm was a side effect of normal operation, and that stops the moment heating and
 water are disabled: a summer setting left on into a cold snap, or a long absence.
 
-**Two independent latches** (split 2026-10-25), both triggering at **5.0°C** and releasing at
-**10.0°C**:
+**One latch, three sensors, one response.** Triggers at **5.0°C** on the boiler flow, the room
+or the DHW tank - whichever is usable and cold - and releases only when every usable reading is
+back above **10.0°C**. The response is space heating at the flow floor (`heating_low_limit`),
+*not* the curve: the curve is a function of outside temperature, so at frost temperatures it
+would ask for a high flow and heat the house, which is the opposite of the intent.
 
-| Latch | Watches | Response | Overrides |
-|-------|---------|----------|-----------|
-| `heatDemand()` | boiler flow **or** room | Space heating at the flow floor (`heating_low_limit`) - *not* the curve, which at frost temperatures would ask for a high flow and heat the house | `HEATING_ENABLED`, the summer override, `HEATING_OFF_OVERRIDE` |
-| `waterDemand()` | DHW tank | A water **charge** | `WATER_ENABLED` |
+It **overrides** `HEATING_ENABLED`, the remote OFF override, the room being satisfied, and the
+burner state machine's explicit-disable stop. It does **not** override `BOILER_ENABLED`: a
+drained-for-service system is a likely reason to switch the boiler off, and firing into a
+drained boiler is worse than frost. It does not bypass the sensor fallback, the pressure
+interlock or anti-flapping.
 
-**Neither overrides `BOILER_ENABLED`**: a drained-for-service system is a likely reason to switch
-the boiler off, and firing a burner into a drained boiler is worse than frost. Neither bypasses
-the sensor fallback, the pressure interlock or anti-flapping.
+A frost-only burn reports `OperationMode::FROST_PROTECTION`, which requires the boiler **output**
+reading and nothing else - it heats to the floor, so the room and return are not inputs to it.
+Reporting `SPACE_HEATING` instead required `roomTempValid`, which a frost burn cannot promise,
+and that turned a frost burn with a dead room sensor into a 10-15 second start/stop loop.
 
-Until 2026-10-25 the tank asked for **space heating**, which warms the house and does nothing
-whatsoever for the tank - so the tank had the appearance of frost protection and none of the
-substance. The room was not watched at all, though a freezing house is what this guard is
-actually for; the flow reading only notices it indirectly, after the boiler itself has gone cold.
+**A tank-driven DHW charge was tried and reverted** (2026-10-25 to 2026-10-26). The argument for
+it was that running the heating circuit does nothing for the tank, so a cold tank should get a
+real charge. Three things were wrong with that:
+
+- **Unreachable first.** The tank is a large thermal mass in the same cellar as the boiler, and
+  the flow sensor sits in that cellar with a fraction of the mass - so flow reaches 5°C days
+  earlier and the latch is already running before the tank could trigger anything.
+- **Disproportionate cost.** It needed a second latch, cross-task atomics, and overrides in the
+  water task's entry gate, start condition and stop condition plus the state machine's
+  Environment. Two of the six high-severity findings of the 2026-10-26 review came out of that
+  machinery; the simple half of the feature produced none.
+- **The premise was overstated.** Running the heating circuit in a freezing cellar does raise
+  the ambient around the tank. Indirect and weak, but it is the mechanism by which the tank is
+  actually protected, and it is not nothing.
+
+So a cold tank still triggers the latch - it warms the room the tank stands in. What that gives
+up is a tank freezing while the cellar and hall do not, which cannot happen while they share a
+room.
 
 **A reading must be valid AND FRESH to trigger.** This matters more than it sounds: nothing
 clears `isBoilerTempOutputValid` when MB8ART reads simply **stop**, so a dead bus leaves the last
@@ -308,6 +327,24 @@ The asymmetry is deliberate in two directions: a **trigger** needs a usable cold
 unreadable sensor is not evidence of frost, and `TEMP_INVALID` is `INT16_MIN`, which would read
 as -3276.8°C and fire instantly), while a **release** treats an unusable reading as not blocking,
 so if every reading goes unusable mid-burn the demand drops rather than firing blind.
+
+**What this cannot cover, and why it is not a complete answer**:
+- **A dead controller.** CH1 BURNER_ENABLE is a normally-OPEN relay contact, so with the ESP32
+  unpowered, crashed or in emergency stop the burner circuit is open and the boiler cannot fire
+  at all. The original Vaillant controller is not in the loop, and the STB and tandem thermostat
+  can only ever *stop* the burner. Only a hardware frost thermostat wired around the relay would
+  close that gap - see below.
+- **A dead bus.** By the rule above, stale readings never fire the burner. A frozen house behind
+  a dead MB8ART therefore gets nothing from here either. That is the accepted trade: the firmware
+  never fires on data it cannot vouch for.
+
+**The latch survives the stop conditions, as of 2026-10-26.** It did not when frost was first
+added: the override was taught to the *start* paths only. The burner state machine fed
+`stopForExplicitDisable()` the RAW switch bit, so a frost burn with the heating switch off was
+stopped on its first `running()` tick with `EXPLICIT_DISABLE` and relit ~20 s later by the
+heating task - repeated ignitions and no heat, in precisely the case the guard exists for. The
+burner's *effective* heating enable is now the switch OR the frost latch, in one place that all
+three state-machine consumers inherit.
 
 **What this cannot cover, and why it is not a complete answer**:
 - **A dead controller.** CH1 BURNER_ENABLE is a normally-OPEN relay contact, so with the ESP32

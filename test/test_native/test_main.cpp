@@ -55,7 +55,7 @@ void test_frost_releases_rather_than_firing_blind();
 void test_frost_one_cold_sensor_holds_while_the_other_is_warm();
 void test_frost_thresholds_are_the_agreed_numbers();
 void test_frost_a_stale_reading_never_fires_the_burner();
-void test_frost_the_two_latches_are_independent();
+void test_frost_is_one_latch_over_all_three_sensors();
 void test_frost_room_trigger_cannot_fire_in_a_lived_in_house();
 void test_frost_cold_mask_describes_every_combination();
 
@@ -665,7 +665,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_frost_one_cold_sensor_holds_while_the_other_is_warm);
     RUN_TEST(test_frost_thresholds_are_the_agreed_numbers);
     RUN_TEST(test_frost_a_stale_reading_never_fires_the_burner);
-    RUN_TEST(test_frost_the_two_latches_are_independent);
+    RUN_TEST(test_frost_is_one_latch_over_all_three_sensors);
     RUN_TEST(test_frost_room_trigger_cannot_fire_in_a_lived_in_house);
     RUN_TEST(test_frost_cold_mask_describes_every_combination);
 

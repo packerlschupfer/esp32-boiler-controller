@@ -381,8 +381,8 @@ public:
 
     bool boilerEnabled() override { return hasSystemBit(SystemEvents::SystemState::BOILER_ENABLED); }
 
-    // EFFECTIVE enable: the switch OR the matching frost latch. Frost demand overrides the
-    // mode switch - being switched off is exactly when freezing happens - and the mode tasks
+    // EFFECTIVE heating enable: the switch OR the frost latch. Frost demand overrides the
+    // heating switch - being switched off is exactly when freezing happens - and the mode tasks
     // already honour that, but the state machine did not: every consumer of these two
     // (BurnerTransitions' running(), modeSwitching() and postPurge(), all via
     // stopForExplicitDisable) saw the RAW bit, and nothing in the state machine knew
@@ -399,12 +399,11 @@ public:
     // reason to switch the boiler off, and firing into a drained boiler is worse than frost.
     bool heatingEnabled() override {
         return hasSystemBit(SystemEvents::SystemState::HEATING_ENABLED) ||
-               FrostProtection::heatDemand();
+               FrostProtection::demand();
     }
-    bool waterEnabled() override {
-        return hasSystemBit(SystemEvents::SystemState::WATER_ENABLED) ||
-               FrostProtection::waterDemand();
-    }
+    // No frost term: there is one latch and its response is space heating. The tank-driven DHW
+    // charge that needed this is reverted (FrostProtectionPolicy::demand()).
+    bool waterEnabled() override { return hasSystemBit(SystemEvents::SystemState::WATER_ENABLED); }
     bool heatingOn() override { return hasSystemBit(SystemEvents::SystemState::HEATING_ON); }
     bool waterOn() override { return hasSystemBit(SystemEvents::SystemState::WATER_ON); }
     bool waterPriority() override { return hasSystemBit(SystemEvents::SystemState::WATER_PRIORITY); }

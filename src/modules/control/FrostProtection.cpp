@@ -20,11 +20,10 @@ static_assert(FrostProtectionPolicy::TRIGGER_TENTHS ==
               "frost trigger must stay tied to FREEZE_PROTECTION_TEMP_C");
 
 namespace {
-    // Read from both mode tasks, written only by evaluate(). Atomics rather than a mutex: one
-    // bool each, and a reader that sees the previous value for one cycle loses nothing - the
-    // latch is re-evaluated every cycle anyway.
-    std::atomic<bool> s_heat{false};
-    std::atomic<bool> s_water{false};
+    // Read from the heating task and from the burner state machine's Environment, written only
+    // by evaluate(). An atomic rather than a mutex: one bool, and a reader that sees the
+    // previous value for one cycle loses nothing - the latch is re-evaluated every cycle.
+    std::atomic<bool> s_demand{false};
 
     /**
      * @brief Is a reading recent enough to act on?
@@ -56,7 +55,7 @@ void evaluate() {
         auto guard = MutexRetryHelper::acquireGuard(SRP::getSensorReadingsMutex(),
                                                     "SensorReadings-Frost");
         if (!guard) {
-            return;  // no snapshot: leave both latches as they are rather than guessing
+            return;  // no snapshot: leave the latch as it is rather than guessing
         }
         const SharedSensorReadings& sr = SRP::getSensorReadings();
         const uint32_t now = millis();
@@ -78,50 +77,32 @@ void evaluate() {
         r.roomUsable = sr.isInsideTempValid && roomFresh;
     }
 
-    const bool wasHeat = s_heat.load(std::memory_order_relaxed);
-    const bool wasWater = s_water.load(std::memory_order_relaxed);
-    const bool nowHeat = FrostProtectionPolicy::heatDemand(wasHeat, r);
-    const bool nowWater = FrostProtectionPolicy::waterDemand(wasWater, r);
-
-    if (nowHeat == wasHeat && nowWater == wasWater) {
+    const bool was = s_demand.load(std::memory_order_relaxed);
+    const bool now = FrostProtectionPolicy::demand(was, r);
+    if (now == was) {
         return;  // edge-triggered logging: one line per transition, not per cycle
     }
-    s_heat.store(nowHeat, std::memory_order_relaxed);
-    s_water.store(nowWater, std::memory_order_relaxed);
+    s_demand.store(now, std::memory_order_relaxed);
 
     char flowBuf[16], tankBuf[16], roomBuf[16];
     formatTemp(flowBuf, sizeof(flowBuf), r.flow);
     formatTemp(tankBuf, sizeof(tankBuf), r.tank);
     formatTemp(roomBuf, sizeof(roomBuf), r.room);
-    const uint8_t cold = FrostProtectionPolicy::coldMask(r);
 
-    if (nowHeat != wasHeat) {
-        if (nowHeat) {
-            LOG_WARN(TAG, "FROST HEAT ON (%s cold) - flow %s°C usable=%d, room %s°C usable=%d; "
-                          "requesting minimum flow regardless of the heating switch",
-                     FrostProtectionPolicy::describe(cold), flowBuf, r.flowUsable ? 1 : 0,
-                     roomBuf, r.roomUsable ? 1 : 0);
-        } else {
-            LOG_WARN(TAG, "Frost heat off - flow %s°C, room %s°C", flowBuf, roomBuf);
-        }
-    }
-    if (nowWater != wasWater) {
-        if (nowWater) {
-            LOG_WARN(TAG, "FROST WATER ON - tank %s°C usable=%d; requesting a charge regardless "
-                          "of the water switch",
-                     tankBuf, r.tankUsable ? 1 : 0);
-        } else {
-            LOG_WARN(TAG, "Frost water off - tank %s°C", tankBuf);
-        }
+    if (now) {
+        LOG_WARN(TAG, "FROST PROTECTION ON (%s cold) - flow %s°C usable=%d, room %s°C usable=%d, "
+                      "tank %s°C usable=%d; requesting minimum flow regardless of the heating switch",
+                 FrostProtectionPolicy::describe(FrostProtectionPolicy::coldMask(r)),
+                 flowBuf, r.flowUsable ? 1 : 0, roomBuf, r.roomUsable ? 1 : 0,
+                 tankBuf, r.tankUsable ? 1 : 0);
+    } else {
+        LOG_WARN(TAG, "Frost protection off - flow %s°C, room %s°C, tank %s°C",
+                 flowBuf, roomBuf, tankBuf);
     }
 }
 
-bool heatDemand() {
-    return s_heat.load(std::memory_order_relaxed);
-}
-
-bool waterDemand() {
-    return s_water.load(std::memory_order_relaxed);
+bool demand() {
+    return s_demand.load(std::memory_order_relaxed);
 }
 
 }  // namespace FrostProtection

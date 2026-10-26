@@ -134,47 +134,43 @@ namespace FrostProtectionPolicy {
      *    the safe direction when the controller can no longer see what it is heating, and the
      *    sensor-failure machinery is better placed to react than this guard is.
      */
-    /// One latch, over a chosen subset of the sensors. Trigger needs a usable cold reading;
-    /// release treats an unusable reading as "not blocking", so a burn stops rather than
-    /// continuing blind.
-    inline bool latch(bool currentlyDemanding, const Readings& r, uint8_t watch) {
+    /**
+     * @brief The one frost latch: any usable sensor below the trigger starts it.
+     *
+     * ONE latch over all three sensors, with ONE response - space heating at the flow floor,
+     * overriding the heating switch. It was briefly two latches, with a cold TANK driving an
+     * autonomous DHW charge. That is reverted (2026-10-26, user decision) and the reasoning is
+     * worth keeping, because the argument for splitting them looked good and was wrong:
+     *
+     *  - The tank trigger was effectively UNREACHABLE FIRST. The tank is a large thermal mass
+     *    in the same cellar as the boiler, and the flow sensor sits in that cellar with a
+     *    fraction of the mass - so flow reaches 5 C days earlier and the latch is already
+     *    running by the time the tank could trigger anything.
+     *  - It cost the most and broke the most: a second latch, cross-task atomics, and
+     *    overrides in the water task's entry gate, start condition and stop condition plus the
+     *    burner state machine's Environment. Two of the six high-severity findings of the
+     *    2026-10-26 review came out of exactly that machinery. The simple half produced none.
+     *  - The justification for building it was an overstatement of mine: I wrote that a tank
+     *    trigger driving space heating "had the appearance of frost protection and none of the
+     *    substance". Running the heating circuit in a freezing cellar does raise the ambient
+     *    around the tank. Indirect and weak, but it is the mechanism by which the tank is
+     *    actually protected, and it is not nothing.
+     *
+     * So a cold tank still triggers this latch - it just warms the room the tank stands in
+     * rather than charging it. What that gives up is a tank freezing while the cellar and hall
+     * do not, which cannot happen while they share a room.
+     *
+     * Trigger needs a USABLE cold reading; release treats an unusable reading as "not
+     * blocking", so a burn stops rather than continuing blind.
+     */
+    inline bool demand(bool currentlyDemanding, const Readings& r) {
         if (!currentlyDemanding) {
-            return (coldMask(r) & watch) != 0;
+            return coldMask(r) != 0;
         }
-        bool clear = true;
-        if (watch & COLD_FLOW) clear = clear && (!r.flowUsable || r.flow >= RELEASE_TENTHS);
-        if (watch & COLD_TANK) clear = clear && (!r.tankUsable || r.tank >= RELEASE_TENTHS);
-        if (watch & COLD_ROOM) clear = clear && (!r.roomUsable || r.room >= RELEASE_TENTHS);
-        return !clear;
-    }
-
-    /**
-     * @brief Space-heating frost demand: the boiler's own water, or the house.
-     *
-     * ROOM was added 2026-10-25 (user decision). The house freezing is the thing this guard is
-     * actually for - "in case someone disabled something or set some values too low" - and the
-     * flow reading only sees it indirectly, after the boiler itself has gone cold.
-     */
-    inline bool heatDemand(bool currentlyDemanding, const Readings& r) {
-        return latch(currentlyDemanding, r, COLD_FLOW | COLD_ROOM);
-    }
-
-    /**
-     * @brief DHW frost demand: the tank, which the heating circuit cannot reach.
-     *
-     * Split from the heating latch 2026-10-25. The tank used to trigger heating demand, which
-     * warms the house and does nothing whatsoever for the tank - so the tank had no frost
-     * protection at all, only the appearance of it. A cold tank needs a water CHARGE: the
-     * water-mode relay, the valve and the water pump.
-     *
-     * This essentially never fires. Normal operation recharges the tank below
-     * wheater/tempLimitLow, 40.0 on this installation, so 35 K above freezing; reaching 5 °C
-     * means water heating was off for a very long time in a very cold house. A spurious
-     * trigger is also cheap: the 10 °C release stops the charge almost at once, and the normal
-     * DHW limits still bound it.
-     */
-    inline bool waterDemand(bool currentlyDemanding, const Readings& r) {
-        return latch(currentlyDemanding, r, COLD_TANK);
+        const bool flowClear = !r.flowUsable || r.flow >= RELEASE_TENTHS;
+        const bool tankClear = !r.tankUsable || r.tank >= RELEASE_TENTHS;
+        const bool roomClear = !r.roomUsable || r.room >= RELEASE_TENTHS;
+        return !(flowClear && tankClear && roomClear);
     }
 
 } // namespace FrostProtectionPolicy

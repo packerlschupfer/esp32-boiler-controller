@@ -254,7 +254,7 @@ static void safetyCheckCallback(TimerHandle_t xTimer) {
  * above all, since CH1 BURNER_ENABLE is normally open.
  */
 static inline bool frostDemand() {
-    return FrostProtection::heatDemand();
+    return FrostProtection::demand();
 }
 
 /**

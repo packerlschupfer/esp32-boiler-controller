@@ -393,6 +393,12 @@ bool TemperatureSensorFallback::hasRequiredSensors() {
     
     // Check additional requirements based on operation mode
     switch (currentStatus.currentOperationMode) {
+        case OperationMode::FROST_PROTECTION:
+            // Boiler output only - already checked above. A frost burn heats to the flow floor,
+            // so the room and return readings are not inputs to it; requiring them turned a
+            // frost burn with a dead room sensor into a start/stop loop. See the enum.
+            return true;
+
         case OperationMode::SPACE_HEATING:
             // Need boiler return and room temperature for space heating
             return currentStatus.boilerReturnValid && currentStatus.roomTempValid;

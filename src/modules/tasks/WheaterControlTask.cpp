@@ -15,7 +15,6 @@
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
 #include "core/SystemResourceProvider.h"
-#include "modules/control/FrostProtection.h"
 #include "core/SharedResourceManager.h"
 #include <TaskManager.h>
 
@@ -281,16 +280,16 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
 
     EventBits_t systemStateBits = SRP::getSystemStateEventBits();
     
-    // Check if both boiler and water heating are enabled. Frost demand on the TANK overrides
-    // the water switch - being switched off is exactly when the tank freezes - but never
-    // BOILER_ENABLED, for the same reason the heating side does not: a drained-for-service
-    // system is a likely reason to switch the boiler off. Added 2026-10-25, when the tank
-    // trigger was split out of the heating latch; before that a cold tank asked for SPACE
-    // heating, which warms the house and does nothing at all for the tank, so the tank had
-    // only the appearance of frost protection. See FrostProtectionPolicy::waterDemand().
+    // Check if both boiler and water heating are enabled.
+    //
+    // No frost carve-out here. A cold TANK briefly drove an autonomous DHW charge that
+    // overrode this gate (2026-10-25); it is reverted - the tank now triggers the single frost
+    // latch, which runs space heating and warms the room the tank stands in. See
+    // FrostProtectionPolicy::demand() for why, including that two of the 2026-10-26 review's
+    // high-severity findings came out of this override and its missing counterpart in the stop
+    // condition below.
     if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) ||
-        (!(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) &&
-         !FrostProtection::waterDemand())) {
+        !(systemStateBits & SystemEvents::SystemState::WATER_ENABLED)) {
         
         // System disabled - turn off water heating if on
         if (waterState.state == WheaterOn) {
@@ -324,7 +323,7 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
     switch (waterState.state) {
         case WheaterOff: {
             // Check if we should turn on water heating
-            if (checkIfWaterHeatingNeededEvent() || FrostProtection::waterDemand() ||
+            if (checkIfWaterHeatingNeededEvent() ||
                 (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE)) {
                 // Check if we can start water heating
                 if (!TemperatureSensorFallback::canContinueOperation()) {
@@ -403,26 +402,10 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
                 break;
             }
 
-            // Frost demand on the TANK suppresses the three "nobody wants hot water" reasons -
-            // the remote override, the water switch and the tank being satisfied - and nothing
-            // else. A sensor failure or a disabled boiler still stops the charge. This mirrors
-            // the heating task's HeatingOn branch exactly.
-            //
-            // 9bf6be5 taught the ENTRY gate and the WheaterOff START condition about
-            // waterDemand() and left this stop test alone, so the two halves disagreed. Since
-            // waterDemand() can only matter when the water switch is OFF - with it on, the
-            // normal recharge at tempLimitLow 40.0 runs 35 K earlier - the only situation the
-            // feature was built for was also the one where this test killed it: the charge
-            // started, then stopped 5 s later with "water heating disabled", then restarted.
-            // A ~10 s loop with an ignition attempt per cycle, the burner relays cycling, and
-            // HeatingControlTask preempted through water priority each time round, while the
-            // tank never charged. Found by the 2026-10-26 review, which also corrected my note
-            // claiming it would cycle 5 -> 10 C: it never got past one cycle.
-            const bool frostWater = FrostProtection::waterDemand();
-            if (((controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) && !frostWater) ||
+            if ((controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) ||
                 !(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) ||
-                (!(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) && !frostWater) ||
-                (!waterStillNeeded && !frostWater) ||
+                !(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) ||
+                !waterStillNeeded ||
                 !sensorsAvailable) {
                 
                 // Determine reason for shutdown
