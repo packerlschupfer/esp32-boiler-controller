@@ -491,6 +491,16 @@ void test_report_fits_the_payload_with_every_counter_set();
 void test_report_marks_truncation_instead_of_losing_the_tail();
 void test_report_refuses_rather_than_emit_half_a_payload();
 
+// Heating curve anchoring - both formulations compared (2026-10-26)
+void test_anchor_room_at_target_is_identical_to_the_old_behaviour();
+void test_anchor_colder_room_now_raises_the_flow_target();
+void test_anchor_sensitivity_is_exactly_minus_the_factor();
+void test_anchor_recovery_case_measured_on_the_live_config();
+void test_anchor_room_mode_is_untouched();
+void test_anchor_substituted_room_gets_no_deviation();
+void test_anchor_zero_factor_disables_only_the_deviation();
+void test_anchor_shift_cannot_overflow_int16();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -988,6 +998,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_report_fits_the_payload_with_every_counter_set);
     RUN_TEST(test_report_marks_truncation_instead_of_losing_the_tail);
     RUN_TEST(test_report_refuses_rather_than_emit_half_a_payload);
+
+    // The curve was anchored on the live room reading, giving the room shift the wrong sign
+    RUN_TEST(test_anchor_room_at_target_is_identical_to_the_old_behaviour);
+    RUN_TEST(test_anchor_colder_room_now_raises_the_flow_target);
+    RUN_TEST(test_anchor_sensitivity_is_exactly_minus_the_factor);
+    RUN_TEST(test_anchor_recovery_case_measured_on_the_live_config);
+    RUN_TEST(test_anchor_room_mode_is_untouched);
+    RUN_TEST(test_anchor_substituted_room_gets_no_deviation);
+    RUN_TEST(test_anchor_zero_factor_disables_only_the_deviation);
+    RUN_TEST(test_anchor_shift_cannot_overflow_int16);
 
     return UNITY_END();
 }

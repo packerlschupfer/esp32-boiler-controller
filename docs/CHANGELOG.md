@@ -22,6 +22,40 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Fixed: the room-deviation curve shift had the wrong sign
+
+The weather curve's Parallelverschiebung was supposed to raise the flow target when the house
+is cold. It lowered it. `HeatingControlModule` passed the **live room reading** as the curve's
+own `insideTenths` as well as deriving the shift from it, so the room fed the curve twice:
+lowering the room dropped the base by 1 K and shrank `diff = outside - inside`, which shrank
+the weather adjustment, and together those beat the `+roomCurveShiftFactor` the shift added.
+
+Measured net sensitivity: **+0.70 K/K at 12 °C outside, +0.50 at 8 °C, +0.30 at 4 °C, +0.20 at
+0 °C and below.** Positive means a colder house gets a lower flow target. A house 3 K down at
+6 °C outside was commanded **44.8 °C** - less than the **46.2** the same curve gives when the
+house is already at temperature - where the documented intent is **52.2**.
+
+It compounded with the `h/boostMin` stage-2 gate in the same direction: at 4 °C outside the
+correct target of 55.0 clears the 50.0 gate and permits stage 2, while the old 47.8 did not. So
+the one case where the room shift matters most - a cold house needing to recover - was also the
+case where the defect denied it the second burner stage.
+
+A Heizkurve is parameterised on the *design* indoor temperature, so `HeatingCurve::anchoring()`
+now returns the anchor and the shift as a pair: anchor on `targetTemp`, room deviation in the
+shift only. The sensitivity is then exactly `-roomCurveShiftFactor` at every outside
+temperature. Tuning the parameter could not have fixed this - the value needed merely to reach
+*zero* sensitivity varied with the weather, from 2.71 at 12 °C to 2.11 at 0 °C.
+
+Unchanged: room mode, a target-or-nominal substitution while the room sensor is unusable, and
+**any house that is at temperature** - the two formulations are identical when room == target
+and near-identical close to it. That is also why the 2026-10-18 validation against 7 live flow
+targets could not detect it: every sample was taken with the room within a degree of target.
+The error only appears when the room deviates, which is exactly when the term is meant to act.
+
+8 native tests (`test_heating_curve_anchoring.cpp`) compute **both** formulations from the same
+inputs and assert on the difference, including that the old one really did have the wrong sign
+at every outside temperature tested, so the regression cannot return silently.
+
 ### Added: the room sensor's own counters, on demand
 
 `boiler/cmd/diagnostics` with payload `room_sensor` reads input registers 50..77 of the ANDRTF3

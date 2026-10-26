@@ -890,7 +890,7 @@ Compute the boiler target for space heating from outside and room temperature, a
 
 **Formula:**
 ```
-diff   = outside - inside        (°C, inside = measured room temperature)
+diff   = outside - inside        (°C, inside = the ANCHOR, see below)
 target = inside + shift - coeff × diff × (1.4347 + 0.021 × diff + 0.000248 × diff²)
 ```
 
@@ -904,7 +904,34 @@ target      = clamp(inside + shift - adjustment, lowerLimit, upperLimit);
 ```
 All divisions are integer divisions (truncated toward zero). `calculateSpaceHeatingTargetTemp()` passes `burner_low_limit` (`h/bLo`, default 38.0°C) and `heating_high_limit` (`h/sHi`, default 75.0°C) as limits; `BurnerRequestManager::setHeatingRequest()` then clamps the request to `heating_low_limit` (`h/sLo`, default 38.0°C) .. `heating_high_limit` (absolute 20.0-110.0°C).
 
-**Weather mode room shift**: with `heating/weatherControl` on and a valid room reading, `shift += (targetTemp - room) × heating/roomCurveShiftFactor`. Room mode uses the curve without this shift.
+**The anchor** (`HeatingCurve::anchoring()`): in weather mode with a real room reading (fresh
+or held) and a configured target, `inside` is **`targetTemp`** - the design indoor temperature -
+and the live room enters **only** through the shift:
+
+```
+inside  = targetTemp
+shift  += (targetTemp - room) × heating/roomCurveShiftFactor
+```
+
+Otherwise (room mode, no target configured, or the room value is a substitute rather than a
+measurement) `inside` is whatever room value is in use and no shift term is added.
+
+This gives `d(target)/d(room) = -roomCurveShiftFactor` at every outside temperature: a house
+1 K cold gets 2.0 K more flow, which is what "Parallelverschiebung" means.
+
+**Fixed 2026-10-26 - it used to have the wrong sign.** `inside` was the *measured room*, so the
+room fed the curve twice: lowering it dropped the base by 1 K and shrank `diff`, which shrank
+the weather adjustment, and together those beat the `+2.0` the shift added. Measured net
+sensitivity was **+0.70 K/K at 12 °C outside, +0.20 K/K at 0 °C** - a colder house got a *lower*
+flow target. A house 3 K down at 6 °C outside was commanded **44.8 °C**, less than the 46.2 it
+would get at temperature, where the intent is 52.2. It compounded with the `h/boostMin` stage-2
+gate: at 4 °C outside the correct 55.0 clears the 50.0 gate and the old 47.8 did not.
+
+No value of `roomCurveShiftFactor` could fix it - the value needed merely to reach *zero*
+sensitivity varied with the weather (2.71 at 12 °C, 2.11 at 0 °C). The two formulations are
+**identical when room == target**, which is why the 2026-10-18 validation against 7 live targets
+could not see it. `test_heating_curve_anchoring.cpp` computes both and asserts on the
+difference.
 
 ### Parameters (`boiler/params/set/<name>`)
 

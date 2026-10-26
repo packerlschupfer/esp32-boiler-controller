@@ -87,6 +87,76 @@ namespace HeatingCurve {
         return static_cast<int16_t>(result);
     }
 
+    /**
+     * @brief What the curve is anchored on, and the shift that goes with it.
+     *
+     * THE DEFECT THIS FIXES (found 2026-10-26, present since the room shift was added)
+     *
+     * The room reading used to be passed as `insideTenths` AND used for the
+     * Parallelverschiebung, so it fed the curve twice and the two terms fought - with the
+     * curve's own term winning. Lowering the room by 1 K lowers the base by 1 K and shrinks
+     * `diff = outside - inside`, which shrinks the weather adjustment; together those beat
+     * the `+roomCurveShiftFactor` the shift adds. Measured sensitivity was **+0.70 K/K at
+     * 12 C outside down to +0.20 K/K at 0 C** - the WRONG SIGN. A house 3 K cold at 6 C
+     * outside was commanded 44.9 C flow, LESS than the 46.3 it would get if it were already
+     * at temperature, where the documented intent is 52.3.
+     *
+     * A Heizkurve is parameterised on the DESIGN indoor temperature, not the live room: the
+     * live room belongs only in the shift. Anchoring on the target makes the sensitivity
+     * exactly `-roomCurveShiftFactor` at every outside temperature, which is what the
+     * comment in HeatingControlModule always claimed.
+     *
+     * Tuning the factor cannot fix it: the value needed merely to reach ZERO sensitivity
+     * varies with the weather (2.71 at 12 C, 2.11 at 0 C), so no single number is right.
+     *
+     * Why the 2026-10-18 validation against 7 live targets missed it: the two formulations
+     * are IDENTICAL when room == target, and near-identical close to it. The error only
+     * appears when the room deviates - exactly when the term is supposed to act.
+     *
+     * The anchor and the deviation are returned together, and deliberately share one
+     * condition: anchoring on a target while not applying its deviation (or the reverse)
+     * is a third formulation nobody wants.
+     */
+    struct Anchoring {
+        int16_t inside;  ///< what to pass as the curve's insideTenths
+        int16_t shift;   ///< base shift plus the room-deviation term, tenths
+    };
+
+    /**
+     * @param baseShift        heating/curveShift, tenths
+     * @param roomTarget       heating/targetTemp, tenths; <= 0 means "none configured"
+     * @param effectiveInside  the room value in use (measured, held, or a substitute)
+     * @param shiftFactorX10   heating/roomCurveShiftFactor x10 (20 = 2.0)
+     * @param weatherMode      heating/weatherControl
+     * @param roomIsMeasurement the room value is a real reading, fresh or held
+     *
+     * Integer-only: the factor arrives x10 rather than as a float so this stays exactly
+     * reproducible on the host. The firmware's float parameter is scaled at the call site.
+     */
+    inline Anchoring anchoring(int16_t baseShift, int16_t roomTarget, int16_t effectiveInside,
+                               int16_t shiftFactorX10, bool weatherMode,
+                               bool roomIsMeasurement) {
+        // No target to anchor on, no weather curve, or no real reading to deviate from:
+        // behave exactly as before - anchor on whatever room value is in use and apply no
+        // deviation. With a TARGET substitution effectiveInside already IS the target, so
+        // the two agree anyway; with NOMINAL there is no target by definition.
+        if (!weatherMode || roomIsMeasurement == false || roomTarget <= 0) {
+            return Anchoring{effectiveInside, baseShift};
+        }
+
+        // Deviation is positive when the room is COLD, and raises the shift.
+        const int32_t deviation = static_cast<int32_t>(roomTarget) - effectiveInside;
+        const int32_t adjust = (deviation * shiftFactorX10) / 10;
+        int32_t shift = static_cast<int32_t>(baseShift) + adjust;
+
+        // The curve clamps its own output, but the shift feeds the polynomial through
+        // `inside + shift`, so keep it inside int16 here rather than relying on that.
+        if (shift > INT16_MAX) { shift = INT16_MAX; }
+        if (shift < INT16_MIN) { shift = INT16_MIN; }
+
+        return Anchoring{roomTarget, static_cast<int16_t>(shift)};
+    }
+
 } // namespace HeatingCurve
 
 #endif // HEATING_CURVE_H

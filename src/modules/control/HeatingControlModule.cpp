@@ -1,6 +1,7 @@
 // src/modules/control/HeatingControlModule.cpp
 #include "modules/control/HeatingControlModule.h"
-#include "modules/control/HeatingCurve.h"  // NOMINAL_ROOM_TENTHS fallback
+#include "modules/control/HeatingCurve.h"  // NOMINAL_ROOM_TENTHS fallback, anchoring()
+#include <cmath>  // lroundf, to scale roomCurveShiftFactor into the policy x10 integer
 #include "modules/control/RoomTempFallbackPolicy.h"  // hold the last good room reading
 #include "modules/control/HeatingControlModuleFixedPoint.h"  // For fixed-point heating curve calculations
 #include "shared/Temperature.h"  // For temperature conversions
@@ -93,32 +94,43 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     Temperature_t effectiveInside = room.value;
     RoomTempFallbackPolicy::Source insideSource = room.source;
 
-    // Weather-compensated mode: apply room temp deviation curve shift (Parallelverschiebung)
-    // If room is cold relative to target → shift curve UP (more heat)
-    // If room is warm relative to target → shift curve DOWN (less heat)
+    // Weather-compensated mode: anchor the curve on the TARGET and put the room deviation
+    // in the shift (Parallelverschiebung). Room cold -> curve UP, room warm -> curve DOWN.
+    //
+    // Both halves come from HeatingCurve::anchoring() as a pair. Until 2026-10-26 this
+    // function passed the live room reading as the curve's own base AS WELL as deriving the
+    // shift from it, so the room fed the curve twice and the terms fought: the net
+    // sensitivity was +0.70 K/K at 12 C outside, i.e. a COLDER house got a LOWER flow
+    // target. See HeatingCurve::anchoring() for the measurements and why no value of
+    // roomCurveShiftFactor can fix it.
     //
     // Gated on the room value being an actual MEASUREMENT (fresh or held) rather than on
     // isInsideTempValid: holding the reading and then dropping its shift term would change
     // the curve output during a dropout, which is the one thing the hold exists to prevent.
-    // For the TARGET and NOMINAL substitutions the deviation is zero by construction, so
-    // skipping the shift and applying it would agree anyway - except that TARGET would then
-    // depend on a float multiply of zero, so it is skipped explicitly.
-    if (settings.useWeatherCompensatedControl &&
-        RoomTempFallbackPolicy::isMeasurement(insideSource) &&
-        settings.targetTemperatureInside > 0) {
-        // Room deviation = target - actual (positive if room is cold)
-        Temperature_t roomDeviation = tempSub(settings.targetTemperatureInside, effectiveInside);
-        // Curve shift adjustment = deviation * factor
-        // e.g., room 1°C cold with factor 2.0 → curve +2°C
-        float shiftAdjust = tempToFloat(roomDeviation) * settings.roomTempCurveShiftFactor;
-        curveShift = tempAdd(curveShift, tempFromFloat(shiftAdjust));
+    // For the TARGET and NOMINAL substitutions the policy returns the old behaviour
+    // unchanged - with TARGET the two are identical anyway, and with NOMINAL there is no
+    // target to anchor on.
+    //
+    // The factor is scaled to x10 here because the policy is integer-only, so the host tests
+    // reproduce the firmware exactly rather than approximately.
+    const HeatingCurve::Anchoring anchor = HeatingCurve::anchoring(
+        curveShift,
+        settings.targetTemperatureInside,
+        effectiveInside,
+        static_cast<int16_t>(lroundf(settings.roomTempCurveShiftFactor * 10.0f)),
+        settings.useWeatherCompensatedControl,
+        RoomTempFallbackPolicy::isMeasurement(insideSource));
 
-        char devBuf[16], adjustBuf[16];
-        formatTemp(devBuf, sizeof(devBuf), roomDeviation);
-        snprintf(adjustBuf, sizeof(adjustBuf), "%.1f", shiftAdjust);
-        LOG_DEBUG(TAG, "Weather mode: room deviation %s°C → curve shift +%s°C",
-                 devBuf, adjustBuf);
+    const Temperature_t curveInside = anchor.inside;
+    if (anchor.shift != curveShift) {
+        char devBuf[16];
+        formatTemp(devBuf, sizeof(devBuf),
+                   tempSub(settings.targetTemperatureInside, effectiveInside));
+        LOG_DEBUG(TAG, "Weather mode: room deviation %s°C → shift %d → %d (0.1°C), "
+                       "curve anchored on the target",
+                  devBuf, static_cast<int>(curveShift), static_cast<int>(anchor.shift));
     }
+    curveShift = anchor.shift;
 
     // Outside has no meaningful substitute: a weather curve without a weather reading is
     // not a curve, and there is no outer loop to catch an error the way the room loop
@@ -146,7 +158,7 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
 
     int32_t rawTarget = 0;
     Temperature_t result = HeatingControlModuleFixedPoint::calculateHeatingCurveTarget(
-        effectiveInside,
+        curveInside,
         readings.outsideTemp,
         curveCoeff,
         curveShift,
