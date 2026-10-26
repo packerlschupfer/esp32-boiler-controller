@@ -36,7 +36,13 @@ namespace HeatingControlDiagnostics {
         ROOM_SATISFIED,  // room thermostat satisfied (room mode)
         SENSOR_INVALID,  // outside or room reading invalid - weather mode fails safe
         SUMMER_OVERRIDE, // heatingOverrideOff (summer mode)
-        HEATING_DISABLED // heatingEnabled false
+        HEATING_DISABLED,// heatingEnabled false
+        // Heating is running ONLY because frost protection demanded it - nothing else wanted
+        // heat. Added 2026-10-26: a frost burn published dem:true with blk:"none", which reads
+        // as ordinary demand, and `cmd` showed the curve output while the burner was actually
+        // commanded to the flow FLOOR. An operator seeing a burn with the heating switch off
+        // had nothing in this payload to explain it.
+        FROST
     };
 
     /// Which clamp bound decided the commanded flow target.
@@ -74,6 +80,7 @@ namespace HeatingControlDiagnostics {
             case Block::SENSOR_INVALID:   return "sensor";
             case Block::SUMMER_OVERRIDE:  return "override";
             case Block::HEATING_DISABLED: return "disabled";
+            case Block::FROST:            return "frost";
         }
         return "unknown";
     }

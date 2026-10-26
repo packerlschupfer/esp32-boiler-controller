@@ -22,10 +22,17 @@ namespace {
     /**
      * @brief Impose the safe desired-relay mask, then drop the release flag.
      *
-     * ORDER MATTERS. The firing bits leave `desired` BEFORE the flag clears, so there is no
-     * tick at which the scheduler is allowed to write a mask that still has them. The tick
-     * that notices the expiry grants nothing anyway, so the first write after a window is at
-     * least one tick later, against an already-safe mask.
+     * ORDER MATTERS, and it is the ONLY thing protecting this. The firing bits leave `desired`
+     * BEFORE the flag clears, so there is no tick at which the scheduler is allowed to write a
+     * mask that still has them.
+     *
+     * This used to add "the tick that notices the expiry grants nothing anyway, so the first
+     * write is at least one tick later". That is FALSE (2026-10-26 review):
+     * ModbusCoordinator::processTick() calls expireIfDue() and then tests isReleased(), so on
+     * the expiring tick the flag is already clear and that same tick proceeds to grant access.
+     * The safety property holds - the mask it grants against is already safe, which is exactly
+     * what the ordering above buys - but there is no spare tick of margin. Do not reorder these
+     * two stores on the assumption that one exists.
      *
      * pendingWrite is set so the next RYN4_SET tick actually pushes the mask out rather than
      * waiting for the control logic to touch a relay. Mirrors RelayState::setRelay(), which

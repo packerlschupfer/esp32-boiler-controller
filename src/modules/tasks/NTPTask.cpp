@@ -573,10 +573,16 @@ bool setNTPRTCCallback(NTPSyncCallback callback) {
     // free-running: measured 2 h 00 min ahead of true UTC on 2026-10-25 while isNTPSynced()
     // reported true, which is what exposed this.
     //
-    // No mutex means the NTP task has not started, so there is no second accessor and the
-    // plain assignment is safe - that is the NORMAL path, not an edge case. Once the task is
-    // up, rtcUpdateCallback is read from inside performNTPSync() under ntpMutex, so a late
-    // registration must take it rather than race a std::function assignment.
+    // No mutex means the NTP task has not reached its own init, which is the NORMAL path here
+    // and not an edge case. Strictly, "no mutex therefore no second accessor" is too strong -
+    // the NTP task exists from the moment xTaskCreate returns, so a sufficiently delayed
+    // caller could in principle race its mutex creation (2026-10-26 review). In this firmware
+    // it cannot: the sole caller is TimerSchedulerTask's init, main.cpp starts it before
+    // NTPTask, and performNTPSync() - the only reader - cannot run before ntpMutex exists.
+    // Treat the assignment as safe because of that ordering, not because of the null check.
+    //
+    // Once the task is up, rtcUpdateCallback is read inside performNTPSync() under ntpMutex,
+    // so a late registration must take it rather than race a std::function assignment.
     if (!ntpMutex) {
         rtcUpdateCallback = callback;
         return true;
@@ -587,8 +593,11 @@ bool setNTPRTCCallback(NTPSyncCallback callback) {
         return true;
     }
     // The NTP task holds this mutex across a whole sync, which can take seconds - so a
-    // registration arriving then would have been dropped by the old code as well. Report it
-    // instead of letting the caller log success.
+    // registration arriving then would have been dropped by the old code as well, silently.
+    // Reporting it is the fix: the ONE caller logs an error and the operator sees that the RTC
+    // will not be corrected. Deliberately not retried here - a retry loop in a startup path
+    // that blocks on a multi-second sync is worse than a loud failure, and the condition
+    // cannot arise given the startup ordering above.
     LOG_WARN(TAG, "RTC callback NOT registered - ntpMutex busy");
     return false;
 }

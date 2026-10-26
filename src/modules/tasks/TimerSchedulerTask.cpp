@@ -227,13 +227,20 @@ static void checkSchedules() {
     // S1: an implausible instant means the RTC lost its battery and NTP has never run. There
     // is no trustworthy time, so no schedule may be evaluated. (Note this leaves an already
     // active schedule active; that is the pre-existing behaviour and is not changed here.)
-    const SchedulerClock::WallClock nowLocal =
-        SchedulerClock::localWallClock(static_cast<int64_t>(rtcController->now().unixtime()));
+    // isValid() as well as the plausibility floor. localWallClock() only rejects epochs before
+    // 2020, which is a LOWER bound - a failed I2C read that returns 0xFF in every field decodes
+    // to a far-future date that sails past it. RTClib's isValid() checks the chip's
+    // oscillator-stop flag and the field ranges, which is the direct question. Found by the
+    // 2026-10-26 review.
+    const DateTime rtcNow = rtcController->now();
+    const SchedulerClock::WallClock nowLocal = rtcNow.isValid()
+        ? SchedulerClock::localWallClock(static_cast<int64_t>(rtcNow.unixtime()))
+        : SchedulerClock::WallClock{};
     if (!nowLocal.valid) {
         static uint32_t lastRtcWarn = 0;
         if (millis() - lastRtcWarn > 60000) {  // Warn once per minute
-            LOG_ERROR(TAG, "RTC time invalid (year=%d) - schedules suspended",
-                      rtcController->now().year());
+            LOG_ERROR(TAG, "RTC time invalid (year=%d, isValid=%d) - schedules suspended",
+                      rtcNow.year(), rtcNow.isValid() ? 1 : 0);
             lastRtcWarn = millis();
         }
         return;  // Skip all schedule checks

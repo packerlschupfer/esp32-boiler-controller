@@ -554,6 +554,22 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
             LOG_WARN(TAG, "Boiler stays disabled: %s", EmergencyStopRelease::toString(safety));
             return safety;
         }
+        // RE-CHECK THE LATCH before committing. `conditions.emergencyActive` was sampled at
+        // the top of this function and evaluateSafety() takes the sensor mutex, so an
+        // emergencyStop() landing in between would be silently overwritten here: the bits
+        // would read BOILER_ENABLED set and the level WARNING with EMERGENCY_STOP still
+        // latched - a state no other code produces, and one that only self-corrects for the
+        // periodic causes (a critical temperature or a stale sensor re-triggers on the next
+        // check). The one-shot request-watchdog cause would persist until the next
+        // emergency_reset. Found by the 2026-10-26 review.
+        //
+        // Refusing is the right answer rather than retrying: a stop that arrived while we were
+        // deciding is newer information than the snapshot we are acting on.
+        if ((xEventGroupGetBits(SRP::getSystemStateEventGroup()) &
+             SystemEvents::SystemState::EMERGENCY_STOP) != 0) {
+            LOG_WARN(TAG, "Boiler stays disabled - an emergency stop latched while we were checking");
+            return EmergencyStopRelease::Result::NOT_ACTIVE;
+        }
         xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
         setLevel(FailsafeLevel::WARNING);
         recoveryAttempts = 0;
@@ -566,6 +582,11 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
         return result;
     }
 
+    // The RELEASED path deliberately does NOT re-check: it is clearing the latch, so a stop
+    // that re-triggered while we were deciding will simply re-latch on its next check (every
+    // cause except the one-shot request watchdog is periodic) and the operator sees the refusal
+    // then. Clearing a latch we were asked to clear is not the dangerous direction; the repair
+    // branch above is, because it SETS BOILER_ENABLED.
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
     latchCause_.store(EmergencyStopRelease::Cause::NONE);
     if (boilerEnabled) {

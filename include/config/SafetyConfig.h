@@ -16,8 +16,15 @@ namespace SafetyConfig {
         // on its own firmware that margin is no longer needed. The MB8ART is read every 2.5 s,
         // so 30 s is still 12 missed reads before anything is called stale, and the room
         // sensor's own driver flags a reading invalid after 3 failed reads (~15 s) regardless.
-        // This is now the single threshold for "too old to act on": TemperatureSensorFallback
-        // and the frost guard both use it.
+        // NOT the single threshold for "too old to act on" - that claim was wrong (2026-10-26
+        // review). There are TWO, and the split is deliberate:
+        //   - SystemConstants::Safety::SENSOR_STALE_THRESHOLD_MS = 15 s, used by
+        //     StateManager::isSensorStale() and thus by continuousSafetyMonitor()'s stale-sensor
+        //     EMERGENCY STOP. Tight, because it only applies while the burner is firing.
+        //   - this one, 30 s, used by TemperatureSensorFallback (mark sensors invalid) and the
+        //     frost guard (is a reading usable). Looser, because it governs whether to START.
+        // A burn is held to a stricter freshness bar than a decision to begin one, which is the
+        // right way round. Change one and check whether the other should follow.
         constexpr uint32_t SENSOR_STALE_MS = 30000;         // 30s
         constexpr uint32_t POST_PURGE_MS = 90000;           // 90s
         constexpr uint32_t ERROR_RECOVERY_MS = 300000;      // 5min (M4: configurable error recovery delay)

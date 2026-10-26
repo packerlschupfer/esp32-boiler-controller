@@ -473,12 +473,13 @@ static TemperatureSensorFallback::OperationMode operationModeForRequests(EventBi
  * later ignition (correct: the sensors really are gone) and refuses emergency_reset with
  * `system_errors` until reads resume. It self-heals on the first good read.
  *
- * SUPPRESSED DURING A DELIBERATE BUS RELEASE. Otherwise every window over ~150 s would escalate
- * - the gate allows up to 900 s - and flag a sensor fault for handing the bus to another master
- * on purpose. "Stale because we stopped asking" is not the same fault as "stale and we do not
- * know why", and only the second one is worth telling anyone about. The window itself cannot
- * hide a real fault: entry requires an idle boiler, and the first read after it resumes
- * re-evaluates this honestly.
+ * The early return on isReleased() below is now belt-and-braces: the real suppression lives in
+ * TemperatureSensorFallback::updateSensorStatus(), because it HAD to. It was only here, and the
+ * 2026-10-26 review reported the gap from three separate dimensions - HeatingControlTask and
+ * WheaterControlTask call canContinueOperation() too, so a demand arriving mid-window escalated
+ * anyway and BusReleasePolicy.h's claim about it was false. One check in the evaluation covers
+ * all eight call sites. This one is kept because it also avoids churning the operation mode and
+ * the refresh timer during a window, which the evaluation-level check cannot do.
  */
 static void refreshIdleFallback(EventBits_t requestBits) {
     static constexpr uint32_t IDLE_FALLBACK_REFRESH_MS = 30000;

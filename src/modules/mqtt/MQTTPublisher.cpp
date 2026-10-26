@@ -40,8 +40,16 @@ void publishSystemStatus() {
     // The transition is logged and published HERE rather than at the point of expiry because
     // that point is a FreeRTOS timer callback, and a single LOG_* costs ~1312 B of stack on
     // this project.
-    // Runs unconditionally, BEFORE the connectivity check: ending the window is a control
-    // action, not a reporting one, and it must not depend on the broker being reachable.
+    // Before the connectivity check below - but NOT unconditionally, which is what this comment
+    // used to claim (2026-10-26 review). MQTTTask only calls publishSystemStatus() from inside
+    // an isConnected() block (MQTTTask.cpp:451), so this backstop does not run while the broker
+    // is unreachable.
+    //
+    // Benign, because it is the second line of defence: the real expiry is in
+    // ModbusCoordinator::processTick(), which runs regardless of MQTT. This one covers "the
+    // coordinator is stopped" only, and if the coordinator is stopped AND the broker is down
+    // then nothing is polling anyway and the DELAY watchdog has already de-energised
+    // everything. Worth knowing rather than believing the stronger claim.
     ModbusBusRelease::expireIfDue();
 
     auto mqttManager = SRP::getMQTTManager();
@@ -72,6 +80,13 @@ void publishSystemStatus() {
     // DEGRADED withholds stage 2 for real, so a boiler left at half power has to be something
     // an operator can see. Retained, and consumed only while connected for the same reason the
     // bus state is: a transition during an outage must survive to the reconnect.
+    // consumeLevelChange() clears the flag before the publish is known to have succeeded, so a
+    // publish dropped by a full queue loses that transition until the NEXT level change
+    // (2026-10-26 review). Accepted rather than fixed: the payload is retained, the level is
+    // sticky, and the alternative - only consuming on a confirmed publish - needs a
+    // publish-result path that MQTTTask::publish() does not expose. The cost is a stale
+    // retained level until the next transition, which the periodic health topic would not
+    // mask; if that ever matters, republish on reconnect rather than reworking the flag.
     if (CentralizedFailsafe::consumeLevelChange()) {
         char fsBuf[96];
         snprintf(fsBuf, sizeof(fsBuf), "{\"level\":\"%s\",\"fullPower\":%s}",

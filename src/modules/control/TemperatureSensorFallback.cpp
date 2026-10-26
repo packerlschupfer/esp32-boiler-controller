@@ -11,7 +11,8 @@
 #include "utils/MutexRetryHelper.h"
 #include "monitoring/HealthMonitor.h"
 #include "config/SystemConstants.h"
-#include "config/SafetyConfig.h"  // M3: For standardized sensorStaleMs
+#include "config/SafetyConfig.h"
+#include "core/ModbusBusRelease.h"  // freeze the fallback during a deliberate window
 #include "LoggingMacros.h"
 #include "modules/tasks/MQTTTask.h"
 #include "MQTTTopics.h"
@@ -148,6 +149,27 @@ void TemperatureSensorFallback::setOperationMode(OperationMode mode) {
 }
 
 TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorStatus() {
+    // FREEZE the fallback while the RS485 bus is deliberately released. No reads happen in a
+    // window, so every reading is frozen at its entry value and goes stale at the same rate -
+    // but "stale because we stopped asking" is not a fault, and escalating for it would set
+    // Error::SENSOR_FAILURE (a CRITICAL_ERROR) for handing the bus to another master on
+    // purpose, then need the first good read afterwards to clear it.
+    //
+    // This was in ONE caller - BurnerControlTask's idle refresh - and the 2026-10-26 review
+    // reported the gap three times over, from three dimensions: HeatingControlTask and
+    // WheaterControlTask also call canContinueOperation() and had no suppression, so a heating
+    // ON override arriving mid-window would escalate after all. Suppressing in the evaluation
+    // itself covers all eight call sites, which is the only way to make
+    // BusReleasePolicy.h's claim about this actually true.
+    //
+    // Reporting the LAST mode rather than a fresh verdict is the point: the window is short
+    // (900 s cap), entry required an idle boiler, and the burner cannot be armed while released
+    // anyway (BurnerStateMachine::setHeatDemand consults the same flag). The first evaluation
+    // after the window re-decides honestly.
+    if (ModbusBusRelease::isReleased()) {
+        return currentStatus.currentMode;
+    }
+
     if (!takeFallbackMutex()) {
         // Another task (or the timer task found the mutex taken): report the last mode and
         // change nothing - the holder is evaluating the same readings

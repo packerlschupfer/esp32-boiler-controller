@@ -521,16 +521,22 @@ static void processHeatingState(EventBits_t pendingControl) {
                 mustYieldToWater) {
                 
                 // Determine reason for shutdown
+                // The qualifiers MUST match the condition above. Without them this chain
+                // named causes that frost had already suppressed - a stop actually triggered
+                // by a sensor failure was logged as "remote override OFF" whenever that
+                // override happened to be set. Found by the 2026-10-26 review; a wrong reason
+                // in the log is worse than "unknown" because it sends the next person after
+                // the wrong thing.
                 const char* reason = "unknown";
-                if (controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) {
+                if ((controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) && !frostDemand()) {
                     reason = "remote override OFF";
                 } else if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED)) {
                     reason = "boiler disabled";
-                } else if (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED)) {
+                } else if (!(systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) && !frostDemand()) {
                     reason = "heating disabled";
                 } else if (mustYieldToWater) {
                     reason = "water heating has priority";
-                } else if (!heatingStillNeeded) {
+                } else if (!heatingStillNeeded && !frostDemand()) {
                     reason = "target temperature reached";
                 } else if (!sensorsAvailable) {
                     reason = "sensor failure";
@@ -634,7 +640,17 @@ static void publishControlDiagnostics() {
     if (!(systemBits & SystemEvents::SystemState::HEATING_ENABLED)) {
         g_blockReason = HeatingControlDiagnostics::Block::HEATING_DISABLED;
     }
-    st.block = st.demand ? HeatingControlDiagnostics::Block::OK : g_blockReason;
+    // A burn that only frost authorised reports blk:"frost" rather than blk:"none". It used to
+    // publish dem:true with blk:"none", which reads as ordinary demand and left an operator
+    // with nothing to explain a burn running with the heating switch off (2026-10-26 review).
+    // Same "nothing but frost wanted this" discriminator as the floor decision and the
+    // operation mode, so all three agree about what kind of burn it is.
+    const bool frostOnlyBurn =
+        st.demand && frostDemand() &&
+        !((systemBits & SystemEvents::SystemState::HEATING_ENABLED) &&
+          checkIfSpaceHeatingNeededEvent());
+    st.block = frostOnlyBurn ? HeatingControlDiagnostics::Block::FROST
+                             : (st.demand ? HeatingControlDiagnostics::Block::OK : g_blockReason);
 
     // Evaluate the curve here rather than reusing the last control-loop value.
     // calculateSpaceHeatingTargetTemp() only runs on the turn-on and target-update paths,
