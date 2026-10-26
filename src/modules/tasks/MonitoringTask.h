@@ -83,3 +83,21 @@ private:
     // Task state
     static TaskHandle_t taskHandle;
 };
+
+/**
+ * @brief Minimum stack free across the tasks WE control, from the last monitoring pass.
+ *
+ * Framework-owned stacks (IDLE, ipc) are excluded - their sizes are not ours to set and IDLE's
+ * ~456 B free is normal, so including them would permanently mask the tightest task of ours.
+ * Returns 0 before the first pass has run.
+ *
+ * Published as `stack_min` on boiler/status/health, replacing `stack_hwm`, which was
+ * uxTaskGetStackHighWaterMark(NULL) - the MQTT task's OWN headroom under a name that reads like
+ * a system minimum (found 2026-10-26, only because the published 1604 happened to match
+ * MQTTTask exactly in a per-task dump).
+ */
+uint16_t MonitoringTask_getMinTaskStackFree();
+
+/// Name of the task reported by MonitoringTask_getMinTaskStackFree(), truncated to 12 chars.
+/// Always NUL-terminated; may be one pass behind the number. See the definition for why.
+const char* MonitoringTask_getMinTaskStackName();

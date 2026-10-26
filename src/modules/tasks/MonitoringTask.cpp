@@ -6,6 +6,7 @@
 #include "config/SystemConstants.h"
 #include <esp_heap_caps.h>
 #include "config/ProjectConfig.h"
+#include <atomic>
 #include "LoggingMacros.h"
 
 #include <Watchdog.h>
@@ -663,6 +664,25 @@ static void logCompactStatus() {
     LOG_DEBUG(TAG, "Tasks: %d", taskCount);
 }
 
+// Minimum stack free across the tasks WE control, from the last logAllTasks() pass, for
+// boiler/status/health. 0 means "not measured yet" - logAllTasks() runs on the monitoring
+// cadence, so the first health publish after boot may precede it.
+//
+// This exists because the health payload used to publish uxTaskGetStackHighWaterMark(NULL),
+// which is the MQTT TASK'S OWN headroom under the name `stack_hwm` - a figure that reads like a
+// system minimum and is not one. Noticed 2026-10-26 only because the published 1604 happened to
+// match MQTTTask exactly in a per-task dump. Same family as heap_free being MALLOC_CAP_INTERNAL.
+static std::atomic<uint16_t> s_minStackFree{0};
+static char s_minStackTask[13] = {0};
+
+uint16_t MonitoringTask_getMinTaskStackFree() {
+    return s_minStackFree.load(std::memory_order_acquire);
+}
+
+const char* MonitoringTask_getMinTaskStackName() {
+    return s_minStackTask;
+}
+
 static void logAllTasks() {
     // Get number of tasks
     UBaseType_t taskCount = uxTaskGetNumberOfTasks();
@@ -691,6 +711,10 @@ static void logAllTasks() {
     // " !LOW!" into a debug stream nobody reads.
     size_t worstStackFree = SIZE_MAX;
     char worstStackTask[13] = {0};
+
+    // The real budget figure, published on boiler/status/health as stack_min / stack_min_task.
+    size_t minStackFreeThisPass = SIZE_MAX;
+    char minStackTaskThisPass[13] = {0};
     
     // Log header
     LOG_DEBUG(TAG, "Name          St Pri Stack Core");
@@ -733,10 +757,23 @@ static void logAllTasks() {
         strncpy(shortName, taskStatusArray[i].pcTaskName, 12);
         shortName[12] = '\0';
 
+        const bool frameworkOwned =
+            SystemConstants::System::isFrameworkOwnedStack(taskStatusArray[i].pcTaskName);
+
+        // The TRUE minimum across the tasks we control, tracked unconditionally. Separate from
+        // worstStackFree below, which only looks at tasks ALREADY under the warn threshold and
+        // is therefore SIZE_MAX whenever nothing is in trouble - fine for naming an offender,
+        // useless as a budget figure. Framework-owned stacks (IDLE, ipc) are excluded because
+        // their sizes are not ours to set and IDLE's ~456 B free is normal; including them
+        // would permanently mask the tightest task of ours.
+        if (!frameworkOwned && stackFreeBytes < minStackFreeThisPass) {
+            minStackFreeThisPass = stackFreeBytes;
+            memcpy(minStackTaskThisPass, shortName, sizeof(minStackTaskThisPass));
+        }
+
         // Check for low stack
         [[maybe_unused]] const char* warning = "";
-        if (stackFreeBytes < SystemConstants::System::LOW_STACK_WARN_BYTES &&
-            !SystemConstants::System::isFrameworkOwnedStack(taskStatusArray[i].pcTaskName)) {
+        if (stackFreeBytes < SystemConstants::System::LOW_STACK_WARN_BYTES && !frameworkOwned) {
             warning = " !LOW!";
             lowStackCount++;
             if (stackFreeBytes < worstStackFree) {
@@ -778,6 +815,20 @@ static void logAllTasks() {
     }
 
     // Free memory
+    // Publish the pass result for boiler/status/health. Name first, then the number with
+    // release ordering; the reader loads the number then copies the name. A concurrent read can
+    // in principle see a name from one pass with a number from the next - the buffer is fixed
+    // size and always NUL-terminated at [12], so the worst case is a garbled diagnostic string,
+    // never a bad access. Said plainly rather than pretending this is synchronised: a mutex for
+    // a 13-byte diagnostic read from one task would cost more than it buys.
+    if (minStackFreeThisPass != SIZE_MAX) {
+        memcpy(s_minStackTask, minStackTaskThisPass, sizeof(s_minStackTask));
+        s_minStackTask[sizeof(s_minStackTask) - 1] = '\0';
+        s_minStackFree.store(static_cast<uint16_t>(
+            minStackFreeThisPass > 0xFFFF ? 0xFFFF : minStackFreeThisPass),
+            std::memory_order_release);
+    }
+
     vPortFree(taskStatusArray);
 }
 

@@ -516,7 +516,7 @@ On release `EMERGENCY_STOP` is cleared, `BOILER_ENABLED` is set only if the save
 | `boiler/cmd/heating` | number 15-30 | Sets the room target in °C, reply `target:<°C>` on `boiler/status/heating` |
 | `boiler/cmd/status` | any | Logged only, nothing is published |
 | `boiler/cmd/diagnostics` | `memory`, `tasks`, `events`, `sensors`, `relays`, `network` | Runtime diagnostics text dump on `boiler/status/diagnostics/report`, split into 320-byte chunks (at most 8, newline-separated lines). `mutexes`, `modbus` and `selftest` exist but are stubs and reply `not_implemented`; any other payload replies `unknown_command`; an empty payload replies `missing_payload` - all on `boiler/status/diagnostics/error`. A dump cut off by the chunk cap also publishes `truncated` there. Read-only: no reboot/watchdog/error-injection command is reachable from this topic |
-| `boiler/cmd/diagnostics` | `health` | Compact `HealthMonitor` JSON on `boiler/status/diagnostics/report`, always a single payload (never chunked): `{"st":..,"up":..,"blk":..,"min":..,"nc":..,"nd":..,"na":..,"nt":..,"sub":{..},"n":..}`. `st` overall status (`excellent`/`good`/`warning`/`critical`/`failed`); `up` uptime in seconds; `blk` largest free DRAM block right now and `min` the lowest free DRAM since boot (`heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)`, the same source as `heap_dram_min` on `boiler/status/health`), in bytes - both are real DRAM, deliberately **not** the IRAM-inflated `ESP.getFreeHeap()` family; `af` allocation failures, **omitted when zero**; `nc` network connected 0/1, `nd` disconnect count, `na` availability as fixed point (10000 = 100%); `sub` contains **only** subsystems that are unhealthy or have recorded errors, unhealthy first, each `{"e":<errors>,"r":<error rate, 10000 = 100%>,"h":<healthy 0/1>}`; `nt` is how many subsystems were notable and `n` how many fit the payload, so `n < nt` means the list was trimmed. Replies `unavailable` on `boiler/status/diagnostics/error` if `HealthMonitor` has not initialised yet, `dropped` if the publish queue rejected the report. Task metrics are absent: `HealthMonitor`'s task-monitoring members were removed outright because nothing ever registered a task with it (unrelated to `health.tasks`/`health.stack_hwm` on `boiler/status/health`, which are unaffected) |
+| `boiler/cmd/diagnostics` | `health` | Compact `HealthMonitor` JSON on `boiler/status/diagnostics/report`, always a single payload (never chunked): `{"st":..,"up":..,"blk":..,"min":..,"nc":..,"nd":..,"na":..,"nt":..,"sub":{..},"n":..}`. `st` overall status (`excellent`/`good`/`warning`/`critical`/`failed`); `up` uptime in seconds; `blk` largest free DRAM block right now and `min` the lowest free DRAM since boot (`heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)`, the same source as `heap_dram_min` on `boiler/status/health`), in bytes - both are real DRAM, deliberately **not** the IRAM-inflated `ESP.getFreeHeap()` family; `af` allocation failures, **omitted when zero**; `nc` network connected 0/1, `nd` disconnect count, `na` availability as fixed point (10000 = 100%); `sub` contains **only** subsystems that are unhealthy or have recorded errors, unhealthy first, each `{"e":<errors>,"r":<error rate, 10000 = 100%>,"h":<healthy 0/1>}`; `nt` is how many subsystems were notable and `n` how many fit the payload, so `n < nt` means the list was trimmed. Replies `unavailable` on `boiler/status/diagnostics/error` if `HealthMonitor` has not initialised yet, `dropped` if the publish queue rejected the report. Task metrics are absent: `HealthMonitor`'s task-monitoring members were removed outright because nothing ever registered a task with it (unrelated to `health.tasks`/`health.stack_min` on `boiler/status/health`, which are unaffected) |
 | `boiler/cmd/fram` | `status` | `boiler/status/fram/status`: `{"connected":true,"size":..,"integrity":true}` |
 | `boiler/cmd/fram` | `counters` | `boiler/status/fram/counters`: `{"b":..,"h":..,"w":..,"e":..}` (burner starts, heating pump starts, water pump starts, errors) |
 | `boiler/cmd/fram` | `runtime` | `boiler/status/fram/runtime`: `{"t":..,"h":..,"w":..,"b":..}` (hours total, heating, water, burner) |
@@ -1252,7 +1252,7 @@ There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagno
 **Topic**: `boiler/status/health` (not retained)
 
 ```json
-{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_hwm":1084}}
+{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_min":860,"stack_min_task":"NTPTask"}}
 ```
 
 - `heap_free` / `heap_min`: free heap now / minimum since boot (bytes)
@@ -1261,7 +1261,17 @@ There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagno
 - `heap_dram`: free byte-addressable DRAM (`MALLOC_CAP_8BIT`); `heap_dram_blk`: largest block `malloc()` can actually return (`MALLOC_CAP_DEFAULT`); `heap_def`: `esp_get_free_heap_size()`. These are the numbers to watch - an allocation larger than `heap_dram_blk` fails regardless of how large `heap_free` looks
 - The same figures are in `boiler/cmd/diagnostics` with payload `memory` (`DRAM (8BIT)`, `malloc (DEFAULT)`, `Largest free block`)
 - `uptime`: seconds (`millis()` based, wraps after 49.7 days)
-- `health.tasks`: number of FreeRTOS tasks; `health.stack_hwm`: stack high water mark of the publishing task
+- `health.tasks`: number of FreeRTOS tasks
+- `health.stack_min` / `health.stack_min_task`: **minimum free stack across the tasks this project
+  controls**, and which task it is, from MonitoringTask's last pass. Framework-owned stacks (IDLE,
+  ipc) are excluded - their sizes are not ours to set and IDLE's ~456 B free is normal, so
+  including them would permanently mask our own tightest task. `stack_min` is 0 before the first
+  monitoring pass; the name may be one pass behind the number.
+
+  This replaced `stack_hwm` on 2026-10-26, which was `uxTaskGetStackHighWaterMark(NULL)` - the
+  **publishing task's own** headroom. The description here always said so, but the field NAME read
+  like a system minimum, and it was wrong by whatever the gap happened to be: it published 1604
+  while the tightest task of ours (NTPTask) had 860.
 
 ---
 

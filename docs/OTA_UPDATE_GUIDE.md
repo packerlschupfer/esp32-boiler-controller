@@ -92,7 +92,7 @@ mosquitto_sub -h 192.168.20.27 -u YOUR_MQTT_USER -P YOUR_MQTT_PASSWORD \
   -t "boiler/status/health" -v
 ```
 ```json
-{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_hwm":1084}}
+{"timestamp":964058,"heap_free":60912,"heap_min":58188,"heap_max_blk":49140,"heap_frag":20,"uptime":964,"health":{"tasks":32,"stack_min":860,"stack_min_task":"NTPTask"}}
 ```
 
 Modbus error statistics are published to `boiler/diagnostics/modbus/{address}` every 30 minutes

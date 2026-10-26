@@ -4,6 +4,7 @@
 #include "core/SystemResourceProvider.h"
 #include "core/ModbusBusRelease.h"  // bus-release expiry backstop and its status topic
 #include "MQTTTopics.h"
+#include "modules/tasks/MonitoringTask.h"
 #include "modules/control/CentralizedFailsafe.h"  // centralized topic macros - see the note below
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
@@ -142,7 +143,17 @@ void publishSystemStatus() {
     // Add health monitor data
     // Add basic health data - HealthMonitor not available in this version
     doc["health"]["tasks"] = uxTaskGetNumberOfTasks();
-    doc["health"]["stack_hwm"] = uxTaskGetStackHighWaterMark(NULL);
+    // stack_min: the minimum free stack across the tasks WE control, from MonitoringTask's last
+    // pass. This replaces `stack_hwm`, which was uxTaskGetStackHighWaterMark(NULL) - the MQTT
+    // task's OWN headroom, published under a name that reads like a system minimum. It was
+    // wrong by whatever the gap happened to be: on 2026-10-26 it published 1604 while the
+    // tightest task of ours (NTPTask, trimmed from 4096 to fund RYN4Proc) had 860.
+    //
+    // Read from MonitoringTask rather than enumerated here: uxTaskGetSystemState() needs a
+    // pvPortMalloc of taskCount * sizeof(TaskStatus_t), about 1.3 kB at 32 tasks, and doing
+    // that on the health publish path to report on the memory budget would be self-defeating.
+    doc["health"]["stack_min"] = MonitoringTask_getMinTaskStackFree();
+    doc["health"]["stack_min_task"] = MonitoringTask_getMinTaskStackName();
 
     auto buffer = MemoryPools::logBufferPool.allocate();
     if (!buffer) {
