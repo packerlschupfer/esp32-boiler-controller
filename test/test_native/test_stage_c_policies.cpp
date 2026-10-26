@@ -105,3 +105,31 @@ void test_charge_delta_or_default_passes_valid_values_through_unchanged() {
     TEST_ASSERT_EQUAL_FLOAT(10.0f, chargeDeltaOrDefault(1.0f));
 }
 
+
+void test_power_fault_first_fault_must_not_degrade() {
+    // handlePowerLevelFault() used to call triggerFailsafe(DEGRADED) UNCONDITIONALLY on the
+    // first refused setPowerLevel(), which was harmless while the level was log-only and became
+    // a permanent half-power lock-out once fullPowerPermitted() gave DEGRADED teeth: one
+    // rate-limiter rejection or RYN4 timeout capped the boiler at stage 1 for the rest of the
+    // uptime, with no reachable release. It now triggers only from the SECOND fault in the
+    // window, which is the `count >= 2` condition this pins.
+    uint8_t count = 0;
+    uint32_t windowStart = 0;
+
+    TEST_ASSERT_FALSE(recordPowerFault(count, windowStart, 1000));
+    TEST_ASSERT_EQUAL_UINT8(1, count);
+    TEST_ASSERT_FALSE_MESSAGE(count >= 2, "a single refused write must not degrade the boiler");
+
+    TEST_ASSERT_FALSE(recordPowerFault(count, windowStart, 2000));
+    TEST_ASSERT_EQUAL_UINT8(2, count);
+    TEST_ASSERT_TRUE_MESSAGE(count >= 2, "a repeating fault must degrade");
+
+    // A lone fault, then silence past the window, must leave the next fault looking like a
+    // first fault again - otherwise two unrelated transients a day apart would degrade.
+    count = 0; windowStart = 0;
+    TEST_ASSERT_FALSE(recordPowerFault(count, windowStart, 1000));
+    TEST_ASSERT_EQUAL_UINT8(1, count);
+    TEST_ASSERT_FALSE(recordPowerFault(count, windowStart, 1000 + POWER_FAULT_WINDOW_MS));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, count, "the window must reset the count, not accumulate");
+    TEST_ASSERT_FALSE(count >= 2);
+}

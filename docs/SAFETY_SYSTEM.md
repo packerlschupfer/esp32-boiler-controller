@@ -319,11 +319,20 @@ so if every reading goes unusable mid-burn the demand drops rather than firing b
   a dead MB8ART therefore gets nothing from here either. That is the accepted trade: the firmware
   never fires on data it cannot vouch for.
 
-**Known behaviour, not fixed**: a frost charge started with the water switch off ends when the
-tank clears the 10.0°C release, so a genuinely freezing tank would cycle 5 -> 10 -> 5 rather than
-charging to the normal target. Each cycle is a multi-minute burn, not chatter, and the state
-should never be reached. A tank-specific release threshold is a comfort/efficiency decision on a
-safety path and is deliberately left open.
+**Both latches survive the stop conditions, as of 2026-10-26.** They did not when they were
+first added: the override was taught to the *start* paths only. The burner state machine fed
+`stopForExplicitDisable()` the RAW switch bits, so a frost heat burn was stopped on its first
+`running()` tick with `EXPLICIT_DISABLE` and relit ~20 s later by the heating task - repeated
+ignitions and no heat, in exactly the case the guard exists for. The water task's `WheaterOn`
+stop test likewise still read `WATER_ENABLED` raw, so a frost charge stopped 5 s after starting
+and restarted on the next cycle. Both are fixed; the burner's *effective* enable is now the
+switch OR the matching frost latch, in one place that all three state-machine consumers inherit.
+
+**What a frost charge does now**: it runs continuously from the 5.0°C trigger until the tank
+clears the 10.0°C release, then stops if the water switch is still off. One burn out of the
+freezing zone, not a cycle. (An earlier note here predicted a 5 -> 10 -> 5 cycle; the 2026-10-26
+review showed the charge never survived one 5 s task cycle, so that prediction described neither
+the old behaviour nor the new.)
 
 ---
 

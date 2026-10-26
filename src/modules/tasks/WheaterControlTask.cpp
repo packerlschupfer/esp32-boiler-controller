@@ -403,10 +403,26 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
                 break;
             }
 
-            if ((controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) || 
+            // Frost demand on the TANK suppresses the three "nobody wants hot water" reasons -
+            // the remote override, the water switch and the tank being satisfied - and nothing
+            // else. A sensor failure or a disabled boiler still stops the charge. This mirrors
+            // the heating task's HeatingOn branch exactly.
+            //
+            // 9bf6be5 taught the ENTRY gate and the WheaterOff START condition about
+            // waterDemand() and left this stop test alone, so the two halves disagreed. Since
+            // waterDemand() can only matter when the water switch is OFF - with it on, the
+            // normal recharge at tempLimitLow 40.0 runs 35 K earlier - the only situation the
+            // feature was built for was also the one where this test killed it: the charge
+            // started, then stopped 5 s later with "water heating disabled", then restarted.
+            // A ~10 s loop with an ignition attempt per cycle, the burner relays cycling, and
+            // HeatingControlTask preempted through water priority each time round, while the
+            // tank never charged. Found by the 2026-10-26 review, which also corrected my note
+            // claiming it would cycle 5 -> 10 C: it never got past one cycle.
+            const bool frostWater = FrostProtection::waterDemand();
+            if (((controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) && !frostWater) ||
                 !(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) ||
-                !(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) ||
-                !waterStillNeeded ||
+                (!(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) && !frostWater) ||
+                (!waterStillNeeded && !frostWater) ||
                 !sensorsAvailable) {
                 
                 // Determine reason for shutdown

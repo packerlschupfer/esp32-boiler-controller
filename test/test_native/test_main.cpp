@@ -473,6 +473,10 @@ void test_room_resolve_walks_the_whole_ladder_on_a_pulled_sensor();
 void test_room_resolve_survives_the_millis_rollover();
 void test_room_resolve_real_struct_has_the_field_the_mock_lacked();
 
+void test_policy_frost_latch_keeps_a_burn_alive_with_the_switch_off();
+void test_policy_frost_never_overrides_a_disabled_boiler();
+void test_power_fault_first_fault_must_not_degrade();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -929,6 +933,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_room_resolve_walks_the_whole_ladder_on_a_pulled_sensor);
     RUN_TEST(test_room_resolve_survives_the_millis_rollover);
     RUN_TEST(test_room_resolve_real_struct_has_the_field_the_mock_lacked);
+
+    // Frost at the burner, and the DEGRADED trigger (2026-10-26 review)
+    RUN_TEST(test_policy_frost_latch_keeps_a_burn_alive_with_the_switch_off);
+    RUN_TEST(test_policy_frost_never_overrides_a_disabled_boiler);
+    RUN_TEST(test_power_fault_first_fault_must_not_degrade);
 
     return UNITY_END();
 }

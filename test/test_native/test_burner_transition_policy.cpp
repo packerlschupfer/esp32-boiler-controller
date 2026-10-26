@@ -125,3 +125,62 @@ void test_policy_mode_switch_exit_records_power_level() {
     TEST_ASSERT_FALSE(recordsPowerLevelOnTransition(BurnerSMState::MODE_SWITCHING));
     TEST_ASSERT_FALSE(recordsPowerLevelOnTransition(BurnerSMState::IGNITION));
 }
+
+// ---------------------------------------------------------------------------------------
+// The EFFECTIVE enable, i.e. switch OR frost latch (2026-10-26)
+//
+// stopForExplicitDisable() is the pure function at the heart of the frost-at-the-burner bug.
+// BurnerStateMachine's Environment used to feed it the RAW HEATING_ENABLED / WATER_ENABLED
+// bits, and nothing in the state machine knew FrostProtection existed - so a frost burn with
+// the heating switch off was stopped on its first running() tick with EXPLICIT_DISABLE while
+// the heating task, which DOES have the carve-out, kept the request alive and relit it ~20 s
+// later. Repeated ignitions, no heat, in exactly the scenario frost protection is for.
+//
+// The Environment is FreeRTOS glue and cannot be reached natively, so what is pinned here is
+// the composition it now performs. If someone reverts the Environment to the raw bits these
+// stay green - but they state the contract, and the scenario comments say which code must
+// honour it.
+// ---------------------------------------------------------------------------------------
+
+// Mirrors BurnerStateMachine's Environment: the switch OR the matching frost latch.
+static bool effectiveEnable(bool switchOn, bool frostLatched) {
+    return switchOn || frostLatched;
+}
+
+void test_policy_frost_latch_keeps_a_burn_alive_with_the_switch_off() {
+    const bool heatingSwitchOff = false;
+    const bool waterSwitchOff = false;
+    const bool boilerOn = true;
+
+    // Heating running, switch OFF, frost heat demand latched: must NOT stop.
+    TEST_ASSERT_FALSE(stopForExplicitDisable(
+        false, boilerOn, effectiveEnable(heatingSwitchOff, true), effectiveEnable(waterSwitchOff, false)));
+
+    // Same, without the frost latch: stops. This is the pre-fix behaviour and must stay for a
+    // genuinely switched-off system.
+    TEST_ASSERT_TRUE(stopForExplicitDisable(
+        false, boilerOn, effectiveEnable(heatingSwitchOff, false), effectiveEnable(waterSwitchOff, false)));
+
+    // Water running on a frost TANK latch with the water switch off: must NOT stop.
+    TEST_ASSERT_FALSE(stopForExplicitDisable(
+        true, boilerOn, effectiveEnable(heatingSwitchOff, false), effectiveEnable(waterSwitchOff, true)));
+
+    // The latches are per mode: a frost HEAT latch must not keep a WATER burn alive, and the
+    // reverse. Getting this wrong would let either latch authorise the other circuit.
+    TEST_ASSERT_TRUE(stopForExplicitDisable(
+        true, boilerOn, effectiveEnable(heatingSwitchOff, true), effectiveEnable(waterSwitchOff, false)));
+    TEST_ASSERT_TRUE(stopForExplicitDisable(
+        false, boilerOn, effectiveEnable(heatingSwitchOff, false), effectiveEnable(waterSwitchOff, true)));
+}
+
+void test_policy_frost_never_overrides_a_disabled_boiler() {
+    // BOILER_ENABLED is deliberately NOT part of the effective enable. A drained-for-service
+    // system is a likely reason to switch the boiler off, and firing into a drained boiler is
+    // worse than frost. Both latches set, boiler off -> still stops, both modes.
+    TEST_ASSERT_TRUE(stopForExplicitDisable(false, false, effectiveEnable(false, true),
+                                            effectiveEnable(false, true)));
+    TEST_ASSERT_TRUE(stopForExplicitDisable(true, false, effectiveEnable(false, true),
+                                            effectiveEnable(false, true)));
+    // And the boiler check outranks everything: switches on, latches set, boiler off -> stop.
+    TEST_ASSERT_TRUE(stopForExplicitDisable(false, false, true, true));
+}

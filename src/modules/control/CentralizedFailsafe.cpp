@@ -609,6 +609,23 @@ void CentralizedFailsafe::setLevel(FailsafeLevel level) {
     }
 }
 
+bool CentralizedFailsafe::clearDegradedForCause(SystemError cause) {
+    if (currentLevel.load() != FailsafeLevel::DEGRADED) {
+        return false;
+    }
+    // lastError is read without stateMutex_. It is a single aligned enum written under the
+    // mutex by triggerFailsafe(), so a torn read is not possible on this target; the worst
+    // outcome of racing a concurrent trigger is that one clear is skipped and the next
+    // successful operation performs it. Taking the mutex here would mean a control-path
+    // function blocking on the failsafe lock for a diagnostic downgrade.
+    if (lastError != cause) {
+        return false;
+    }
+    setLevel(FailsafeLevel::WARNING);
+    LOG_WARN(TAG, "DEGRADED cleared - the fault that raised it has resolved, full power permitted again");
+    return true;
+}
+
 bool CentralizedFailsafe::consumeLevelChange() {
     return levelChanged_.exchange(false, std::memory_order_acq_rel);
 }

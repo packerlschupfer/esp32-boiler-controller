@@ -80,12 +80,27 @@ public:
      * stage-2 decision alongside the bang-bang's request, the state machine's hot-boiler
      * ceiling and BurnerBoostPolicy's shoulder-season lock.
      *
-     * Note the level is STICKY by design - triggerFailsafe() never downgrades, so a fault must
-     * be cleared through a recovery path. That makes a half-power lock-out persistent, which is
-     * the intent, and is why the level is now published on boiler/status/failsafe: before this
-     * it was visible nowhere.
+     * The level is STICKY: triggerFailsafe() never downgrades. THAT SENTENCE USED TO END "so a
+     * fault must be cleared through a recovery path", and there was no such path for a bare
+     * DEGRADED - every downgrade required a LATCHED emergency stop, and attemptRecovery() has
+     * no caller. So this function, added the day before, turned a sticky level with no release
+     * into a permanent half-power lock-out, reachable from a single refused relay write. Found
+     * by the 2026-10-26 review; see clearDegradedForCause() for the release that now exists.
      */
     static bool fullPowerPermitted() { return currentLevel.load() < FailsafeLevel::DEGRADED; }
+
+    /**
+     * @brief Lower a DEGRADED level back to WARNING once the fault that raised it has resolved.
+     *
+     * CAUSE-MATCHED on purpose, and this is the whole design of it. A blanket "clear on any
+     * success" would let one successful relay write clear a DEGRADED raised by sensor-mutex
+     * timeouts or by heap pressure - the same mistake as clearing Error::RELAY on a single
+     * relay's success instead of a fully clean verification (5521222).
+     *
+     * @param cause must equal the SystemError that raised the level, or nothing happens.
+     * @return true if the level was lowered.
+     */
+    static bool clearDegradedForCause(SystemError cause);
 
     /// True once per level change, for the publisher. Same shape as
     /// ModbusBusRelease::consumeStateChange(), and for the same reason: the level changes in

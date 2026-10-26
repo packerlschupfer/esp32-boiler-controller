@@ -429,7 +429,20 @@ static void processHeatingState(EventBits_t pendingControl) {
                 // and heat the house - the opposite of the intent, which is to get the water
                 // off 5 °C and stop. setHeatingRequest clamps to heating_low_limit anyway,
                 // so requesting anything lower would be clamped back up to it.
-                if (frostDemand() && !checkIfSpaceHeatingNeededEvent()) {
+                //
+                // Gated on "nothing BUT frost authorised this burn", not on
+                // `!checkIfSpaceHeatingNeededEvent()`. That predicate asks the weather/room
+                // decision and knows nothing about the heating SWITCH - so with heating
+                // switched off on a genuinely cold day it returns TRUE (outside is cold, room
+                // below the backstop), the floor branch was skipped, and a frost burn heated
+                // the house to the full curve target. In other words the branch only ever fired
+                // in mild weather and never in a frost, which is the one case it was written
+                // for. Found by the 2026-10-26 review.
+                const bool normalHeatingWanted =
+                    (systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) &&
+                    !(controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) &&
+                    checkIfSpaceHeatingNeededEvent();
+                if (frostDemand() && !normalHeatingWanted) {
                     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                         boilerTargetTemp = SRP::getSystemSettings().heating_low_limit;
                         SRP::giveSystemSettingsMutex();

@@ -3,7 +3,8 @@
 #include "modules/control/SafetyInterlocks.h"  // Add safety interlocks
 #include "modules/control/BurnerAntiFlapping.h"  // Add anti-flapping
 #include "modules/control/BurnerSystemController.h"  // Unified burner control with batch relays
-#include "modules/control/CentralizedFailsafe.h"  // Failsafe system
+#include "modules/control/CentralizedFailsafe.h"
+#include "modules/control/FrostProtection.h"  // effective enable: switch OR frost latch
 #include "modules/control/BurnerSafetyChecks.h"  // Round 21: Extracted safety checks
 #include "modules/control/BurnerPowerController.h"  // Round 21: Extracted power control
 #include "modules/control/BurnerRuntimeTracker.h"  // Round 21: Extracted runtime tracking
@@ -379,8 +380,31 @@ public:
     bool flameDetected() override { return BurnerSafetyChecks::isFlameDetected(); }
 
     bool boilerEnabled() override { return hasSystemBit(SystemEvents::SystemState::BOILER_ENABLED); }
-    bool heatingEnabled() override { return hasSystemBit(SystemEvents::SystemState::HEATING_ENABLED); }
-    bool waterEnabled() override { return hasSystemBit(SystemEvents::SystemState::WATER_ENABLED); }
+
+    // EFFECTIVE enable: the switch OR the matching frost latch. Frost demand overrides the
+    // mode switch - being switched off is exactly when freezing happens - and the mode tasks
+    // already honour that, but the state machine did not: every consumer of these two
+    // (BurnerTransitions' running(), modeSwitching() and postPurge(), all via
+    // stopForExplicitDisable) saw the RAW bit, and nothing in the state machine knew
+    // FrostProtection existed.
+    //
+    // So a frost burn with the heating switch off was stopped on its FIRST running() tick with
+    // Reason::EXPLICIT_DISABLE, bypassing the minimum on-time - while the heating task, which
+    // does have the carve-out, kept the request alive and relit it ~20 s later. Repeated
+    // ignitions and no heat, in precisely the scenario frost protection exists for. Found by
+    // the 2026-10-26 review; these three call sites are the only consumers, so overriding here
+    // reaches all of them and nothing else.
+    //
+    // BOILER_ENABLED is deliberately NOT overridden: a drained-for-service system is a likely
+    // reason to switch the boiler off, and firing into a drained boiler is worse than frost.
+    bool heatingEnabled() override {
+        return hasSystemBit(SystemEvents::SystemState::HEATING_ENABLED) ||
+               FrostProtection::heatDemand();
+    }
+    bool waterEnabled() override {
+        return hasSystemBit(SystemEvents::SystemState::WATER_ENABLED) ||
+               FrostProtection::waterDemand();
+    }
     bool heatingOn() override { return hasSystemBit(SystemEvents::SystemState::HEATING_ON); }
     bool waterOn() override { return hasSystemBit(SystemEvents::SystemState::WATER_ON); }
     bool waterPriority() override { return hasSystemBit(SystemEvents::SystemState::WATER_PRIORITY); }
@@ -816,6 +840,10 @@ void BurnerStateMachine::onEnterRunningLow() {
             handlePowerLevelFault(false);
             return;  // onEntry action aborted - state machine already left RUNNING_LOW
         }
+        // The write succeeded, so a DEGRADED raised by an earlier power-level fault has
+        // demonstrably resolved. Cause-matched, so it cannot clear a DEGRADED that something
+        // else raised. Without this the level had no reachable release at all.
+        CentralizedFailsafe::clearDegradedForCause(SystemError::RELAY_OPERATION_FAILED);
     }
     // Clear any error bits
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BURNER_ERROR);
@@ -835,6 +863,7 @@ void BurnerStateMachine::onEnterRunningHigh() {
             handlePowerLevelFault(true);
             return;  // onEntry action aborted - state machine already left RUNNING_HIGH
         }
+        CentralizedFailsafe::clearDegradedForCause(SystemError::RELAY_OPERATION_FAILED);
     }
     // Set system burner on bit
     xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BURNER_ON);
@@ -852,11 +881,25 @@ void BurnerStateMachine::handlePowerLevelFault(bool high) {
     static uint32_t faultWindowStartMs = 0;
     const bool escalate = BurnerTransitionPolicy::recordPowerFault(faultCount, faultWindowStartMs, millis());
 
-    CentralizedFailsafe::triggerFailsafe(
-        CentralizedFailsafe::FailsafeLevel::DEGRADED,
-        SystemError::RELAY_OPERATION_FAILED,
-        high ? "Failed to set power level to HIGH" : "Failed to set power level to LOW"
-    );
+    // DEGRADED only from the SECOND fault inside the window. This used to fire on the FIRST,
+    // unconditionally, which was harmless while the level was log-only - and became a
+    // permanent half-power lock-out the moment fullPowerPermitted() gave DEGRADED teeth
+    // (7cde437). One rate-limiter rejection, one full queue or one RYN4 timeout - the exact
+    // class of refusal this function was written for, observed on hardware 2026-09-14
+    // 15:41:25 - then capped the boiler at stage 1 (~19 kW against ~34 kW) for the rest of the
+    // uptime, with emergency_reset answering "emergency_not_active" and only a reboot clearing
+    // it. The comment above always promised "escalate only when the fault keeps repeating";
+    // the emergency stop honoured that and this did not. Found by the 2026-10-26 review.
+    //
+    // A single fault already costs a graceful post-purge and a relight, which is response
+    // enough for one refused write on a shared bus.
+    if (faultCount >= 2) {
+        CentralizedFailsafe::triggerFailsafe(
+            CentralizedFailsafe::FailsafeLevel::DEGRADED,
+            SystemError::RELAY_OPERATION_FAILED,
+            high ? "Failed to set power level to HIGH" : "Failed to set power level to LOW"
+        );
+    }
 
     if (escalate) {
         LOG_ERROR(TAG, "RUNNING_%s: power level relay failed %u times within %lu s - emergency stop",

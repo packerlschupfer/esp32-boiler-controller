@@ -706,6 +706,18 @@ static void processBurnerRequest() {
             LOG_WARN(TAG, "Disabling high power due to sensor fallback");
             highPower = false;
         }
+
+        // The same stage-2 withholding BoilerTempControlTask applies, applied here too.
+        // 7cde437 put the failsafe gate only on BoilerTempControlTask's modulating path, so
+        // this task's own arm - which is what carries a WATER charge - could still request
+        // stage 2 while the failsafe level was DEGRADED. Found by the 2026-10-26 review.
+        // Placed beside the sensor-fallback clamp because they are the same kind of rule:
+        // a system condition withholding full power regardless of what the controller wants.
+        if (highPower && !CentralizedFailsafe::fullPowerPermitted()) {
+            LOG_WARN(TAG, "Disabling high power - failsafe level %s",
+                     CentralizedFailsafe::getFailsafeStatusString());
+            highPower = false;
+        }
         
         // Check runtime limit
         if (burnerState.operationStartTime == 0) {
