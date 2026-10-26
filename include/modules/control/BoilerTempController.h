@@ -1,0 +1,332 @@
+// include/modules/control/BoilerTempController.h
+#pragma once
+
+#include <cstdint>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include "shared/Temperature.h"
+#include "modules/control/PIDControlModuleFixedPoint.h"
+#include "modules/control/PIDAutoTuner.h"
+#include "modules/control/BoilerPowerLevel.h"      // power level mapping shared with the native tests
+#include "modules/control/BurnerHysteresisPolicy.h" // flow dead band, in degrees
+#include "modules/control/AutotuneClock.h"       // wrap-safe autotune run time
+#include "modules/control/AutotuneGainTarget.h"  // which gain set an autotune result belongs to
+
+/**
+ * @brief Boiler Temperature Controller for cascade control
+ *
+ * Supports two control modes:
+ * - TWO_STAGE (bang-bang): Simple hysteresis-based OFF/HALF/FULL control
+ * - MODULATING (PID): Smoother PID-based control with output mapped to power levels
+ *
+ * Control Flow:
+ *   Heating Curve → Target Boiler Temp → BoilerTempController → Power Level → Burner
+ *
+ * PID Mode (default):
+ *   - PID calculates 0-100% output based on temperature error
+ *   - Output mapped to power levels with hysteresis:
+ *     * 0-25% → OFF, 25-75% → HALF, 75-100% → FULL
+ *   - Smoother transitions, supports auto-tuning
+ *
+ * Bang-Bang Mode:
+ *   - Simple threshold-based control
+ *   - FULL: error > fullPowerThreshold
+ *   - HALF: error > onHysteresis
+ *   - OFF: error < -offHysteresis
+ */
+class BoilerTempController {
+public:
+    /**
+     * @brief Burner type for control strategy selection
+     */
+    enum class BurnerType {
+        TWO_STAGE,    // OFF/HALF/FULL bang-bang control
+        MODULATING    // 0-100% PID control (future)
+    };
+
+    /**
+     * @brief Power level output for two-stage burners (OFF = 0, HALF = 1, FULL = 2)
+     */
+    using PowerLevel = BoilerPowerLevel::Level;
+
+    /**
+     * @brief Control output from the controller
+     */
+    struct ControlOutput {
+        bool burnerOn;              // Whether burner should be running
+        PowerLevel powerLevel;      // Power level for two-stage
+        uint8_t modulationPercent;  // 0-100% for modulating (future)
+        bool changed;               // Whether output changed from last calculation
+    };
+
+    /**
+     * @brief Configuration for the controller
+     */
+    struct Config {
+        BurnerType burnerType = BurnerType::MODULATING;  // Default to PID mode
+
+        // Hysteresis bands for bang-bang mode (Temperature_t = tenths of degrees)
+        Temperature_t offHysteresis = BoilerPowerLevel::DEFAULT_OFF_HYSTERESIS;            // +5.0°C above target → OFF
+        Temperature_t onHysteresis = BoilerPowerLevel::DEFAULT_ON_HYSTERESIS;              // -3.0°C below target → ON (HALF)
+        Temperature_t fullPowerThreshold = BoilerPowerLevel::DEFAULT_FULL_POWER_THRESHOLD; // -10.0°C below target → FULL
+
+        // Flow dead band for the PID path, in DEGREES. The bands above are read only by
+        // the bang-bang path and a boot log line; this one gates the burner on/off on the
+        // live modulating path. updateMode() swaps it per mode every cycle, like the gains.
+        // See BurnerHysteresisPolicy.h for why a percent band was the wrong unit.
+        BurnerHysteresisPolicy::Band flowBand = BurnerHysteresisPolicy::heatingDefault();
+
+        // Minimum valid target temperature (safety)
+        Temperature_t minTargetTemp = 200;      // 20.0°C minimum target
+
+        // PID gains for space heating (modulating mode)
+        float modKp = 5.0f;     // Proportional gain (higher for fast response)
+        float modKi = 0.02f;    // Integral gain (lower to prevent overshoot)
+        float modKd = 1.0f;     // Derivative gain (damping)
+
+        // PID gains for water heating (separate from space heating)
+        float waterKp = 5.0f;   // Water heating proportional gain
+        float waterKi = 0.02f;  // Water heating integral gain
+        float waterKd = 1.0f;   // Water heating derivative gain
+
+        // PID output thresholds for mapping to power levels (0-100%)
+        // Pure PID mode - output centered at 50% when at target
+        // With Kp=5.0: ~10% shift per 2°C error
+        // Wide bands minimize burner cycling
+        uint8_t offThreshold = BoilerPowerLevel::DEFAULT_OFF_THRESHOLD;      // 35: below this → OFF (well above target)
+        uint8_t halfThreshold = BoilerPowerLevel::DEFAULT_HALF_THRESHOLD;    // 45: above this → at least HALF
+        uint8_t fullThreshold = BoilerPowerLevel::DEFAULT_FULL_THRESHOLD;    // 75: above this → FULL (significantly below target)
+        uint8_t thresholdHysteresis = BoilerPowerLevel::DEFAULT_THRESHOLD_HYSTERESIS; // 10: wide hysteresis prevents oscillation
+    };
+
+    /**
+     * @brief Initialize the controller
+     * @return true if initialization successful
+     */
+    bool initialize();
+
+    /**
+     * @brief Set controller configuration
+     * @param config New configuration
+     */
+    void setConfig(const Config& config);
+
+    /**
+     * @brief Get current configuration
+     * @return Current configuration
+     */
+    Config getConfig() const;
+
+    /**
+     * @brief Calculate control output based on temperatures
+     * @param targetTemp Target boiler temperature (from Room/Water PID)
+     * @param currentTemp Current boiler output temperature
+     * @return Control output (power level and burner state)
+     */
+    ControlOutput calculate(Temperature_t targetTemp, Temperature_t currentTemp);
+
+    /**
+     * @brief Would the next control cycle want heat for this target? (BurnerDemandGate)
+     *
+     * For BurnerControlTask's arming check when no fresh decision exists: runs the
+     * PID step and power mapping on a copy of the state, with the PID reset that
+     * updateMode()/calculateModulating() would apply (mode or gain change, pause)
+     * and the current level's hysteresis, from OFF after a pause
+     * (BoilerPowerLevel::predictModulatingLevel). Anti-flapping is not included. Does
+     * not change controller state.
+     * @param wantsHeat Output: HALF or FULL
+     * @return false if unknown (not initialized, autotune active, mutex timeout)
+     */
+    bool predictHeatDemand(Temperature_t targetTemp, Temperature_t currentTemp, bool& wantsHeat) const;
+
+    /**
+     * @brief Reset controller state
+     */
+    void reset();
+
+    /**
+     * @brief Get the last calculated output
+     * @return Last output
+     */
+    ControlOutput getLastOutput() const;
+
+    /**
+     * @brief Check if controller is initialized
+     * @return true if initialized
+     */
+    bool isInitialized() const { return initialized_; }
+
+    /**
+     * @brief Convert PowerLevel to string for logging
+     * @param level Power level
+     * @return String representation
+     */
+    static const char* powerLevelToString(PowerLevel level);
+
+    /**
+     * @brief Set PID gains (thread-safe)
+     * @param kp Proportional gain
+     * @param ki Integral gain
+     * @param kd Derivative gain
+     */
+    void setPIDGains(float kp, float ki, float kd);
+
+    /**
+     * @brief Get current PID gains (thread-safe)
+     * @param kp Output: Proportional gain
+     * @param ki Output: Integral gain
+     * @param kd Output: Derivative gain
+     */
+    void getPIDGains(float& kp, float& ki, float& kd) const;
+
+    /**
+     * @brief Reset PID controller state (clears integral accumulator)
+     */
+    void resetPID();
+
+    /**
+     * @brief Get current PID output percentage (0-100)
+     * @return Last calculated PID output
+     */
+    uint8_t getPIDOutput() const { return lastPIDOutput_; }
+
+    /**
+     * @brief Update mode based on current burner request event bits
+     * Switches PID gains between space heating and water heating
+     */
+    void updateMode();
+
+    /**
+     * @brief Check if currently in water heating mode
+     *
+     * Tracked by updateMode(), which only runs on a normal control cycle: during an
+     * autotune run this flag keeps the mode of the last such cycle. Use the active
+     * burner request (or getTunedGainTarget()) while tuning.
+     * @return true if water heating mode active
+     */
+    bool isWaterMode() const { return isWaterMode_; }
+
+    // ===== Auto-Tuning Support =====
+
+    /**
+     * @brief Set the tuning method for auto-tuning
+     * Available methods: zn_pi, zn_pid, tyreus, cohen, lambda
+     * @param method Method name string
+     * @return true if method is valid
+     */
+    bool setTuningMethod(const char* method);
+
+    /**
+     * @brief Start PID auto-tuning
+     * @param setpoint Target temperature for tuning
+     * @return true if tuning started successfully
+     */
+    bool startAutoTuning(Temperature_t setpoint);
+
+    /**
+     * @brief Stop PID auto-tuning
+     */
+    void stopAutoTuning();
+
+    /**
+     * @brief Check if auto-tuning is active
+     * @return true if tuning in progress
+     */
+    bool isAutoTuning() const { return autoTuningActive_; }
+
+    /**
+     * @brief Update auto-tuning with current temperature
+     * Call this periodically during tuning
+     * @param currentTemp Current boiler temperature
+     * @return Control output to apply (for relay feedback test)
+     */
+    ControlOutput updateAutoTuning(Temperature_t currentTemp);
+
+    /**
+     * @brief Apply auto-tuning results to PID gains
+     * @return true if results applied successfully
+     */
+    bool applyAutoTuningResults();
+
+    /**
+     * @brief Get auto-tuning progress (0-100%)
+     * @return Progress percentage
+     */
+    uint8_t getAutoTuningProgress() const;
+
+    /**
+     * @brief Get the tuned PID gains after auto-tuning
+     * @param kp Output: Proportional gain
+     * @param ki Output: Integral gain
+     * @param kd Output: Derivative gain
+     * @return true if valid results are available
+     */
+    bool getTunedGains(float& kp, float& ki, float& kd) const;
+
+    /**
+     * @brief Gain set the finished autotune result belongs to (AutotuneGainTarget)
+     *
+     * Compares the mode captured at startAutoTuning() with the mode of the active burner
+     * request; returns REJECT_MODE_CHANGED if they differ, because the oscillation then
+     * came partly from the other loop. isWaterMode_ cannot answer this: updateMode() does
+     * not run while tuning (review 2026-09-14 pid-4).
+     */
+    AutotuneGainTarget::Target getTunedGainTarget() const;
+
+private:
+    Config config_;
+    ControlOutput lastOutput_;
+    bool initialized_ = false;
+    mutable SemaphoreHandle_t mutex_ = nullptr;
+    static constexpr TickType_t MUTEX_TIMEOUT = pdMS_TO_TICKS(50);
+
+    // PID controller for modulating mode
+    PIDControlModuleFixedPoint* pidController_ = nullptr;
+    uint8_t lastPIDOutput_ = 0;
+    // millis() of the last control cycle; both calculateModulating() and
+    // calculateBangBang() stamp it, so the pause check (BoilerPowerLevel::pidPaused)
+    // covers either burner type
+    uint32_t lastCycleTime_ = 0;
+
+    // Mode tracking for gain switching
+    bool isWaterMode_ = false;
+
+    // Auto-tuning support
+    PIDAutoTuner* autoTuner_ = nullptr;
+    bool autoTuningActive_ = false;
+    Temperature_t autoTuneSetpoint_ = 0;
+    // Mode of the run, captured at startAutoTuning(): the results are only valid for the
+    // loop the relay test actually drove (pid-4)
+    bool autoTuneWaterMode_ = false;
+    // Run time for the tuner: millis() differences instead of an absolute millis()/1000
+    // (wrap and float resolution, pid-7)
+    AutotuneClock::Clock autoTuneClock_;
+    // Loaded from SystemSettings::autotuneMethod in initialize(). ZN-PI default:
+    // the boiler's relay period is ~9 min, which makes ZN-PID's Kd absurd (~2000).
+    PIDAutoTuner::TuningMethod tuningMethod_ = PIDAutoTuner::TuningMethod::ZIEGLER_NICHOLS_PI;
+
+    static const char* TAG;
+
+    /**
+     * @brief Calculate output using bang-bang control for two-stage burner
+     * @param target Target temperature
+     * @param current Current temperature
+     * @return Control output
+     */
+    ControlOutput calculateBangBang(Temperature_t target, Temperature_t current);
+
+    /**
+     * @brief Calculate output using PID for modulating burner (future)
+     * @param target Target temperature
+     * @param current Current temperature
+     * @return Control output
+     */
+    ControlOutput calculateModulating(Temperature_t target, Temperature_t current);
+
+    /**
+     * @brief Check if target temperature is valid
+     * @param target Target temperature to check
+     * @return true if valid
+     */
+    bool isValidTarget(Temperature_t target) const;
+};

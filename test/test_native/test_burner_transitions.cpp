@@ -1,0 +1,711 @@
+/**
+ * @file test_burner_transitions.cpp
+ * @brief Scenario tests for BurnerTransitions::step() (burner state machine logic)
+ *
+ * Replays tick sequences through the real transition function. The simulator
+ * mirrors StateMachine::update(): the backstop timeouts (PRE_PURGE 4 s -> IGNITION,
+ * IGNITION 7 s -> LOCKOUT) are checked before the step, and entering IGNITION
+ * records the running mode like onEnterIgnition().
+ */
+
+#include <unity.h>
+#include <cstdint>
+
+#include "../../include/modules/control/BurnerTransitions.h"
+
+// setUp and tearDown are defined in test_main.cpp
+
+using namespace BurnerTransitions;
+
+namespace {
+
+constexpr uint32_t TICK_MS = 100;
+constexpr uint32_t PRE_PURGE_TIME_MS = 2000;     // SystemConstants::Burner::PRE_PURGE_TIME_MS
+constexpr uint32_t IGNITION_TIME_MS = 5000;      // SystemConstants::Burner::IGNITION_TIME_MS
+constexpr uint32_t MIN_IGNITION_TIME_MS = 3000;  // SystemConstants::Timing::BURNER_MIN_IGNITION_TIME_MS
+constexpr uint32_t IGNITION_STATE_TIMEOUT_MS =    // BurnerStateMachine IGNITION StateMachine timeout
+    IGNITION_TIME_MS + BurnerTransitionPolicy::IGNITION_BACKSTOP_MARGIN_MS;
+constexpr uint32_t PRE_PURGE_STATE_TIMEOUT_MS =   // BurnerStateMachine PRE_PURGE StateMachine timeout
+    PRE_PURGE_TIME_MS + BurnerTransitionPolicy::PRE_PURGE_BACKSTOP_MARGIN_MS;
+
+class FakeEnvironment : public Environment {
+public:
+    bool safety = true;
+    bool flame = true;
+    bool boilerEn = true;
+    bool heatingEn = true;
+    bool waterEn = true;
+    bool heatingOnBit = false;
+    bool waterOnBit = false;
+    bool priority = false;
+    bool heatingReq = false;
+    bool waterReq = false;
+    bool relaysWater = false;
+    bool boilerHot = false;          // BurnerPowerController blocks high power
+    bool heatingWanted = true;
+    bool turnOnAllowed = true;
+    bool turnOffAllowed = true;
+    bool powerChangeAllowed = true;
+    bool switchSucceeds = true;
+
+    int safetyCalls = 0;
+    int switchCalls = 0;
+
+    bool safetyOk() override { safetyCalls++; return safety; }
+    bool flameDetected() override { return flame; }
+    bool boilerEnabled() override { return boilerEn; }
+    bool heatingEnabled() override { return heatingEn; }
+    bool waterEnabled() override { return waterEn; }
+    bool heatingOn() override { return heatingOnBit; }
+    bool waterOn() override { return waterOnBit; }
+    bool waterPriority() override { return priority; }
+    bool heatingRequested() override { return heatingReq; }
+    bool waterRequested() override { return waterReq; }
+    bool relaysInWaterMode() override { return relaysWater; }
+    bool highPowerAllowed(bool requestedHighPower) override { return requestedHighPower && !boilerHot; }
+    bool heatingLikelyWanted() override { return heatingWanted; }
+    bool canTurnOn() override { return turnOnAllowed; }
+    bool canTurnOff() override { return turnOffAllowed; }
+    bool canChangePower(bool) override { return powerChangeAllowed; }
+    bool switchMode(bool toWater) override {
+        switchCalls++;
+        if (switchSucceeds) {
+            relaysWater = toWater;
+        }
+        return switchSucceeds;
+    }
+};
+
+struct Simulator {
+    FakeEnvironment env;
+    Memory memory;
+    Timing timing;
+    BurnerSMState state;
+    uint32_t nowMs;
+    uint32_t entryMs;
+    bool heatDemand;
+    bool highPower;
+    Decision last;
+    int visits[9];
+    uint32_t tickMs;
+
+    Simulator()
+        : memory(Memory()), timing(Timing()), state(BurnerSMState::IDLE),
+          nowMs(1000), entryMs(1000), heatDemand(false), highPower(false), last(Decision()),
+          tickMs(TICK_MS) {
+        timing.ignitionMinTimeMs = MIN_IGNITION_TIME_MS;
+        timing.ignitionTimeoutMs = IGNITION_TIME_MS;
+        timing.maxIgnitionRetries = 3;
+        timing.modeDemandLossGraceMs = MODE_DEMAND_LOSS_GRACE_MS;
+        timing.prePurgeTimeMs = PRE_PURGE_TIME_MS;
+        clearVisits();
+    }
+
+    void clearVisits() {
+        for (int i = 0; i < 9; i++) {
+            visits[i] = 0;
+        }
+    }
+
+    int visitsOf(BurnerSMState s) const { return visits[static_cast<int>(s)]; }
+
+    void enter(BurnerSMState s) {
+        state = s;
+        entryMs = nowMs;
+        visits[static_cast<int>(s)]++;
+        if (s == BurnerSMState::IGNITION) {
+            // onEnterIgnition(): water if WATER_ON && (!HEATING_ON || WATER_PRIORITY)
+            memory.runningModeIsWater = env.waterOnBit && (!env.heatingOnBit || env.priority);
+            env.relaysWater = memory.runningModeIsWater;
+        }
+    }
+
+    void tick() {
+        nowMs += tickMs;
+        const uint32_t inState = nowMs - entryMs;
+        // StateMachine::update(): timeout first (strictly greater), then the handler
+        if (state == BurnerSMState::PRE_PURGE && inState > PRE_PURGE_STATE_TIMEOUT_MS) {
+            enter(BurnerSMState::IGNITION);
+            return;
+        }
+        if (state == BurnerSMState::IGNITION && inState > IGNITION_STATE_TIMEOUT_MS) {
+            enter(BurnerSMState::LOCKOUT);
+            return;
+        }
+        const Context ctx = { state, inState, nowMs, heatDemand, highPower };
+        last = step(ctx, timing, env, memory);
+        if (last.next != state) {
+            enter(last.next);
+        }
+    }
+
+    void run(uint32_t ms) {
+        for (uint32_t t = 0; t < ms; t += TICK_MS) {
+            tick();
+        }
+    }
+};
+
+Simulator sim;
+
+void requestHeating(bool on) {
+    sim.env.heatingOnBit = on;
+    sim.env.heatingReq = on;
+}
+
+void requestWater(bool on) {
+    sim.env.waterOnBit = on;
+    sim.env.waterReq = on;
+}
+
+bool isRunning() {
+    return sim.state == BurnerSMState::RUNNING_LOW || sim.state == BurnerSMState::RUNNING_HIGH;
+}
+
+// Fresh simulator, start the burner for one mode and run until it is lit.
+void startBurner(bool water, bool highPower) {
+    sim = Simulator();
+    if (water) {
+        requestWater(true);
+        sim.env.priority = true;
+    } else {
+        requestHeating(true);
+    }
+    sim.heatDemand = true;
+    sim.highPower = highPower;
+    for (int i = 0; i < 100 && !isRunning(); i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == (highPower ? BurnerSMState::RUNNING_HIGH : BurnerSMState::RUNNING_LOW));
+    TEST_ASSERT_EQUAL(water, sim.memory.runningModeIsWater);
+    sim.clearVisits();
+}
+
+} // namespace
+
+// --- Start ------------------------------------------------------------------
+
+void test_bsm_step_idle_without_demand_skips_safety_check() {
+    sim = Simulator();
+    requestHeating(true);  // mode active, but no heat demand from BoilerTempControl
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IDLE);
+    // performSafetyCheck() can emergency-shutdown; it is only probed with demand
+    TEST_ASSERT_EQUAL_INT(0, sim.env.safetyCalls);
+}
+
+void test_bsm_step_stale_demand_never_starts_burner() {
+    // 2026-09-12/13: latched demand after ERROR recovery, no mode request
+    sim = Simulator();
+    sim.heatDemand = true;
+    sim.run(60000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IDLE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::STALE_DEMAND);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.safetyCalls);
+}
+
+void test_bsm_step_heating_start_sequence() {
+    sim = Simulator();
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.highPower = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    sim.run(PRE_PURGE_TIME_MS + TICK_MS);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IGNITION);
+    sim.run(MIN_IGNITION_TIME_MS - TICK_MS);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IGNITION);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_HIGH);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::IGNITION_OK);
+    TEST_ASSERT_FALSE(sim.memory.runningModeIsWater);
+}
+
+void test_bsm_step_start_waits_for_minimum_off_time() {
+    sim = Simulator();
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.turnOnAllowed = false;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IDLE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::START_DELAYED);
+    sim.env.turnOnAllowed = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+}
+
+void test_bsm_step_request_withdrawn_during_pre_purge_aborts() {
+    sim = Simulator();
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    requestHeating(false);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IDLE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::MODE_WITHDRAWN);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::IGNITION));
+}
+
+// --- Stop -------------------------------------------------------------------
+
+void test_bsm_step_heating_disable_stops_during_min_on_time() {
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;  // inside the 2 min minimum on-time
+    sim.env.heatingEn = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
+    TEST_ASSERT_FALSE(sim.last.fromWater);
+}
+
+void test_bsm_step_water_disable_does_not_stop_heating() {
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;
+    sim.env.waterEn = false;
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+}
+
+void test_bsm_step_demand_end_respects_min_on_time() {
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;
+    sim.heatDemand = false;
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.stopDelayed);
+    sim.env.turnOffAllowed = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::DEMAND_ENDED);
+}
+
+void test_bsm_step_lost_mode_request_stops_after_grace() {
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;
+    sim.env.heatingReq = false;  // HEATING_ON still set, request withdrawn
+    sim.run(MODE_DEMAND_LOSS_GRACE_MS);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    // Exactly MODE_DEMAND_LOSS_GRACE_MS after the first step without a request (the
+    // former 'nowMs | 1' sentinel stopped 1 ms later, one tick after the grace period)
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::NO_MODE_DEMAND);
+}
+
+// =======================================================================================
+// THE THREE FLAME TESTS BELOW EXERCISE A PATH THE FIRMWARE CANNOT TAKE.
+//
+// There is no flame-detection hardware on this boiler. BurnerSafetyChecks::isFlameDetected()
+// returns BurnerSystemController::isActive() - i.e. "the burner relay is commanded on" - so
+// flameDetected() reporting false WHILE the burner is commanded active, which is what every
+// flame-loss test below sets up, cannot happen in the real system. The only flame proof that
+// exists is the Home Assistant gas-meter pulse counter, which is outside the control loop and
+// which caught a 112 s flame loss on 2026-10-24 that the firmware was entirely blind to.
+//
+// They are KEPT, not deleted: the state machine's handling is correct and is what a flame
+// sensor would need. They are labelled because the 2026-10-25 review counted them as tests
+// asserting a safety behaviour the controller does not have, and a passing test named
+// "flame loss bypasses min on time" reads like evidence that it does.
+//
+// Delete this banner the day a flame sensor is wired and isFlameDetected() reads it.
+// =======================================================================================
+void test_bsm_step_flame_loss_bypasses_min_on_time() {
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;
+    sim.env.flame = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::FLAME_LOST);
+}
+
+// --- Mode switching ---------------------------------------------------------
+
+void test_bsm_step_heating_to_water_is_seamless() {
+    // 2026-09-14 16:09:19: hot water preempts low-power heating
+    startBurner(false, false);
+    requestHeating(false);
+    requestWater(true);
+    sim.env.priority = true;
+    sim.highPower = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_SEAMLESS);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_HIGH);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_DONE);
+    TEST_ASSERT_TRUE(sim.env.relaysWater);
+    TEST_ASSERT_TRUE(sim.memory.runningModeIsWater);
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_HIGH);
+    TEST_ASSERT_EQUAL_INT(1, sim.env.switchCalls);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::POST_PURGE));
+}
+
+void test_bsm_step_water_to_heating_waits_for_heating_request() {
+    // 2026-09-14 16:09:58: tank charged, HeatingControlTask requests ~1 s later
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.priority = false;
+    sim.env.heatingWanted = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_WAIT_FOR_HEATING);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+    requestHeating(true);
+    sim.highPower = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_DONE);
+    TEST_ASSERT_EQUAL_INT(1, sim.env.switchCalls);
+    TEST_ASSERT_FALSE(sim.env.relaysWater);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::POST_PURGE));
+}
+
+void test_bsm_step_handover_stops_when_heating_not_wanted() {
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = false;  // heating disabled / warm outside
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_NO_DEMAND);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+}
+
+void test_bsm_step_handover_room_in_restart_band_stops() {
+    // Weather mode, target 18.0, margin 1.0, hysteresis 0.5: HeatingControlTask does not
+    // restart at room >= 18.5, so the handover must not wait 15 s with the burner firing
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = BurnerTransitionPolicy::heatingLikelyWanted(
+        true, false, true, true, 100, 150, true, 185, 180, 10, 5);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_NO_DEMAND);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+
+    // Just below the restart limit heating will request: wait for the handover
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = BurnerTransitionPolicy::heatingLikelyWanted(
+        true, false, true, true, 100, 150, true, 184, 180, 10, 5);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_WAIT_FOR_HEATING);
+}
+
+void test_bsm_step_handover_wait_is_bounded() {
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = true;  // wanted, but the request never comes
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(BurnerTransitionPolicy::MODE_SWITCH_MAX_WAIT_MS - TICK_MS);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_NO_DEMAND);
+}
+
+void test_bsm_step_failed_mode_switch_stops_burner() {
+    startBurner(false, false);
+    sim.env.switchSucceeds = false;
+    requestHeating(false);
+    requestWater(true);
+    sim.env.priority = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_FAILED);
+    TEST_ASSERT_FALSE(sim.memory.runningModeIsWater);
+}
+
+void test_bsm_step_revert_without_on_bit_does_not_bounce() {
+    // WATER_OFF_OVERRIDE clears WATER_ON while the water request is still set
+    startBurner(true, true);
+    sim.env.waterOnBit = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(BurnerTransitionPolicy::MODE_SWITCH_MAX_WAIT_MS - TICK_MS);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_REVERT_WAIT);
+    TEST_ASSERT_EQUAL_INT(1, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::RUNNING_LOW));
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::RUNNING_HIGH));
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_REVERT_STOP);
+}
+
+void test_bsm_step_revert_with_on_bit_resumes_low_power() {
+    startBurner(true, true);
+    sim.env.waterOnBit = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.env.waterOnBit = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_RESUME);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+}
+
+void test_bsm_step_mode_change_without_flame_stops() {
+    startBurner(false, false);
+    sim.env.flame = false;
+    requestHeating(false);
+    requestWater(true);
+    sim.env.priority = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_NEEDS_STOP);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+}
+
+void test_bsm_step_safety_failure_during_mode_switch_errors() {
+    startBurner(false, false);
+    requestHeating(false);
+    requestWater(true);
+    sim.env.priority = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.env.safety = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::ERROR);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SAFETY_FAILED);
+}
+
+// --- Power level ------------------------------------------------------------
+
+void test_bsm_step_power_level_follows_request_with_anti_flapping() {
+    startBurner(false, false);
+    sim.highPower = true;
+    sim.env.powerChangeAllowed = false;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::POWER_UP_DELAYED);
+    sim.env.powerChangeAllowed = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_HIGH);
+    sim.highPower = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::POWER_DOWN);
+    // Hot boiler: a high power request does not raise the power
+    sim.env.boilerHot = true;
+    sim.highPower = true;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+}
+
+// --- Restart from post-purge ------------------------------------------------
+
+void test_bsm_step_post_purge_restarts_when_demand_returns() {
+    startBurner(false, false);
+    sim.heatDemand = false;  // PID coast
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    // Demand returns inside the minimum off-time: hold
+    sim.heatDemand = true;
+    sim.env.turnOnAllowed = false;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    // Minimum off-time over: restart without waiting out the post-purge
+    sim.env.turnOnAllowed = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::RESTART_FROM_POST_PURGE);
+}
+
+void test_bsm_step_post_purge_no_restart_without_mode_request() {
+    startBurner(false, false);
+    sim.heatDemand = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    requestHeating(false);
+    sim.heatDemand = true;  // latched demand without a mode request
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}
+
+void test_bsm_step_post_purge_no_restart_of_disabled_mode() {
+    startBurner(false, false);
+    sim.env.heatingEn = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
+    // Request and demand can still be set for a control cycle after the disable
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}
+
+void test_bsm_step_post_purge_restart_requires_safety() {
+    startBurner(false, false);
+    sim.heatDemand = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    sim.heatDemand = true;
+    sim.env.safety = false;
+    sim.run(1000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::PRE_PURGE));
+}
+
+// --- Ignition retries -------------------------------------------------------
+
+// BurnerControlTask ticks do not land exactly on IGNITION_TIME_MS. With the
+// StateMachine timeout at the same 5 s (checked before the handler) the first
+// tick past 5 s locked out after a single attempt.
+void test_bsm_step_ignition_failure_retries_then_locks_out() {
+    sim = Simulator();
+    sim.tickMs = 130;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.flame = false;  // burner never reports active
+    for (int i = 0; i < 400 && sim.state != BurnerSMState::LOCKOUT; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::LOCKOUT);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::IGNITION_LOCKOUT);
+    TEST_ASSERT_EQUAL_INT(3, sim.visitsOf(BurnerSMState::IGNITION));
+    TEST_ASSERT_EQUAL_INT(3, sim.visitsOf(BurnerSMState::PRE_PURGE));  // start + 2 retries
+}
+
+void test_bsm_step_ignition_retry_success_resets_counter() {
+    sim = Simulator();
+    sim.tickMs = 130;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.flame = false;
+    for (int i = 0; i < 400 && sim.visitsOf(BurnerSMState::IGNITION) < 2; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_EQUAL_INT(2, sim.visitsOf(BurnerSMState::IGNITION));
+    TEST_ASSERT_EQUAL_INT(1, sim.memory.ignitionRetries);
+    sim.env.flame = true;  // second attempt lights
+    for (int i = 0; i < 100 && !isRunning(); i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(isRunning());
+    TEST_ASSERT_EQUAL_INT(0, sim.memory.ignitionRetries);
+}
+
+// --- Review fixes 2026-09-14 --------------------------------------------------
+
+void test_bsm_step_new_start_gets_full_ignition_attempts_after_lockout() {
+    // A LOCKOUT that ended by timeout left ignitionRetries at the maximum, so the next
+    // failed start locked out after a single attempt
+    sim = Simulator();
+    sim.tickMs = 130;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.env.flame = false;
+    for (int i = 0; i < 400 && sim.state != BurnerSMState::LOCKOUT; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::LOCKOUT);
+    sim.enter(BurnerSMState::IDLE);  // LOCKOUT StateMachine timeout (not simulated)
+    sim.clearVisits();
+    for (int i = 0; i < 400 && sim.state != BurnerSMState::LOCKOUT; i++) {
+        sim.tick();
+    }
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::LOCKOUT);
+    TEST_ASSERT_EQUAL_INT(3, sim.visitsOf(BurnerSMState::IGNITION));
+}
+
+void test_bsm_step_no_mode_grace_survives_steps_in_same_millisecond() {
+    // The grace timer stored 'nowMs | 1': a second step in the same even millisecond
+    // computed now - (now + 1) = 0xFFFFFFFF and stopped the burner at once
+    startBurner(false, false);
+    sim.env.turnOffAllowed = false;
+    sim.env.heatingReq = false;  // request briefly gone (handover)
+    const Context ctx = { BurnerSMState::RUNNING_LOW, 5000, 20000, true, false };
+    const Decision first = step(ctx, sim.timing, sim.env, sim.memory);
+    const Decision second = step(ctx, sim.timing, sim.env, sim.memory);
+    TEST_ASSERT_TRUE(first.next == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(second.next == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(second.reason != Reason::NO_MODE_DEMAND);
+}
+
+void test_bsm_step_stray_other_mode_on_bit_does_not_bounce() {
+    // MQTT water override_on sets WATER_ON without a water request while heating runs
+    // with water priority: running() switched, modeSwitching() saw the heating request
+    // and resumed, and the two alternated on every tick
+    startBurner(false, false);
+    sim.env.priority = true;
+    sim.env.waterOnBit = true;  // no water request
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_REVERT_WAIT);
+    TEST_ASSERT_EQUAL_INT(1, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::RUNNING_LOW));
+    // Stray bit cleared (HeatingControlTask refresh): resume once, no bounce
+    sim.env.waterOnBit = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::SWITCH_RESUME);
+    sim.run(5000);
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::RUNNING_LOW);
+    TEST_ASSERT_EQUAL_INT(1, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+}
+
+void test_bsm_step_demand_withdrawn_late_in_pre_purge_aborts() {
+    // BurnerControlTask ticks about once a second. With PRE_PURGE -> IGNITION as the
+    // StateMachine timeout (checked before the handler) a demand withdrawn in the last
+    // second of the pre-purge still ignited the burner
+    sim = Simulator();
+    sim.tickMs = 1100;
+    requestHeating(true);
+    sim.heatDemand = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    sim.tick();  // 1.1 s in pre-purge
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::PRE_PURGE);
+    sim.heatDemand = false;  // BoilerTempControlTask re-asserts OFF
+    sim.tick();  // 2.2 s: past the pre-purge time
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::IDLE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::DEMAND_WITHDRAWN);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::IGNITION));
+}
+
+void test_bsm_step_water_disable_during_charge_stops_now() {
+    // Disabling water clears WATER_ON and the request at once; the mode-switch check came
+    // first and the burner waited up to 15 s for a heating handover
+    startBurner(true, true);
+    sim.env.turnOffAllowed = false;
+    sim.env.heatingWanted = true;
+    sim.env.waterEn = false;
+    requestWater(false);
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
+    TEST_ASSERT_TRUE(sim.last.fromWater);
+    TEST_ASSERT_EQUAL_INT(0, sim.visitsOf(BurnerSMState::MODE_SWITCHING));
+}
+
+void test_bsm_step_explicit_disable_during_mode_switch_stops() {
+    // Charge done, waiting for the heating handover; then water is disabled
+    startBurner(true, true);
+    requestWater(false);
+    sim.env.heatingWanted = true;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::MODE_SWITCHING);
+    sim.env.waterEn = false;
+    sim.tick();
+    TEST_ASSERT_TRUE(sim.state == BurnerSMState::POST_PURGE);
+    TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
+    TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
+}

@@ -1,0 +1,2 @@
+# Requirements for ESPlan monitoring tools
+pyserial>=3.5

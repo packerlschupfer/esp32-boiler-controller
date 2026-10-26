@@ -1,0 +1,108 @@
+@startuml StorageArchitecture
+!include theme.puml
+
+' File-local: stock PlantUML gives storage and database a light fill, which
+' leaves the theme's white text unreadable.
+skinparam storage {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+skinparam database {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+}
+
+title Storage Architecture - NVS Flash + FRAM (MB85RC256V)\nDS3231 RTC for time
+
+package "Application" {
+    component [PersistentStorageTask] as PSTask
+    component [MQTTTask] as MQTTTask
+    component [ErrorHandler] as ErrorHandler
+    component [CentralizedFailsafe] as Failsafe
+    component [TimerSchedulerTask] as Scheduler
+    component [BurnerRuntimeTracker] as RuntimeTracker
+    component [PIDControlModuleFixedPoint] as PIDCtrl
+    component [NTPTask] as NTPTask
+}
+
+package "Storage Modules and Libraries" {
+    rectangle "ESP32-PersistentStorage" as PersistSvc {
+        component [52 registered parameters\nrange check, setOnChange] as ParamReg
+        component [save / saveAll\nPreferences] as NVSOps
+    }
+
+    rectangle "FRAM users (RuntimeStorage driver)" as FramUsers {
+        component [ErrorLogFRAM\n50-entry error log\nCRC-protected stats] as ErrorLog
+        component [CriticalDataStorage\nemergency state, PID tuning,\nruntime counters, error log area,\nsafety events (CRC32)] as Critical
+        component [ScheduleStorage\nup to 20 schedules at 0x6200, CRC] as Schedules
+        component [PID state\nsaveState / restoreState] as PIDState
+    }
+
+    component [DS3231Controller\nRTC time] as DS3231Mgr
+}
+
+package "Physical Storage Hardware" {
+    database "ESP32 NVS Flash\nnamespace esplan" as NVS
+    database "MB85RC256V FRAM\n32KB, I2C 0x50" as FRAM
+    database "DS3231 RTC" as RTC
+}
+
+package "Runtime Data Structures" {
+    storage "SystemSettings\nmutex protected" as SystemSettings
+}
+
+' Parameters (NVS)
+MQTTTask --> PSTask : boiler/params/* messages
+PSTask --> ParamReg : register, handleMqttCommand
+ParamReg --> SystemSettings : registered variables
+PSTask --> NVSOps : save / saveAll
+NVSOps --> NVS : Preferences put*
+
+' FRAM
+ErrorHandler --> ErrorLog : logError()
+Failsafe --> Critical : saveEmergencyState()
+RuntimeTracker --> Critical : runtime and cycle counters
+PIDCtrl --> PIDState
+Scheduler --> Schedules : persist 5 min after changes
+ErrorLog --> FRAM
+Critical --> FRAM
+Schedules --> FRAM
+PIDState --> FRAM
+
+' Time
+NTPTask --> DS3231Mgr : time fallback after\n5 NTP failures
+Scheduler --> DS3231Mgr : updateRTCFromNTP\n(NTP callback)
+DS3231Mgr --> RTC
+
+note right of PersistSvc
+  Parameters: MQTT boiler/params/{set,get,list,save},
+  handled by handleMqttCommand() in PersistentStorageTask.
+  52 parameters: system, heating, limits, wheater,
+  pid, sensor offsets, syslog.
+  Saved with saveAll() on a save request;
+  SAVE_INTERVAL_MS (5 min) is defined but unused
+  (no periodic auto-save).
+end note
+
+note right of FramUsers
+  FRAM layout from code:
+  - CriticalDataStorage 0x4C20 - 0x6120
+  - schedules from 0x6200 (4KB)
+  - ErrorLogFRAM and PID state through RuntimeStorage
+  Current code writes only safety events into the
+  CriticalDataStorage error log area.
+end note
+
+note bottom of NVS
+  NVS: configuration parameters (Preferences).
+  FRAM: error log, critical data, counters,
+  schedules, PID state.
+  DS3231: time only - no SRAM use found,
+  no schedules or vacation flag stored there.
+  Not verified: NVS partition size,
+  write endurance figures.
+end note
+
+@enduml

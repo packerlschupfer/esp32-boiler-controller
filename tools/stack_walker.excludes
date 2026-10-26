@@ -1,0 +1,100 @@
+# Project-specific graph adjustments for tools/stack_walker.py.
+#
+# Every entry needs a reason after '#' saying WHY and HOW TO RE-CHECK it - a
+# stale entry silently under-reports stack. Each fact below was verified in the
+# disassembly of the image it was written against, not inferred from names.
+#
+# Kinds:
+#   FUNC                    never runs in this firmware    -> cut from BOTH bounds
+#   cut: CALLER -> CALLEE   that call never happens        -> cut from BOTH bounds
+#   edge: CALLER -> CALLEE  a real call the tool can't see -> added to BOTH bounds
+#   failure: FUNC           only runs after a failure      -> cut from NOMINAL only
+#   once: FUNC              one-time initialisation        -> cut from NOMINAL only
+#
+# The worst-case bound keeps failure/once code, so it still answers "could error
+# handling overflow this task?". No-return panic/abort paths are excluded by the
+# tool itself and are not listed here.
+
+# --- never runs in this firmware ---------------------------------------------
+
+QueueManager::ManagedQueue::dropLowestPriorityItem  # the only two queues (MQTTTask.cpp, mqtt_high_priority / mqtt_normal_priority) are DROP_OLDEST; re-check: grep -rn 'overflowStrategy *=' src/
+
+# --- infeasible call edges ---------------------------------------------------
+
+cut: QueueManager::ManagedQueue::dropOldestItem -> log_write_impl  # LOG_ERROR only when itemSize > MAX_QUEUE_ITEM_SIZE (movi a12,0x200; bltu); both queues pass sizeof(MQTTPublishRequest) = 392 (movi 0x188); re-check if MQTTPublishRequest grows past 512
+
+cut: tlsf_walk_pool -> default_walker  # default_walker is substituted only for a NULL walker (bnez a3; l32r a3); the sole caller multi_heap_get_info_impl passes multi_heap_get_info_tlsf; re-check: callers of tlsf_walk_pool in the resolved graph
+cut: esp_cache_get_alignment -> esp_log  # logged only when the out-pointer is NULL (bnez a3); the sole caller esp_heap_adjust_alignment_to_hw passes a stack local (addi a5, a1, 28; mov.n a11, a5); re-check: callers of esp_cache_get_alignment
+cut: esp_cache_get_alignment -> esp_log_timestamp  # same NULL-pointer error branch as the esp_log call above
+# newlib grows a string stream only for asprintf-family streams: __ssprint_r tests
+# flags & (__SOPT|__SMBF) (movi a8, 0x480; beqz a9 -> plain memmove path) before
+# any allocator call, then bbci bit 10 picks __SOPT -> _malloc_r or __SMBF ->
+# _realloc_r (_free_r only when that realloc returns NULL). vsnprintf into a fixed
+# buffer - how every log call formats - sets neither flag. asprintf is linked but
+# has no resolved caller today; the cut is automatically skipped for any task that
+# can reach it. Re-check: grep the listing for asprintf-family symbols.
+cut-unless-reachable: __ssprint_r -> _realloc_r | asprintf  # dynamic-stream growth only; see block comment above
+cut-unless-reachable: __ssprint_r -> _malloc_r | asprintf  # __SOPT first-allocation branch; see block comment above
+cut-unless-reachable: __ssprint_r -> _free_r | asprintf  # realloc-failure branch; see block comment above
+
+edge: tlsf_walk_pool -> multi_heap_get_info_tlsf  # the walker that really runs, passed by multi_heap_get_info_impl (literal 0x4018de10); the tool attributes the callx to the conditional default instead
+
+# --- failure-only (nominal bound only) ---------------------------------------
+
+failure: MutexRetryHelper::escalateFailure  # called only when consecutiveFailures >= escalationThreshold && !escalated (MutexRetryHelper.cpp); re-check: grep -n 'escalateFailure(' src/utils/MutexRetryHelper.cpp
+failure: ErrorHandler::logError  # all 8 call sites are on error branches (init result.error(), failsafe trigger, sensor failure, relay interlock, NOT_INITIALIZED); re-check: grep -rn 'ErrorHandler::logError(' src/
+
+failure-cut: assert_valid_block -> ets_printf@rom  # heap-corruption assertion: out-of-pool block -> ets_printf then call8 abort (no return); in-bounds blocks retw. assert_valid_block itself runs on every free, so only this edge is failure-only; re-check: disassemble assert_valid_block
+
+# --- one-time initialisation (nominal bound only) ----------------------------
+
+once: SharedResourceManager::SharedResourceManager  # constructed under __cxa_guard_acquire in getInstance(), once system-wide at boot; re-check: disassemble SharedResourceManager::getInstance()
+
+# --- failsafe callback dispatch (invisible to static analysis) -----------------
+# CentralizedFailsafe::executeFailsafeActions() invokes the registered subsystem
+# callbacks as callback.second(level, reason) where FailsafeCallback is a
+# std::function<void(FailsafeLevel, SystemError)> held in a std::vector
+# (CentralizedFailsafe.cpp:33,181-185). No call-graph walk can follow that, so the tool
+# reported "[1 unresolved indirect]" there. RYN4ProcessingTask and RelayControlTask both
+# reach it via RelayVerificationManager::checkRelayHealthAndEscalate -> triggerFailsafe.
+#
+# The registered callbacks are the three lambdas at CentralizedFailsafe.cpp:61-71, which
+# call exactly these two functions; registerSubsystem() has no other caller in the tree,
+# so the list is complete. Re-check if a subsystem is added.
+#
+# TWO CORRECTIONS from a 2026-09-18 review of the commit that added these (read before
+# trusting any margin figure derived from them):
+#
+# 1. These entries recovered NO depth. defaultBurnerFailsafe is ALREADY called directly
+#    from executeFailsafeActions at CentralizedFailsafe.cpp:203 (DEGRADED) and :209
+#    (CRITICAL), so its 1872 B chain was in both bounds all along; only
+#    defaultPumpFailsafe was unreachable, and its branch is SHALLOWER. Verified by making
+#    the pump edge stale - bounds came back bit-identical. The claim in commit 0bca0e4
+#    that this dispatch was "hiding ~1.9 kB" is WRONG. The entries are still worth
+#    keeping: they make a future change to either callback visible instead of invisible.
+#
+# 2. These edges SHORTCUT the dispatch. They jump straight to the callback, skipping the
+#    std::function trampoline frames that are really on the stack
+#    (operator() -> _Function_handler::_M_invoke). Those symbols are inlined away in the
+#    current debug_selective image so the hop cannot be modelled here, but a reviewer
+#    measured 48 + 32 = 80 B of them in a build where they survive. Treat every margin
+#    figure on this path as up to ~80 B OPTIMISTIC: RYN4Proc's pre-raise nominal margin
+#    was more likely 16 B than the 96 B quoted in 0bca0e4, which makes that raise better
+#    justified, not worse. If those thunks ever appear as symbols, model the real hop
+#    instead of this shortcut.
+edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultBurnerFailsafe  # lambda at CentralizedFailsafe.cpp:61 (Subsystem::BURNER); also called directly at :203,:209 so this adds no depth - kept for change visibility
+edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultPumpFailsafe  # lambdas at CentralizedFailsafe.cpp:65,69 (HEATING_PUMP, WATER_PUMP); chain 1728 B, shallower than the burner branch
+
+# The pointer-keyed fast path in SharedResourceManager falls back to the map on a slot
+# miss, which keeps std::string construction, the global accessMutex_ and the libstdc++
+# throw/unwind tail statically reachable from the hot accessors. No TASK can reach it:
+# SystemInitializer::initializeSharedResources() (SystemInitializer.cpp:108) calls
+# initializeStandardResources() (:213), which creates all 11 event groups and all 4
+# mutexes THROUGH THESE SAME const char* overloads, and that completes at
+# InitStage::SHARED_RESOURCES (:113) - well before initializeTasks() (:186). So every
+# fast slot is populated before any task exists and the miss branch is boot-only.
+# re-check: that every name in SharedResourceManager.h initializeStandardResources()
+# still matches the fastInstall() list in the constructor, and that no accessor is called
+# before InitStage::SHARED_RESOURCES.
+cut: SharedResourceManager::getMutex(char const*) -> SharedResourceManager::getMutex(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)  # boot-only miss branch; see block comment above
+cut: SharedResourceManager::getEventGroup(char const*) -> SharedResourceManager::getEventGroup(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)  # boot-only miss branch; see block comment above

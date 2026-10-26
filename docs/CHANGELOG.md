@@ -1,0 +1,1472 @@
+# Changelog
+
+All notable changes to the ESP32 Boiler Controller are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+---
+
+## [Unreleased]
+
+The project stays at **0.1.0** by maintainer decision; everything below ships in the
+refreshed v0.1.0 snapshot rather than under a new version number. Same convention as the
+ESP32-RYN4 and ESP32-ModbusDevice libraries, which were also re-released as v0.1.0 on
+2026-10-18 without a bump.
+
+Three items here would normally argue for a version bump, recorded so the decision is
+visible rather than implicit: `boiler/params/set/...` now rejects malformed payloads it
+previously coerced (a client sending `13,22` for a PID gain used to get a silent `0`), a
+pressure-sensor fault now stops the burner where it previously continued, and
+`sensor/offset/waterOutput` has been **removed** - a client setting it now gets a
+rejection rather than a silent no-op. The first two are corrections toward documented
+intent rather than breaks of a documented contract. The third is a genuine removal, but of
+a parameter that never affected anything and that Home Assistant never exposed.
+
+### Added: the room sensor's own counters, on demand
+
+`boiler/cmd/diagnostics` with payload `room_sensor` reads input registers 50..77 of the ANDRTF3
+open firmware - one FC04, no bus-release window - and publishes them to
+`boiler/status/sensors/room/diag`.
+
+This closes a measurement gap that had already produced a wrong conclusion. The counters on
+`boiler/status/sensors/room` are the CONTROLLER's view, and the open firmware changed what that
+view means: it samples every 1 s and bridges up to two consecutive bad readings, so register 50
+only reads 0 from the third consecutive failure on. Our `flt` counter therefore counts
+**sustained** failures (>= 3 s), while the stock-firmware baseline it was being compared against
+counted single glitches. "Zero faults in 7118 reads" was read as a large improvement when what
+it actually says is "no sustained failure in 10.3 h"; the raw rate only exists in the sensor, in
+register 55.
+
+`ANDRTF3::readDiagnostics()` had been in the library from the start with no caller - 28
+registers of sensor-side counters, bus error counters, reset cause and running slot, available
+for one request and never read. Same shape as the sensor offsets and the parameter-save
+debounce, both of which were also wired at one end only.
+
+The reply is asynchronous by necessity: `boiler/cmd/+` handlers run in the esp-mqtt task, which
+must not issue a transaction on the shared half-duplex RS485 bus, so the command raises a flag
+and ANDRTF3Task does the read after its next temperature read. It also runs `detectFirmware()`
+once, so the report names the firmware build that produced the counters - attribution that
+previously had to be established out of band.
+
+Not retained, unlike `sensors/room`: a point-in-time answer to a command would be read months
+later as current. The payload carries the sensor's uptime so the period is always visible.
+
+First reading on the wall unit, which is the measurement this was built for: `fail` **0** over
+84845 readings in 23.6 h (`good` 19309 plus one 65536 wrap, against an uptime of 84844 s at 1 s
+sampling - essentially every sample succeeded), zero ADC timeouts, range errors and overflows,
+and zero parity/noise/overrun errors on the line. Against the stock-firmware baseline of 12
+faults in 8198 reads over 11.4 h.
+
+Two caveats are documented with the field table because both could make a future reading
+misleading. `fail` is 16-bit and increments on every failed 1 s reading, so a **sustained**
+fault (dead ADC, broken PT1000 wire) wraps it in ~18 h - it is a glitch rate, not a fault flag;
+for a fault use status bit 0 clear or register 53, which saturates instead of wrapping. And
+`blen` is not independent of `bfrm`/`bpar`/`bnoi`: it also counts every UART-error-poisoned
+frame, so a framing error increments both.
+
+### Fixed: health.stack_min read 0 for the first 30 minutes of every boot
+
+`health.stack_min` / `stack_min_task` were published from the per-task scan in
+`logAllTasks()`, which runs only on the 30-minute detailed-report timer. The field was
+therefore 0 and empty for the first half hour after every boot - useless exactly on a device
+that is rebooting. The scan is now driven from the 5-second health check (first pass, then
+every 12th), so the figure is real within ~5 s. The `LOW STACK` warning came along and is now
+at most ~60 s late instead of 30 minutes, with its repeat interval held at 30 minutes so the
+log volume is unchanged.
+
+### Added: the RS485 bus can be handed to another master
+
+The room sensor runs open firmware whose maintenance tools - identity, calibration, A/B firmware
+updates over Modbus - all require being the **sole** master. This controller polls that bus
+continuously, so those tools could not run while it was alive. Powering the ESP32 down works and
+is strictly safer, but needs physical access and loses the window's observability.
+
+`boiler/cmd/system` `bus_release [seconds]` / `bus_acquire`, state on `boiler/status/bus`.
+Default 600 s, minimum 30 s, **900 s hard cap**, expiring on-device - with the bus released there
+is no guaranteed path for a remote acquire, so a dropped network must not park the controller.
+
+The design is shaped by two facts that rule out the obvious approach. All three Modbus devices
+share one bus, so "stop polling and let the safety layer stop the burner" is impossible: once
+released, nothing can actuate anything. And **every relay switched ON is held by the RYN4's own
+10 s DELAY watchdog**, renewed per SET tick - withhold the ticks and the board de-energises
+everything by itself, with no cooperation from this firmware. So a released bus converges on the
+same physical state as pulling the controller's power, which is the comparison the feature had to
+beat. Entry therefore **refuses** rather than orchestrating a shutdown: `burner_active`,
+`demand_present`, `pump_active`, `burner_sequencing`, `emergency_latched`.
+
+`pump_active` was added after review, and it was my omission: the first gate asked only whether
+the burner was *firing*, but a pump running with the burner off is the normal state of
+POST_PURGE, the 5-minute `pumpCooldownMs` overrun and emergency dissipation. Releasing then traps
+residual heat with no flow - the one thing all of those exist to prevent. The gate now asks the
+relay mask rather than those four mechanisms, because their state is task-local and the real
+question is "is anything energised that withholding the ticks would kill".
+
+**First real use, 2026-10-25 14:49:40-14:52:59 CET**: 199 s of a 900 s window, room-sensor
+firmware update to v0.1 (0x8001 in slot B) by the peer session. Nothing latched; the controller
+resumed polling with the room sensor reading within one cycle. Also measured in that window: the
+sensor fallback does **not** escalate during a release, because the only thing that re-evaluated
+it while idle was driven *by* MB8ART reads - fixed, and then deliberately suppressed during a
+release, since "stale because we stopped asking" is not the same fault as "stale and we don't
+know why".
+
+### The DS3231 held local time, and nothing had ever written it
+
+Two defects, the second found by the observability added for the first.
+
+`updateRTCFromNTP()` derived the live CET/CEST offset and wrote local wall-clock into the chip.
+That is lossy: a wall-clock reading carries no record of which offset produced it, so when the
+DST rule changes the offset the chip keeps ticking the old one and nothing in the stored fields
+can reveal it - 14:00 and 15:00 are equally plausible times of day. With a network this healed
+inside the hourly sync, which is why it was easy to miss. Without one it did not heal at all, and
+**this controller is required to work with no internet**: every schedule would run an hour off
+from the last Sunday in March to the last Sunday in October, or an hour off the other way for the
+rest of the year.
+
+The RTC now stores **UTC** and local time is derived from the POSIX rule compiled into the
+firmware, so the offset needs no network. All three readers were converting: the two
+system-clock seeds used `mktime(tm_isdst = -1)`, which reads its fields as *local* - correct while
+the chip held local, wrong now - and both now share a hand-rolled `timegm()`. `checkSchedules()`
+also reads the chip once per pass instead of once per schedule, removing a torn read where one
+schedule could be evaluated at 09:59 and the next at 10:00.
+
+New `boiler/status/clock` publishes both halves of the conversion, the stored `utc` epoch and the
+derived `local`. **On its first reading it showed the RTC was 2 h 00 min ahead of true UTC while
+`isNTPSynced()` reported true.** `setNTPRTCCallback()` was guarded by
+`if (ntpMutex && xSemaphoreTake(...))`, and `ntpMutex` is created *inside the NTP task* while
+`main.cpp` starts TimerSchedulerTask - the only caller - **before** NTPTask, deliberately: the
+comment there reads "registers RTC update callback needed by NTPTask". So the `&&`
+short-circuited, the assignment never ran, and `initializeScheduler()` logged
+"Registered NTP RTC update callback" regardless. The ordering arranged to make it work is what
+broke it, for the life of the project. The DS3231 had therefore been free-running since whenever
+it was last set by hand - the measured offset says when: exactly +2 h, CEST wall-clock, set during
+summer time and never touched again. After the fix: within 1 s of true UTC.
+
+### Four safety layers that could not act
+
+All found in an 18-agent review at `c1ed1b0`. Common shape: a check, a level or an event bit
+written at one end and read at neither.
+
+**`Error::RELAY` was an unreleasable latch.** Set after three consecutive relay read-back
+mismatches; its only clear lived in `ErrorRecovery.cpp`, which is dead code - reachable only
+through `REPORT_ERROR`/`REPORT_WARNING`/`REPORT_CRITICAL` macros in its own header, none used
+anywhere in `src/`. Since it is one of `SafetyInterlocks`' critical errors, one flaky-bus moment
+meant no heat and `emergency_reset` refused **until a power cycle**. The same defect was fixed for
+`Error::SENSOR_FAILURE` in `c204a6d`, on the sibling bit set by the very same line; that fix
+found one and left the other. Now cleared on a *fully* clean verification, not one relay's
+success - escalation zeroes its own counter, so a per-relay clear would let the bit flap and
+briefly re-permit the burner between a broken relay's failures.
+
+**The relay-communication interlock could never fail after boot.** `RelayStatus::SYNCHRONIZED`
+was set unconditionally on every successful relay *read*, before the mismatch check, and never
+cleared; `COMM_ERROR` was set in two places and read by nobody. Both now meaningful - see
+SAFETY_SYSTEM.md Layer 2.
+
+**DEGRADED's "limiting burner to half power" was a log line** above a bare
+`// Force low power mode` comment. Now enforced where stage 2 is decided, as a fourth gate in
+`BoilerTempControlTask`. The level is sticky by design and was visible nowhere
+(`getFailsafeStatusString()` had no callers), so it is now published on
+`boiler/status/failsafe`.
+
+**The sensor-fallback debounce counted calls, not samples.** `updateSensorStatus()` is reached
+from eight call sites plus a STARTUP branch that calls it twice, so `INVALID_COUNT_TO_SHUTDOWN = 3`
+could be crossed inside one 2.5 s MB8ART period - silently undoing most of the 2026-10-23 change
+from 1 to 3. Now rate-limited to one step per sample period, gated on **elapsed time** rather
+than sample arrival: a dead MB8ART freezes its timestamp, so a sample-arrival gate would never
+escalate at all, which is the exact failure the layer exists to catch.
+
+`Error::MODBUS` is confirmed to have **no producer anywhere** and is deliberately left in the
+critical mask, reasoning in the code: every real Modbus failure already has a better-targeted
+detector, and inventing a producer would mean deciding that some rate of transient CRC errors
+should stop the boiler.
+
+### An OTA image was rolled back - rebooting the controller - over a dead LAN
+
+Confirmation required `networkConnected`, so an Ethernet link down between uptime 60 s and 600 s
+rolled back a perfectly healthy image and rebooted the controller unattended, with no post-purge
+and no pump overrun if it landed mid-burn. On a controller required to run with no network that
+window was reachable on an ordinary LAN outage - and the rollback was pointless on its own terms,
+since the previous image boots into the same dead LAN. Reading the sensors is the health signal
+that means something: it proves the RS485 bus, the coordinator and the MB8ART driver work.
+Accepted cost, stated in the header: an image that boots and reads sensors but breaks *networking*
+is now kept, and recovery needs the USB path.
+
+### Three control-path defects
+
+**`HEATING_ON` leaked when a start was abandoned.** The `HeatingOff` case called
+`startHeating()` - which only sets that bit - and *then* checked whether the sensors allowed a
+start. The bit is not private: `PumpControlModule` runs the heating pump off it,
+`WheaterControlTask` refuses a water charge while it is set with priority off, and
+SafetyInterlocks and BurnerStateMachine both read it. So a sensor outage ran the pump with no
+burner request and locked out hot water, and nothing cleared it - every clear was keyed on
+`state == HeatingOn`, which it never became. The sensor check moved *before* the start, the
+remaining abandon path undoes it, the `HeatingOff` case heals the invariant, and the
+system-disabled branch keys on the bit as well as the state variable.
+
+**`emergency_reset` was a dead end after a sensor-recovery release.** See TROUBLESHOOTING.md:
+the latch is already clear, so the command answered `emergency_not_active` and changed nothing
+while the boiler stayed dead. It now repairs that mismatch and returns `boiler_re_enabled`.
+
+**Room mode never wrote `g_blockReason` when off-and-satisfied** - the commonest steady state in
+that mode - so `blk` kept whatever reason was there last.
+
+### Two test "mocks" were stale copies of production structs
+
+`MockSystemSettings` claimed "defaults matching real SystemSettings" while carrying
+`heating_curve_shift` 20.0 against the real 0.0 (changed 2026-09-15 with the curve fix),
+`heating_curve_coeff` 2.0 against 1.4, and `heating_low_limit` 40.0 against 38.0 - a 20-degree
+curve shift is not a detail. `MockSharedSensorReadings` was missing `insideTempGoodMs`, which is
+why a native test of `resolveRoomForControl()` "could not be written".
+
+**Neither needed to exist.** Four unnecessary includes were all that stopped the real structs
+compiling natively: two unused FreeRTOS headers and an unused `ProjectConfig.h` (which pulls in
+`<Arduino.h>`) in `SharedSensorReadings.h`, plus `<Arduino.h>` in `Pressure.h` where
+`<cstdint>`/`<cstdio>` sufficed. Both mock headers now forward to the real struct, so the
+defaults cannot drift again instead of needing a hand re-sync that twice did not happen. The
+resolver moved into `RoomTempFallbackPolicy::resolve()` and has five tests. 378 native cases, up
+from 350.
+
+The three flame tests are kept and **labelled**: there is no flame sensor, so flame loss while
+the burner is commanded active is unreachable, and a passing test called "flame loss bypasses min
+on time" reads like evidence the controller detects flame loss.
+
+### Room sensor read failures are now observable
+
+The 2026-10-23 08:34 dropout cost a burner ignition and its cause is permanently unknown: the
+HAL logs the failure reason with `LOG_WARN`, syslog is deliberately off on this device
+(it cost ~11 kB of DRAM) and no serial capture was running, so the string went to a UART
+nobody was listening to. ESP32-ANDRTF3 `b4a661d` adds per-kind read counters for exactly this
+reason; new topic **`boiler/status/sensors/room`** publishes them, so the next dropout is
+explainable from the recorder rather than guessed at. The maintainer's hypothesis for 08:34
+is `BUS_BUSY` - pure RS485 contention, nothing sent - and `busy` is the field that will
+confirm or kill it.
+
+Error kinds appear only when non-zero, so the steady state is ~30 bytes; successes are always
+published as the denominator for a failure rate. Full key table in `docs/MQTT_API.md`.
+
+Two other changes from the same library update:
+
+- **The heating curve's room-reading hold now measures age from the sensor's own last good
+  read** rather than from `millis()` at the moment this code noticed a valid-looking flag.
+  Those differ by more than bookkeeping: `isInsideTempValid` stays **true through up to three
+  failed reads** (~15 s, `ANDRTF3Task`) while `insideTemp` goes stale, so the old version kept
+  resetting its 10-minute window against data that was already ageing. `SharedSensorReadings`
+  carries the timestamp as `insideTempGoodMs`.
+- **A dead wait loop is gone from the HAL wrapper.** `processAsyncReading()` spun on
+  `!device->isReadComplete()` with a 250 ms "timeout to allow for Modbus bus contention
+  (library uses 200ms internally)". Both halves were wrong: `isReadComplete()` is always
+  true, so the loop body never ran, and the library's bus-mutex timeout is 2000 ms. Asking
+  for a genuinely async read was *also* wrong of me, and the maintainer declined it correctly:
+  RS485 is half-duplex, so the mutex is held for request **and** response however the call is
+  shaped - async would only stop the calling task from blocking, not reduce bus occupancy.
+
+Seven native tests (331 -> 338), including the worst-case payload against MQTTTask's 319-byte
+refusal threshold and that `age` alone never triggers a publish.
+
+### Frost protection: stale readings, the room, and the tank (2026-10-25)
+
+Three changes to the guard added below, after the staleness implication was raised.
+
+**A stale reading never fires the burner** (user's rule). The guard read
+`isBoilerTempOutputValid` raw, and **nothing clears that flag when MB8ART reads simply stop** - a
+dead bus leaves the last value flagged valid indefinitely. So a bus failure froze the flow
+reading at whatever it last was, typically 30-40 °C just after a burn, and frost protection could
+**never fire again** however cold the house got, with `sf:1` still reporting healthy. It cuts
+both ways: a frozen *cold* reading would have fired forever. Readings now carry usable flags =
+valid AND fresh, with per-source timestamps (`lastBoilerTempUpdateTimestamp` for flow and tank,
+`insideTempGoodMs` for the room) against `SafetyConfig::sensorStaleMs`. Accepted cost: a frozen
+house behind a dead bus gets nothing from here either.
+
+**The room is now a trigger.** A freezing house is what this guard is for; the flow reading only
+notices indirectly, after the boiler itself has gone cold.
+
+**The tank now drives a water charge, not space heating.** It used to ask for heating, which
+warms the house and does nothing whatsoever for the tank - so the tank had the appearance of
+frost protection and none of the substance. There are two independent latches now: flow-or-room
+to heating, tank to a DHW charge, each overriding its own mode switch and neither overriding
+`BOILER_ENABLED`. The latches moved into a `FrostProtection` module because a static inside
+`HeatingControlTask.cpp` was invisible to the water task; the evaluation stays in one place so
+two tasks cannot hold latches that disagree about the same instant.
+
+Left open deliberately: a frost charge with the water switch off ends at the 10 °C release, so a
+genuinely freezing tank would cycle 5 -> 10 -> 5 rather than charging to target. Multi-minute
+burns, not chatter, in a state that should never be reached - a tank-specific release threshold
+is a comfort decision on a safety path.
+
+Also fixed while making these: **`TemperatureSensorFallback`'s room-freshness check read
+`lastUpdateTimestamp`**, which `MB8ARTTasks.cpp` writes every 2.5 s. That is F5's mirror image -
+F5 split the *boiler* side off that shared field because a live room sensor masked a dead MB8ART,
+and left the room side reading it - so a healthy MB8ART kept the room "fresh" however long the
+ANDRTF3 had been silent. And `sensorStaleMs` was tightened 60 s to 30 s (default and the live NVS
+value), 60 s having dated from when the room sensor was the unreliable part.
+
+### Added: frost protection, which did not exist
+
+Nothing in the firmware reacted to a **low** temperature. `FREEZE_PROTECTION_TEMP_C` (5.0 °C,
+"Anti-freeze activation") was referenced nowhere, `wheater/tempSafeLimitLow` ("prevent
+freezing of the boiler") was read by nothing and has now been removed, `SafetyInterlocks`
+bounds pressure from below but not temperature, and `MIN_BOILER_TEMP_C` is a floor on
+requested setpoints rather than a trigger. What kept the water warm was a side effect of
+normal operation - the tank recharges below `wheater/tempLimitLow`, which is **40.0** on this
+installation (the struct comment's "e.g. 45.0" is only an example; the live NVS value is
+400), so 35 K of margin above freezing - and the house is held at its room target. Both stop
+the moment heating and water are switched off.
+
+`FrostProtectionPolicy` (header-only, natively testable) now latches a demand when a **valid**
+flow or tank reading falls to **5.0 °C**, and releases when everything readable is back above
+**10.0 °C**. The 5 K of hysteresis stops a thermometer sitting on the trigger from chattering
+the burner. The trigger value is `static_assert`-ed equal to `FREEZE_PROTECTION_TEMP_C`, so
+that constant finally has logic behind it.
+
+Two asymmetries, both deliberate:
+
+- **Triggering requires a valid reading.** `TEMP_INVALID` is `INT16_MIN`, i.e. -3276.8 °C,
+  which would otherwise fire the burner instantly and permanently.
+- **Releasing treats an invalid reading as not-blocking.** If every reading goes invalid
+  during a frost burn the demand drops rather than firing blind; stopping is the safe
+  direction when the controller can no longer see what it is heating, and the sensor-failure
+  machinery is better placed to react.
+
+What the demand overrides, in `HeatingControlTask`: the heating switch (`HEATING_ENABLED`),
+the remote OFF override, and the room being satisfied - the three "nobody wants heat"
+reasons. Nothing else. A frost burn still yields to water priority, still stops on a sensor
+failure, still obeys the pressure interlock and anti-flapping, and asks for the **flow floor**
+(`h/sLo`) rather than the weather curve - the curve is a function of outside temperature, so
+at frost temperatures it would ask for a high flow and heat the house, which is the opposite
+of the intent.
+
+**It does not override `BOILER_ENABLED`.** A drained-for-service system is a likely reason to
+switch the boiler off, and firing a burner into a drained boiler is worse than frost. The
+pressure interlock would probably catch that, but "probably" plus a never-calibrated pressure
+channel is not a safety argument.
+
+**What it cannot cover, and why that matters more than what it can:**
+
+- **A dead controller.** `CH1 BURNER_ENABLE` is a normally-**open** relay contact, so with the
+  ESP32 unpowered, crashed or in emergency stop the burner circuit is open and the boiler
+  cannot fire at all. The original Vaillant controller is not in the loop; the STB and tandem
+  thermostat can only ever *stop* the burner. Closing that gap needs hardware - a mechanical
+  frost thermostat wired around the relay.
+- **A dead room sensor.** `TemperatureSensorFallback::hasRequiredSensors()` requires
+  `roomTempValid` in `SPACE_HEATING`, so a room-sensor failure stops the burner however cold
+  the water is. This guard deliberately does not bypass the sensor fallback.
+
+So it covers one scenario - the system is healthy and simply is not heating - which is also
+the likely one. Seven native tests (324 -> 331), including that the guard is **inert at the
+real readings** of a working system, which is what makes it safe to add to the heating path.
+
+### Removed: `h/bHi` and `wheater/tempSafeLimitLow`
+
+Both were registered, range-checked, persisted to NVS and published in their status group -
+and **read by nothing**. A parameter that accepts a value and changes no behaviour is worse
+than no parameter, because someone will eventually set it and trust it. Same reasoning as
+the `sensor/offset/waterOutput` removal on 2026-10-19, and like that one this is a genuine
+removal: a client setting either key now gets a rejection rather than a silent no-op.
+
+**`h/bHi`** (`burner_high_limit`, registered 700-1100, default 110.0) was filed under
+"Global Burner Limits (All Modes)". Wiring it was considered and rejected:
+
+- It gains no capability. The ceiling that decides per mode is `h/sHi` (50-90, default 75.0)
+  or `w/hHi` (60-100, default 90.0); the absolute ceiling is `MAX_BOILER_TEMP_C` 110.0,
+  enforced in `BurnerRequestManager` and `SafetyInterlocks` and now also backing the dead
+  band's `MAX_OFF_THRESHOLD` through a `static_assert`. `h/bHi`'s range stops at exactly that
+  constant, so it could only duplicate it or undercut it.
+- It would be inert at the defaults (110 > 90 > 75) and invisible when not: lowering it would
+  silently override the mode limit the user set elsewhere, with nothing showing which won.
+  This project has already paid for that shape once - `h/sLo` against `h/bLo` had the
+  diagnostics topic reporting `cmd` 380 where the boiler commanded 400 (fixed 2026-10-18),
+  and the note at `HeatingControlTask.cpp` still warns the two only agree *at the defaults*.
+- An absolute ceiling should not be writable at runtime at all.
+
+**`wheater/tempSafeLimitLow`** (`wHeaterConfTempSafeLimitLow`, 0-10.0, default 5.0) was
+commented "Safety limit to prevent freezing of the boiler". Its sibling
+`tempSafeLimitHigh` is live - `BurnerControlTask` and `BoilerTempControlTask` both read it as
+`safetyConfig.maxWaterTemp`. The low one had no reader, and `FREEZE_PROTECTION_TEMP_C` (5.0,
+"Anti-freeze activation") is referenced nowhere either, so **tank frost protection was never
+implemented**. What does exist is the scheduler's FROST space mode, which sets the room target
+to `DEFAULT_FROST_TEMP` 10.0 and lets normal control hold it - frost protection for the house,
+not for the tank. Removing the parameter does not remove a feature; it stops advertising one
+that was never there.
+
+`h/bLo` stays, because it is genuinely read: `HeatingCurve::target()` takes it as the curve's
+lower clamp. Its name oversells it - it is the curve floor, not a global burner minimum, and
+`h/sLo` is the floor that actually decides afterwards - but the NVS key, MQTT topic and HA
+entity are all built from it, so the name stays and the comment now says what it is.
+
+Consumer side: the add-on panel's **High Limit** control writes `params/h/bHi` with a 70-110
+range, so it was writing a dead parameter *and* offering a range the live ceiling (`h/sHi`,
+50-90) would reject. Repointing it is a Home Assistant-side change. The panel degrades
+safely in the meantime - every field it fills is guarded with `!== undefined`, so the removed
+keys simply stop updating two displays. No Home Assistant *entity* referenced either key
+(`h/bHi`'s was removed on 2026-10-18).
+
+### An absent sensor key now means "no reading", on every temperature
+
+`boiler/status/sensors` published `t.bo`, `t.br`, `t.wt` and `t.o` **unconditionally**, so
+whatever sat in `SharedSensorReadings` went out as though it were a measurement - while the
+per-channel validity flags sat unused right beside those fields. Only `t.i` and `p` were
+guarded.
+
+The evidence that this matters is in Home Assistant's long-term statistics, which still
+carry **two hours from 2025-12-06/07 where all four channels recorded a minimum of
+-3276.8 °C**, with hourly *means* of **-1504 °C** and **-528 °C**. That is `TEMP_INVALID`
+(`INT16_MIN` tenths) divided by ten, on every channel at once - the whole Modbus block
+failing or being rewired. One hour also carries a +227 °C maximum.
+
+A subscriber cannot defend itself against this: the key arrives present and numeric, so
+there is nothing to test for. That is the whole reason to fix it at the publisher.
+
+Every temperature key is now gated on its own validity flag plus the marker check:
+
+```cpp
+const auto putTemp = [&temps](const char* key, Temperature_t value, bool valid) {
+    if (valid && tempIsValid(value)) { temps[key] = value; }
+};
+```
+
+`t.i` was already guarded, but on the marker alone - and the struct initialises `insideTemp`
+to **0**, which `tempIsValid()` accepts, so a boot-window publish could have reported the
+room as 0.0 °C. Checked against the recorder for all three of this evening's reboots: no
+such sample ever reached HA, so this one was latent rather than realised. The flag closes it
+regardless.
+
+Nothing currently writes `TEMP_INVALID` into those four fields, which only changed the
+failure mode from impossible to invisible: a failed channel published its **last good
+value** as though it were current, and only `sf` hinted otherwise.
+
+Consumer side: the five Home Assistant templates that read these keys moved from
+`| default(0)` to presence tests, so an absent reading renders `None` and the entity goes
+`unknown` instead of recording a zero (`boiler_mqtt_include.yaml` lines 97, 110, 123, 136
+and the flow-return delta at 178). **Deploy order matters** - the templates have to be live
+before the firmware starts omitting keys, or a channel failure records 0 instead. The add-on
+panel needs nothing: its `formatTemp()` already renders an absent key as `--`, because `t.i`
+was always optional. `t.bt` keeps `default(0)`: zero is its real idle value.
+
+### The burner dead band is now in degrees, and mode-aware
+
+New parameters `h/bandOff` / `h/bandOn` (heating, default **+5.0 / -3.0 C**) and
+`w/bandOff` / `w/bandOn` (water, default **+4.0 / -3.0 C**), range 0.5-15.0 C each. The
+burner now turns OFF once flow reaches `target + bandOff` and relights only once flow falls
+to `target - bandOn`. Stage selection (1 vs 2) is unchanged - still the PID's percent output
+through `BoilerPowerLevel::fromPidOutput()`, still gated for space heating by `h/boostMin`.
+
+**Why.** The flow loop's hysteresis sets the burner start rate, and it was specified in
+percent of PID output. A percent threshold only becomes a temperature after dividing by Kp,
+so with the live gains (Kp 13.222, Ki 0.045334, Kd 0) pure proportional action gave OFF at
+target +1.13 and ON at target -0.38 - a 1.51 K band. Measured on hardware it was 2.9-3.2 K:
+the burner shut off at target +2.3, +2.4, +2.4 on three independent cycles and relit at
+-0.5 to -0.8. Kd is zero, so the extra width is integral windup, and each +100 of integral
+contribution moves the OFF point 0.76 C further out. The PID is not reset between burner
+cycles inside one request, only when a request ends, so the band's width and position
+depended on how long the burner had been running. It was not a fixed band but a
+trajectory-dependent one, which is why no amount of tuning the percentages fixed the
+cycling.
+
+**What it cost**, 2026-10-22 17:39-18:19 with the target pinned at the 38.0 floor: a 32m20s
+burn ended at flow 40.4, flow decayed 3.2 K in 3m50s, the burner relit at 37.2 and ran
+3m20s before the *room* loop ended the request at 18:20. 0.11 m3 and one extra ignition for
+a burn the house had not asked for. The inner flow loop cycles far faster than the outer
+room loop that actually knows whether the room is satisfied.
+
+**Why the band and not another dial.** For hysteresis control, on-time is `H*C/(P-L)` and
+off-time `H*C/L`, so cycle period is proportional to band width H while duty is `L/P` and
+independent of it - fewer starts for the same gas. `MIN_ON_TIME_MS` lengthens unwanted burns
+instead of preventing them (2026-10-20: it held the burner on for the last 5 s of a burn the
+room had already finished with). A minimum off-time only postpones the burn while the house
+keeps cooling. `h/sLo` moves where the band sits, not how wide it is. Lowering Kp widens it
+only by detuning the loop.
+
+**Replayed against the recorded traces**, 20 s resolution:
+
+| cycle | actual | with +5.0 / -3.0 |
+|---|---|---|
+| 2026-10-22 17:39-18:21 | 2 ignitions (32m20s + 3m20s) | **1** (17:39:20 -> 18:20:40) |
+| 2026-10-19 19:50-20:45 | 4 ignitions | **1** (19:54:40 -> 20:41:20) |
+
+Caveat on that table: it is an **open-loop** replay of flow temperatures produced by the old
+controller. Holding the burner on longer would have pushed flow higher than recorded, so the
+OFF edge would in reality be crossed sooner than the replay suggests - treat "1 ignition" as
+the optimistic bound. The relight half is sound either way: flow bottomed at 36.2-37.2 in
+those gaps and never came near the new 35.0 relight edge, so those specific afterburns could
+not have happened.
+
+**Mode awareness.** Space heating gets the wide band - the room is governed by the outer loop
+and the building time constant is hours against a band period of tens of minutes, so the
+room barely sees the flow swing. Water defaults to +4.0 / -3.0, chosen to *reproduce*
+measured behaviour rather than change it: a 2026-10-22 charge stopped at target +3.3 and
++5.2 and relit at -2.9. Widening it would raise peak flow and the boiler's internal tandem
+thermostat dial is still unread (flow has reached 66.7 with no cut-out, so above ~67, but
+nothing bounds it above that). The DHW burst structure needs the charge target to stop
+chasing the tank, which is a separate change.
+
+Safety: the band is applied upstream of `BurnerAntiFlapping`, so `MIN_ON_TIME_MS` and
+`MIN_OFF_TIME_MS` still bound every transition. Out-of-range values are rejected at
+`params/set` and fall back as a *pair* to the mode's default rather than being half-clamped.
+
+The OFF edge is additionally capped at `MAX_OFF_THRESHOLD` = **105.0 C**, 5.0 K below the
+110.0 C `MAX_BOILER_TEMP_C` interlock. The first version of this change argued no cap was
+needed because `heating_high_limit` is 75.0 and 75.0 + the widest band is 90.0 - which
+checked the *default* rather than the parameter's *maximum*. `h/sHi` is registered 500-900
+and `w/hHi` 600-1000, `BurnerRequestManager` clamps the target to whichever is configured,
+and the band then adds `bandOff` on top, so the OFF edge could be asked for 105.0 or
+**115.0** - at or above the interlock, and into the boiler's manual-reset STB. Reaching that
+takes several parameters at their extremes simultaneously and no default comes close, but an
+invariant that holds only for today's defaults is not an invariant. Found in review,
+2026-10-23; the cap makes the bound hold for any configuration, and a `static_assert` in
+`BoilerTempController.cpp` ties it to `MAX_BOILER_TEMP_C` (the policy header stays free of
+config includes so it can be tested natively).
+
+The old degree bands (`offHysteresis` +5.0 / `onHysteresis` -3.0 in
+`BoilerTempController::Config`) were already present but read only by the bang-bang path and
+a boot log line. The new parameters take those values as their heating defaults.
+
+Eight native tests added (309 -> 317). The interlock test originally asserted the
+75.0-default worst case and so passed against the uncapped code; it now pins `offThreshold()`
+at both configurable maxima, and fails if the cap is removed.
+
+### An invalid room reading overflowed the heating curve
+
+Found in recorder data, 2026-10-23 08:34:13: the device published
+`heating_curve_raw = -755418.5` on `boiler/status/heating/control` and the burner stopped
+for 20 s. Two defects in sequence.
+
+**1. An invalid reading was passed into the curve.**
+`HeatingControlModule::calculateSpaceHeatingTargetTemp()` guards the room-deviation shift on
+`readings.isInsideTempValid`, but then passed `readings.insideTemp` to the curve
+unconditionally. `ANDRTF3Task` sets that field to `TEMP_INVALID` (`INT16_MIN` = -32768)
+after three consecutive read failures, so the curve ran with a base temperature of
+-3276.8 C. The published `shift` of 4.4 - `curveShift` alone, with no room term - is the
+fingerprint: the guard worked, the curve input did not.
+
+**2. The curve then overflowed int32.** With `diff = outside - inside = 32814` tenths and
+`diffSquared = 107675859`, `POLY_C3 * diffSquared` is 248 x 107675859 = **26,703,613,032**,
+which does not fit int32 and wrapped to 933,809,256. Both operands were int32, so this was
+signed overflow - undefined behaviour, not merely a wrong number. Wrapping that one multiply
+reproduces the published value exactly: polynomial 1637250, adjustment 7521461, result
+-7554185 tenths = -755418.5 C.
+
+Fixes:
+
+- `HeatingCurve::target()` now does `diffSquared` and the polynomial in int64. With int16
+  inputs `diff` reaches +/-65535, so `diff * diff` alone is up to 4.29e9 and could not be
+  held in int32 either - that one had simply never been reached. Division truncates toward
+  zero identically in both widths, so results for in-range inputs are unchanged. `rawOut`
+  now saturates instead of narrowing, because the diagnostics topic is the one place
+  someone looks to find out the curve went wrong.
+- `calculateSpaceHeatingTargetTemp()` no longer passes an invalid reading to the curve. It
+  now **holds the last valid room reading** for up to 10 minutes (`RoomTempFallbackPolicy`),
+  and only if there is nothing fresh to hold does it assume the room is *at target*, or
+  20.0 (`HeatingCurve::NOMINAL_ROOM_TENTHS`) if no target is configured either.
+
+  The first version of this fix went straight to the target assumption. That is sound
+  reasoning - it is the same assumption the skipped room-deviation shift already makes, so
+  the curve degrades to its nominal line rather than to a wrong one, and replaying the real
+  glitch it yields **47.7 C against the 47.9 C** the curve computed six seconds later once
+  the sensor recovered. But a 0.2 C perturbation is still a perturbation of something that
+  was *known*: the sensor fails for a few seconds at a time, and in those seconds the room
+  temperature had just been measured. Holding it makes the dropout a true no-op - identical
+  curve output, not a near one (user's call, 2026-10-23).
+
+  The hold expires because a held reading is a measurement with an age, and the room moves:
+  measured at 0.014 C/min over a 44-minute burn, so ten minutes is worth a few tenths of
+  error, well inside the ~1.2 C that "room = target" can be wrong by. Past that the
+  comparison flips - an hours-old reading keeps biasing the curve on evidence that is no
+  longer evidence, with no room feedback to notice - so the nominal line becomes the better
+  guess. In practice the window rarely binds: with the room sensor required in
+  `SPACE_HEATING`, the sensor fallback escalates while a dropout is still tens of seconds
+  old, so the hold does its work in the first seconds, which is the failure that actually
+  occurs.
+
+  A **held** reading still earns the room-deviation curve shift. Holding the value and then
+  dropping its correction term would change the curve output during a dropout, which is the
+  one thing the hold exists to prevent. The `target` and `nominal` substitutions skip it,
+  where the deviation is zero by construction anyway.
+- An invalid *outside* reading now returns the flow floor and logs it, instead of feeding
+  `TEMP_INVALID` into the same arithmetic. `HeatingControlTask` already refuses to request
+  heating while `isOutsideTempValid` is false, so this is a backstop for the room-mode path.
+- Both of those warnings are **edge-triggered**, one line when the sensor breaks and one
+  when it recovers. As first written they were plain `LOG_WARN` calls on a function that
+  runs about once a second, so a room-sensor dropout logged at 1 Hz for its duration and a
+  disconnected outside sensor logged at 1 Hz forever - including from boot until the first
+  successful read. On a device where a single `LOG_*` call costs ~1312 B of stack and syslog
+  is deliberately off to recover DRAM, the repetition buys nothing. Found in review,
+  2026-10-23. Statics are safe here: every caller is `HeatingControlTask`, a single task.
+
+The commanded target was never unsafe - the existing clamp caught the garbage and pinned the
+target to the 38.0 floor. What was broken was the arithmetic (UB) and the `raw` diagnostics
+field, and it would have become a control fault if that lower clamp were ever widened.
+
+**The 20 s burner stop had a different cause than first recorded here, and it is not
+defensible.** This entry originally said the space-heating policy declared heating
+not-needed because the room reading was invalid. That mechanism does not exist in weather
+mode: `roomOverheated` stays false when the reading is invalid, so `heatingNeeded` stays
+true - and the recorder confirms it, `heating_status` never left "Heating" and
+`boiler_target_temp` never left 48.0, so neither the policy nor the curve clamp touched the
+burner. What the recorder does show:
+
+```
+08:34:14.898  sensor_mode   SHUTDOWN
+08:34:14.906  sensor_mode   NORMAL
+08:34:15.088  sensor_mode   SHUTDOWN
+08:34:19.884  sensor_mode   NORMAL
+08:34:24.906  burner_mode   Idle
+08:34:44.906  burner_mode   Heating     <- exactly MIN_OFF_TIME_MS later
+```
+
+`TemperatureSensorFallback` escalated to SHUTDOWN. In `SPACE_HEATING` its
+`hasRequiredSensors()` requires `roomTempValid`, and `INVALID_COUNT_TO_SHUTDOWN` was **1**
+with the comment "Was 2 - instant shutdown on sensor fail" - so a single failed check of a
+Modbus room sensor on a shared bus stopped the burner, while the surrounding code comments
+claim the counters exist to prevent "mode chattering when sensors are intermittently
+failing". The trace above is that chatter, four transitions in five seconds.
+
+**`INVALID_COUNT_TO_SHUTDOWN` is now 3** (user decision, 2026-10-23), about **7.5 s** of
+continuous failure. `VALID_COUNT_TO_ENTER_NORMAL` stays at 1: slow to shut down, immediate
+to recover.
+
+The cadence is worth stating precisely, because it is not the obvious one. Evaluation is
+driven by `BurnerControlTask`'s `TEMP_UPDATE_BITS`, which contains **MB8ART channels only**
+(`BOILER_RETURN`, `WATER_TANK` and the three error bits, set on every read). The ANDRTF3
+room sensor raises `SensorUpdate::INSIDE` / `INSIDE_ERROR`, and neither is in that mask - so
+the room sensor's own 5 s cycle does **not** tick this counter; a room failure is noticed on
+the next MB8ART read like everything else. `MB8ART_SENSOR_READ_INTERVAL_MS` is 2500, so one
+tick is 2.5 s.
+
+Three rather than two because the room sensor's driver already needs 3 consecutive failed
+reads at 5 s each before it marks the value invalid - by then the sensor has been failing
+~15 s, and the debounce here only has to cover the dropout itself. The one on record was
+~5 s of invalid room data (08:34:14.9 to 08:34:19.9), i.e. 2 ticks, so 3 covers it with a
+tick to spare.
+
+Known consequence, recorded rather than fixed: the counter is **shared by all required
+sensors**, so a missing boiler-*output* reading - the one that leaves overheat protection
+blind and sets `Error::SENSOR_FAILURE` - now also takes ~7.5 s longer to escalate. Keeping
+the number as low as still works is the reason to prefer 3 over a wider debounce. The
+boiler's own aquastat and manual-reset STB are independent of the firmware, and
+`SafetyInterlocks`' 110.0 C check does not depend on this mode, so the physical safety chain
+is unchanged. Splitting the debounce per sensor class (short for boiler output, long for
+room) is the better shape and is not done here.
+
+Four native tests added (305 -> 309), including the exact field input, both int16 extremes
+on both arguments, `rawOut` saturation, and the fallback-accuracy check above. The
+saturation test as first written asserted
+`raw == INT32_MAX || raw == INT32_MIN || (raw > INT32_MIN && raw < INT32_MAX)`, which is
+every `int32` there is: it could not fail, and would have passed against the narrowing cast
+it existed to catch (verified by mutation - the unfixed code returns -1835557525 and the old
+assertion accepts it). It now asserts both saturated values exactly.
+
+### `wheater/tempChargeDelta` accepted values it then ignored
+
+The parameter was registered with range **1.0-20.0** (`PersistentStorageTask.cpp`) but the
+use site (`WheaterControlTask::calculateBoilerTarget`) rejected anything below **5.0** and
+silently substituted the 10.0 default. A `params/set` of 1.0-4.9 was therefore validated,
+acknowledged, persisted to NVS and then ignored - the stored value and the running value
+disagreed, with no error raised anywhere and nothing in the status topic to show it.
+
+The bounds now live once, in `WaterChargePolicy` (the header that already owns the
+tank-limit invariant), as `CHARGE_DELTA_MIN` / `MAX` / `DEFAULT` plus `chargeDeltaValid()`
+and `chargeDeltaOrDefault()`. All three sites read them: the registration, the task, and
+`WheaterControlModule::calculateWaterHeatingTargetTemp()` - a third copy of the same
+calculation that had no validation at all and currently has no callers (its wire-or-delete
+decision is still open; the comment there records that).
+
+5.0 is the correct floor rather than 1.0: the delta is the head that drives the tank coil,
+and transfer is `UA x (flow - tank)`. A 10.0 delta already produces only a 3.0-3.5 K
+flow-return gap on this boiler, measured across a full charge on 2026-10-22. Below ~5.0 the
+boiler would command tank plus a few tenths and could not charge the tank at all.
+
+The two Home Assistant surfaces that set this parameter were left behind by that change
+and are corrected here: the MQTT number entity in `boiler_mqtt_include.yaml` still declared
+`min: 1` and the add-on's panel input `min="3"`. Either one would have let a user set 2.0
+from a slider and get the firmware's rejection with nothing shown anywhere - the same
+silent no-op this entry is about, one layer up. Found in review, 2026-10-23. Both now read
+5, matching `WaterChargePolicy::CHARGE_DELTA_MIN`. The add-on needs a **Rebuild** for the
+template change to take effect.
+
+Out-of-range now fails at `params/set` (`PersistentStorage` returns
+`ERROR_VALIDATION_FAILED`), and an out-of-range value already in NVS loads as the default
+with a warning, so tightening the minimum is safe for existing installs. Four native tests
+added, including one that pins the three constants so the registration and the use site
+cannot be split apart again.
+
+Unrelated to, but found during, the charge-delta work below.
+
+### Burner output measured against the house gas meter; nameplate figures corrected
+
+The docs quoted the nameplate **23.3 kW / 42.2 kW** as this boiler's delivered output. It is
+set to the lowest gas pressure its valve allows, so those were always upper bounds, and they
+are now measured: ten days of `sensor.esp32_gas_meter_gas_used` (one pulse = 0.01 m3) binned
+by `sensor.burner_power_level`, 2026-10-13 to 2026-10-22, 22.3 h of firing.
+
+| Stage | Firing time | Gas | Measured rate |
+|-------|-------------|-----|---------------|
+| Stage 1 (`Low`) | 14.47 h | 29.87 m3 | **2.065 m3/h** |
+| Stage 2 (`High`) | 7.81 h | 28.72 m3 | **3.678 m3/h** |
+| Burner off | 217.71 h | 0.21 m3 | 0.001 m3/h |
+
+At `Hi` ~10.2 kWh/m3 that is about **19 kW and 34 kW of output, both ~82 % of nameplate** -
+one uniform derate, which is what a single pressure adjustment looks like. Corrected in
+`BurnerBoostPolicy.h`, `ALGORITHMS.md`, `MQTT_API.md` and `EQUIPMENT_SPECS.md`; the
+nameplate values are kept where they are labelled as nameplate.
+
+Three further results, all in `EQUIPMENT_SPECS.md`:
+
+- **No standing pilot.** 0.21 m3 over 218 h of burner-off, most of it one cooking event.
+  Idle loss on this boiler is thermal, not fuel.
+- **The spec table's "Minimum heat load (Hi) 22.3 kW" is a transcription error** - it would
+  make stage 1 104 % efficient. The nameplate figure is 25.3 kW, and the measured stage
+  ratio 0.561 confirms it (25.3/46.4 = 0.545, a 3 % match; 22.3/46.4 = 0.481 is off by 17 %).
+- **The tank-compatibility verdict flips.** Against the tank's 21-36 kW recommended charging
+  power, nameplate said stage 1 cleared the minimum and stage 2 overshot the maximum.
+  Measured, it is the reverse: stage 1 (~19 kW) is *under* the minimum and stage 2 (~34 kW)
+  sits inside the band - an independent argument for the water exemption in
+  `BurnerBoostPolicy`.
+
+Also corrected in `EQUIPMENT_SPECS.md`: the "Power Level Selection" table claimed a 50 %
+split between stage 1 and stage 2. The real mapping is `BoilerPowerLevel::fromPidOutput()`,
+a four-way band with hysteresis at 35 / 55 / 65 / 75 %.
+
+Measurement note for anyone repeating this: the HA sensor state is a float32, so near a
+36 300 m3 meter reading the representable step is 0.0039 m3 and consecutive deltas alternate
+0.0078 / 0.0117. Count pulses rather than differencing readings.
+
+### Stage 2 no longer fires for mild-weather space heating
+
+New parameter `h/boostMin` (default **50.0 C**, range 38.0-75.0): the lowest space-heating
+flow target allowed to use POWER_BOOST. Water charges and autotune runs are exempt.
+
+A space-heating cold start saturates the power selector, because the radiator circuit sits
+at room temperature: the first flow reading after the pump starts is 20-27 C, a 10-20 C
+deficit against a shoulder-season target of 38-46 C. With `boiler/pidEnabled` true - the
+live configuration - that means `fromPidOutput()` asks for FULL above a 75 % PID output;
+with it false, `fromBangBangError()` asks for FULL above a 10.0 C error. The gate sits
+downstream of both. Measured on the live boiler 2026-10-19 at 11.5 C outside with a 38.0 C
+target - ignition at 19:55:57 RUNNING_LOW with flow 35.7, RUNNING_HIGH 20 s later at flow
+29.3, back to RUNNING_LOW at 20:07:17 at flow 38.9: **11 minutes of stage 2 to chase a 38 C
+setpoint**, plus a second 1.5-minute burst at 20:35. The house needs single-digit kW at
+11 C outside and stage 1 alone is ~19 kW.
+
+The gate is the flow target and not the outside temperature, although the outside
+temperature is what the behaviour is about. The target already contains it, through the
+curve, and also contains the room deficit, through the room-deviation shift (2.0 C of flow
+per C of room error) - so a cold-morning recovery raises the target and earns stage 2 back
+by itself, where an outside-temperature gate would deny it. The target also survives sensor
+fallback, which clamps it, rather than depending on the outside reading that fallback has
+just declared untrustworthy. 50.0 C corresponds to roughly +4 C outside on the current curve.
+
+Not a version-bump item: no existing parameter changes meaning, and the default only
+withholds a power stage the boiler should not have been using in these conditions.
+
+**Corrected 2026-10-20 against recorder data.** This entry first claimed the lock buys less
+overshoot and fewer starts. Neither is true. Boost was released 0.9 C *past* the 38.0 target
+and peak flow for that whole cycle was 40.3, so there was no overshoot to remove; the -5.0 C
+off-hysteresis cited above was never approached and is not even in use on the PID path. The
+four starts came from the PID's 35 % off threshold against a target pinned on the `h/sLo`
+floor, with burns held near 3 minutes by `MIN_ON_TIME_MS`, and that pattern recurred with
+the lock live (2026-10-20 09:46-10:30: a 37m10s burn ending flow-driven at 43.4 against a
+41.0 target, a 3m40s stop, then a 2m00s burn). Energy per cycle is unchanged, as stated.
+What the lock does buy is less heat-exchanger stress on a cold start - ~34 kW into 20.8 C
+return water - and a quieter boiler. Confirmed working on hardware: no `RUNNING_HIGH` in
+Heating mode since the flash, including two overnight burns at 44-46 C targets, while a
+07:08 tank charge did use stage 2, so the water exemption works as intended.
+
+Rules in `BurnerBoostPolicy.h` (header-only, 8 native tests, mutation-checked), applied in
+`BoilerTempControlTask` at the single point where FULL becomes a burner request.
+
+### `h/sLo` defaults to 38.0, the floor that was making weather compensation inert
+
+`h/sLo` was 40.0, and the heating curve's raw output only reaches 40.0 at about **10.5 C**
+indicated outside temperature. Above that the commanded flow was a flat 40.0 and weather
+compensation did nothing at all - the system was a plain room thermostat at fixed flow.
+The outside gate cuts out at 14.0, so the whole band 10.5-14.0 C ran unmodulated, and
+October's outside readings spanned 5.0-27.5 C. Weather compensation was in practice a
+deep-winter-only feature, which is the opposite of where it is usually worth the most.
+
+The diagnostics topic added above is what made it visible: `cmd:400` with `clp:"floor"`
+for an entire mild evening, while `raw` showed the curve asking for 30.1 C at 16.4 C
+outside and 37.4 at 11.8.
+
+38.0 is not an arbitrary reduction. The Vaillant VK 42/4-2 is a low-temperature
+(Niedertemperatur) boiler with a **35 C** minimum settable flow
+(`docs/EQUIPMENT_SPECS.md:52-72`); `burner_low_limit` sits at 38.0 only to stay
+oil-burner-compatible. So 38.0 matches `h/bLo`, keeps 3 C of manufacturer margin, and
+moves the clamp crossover from 10.5 up to about **13.0** - the outside gate's own
+threshold, so the curve now modulates across the whole band where heating is allowed to
+run at all.
+
+Confirmed on the device at 10.1 C outside: `cmd:407` with `clp:"none"`, the curve driving
+the flow target rather than sitting on a bound.
+
+Changed in **both** places that define it, plus the fallback that would have undone it:
+`PersistentStorageTask.cpp:340` (the NVS shadow default, what a fresh device actually
+receives via `loadAll(autoSaveDefaults=true)`), `SystemSettingsStruct.h:168` (the struct
+constructor default, which applies before the storage task runs and if storage fails), and
+the missing-key restore at `PersistentStorageTask.cpp:704`, which would otherwise have
+quietly put 400 back on any device whose NVS lacked the key. That third one is the
+instructive one - change the default, watch it work on your own device because NVS already
+holds the new value, and never notice that a factory-reset unit gets the old one.
+
+`water_heating_low_limit` stays 40.0 (different circuit, and the tank charge wants the
+higher flow) and `h/bLo` stays 38.0. `ALGORITHMS.md` and its worked-example row, plus the
+clamp note in `HeatingControlLogic.puml`, now state the new default and why it changed.
+
+### The seven MB8ART sensor offsets were applied to nothing, and four of them named the wrong channel
+
+`sensor/offset/boilerOutput` and its six siblings have been registered with a +-5.0 C
+range, persisted to NVS, published on `boiler/params/status/sensor` and settable over MQTT
+since the project began - and **read by nothing that touches a reading**. Setting one was
+accepted, echoed back on the status topic, displayed correctly in Home Assistant, and
+changed no temperature. Only `roomTempOffset` (`ANDRTF3Task.cpp:47`, a different device)
+and `pressureOffset` (`MB8ARTTasks.cpp:378`) ever worked.
+
+The cause is structural: the MB8ART library writes temperatures **directly into**
+`SharedSensorReadings` through the raw pointers bound in `SensorBindings.cpp`
+(`mb8art_->bindSensorPointers(...)`, `ModbusDeviceInitializer.cpp:170`), so this firmware
+had no interception point. The library's own hook, `MB8ART::applyTemperatureCorrection()`,
+was a stub with a hardcoded `TEMPERATURE_OFFSET = 0` and zero callers in either repo - its
+own `MINOR_ENHANCEMENTS.md` listed per-channel calibration as a future enhancement, so it
+had always been a placeholder.
+
+**And the documented channel map was wrong**, in three places that agreed with each other
+and disagreed with `include/config/SensorIndices.h`, which declares itself the single
+source of truth:
+
+| parameter | documented | actual |
+|---|---|---|
+| `waterOutput` | CH3 | no such channel |
+| `waterReturn` | CH4 | CH6 |
+| `heatingReturn` | CH5 | CH7 |
+| `outside` | CH6 | **CH3** |
+
+The `outside` row is the one that mattered: CH6 is both the wrong channel and
+hardware-deactivated (`MB8ART_ACTIVE_CHANNELS` is 5), so wiring an outside calibration by
+following the documentation would have sent it to a dead channel. Invisible while nothing
+applied the offsets; a silent failure the moment they were wired. Corrected in
+`SystemSettingsStruct.h`, in the `registerInt()` descriptions that `params/list` publishes,
+and in the `MQTT_API.md` table - which also had the `room` default as -14 where the struct
+says -17.
+
+`sensor/offset/waterOutput` is **removed**: no such sensor exists in `SensorIndices.h` or
+`SharedSensorReadings`, and it was left over from an older map in which CH3 was hot water
+output rather than the outside sensor. Removed rather than renamed - the only channel it
+could have served is CH5 `WATER_TANK_TOP`, which is not installed, not enabled and
+deactivated in hardware, so renaming would have handed a calibration knob to hardware that
+does not exist. If a tank-top sensor is ever fitted, adding
+`sensor/offset/waterTankTop` is one `registerInt()` line. The stale NVS key is harmless and
+deliberately not cleaned up: `loadAll()` iterates the registered parameter map rather than
+the NVS contents (`PersistentStorage.cpp:474`), so an unregistered key is never read.
+
+**Now wired.** ESP32-MB8ART `1a4ca62` adds `setChannelOffset()` / `setChannelOffsets()` /
+`getChannelOffset()`. The library validates at set time (channel index and magnitude only)
+and gates at apply time on the channel having a binding **and** a temperature mode. That
+split is deliberate and was the one real design bug caught during review: every channel
+mode starts `DEACTIVATED` until the first config read from the device, so a set-time mode
+check would have silently dropped every offset restored at boot - which is the ordering
+this firmware actually has.
+
+`SensorOffsetMap.h` (header-only, native-testable) owns the name-to-position translation,
+because that is the step that was already wrong. Two properties the tests hold beyond the
+mapping itself:
+
+- **CH4 is always 0.** It is the 4-20 mA pressure input, whose calibration lives in a
+  different layer and unit entirely (`pressureOffset`, hundredths of BAR). Asserted at zero
+  and at both ends of the registered +-5.0 C range. This is the outer of two independent
+  guards, the library refusing a `CURRENT`-mode channel at apply time being the inner one.
+- **No two fields share a channel and none is dropped** - setting each alone must light
+  exactly one slot. A collision would let one offset silently win.
+
+6 new tests (293 total), mutation-checked, all four mutations caught: `outside` to CH6 (the
+original bug) by 3 tests, the pressure channel given an offset by 2, two fields colliding
+by 2, a field dropped by 2. Pushed from the three points where `applyToSettings()` already
+runs - every offset change, after the boot load, after a runtime reload - and not from the
+post-`saveAll()` apply, where no value can have changed. A `LOG_WARN` covers the absent
+device, replacing what would otherwise have been another silent no-op.
+
+Verified end to end on the device: `sensor/offset/boilerOutput` = -20 moved the published
+`t.bo` from 36.1 to 34.1, exactly -2.0 C and stable across samples, with boiler return,
+tank and pressure all unmoved; restoring 0 brought it back. All-zero offsets were
+bit-identical to the pre-flash readings.
+
+Of the six remaining offsets, four take effect: `boilerOutput` CH0, `boilerReturn` CH1,
+`waterTank` CH2, `outside` CH3. `waterReturn` (CH6) and `heatingReturn` (CH7) are stored
+and never applied while those channels are disabled - the library's documented behaviour
+for an unbound channel, expected rather than a defect.
+
+First real use, as site calibration in NVS rather than a repo default: the outside sensor
+reads about **+1.05 C** in winter against TAWES station 11182, 1.8 km away, so
+`sensor/offset/outside` is set to -10, with `heating/curveShift` reduced 5.0 to 3.6 in the
+same change to keep flow behaviour neutral - the curve had been empirically tuned against
+the raw sensor, so an uncompensated offset would have double-counted the bias. 3.6 rather
+than 3.5 or 4.0 because curve sensitivity runs 1.20 C of flow per C of outside at -12 C up
+to 1.70 at 13 C, and 3.6 centres the residual at -0.2..+0.3 C across the range.
+
+Also removed in this pass: three dead "Example of using HAL to ..." functions from
+`HardwareFactory.cpp` (119 lines) - all defined there, declared in no header, zero callers.
+Deadness was not the main reason. `controlRelaysThroughHAL` drove
+`burnerRelay->setState()` directly, bypassing `BurnerRequestManager`,
+`BurnerAntiFlapping`, the rate limiter and `RelayCommandPolicy`'s pump protection, and its
+indices were wrong against `RelayIndices.h`: it labelled index 1 "heating pump"
+(`POWER_BOOST`, full 42.2 kW) and index 2 "water pump" (`WATER_MODE`), while the real pumps
+are 4 and 5. Copied as the example it announced itself to be, it would have fired the
+burner at full power with no pump running - the September 2026 overheat.
+`setupHALCallbacks` repeated the same wrong labels in an empty switch, and
+`readTemperaturesThroughHAL` read channel 4 as "outside" when channel 4 is the pressure
+input.
+
+### New topic `boiler/status/heating/control`: why the heating is off, and what the curve actually wanted
+
+Four things about weather compensation were unobservable from outside the firmware, so Home Assistant could only guess at them with templates: the **pre-clamp** curve output, the **room-deviation shift** on its own, the **active mode**, and whether demand is blocked by the **outside-threshold gate** or the **room backstop**. The last two are indistinguishable from published state, and the first is the one that matters most in mild weather - the clamped target is a flat `h/sLo` 40.0 and says nothing about what the curve asked for.
+
+Published **retained**, QoS 0, LOW priority, on change and at least every 10 s so a retained pre-reboot value self-corrects. All temperatures in tenths, matching `t.*` on `boiler/status/sensors`:
+
+```
+{"mode":"weather","dem":true,"blk":"none","raw":364,"shift":38,
+ "cmd":400,"clp":"floor","o":130,"i":199,"tgt":192}
+```
+
+`blk` is the field that answers the question directly, in the firmware's own words: `none`, `outside`, `backstop`, `roomsat`, `sensor`, `override`, `disabled`. `clp` reports which bound won, so `floor` means weather compensation is currently inert. `o`/`i`/`tgt` are the values *this* evaluation used, so one payload is internally consistent instead of having to be paired with separately-published sensors and their sampling lag.
+
+Implementation notes worth keeping:
+
+- The pre-clamp value is threaded out through optional `rawOut`/`CurveDebug*` parameters defaulting to `nullptr`, so `HeatingCurve::target()` and both module layers keep their existing behaviour and every existing caller - including three native tests - is untouched. The formula is not duplicated anywhere.
+- `snprintf` into a stack buffer, not a `JsonDocument`: this evaluates on the 1 s task loop and the project avoids heap on runtime paths. `format()` returns 0 rather than emitting a fragment, and the caller checks it - a truncated JSON payload is worse than a skipped publish, and since today `MQTTTask::publish` refuses oversized payloads anyway.
+- The publisher takes both mutexes with a 20 ms timeout and **returns without publishing** if either fails, rather than mixing a fresh reading with a stale setting.
+- Enumerators are `OK`/`OUTSIDE_GATE`/`HEATING_DISABLED` rather than the obvious words because Arduino's `esp32-hal-gpio.h` does `#define DISABLED 0x00` (also `RISING`, `FALLING`, `CHANGE`, `ANALOG`). A `DISABLED` enumerator expands to a numeric constant and the compiler reports the error *inside the framework header*, which is a thoroughly confusing place to debug. The JSON strings are unchanged - the wire format is the contract.
+
+6 new tests (287 total), including that the worst realistic payload fits the 319-byte limit and that `differs()` catches every field. `HeatingControlTask` bound unchanged at 2820-2832 B of 4096 (+1264 B) despite the new MQTT dependency.
+
+**Three defects in the first version, all found on the device and none catchable by the build or the unit tests.** Recorded because they are the argument for cross-checking a new diagnostic against an independent model rather than eyeballing it:
+
+1. **The block reason was misleading.** With outside 20.1 C against a 13.0 C threshold it reported `backstop`. Two errors in one: the outside gate is the primary weather-mode decision (at 20 C outside the honest answer is "it is warm"), and `roomOverheated` does not mean what its name suggests while heating is OFF - it is then the RESTART test, `room >= limit - hysteresis`, so a room merely sitting in the deadband at 19.9 set it true. Reporting the room limit there would have sent the user to adjust a margin that was not the cause. The gate now takes precedence.
+2. **`raw`, `shift` and `cmd` were all 0 whenever heating was off** - i.e. blank in exactly the situation the topic exists for. `calculateSpaceHeatingTargetTemp()` only runs on the turn-on and target-update paths, so the cached values were never populated with no demand. The publisher now evaluates the curve itself; it is a `const`, side-effect-free computation over the same inputs the control loop uses, so it is the curve's current answer rather than a prediction.
+3. **`cmd` reported the wrong floor.** It showed 380 where the boiler would actually command 400, because `HeatingCurve::target()` clamps to `h/bLo` (38.0) while `BurnerRequestManager::setHeatingRequest()` then clamps to `h/sLo` (40.0) - the effective floor. The publisher now mirrors the second clamp. Caught by predicting the payload from an independent implementation of the curve and finding the 20-tenths disagreement.
+
+Also restructured to take the sensor and settings mutexes **once** (nested Sensor -> Settings, the documented order) for the inputs *and* the curve evaluation. The first version read `o`/`i` in one acquisition and computed `raw` in another, so a sensor update landing in between would have broken the internal consistency that is the whole reason this payload carries its own inputs.
+
+Verified on hardware: `{"mode":"weather","dem":false,"blk":"outside","raw":237,"shift":36,"cmd":400,"clp":"floor","o":198,"i":199,"tgt":192}` - `raw` and `shift` match an independent model of the curve exactly, `cmd` sits on the h/sLo floor, and `blk` names the gate that is actually blocking.
+
+
+### DELAY renewal no longer allocates, and no longer encodes the RYN4 wire format itself
+
+`sendCompactDelayRenewal()` built a `std::vector<uint16_t>` per contiguous ON block and filled it with a hand-rolled `0x0600 | 10`, then called `writeMultipleRegisters(uint16_t, const std::vector<uint16_t>&)`. That signature is declared in ESP32-ModbusDevice and merely inherited by RYN4, so the allocation was forced by reaching past RYN4's own API - every one of which is `std::array`-based and allocation-free. Small (2-16 B) but on the path that owns the DELAY watchdog, at a 5 s cadence, in a project whose stated policy is no heap on runtime paths; and the duplicated wire format was the worse half.
+
+Replaced with `setRelayCommandRange(startRelay, count, spec)`, added to ESP32-RYN4 at this project's request. The library now builds the register payload on a stack buffer and owns the encoding. Both libraries were squashed to fresh v0.1.0 root commits in the process: **ESP32-ModbusDevice `bbf737a`** (tag `v0.1.0` -> `9ca40d3`, adds `ensureSyncReady()` as protected) and **ESP32-RYN4 `0825689`** (tag `v0.1.0` -> `47fb195`).
+
+Three things were verified before migrating, because this is the path that keeps the burner and pump relays from auto-OFF:
+
+- **Indices are 0-based on both sides.** The library documents "startRelay = 0 targets Relay 1". A 1-based parameter would have shifted every relay by one, which here means commanding the wrong relay on a gas boiler.
+- **Timing is unchanged.** The new method wraps its transaction in `RetryPolicies::modbusDefault()`, which sets `maxRetries = 0`, and `execute()` loops `attempt <= maxRetries` - so exactly one attempt, like `writeMultipleRegisters` has always been. This matters: F14 in this function deliberately fails fast and retries on the *next* SET tick rather than blocking, so that a lost renewal cannot race the 10 s hardware auto-OFF. A retrying library call, across up to 4 blocks each able to spend 2000 ms of `MODBUS_MUTEX_TIMEOUT_MS` plus response wait plus backoff, could have pushed a renewal past that deadline.
+- **The encoding matches.** `makeDelayCommand(10)` produces `0x0600 | 0x0A = 0x060A`, identical to the word this code used to build by hand.
+
+The failure log now carries the error code, which the old `ModbusResult<void>` path did not expose usefully.
+
+Honest scope note: `RYN4ProcessingTask.cpp.o` still has undefined references to `operator new`/`operator delete`, but they come from `std::unordered_map<std::string, ResourceInfo>` template instantiations pulled in through `SharedResourceManager`'s header - the boot-only cache-miss lookup, not the renewal path. No function in this file references the allocator. Task bound unchanged at 2324-2336 B of 3584 (+1248 B). 281/281 native tests.
+
+
+### Deferred logging reaches the deployed firmware, ~18 kB of DRAM recovered, and four checks that could not fire now can
+
+A sweep of the 2026-10-18 review findings.
+
+**`LOG_DEFERRED_FORMAT` was in one environment only.** The flag and `CONFIG_LOG_DEFERRED_TASK_CORE` lived inside `[env:esp32dev_usb_debug_selective]`, not in `[base_debug_selective]`, so `prod_debug_selective` - the env behind every USB flash, including e3f230a - and both OTA envs built without it. Confirmed from the binaries rather than the ini: `DeferredLog.cpp.o` contributed 0 bytes of text/data/bss to the prod build and its RTC region was empty. Both flags moved to the base. Consequence worth recording: `ProjectConfig.h` cites "the ~5.5 kB of DRAM that LOG_DEFERRED_FORMAT freed" as the funding for the +512 B stack raises, and that reclaim had never been collected on the deployed image - the raises were actually paid for by the syslog-off reclaim. Every bound published until now was measured on the non-deferred build, i.e. conservative; with the flag active they all fall. Static RAM 48880 -> 47368 B, and the full sweep now shows a minimum headroom of **+1024 B** (WheaterControl) against the 512 B rule, with the deferred logger task at 2100-2112 B of 5120.
+
+**Two OTA environments were building from months-old libraries.** Independent of the flag: `.pio/libdeps/esp32dev_ota_debug_selective/ESP32-Logger` sat at `b924d43`, which predates `DeferredLog.cpp` existing, and its ESP32-PersistentStorage at `97eb133` - so an OTA from the env the docs recommend would have shipped an image without deferred logging *and* without any of today's storage fixes, with the flag defined and no code behind it. `prod_ota_debug_selective` was the same. Both re-cloned; all four selective envs now carry Logger `3154898` and PersistentStorage `96a7057`. `.pio/libdeps` is per-environment and is not refreshed by building a sibling env - audit it before an OTA, or wipe it.
+
+**~12.57 kB of DRAM was allocated at boot into an object nothing used.** `SystemInitializer` newed a `PIDControlModule`, whose constructor news a `PIDAutoTuner` holding `CircularBuffer<OscillationPoint, 1000>` **by value** (1000 x 12 B) plus four 32-float peak buffers. `SystemResourceProvider::getPIDControl()` had no callers and no `pidControl_->` call site existed outside the allocation; the live PID and autotuner are `BoilerTempController`'s own instance. The allocation, member and both accessors are gone and the linker now drops the class entirely (0 `PIDControlModule::` symbols in the image, `PIDAutoTuner::` still present for the live one). The class files are kept, with a header warning, only because several docs still describe them.
+
+**Three low-memory gates that could never fire.** `main.cpp`, `MonitoringTask` and `PersistentStorageTask` compared `ESP.getFreeHeap()` - which is `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` and counts IRAM, ~58 kB on this chip - against `MIN_FREE_HEAP_WARNING` 20000 and `MIN_FREE_HEAP_CRITICAL` 10000, so every comparison was true-by-construction even when real malloc DRAM measured 576 B. `SystemConstants.h:485` already said the thresholds were inert; three live sites still used them. All three now read `MALLOC_CAP_DEFAULT` against the DRAM block constants. The storage one is the one that mattered: its "do not subscribe when memory is short" protection had never once refused, and refusing is self-correcting because the loop retries with backoff.
+
+**The enable/priority bools changed the saved value but not the running one.** `wheater/priorityEnabled` had a log-only callback and the five `system/*` bools had no callback at all, while the control path reads the EVENT BIT - and the bits are synced from settings only at boot (`syncEnableStatesToEventBits()` has two callers, both init; its inverse has none). For water priority that is worse than ineffective, because the two stores have different readers: `HeatingControlTask.cpp:250` reads the field while `BurnerStateMachine.cpp:376/507/754` read the bit, so one set from the add-on's Water tab put those two tasks on opposite answers. All six now route through the same `StateManager` setters `boiler/cmd/*` uses, with `persist=false` since `setJson()` has already written the key.
+
+**`MQTTTask::publish` truncated silently.** `strncpy` cut any payload at 319 bytes with no check, no log and a `true` return. Live case: `boiler/params/list` builds a JSON array of all 60 parameter names (1288 bytes), which the library cut to its 1024 B buffer and the transport then cut to 319 - so that reply was **always** malformed JSON, while `docs/MQTT_API.md:649` documented the command as working. `publish()` now refuses and logs; the library's list reply was rebuilt as an object reporting the true total, carrying as many names as fit, and setting `truncated`.
+
+**Malformed parameter payloads were coerced rather than rejected** (ESP32-PersistentStorage `96a7057`). A payload `strtod` could not consume whole was wrapped as a JSON string, and ArduinoJson's `as<T>()` does not fail on a non-numeric string - it returns `T()`, so 0 for int/float and `true` for bool. Verified on the host against the vendored 7.4.3. Range checks could not catch it because every PID gain is registered with a minimum of `0.0f`, so `params/set/pid/spaceHeating/kp` with a decimal comma silently set Kp = 0, persisted it and reported Success. Strings for numeric parameters must now parse cleanly and completely; strings for bools must be a recognised token, decoded properly instead of "any string is truthy".
+
+281/281 native tests. `prod_debug_selective`, `esp32dev_usb_debug_selective`, `prod_ota_debug_selective` and `esp32dev_ota_debug_selective` all build clean.
+
+
+### One sensor-mutex timeout latched an emergency stop that only a reboot could clear
+
+`Error::SENSOR_FAILURE` has two writers and, until now, one of them had no way to clear it. `TemperatureSensorFallback` raises it for a genuinely missing sensor and clears it in exactly two places (`TemperatureSensorFallback.cpp:292`, `:318`) - one inside `if (currentMode == SHUTDOWN)`, the other inside a mode-**change** guard. `BurnerControlTask.cpp:759` raised it when it could not *read* the sensors, which says nothing about whether they work: a single 100 ms mutex timeout, or one stale reading. The only other clear, `ErrorRecovery.cpp:397`, sits in `clearErrors()`, which has no callers.
+
+So a bit raised from the burner task while the sensors were perfectly healthy was cleared by nobody - and the bit is load-bearing twice over. It is in `CRITICAL_ERRORS` (`SafetyInterlocks.cpp:362`), so `checkSystemErrors()` fails forever and `performSafetyCheck()` emergency-stops the burner; and `clearEmergencyStop()` requires it clear (`CentralizedFailsafe.cpp:508-511`, in both `sensorsOk` and `systemErrorsClear`), so `boiler/cmd/emergency_reset` refuses permanently. **Net effect: one transient mutex timeout produced an emergency stop that no MQTT command could release, recoverable only by a power cycle.**
+
+The timeout is reachable rather than theoretical: `MQTTPublisher.cpp:109` takes the sensor mutex in a **function-scoped** guard and then builds the whole sensor JSON inside that hold, acquiring two further mutexes on the way (`getHeatDemandState()` through the retry helper, then the relay mutex at 50 ms). The comment at `:118` - "SemaphoreGuard releases automatically when it goes out of scope" - is true but reads as though it releases at once, which is how a multi-hundred-millisecond hold went unnoticed. `BurnerControlTask` makes a single 100 ms attempt against it.
+
+Fixed with two narrow changes, plus a new header-only `SensorErrorBitPolicy` (`include/modules/control/SensorErrorBitPolicy.h`) so the decision is natively testable:
+
+1. **Confirm before escalating.** Reuses the `SensorFailureConfirm` helper already in that file (10 s window), so a transient timeout or one stale read no longer raises the bit at all. Safety is unchanged while confirming: `heatDemand = false` still fires on every failing cycle, so the burner stays blocked exactly as before. Only the error-bit escalation is delayed.
+2. **Clear on recovery, but only what this task raised.** An `ownedHere` flag keeps `BurnerControlTask` from clearing a bit that `TemperatureSensorFallback` set - without it, a successful read would unblock `performSafetyCheck()` and permit an emergency-stop release while a sensor was still missing.
+
+The stale-reading site is covered as well as the mutex-timeout one; it had the same flaw, since readings that go stale and recover need not move the fallback between modes at all.
+
+7 new tests (281 total), and they were **mutation-checked** rather than merely run: restoring the old unconditional raise fails 4 of them including the end-to-end latch sequence, and removing the ownership guard fails exactly the test written for it. `BurnerControlTask` bound 3252-3264 B of 4096 (+832 B); both selective envs build clean.
+
+
+### NetworkMonitor's stack was BELOW its static bound - a 21st task the "every task" sweep never saw
+
+`STACK_SIZE_NETWORK_MONITOR_TASK` was 2048 B against a worst-case static bound of **2068-2080 B** in the `prod_debug_selective` build - over by 20-32 B, with no phantom-edge flag, in the binary flashed on 2026-10-18. Raised to **3072** (+992 B headroom there, +1168 B in `esp32dev_usb_debug_selective`, both verdict "fits, including the worst case").
+
+Two things hid it. First, the comment that sat above the macro said "this task only polls link state" - but on link-up it also calls `EthernetManager::logEthernetStatus()`, whose `NetworkInterface::macAddress()` builds an Arduino String through `snprintf` -> `_svfprintf_r` (an 800 B frame) -> `_malloc_r`. That frame is the framework's own, so `LOG_DEFERRED_FORMAT` cannot remove it, which is also why the two tiers differ by only 176 B. Second, and more useful as a method lesson: the deep path runs **once, at link-up**, and the task then calls `vTaskDelete(NULL)`, so it is absent from the `tasks` diagnostic dump by the time anyone reads it (confirmed: 0 occurrences in the 2026-10-18 dump). **No high-water mark for it has ever been recorded, in any run.** The e3f230a sweep that raised "every task" to 512 B over its bound enumerated the dump, and a self-deleting task is invisible there. Enumerate `xTaskCreate` call sites instead.
+
+The task is also created by a raw `xTaskCreate` rather than through TaskManager, so its bound must be measured with `--no-task-manager-wrapper` (no `safeTaskWrapper` frame) - measuring it the usual way understates the headroom by 32 B in the wrong direction.
+
+The DRAM cost is transient: the task deletes itself at link-up, so the extra 1024 B returns to the heap and steady-state DRAM is unchanged. 274/274 native tests; `prod_debug_selective` and `esp32dev_usb_debug_selective` both build clean.
+
+
+### `boiler/cmd/fram` `save_pid` saved nothing, and two dead declarations removed
+
+`ControlRequest::SAVE_PARAMETERS` (bit 20) was **set in 16 places and never waited on or tested** - and, because nothing cleared it either, it latched on first use and stayed set for the rest of the run. Fifteen of those sites were belt-and-braces alongside a real `STORAGE_SAVE_REQUEST_BIT`, so they lost nothing. The sixteenth was not: `boiler/cmd/fram` with payload `save_pid` set **only** that bit, then published `requested` on `boiler/status/fram/pid_save` and logged "Requested PID parameters save to FRAM". The command saved nothing and reported success. It now calls `PersistentStorageTask_RequestSave()`, the same path `boiler/params/save` uses - the PID gains are ordinary registered parameters (`pid/spaceHeating/*`, `pid/waterHeater/*`), so a full save persists them. The topic's "FRAM" is legacy; the storage is NVS.
+
+The bit is gone from `tools/event_config.yaml` and the header regenerated. Bit numbers in that spec are explicit rather than sequential, so **nothing was renumbered** - the only other change to `SystemEventsGenerated.h` is five `BURNER_*` comments that had been updated in the YAML and never regenerated, plus the dropped `CONTROLREQUEST_SAVE_PARAMETERS_BIT` migration macro, which had no users. `Tasks::Storage::SAVE_INTERVAL_MS` (5 minutes, unused - there are no periodic saves) removed, with a comment where it sat recording that the absence is deliberate.
+
+`ControlRequest::PID_SAVE` (bit 19) was the same defect one bit down and is now removed too, along with its `CONTROLREQUEST_PID_SAVE_BIT` migration macro. Unlike bit 20 it was a clean removal - it had no references at all outside the generated declarations, so there was no inert command behind it. **Bits 19, 20 and 21 are now free** (and bits 24-31 remain reserved by FreeRTOS).
+
+274/274 native tests, both `prod_debug_selective` and `esp32dev_usb_debug_selective` build clean, task bounds unchanged (storage 4308-4320 B of 5120, MQTT 3300-3312 B of 4096).
+
+
+### A parameter set never refreshed the group HA reads, and every set ran a full 60-key NVS save
+
+Two defects found while chasing a stale Home Assistant entity, one in the storage library and one in the task.
+
+Home Assistant's ~60 boiler config entities (`number.*`, `switch.*`) take their value out of the **grouped** JSON on `boiler/params/status/<group>`. `PersistentStorage::setJson()` published only the per-parameter topic `boiler/params/status/<group>/<param>`, which nothing subscribes to, so after any set every config entity kept displaying the old value until something sent `boiler/params/get/all`. Measured on the device: the room target was changed 19.2 -> 19.4 on 2026-10-17, the controller honoured it immediately, and HA's number entity showed **19.2 for about 12 hours**. The group publish was also **not retained**, so a client connecting later saw nothing at all. Fixed in `ESP32-PersistentStorage` **315a969**: a successful set republishes the parameter's group, and group status is published retained. The `status/complete` marker stays non-retained - it describes one dump, not a state. `setJson()` has exactly one caller, the MQTT SET path, so the new publish cannot fire during `loadAll()` or registration. Also widened its publish guard from `if (mqttManager_)` to either transport; `publishUpdate()` handles both itself, so a callback-only user silently got no publish. **0 B** added to the storage task's static bound. Hardware-verified after flashing: a fresh subscribe received 6 groups immediately as retained with no `get/all`, and a set published both the per-param reply and the republished group.
+
+The retain flag has one honest caveat: across a **device** reboot the broker can serve a retained group from before the reboot while the device comes up on NVS values. The HA side already covers this - its refresh automation triggers on `boiler/status/online` - and republishing all groups when MQTT comes up was deliberately **not** added, because that puts a group burst on the boot path where DRAM is tightest.
+
+Second defect, in `PersistentStorageTask`: **the save debounce was designed and never wired up.** All 14 parameter `onChange` callbacks set `parametersChanged` and `lastChangeTime`, and **nothing read either variable**; each callback also set `STORAGE_SAVE_REQUEST_BIT`, so every set ran `saveAll()` at once - 60 registered parameters x (`nvs_set_*` + `nvs_commit`), because `Preferences` commits per key. A thermostat card dragged through five values cost five full passes, ~300 commits. Flash wear was never the risk (a 4-byte NVS entry is 32 bytes of a 4 KB page, ~126 writes per page erase, endurance ~100k cycles, wear-levelled - years of margin at any plausible click rate); the cost is a commit storm blocking the storage task. The callbacks now only mark the change, and `ParameterSavePolicy::shouldSave()` (header-only, native-testable, 5 new tests including the ~49-day `millis()` wrap) coalesces over `PARAM_SAVE_DEBOUNCE_MS` 2000. Explicit saves - `boiler/params/save`, StateManager enable/priority/override, the syslog and autotune writers - are **not** debounced. Nothing is at risk during the wait: `setJson()` has already written the one key that changed. The full pass still earns its place, because it is what persists a setting written straight into `SystemSettings` by `boiler/cmd/room_target` or `boiler/cmd/heating`, which never go near `setJson()`. Storage task bound 4292-4304 -> **4308-4320 B** of 5120, +16 B. 274/274 native tests.
+
+**Still open, not fixed:** those two `cmd` handlers (`MQTTCommandHandlers.cpp:193`, `:223`) write `SystemSettings` and publish but never request a save, so a room target set through HA's climate card is **lost on the next reboot** - demonstrated by this flash, where the device booted from NVS at 19.2 after running 19.4 for 14 hours on a RAM-only value. The code comment at `PersistentStorageTask.cpp:822` already calls this "the mirror image of 57d6456, where the cmd path published but did not persist". The recommended fix is to reroute HA's climate card to `boiler/params/set/heating/targetTemp` rather than add a third immediate-save path; note the two paths validate differently - `cmd` enforces 15.0-30.0 C, the parameter `registerInt(100, 300)` allows 10.0-30.0 C.
+
+Two pieces of dead state found and left alone: `ControlRequest::SAVE_PARAMETERS` is set in 16 places and never waited on or tested, and `Tasks::Storage::SAVE_INTERVAL_MS` is unused (there are no periodic saves).
+
+
+### OTATask was 384 B from its warning threshold during an OTA - measured, and raised to 4096 B
+
+The static bound had put `OTATask` at +96 B headroom on its 3072 B stack, recorded as "an optimistic floor, not a ceiling" because 152 indirect calls go unresolved on that path. That caution was justified. An **OTA auth exchange alone** took `OTATask` from 2144 B free to **384 B** - below this project's own `LOW_STACK_WARN_BYTES` (512) - i.e. 2688 B used of 3072, and the successful-transfer branch (`_runUpdate` -> `client.printf` -> `Update.write`) is deeper and was not measured. Exercised safely with a deliberately wrong OTA password: `ArduinoOTA` invokes `_start_callback` only *after* auth succeeds (`ArduinoOTA.cpp:356`), so a failed auth runs `_onRx` and its `AUTH %s` `printf` (`:251`) while writing no flash, never tearing down MQTT and never triggering the graceful burner shutdown.
+
+The depth is Arduino-core, not ours - `ArduinoOTAClass::_onRx` has an **880 B** frame and calls `Print::printf` -> `_svfprintf_r` (800 B) -> `_malloc_r` - so it does **not** shrink with log mode. That is why `STACK_SIZE_OTA_TASK` was also below measured usage in the other two tiers, **DEBUG_FULL at 2048 and RELEASE at 1536**; latent in both, though both are `#error`-gated today. All three are now **4096**. Re-measured after the raise on the identical exchange: **1408 B free**, exactly the +1024 B. Funded from the DRAM that deferred logging freed.
+
+Two secondary findings while chasing this. The low-stack warning is evaluated on the **30-minute** `DETAILED_MONITOR_INTERVAL_MS` timer, so it is up to half an hour late - it would have fired eventually, since `usStackHighWaterMark` is a persistent minimum, but not during the event. And the `tasks` diagnostic was **refused for hours**: `MIN_DRAM_BLOCK_WARNING` is 2560 B and the largest free DRAM block sat steadily at **2548 B**, 12 B under the gate, making the one diagnostic that could answer this question unavailable exactly when DRAM was tight enough to need it.
+
+### `LOG_DEFERRED_FORMAT` enabled after a hardware test
+
+Formatting now runs on the logger task instead of the caller. Verified on the device, not just in a build:
+
+- **DRAM 4160 -> 9720 B free, largest block 2548 -> 8180 B.** The design predicted +5392 B; measured +5560. This is what un-gated the `tasks` diagnostic above.
+- **470 boot log lines, zero ring drops**, no errors, boot completing to `Task initialization complete`.
+- The ring is `RTC_NOINIT_ATTR` at **0x50000200** - RTC slow memory, so **0 DRAM** - and entries still queued at a crash are replayed on the next boot as `[pre-reset]`. That answers the panic-log-loss objection that had been the main argument against deferral; the logger reported `Reset reason POWERON: no log entries recovered (ring not retained...)` on the first boot, which is the correct result after a USB flash.
+- **Logger task 2160 B free of 5120**, against a 1744 B static chain / 2100-2112 B predicted - close agreement, and the 5120 override is now generous rather than tight. Do not trim it until it is re-measured with syslog *enabled*, which is the case that adds `Syslog::sendInternal`'s 1104 B frame.
+- **Every task bound fell 336-784 B, none worse.** `NTPTask` landed at exactly the **1984 B** predicted after diagnosing the phantom call edge, independently confirming that diagnosis was right and the +800 B "regression" was an artifact.
+
+Net DRAM against the pre-deferral firmware, after paying 1024 B for OTATask: **4160 -> 8520 B free**. Device runs `0.1.0-24b297f`; heating disabled, relays off, sensor mode NORMAL throughout. Still open: with the logger off caller paths, `BoilerTempCtrl` and `MQTTTask` now show 2 formatter frames each from a *direct* `snprintf`, so the `formatTemp` question retracted earlier becomes live again - but only now, and it is worth re-measuring rather than assuming.
+
+### Library bump: ESP32-Logger 3154898 plus 17 logger_submodule updates (not yet flashed)
+
+`lib_deps` carries bare git URLs with no `#ref`, so each library's pushed `main` *is* what the next build compiles - the version bump below is already in the local build output and will be in the next firmware, whether or not anything else changes. Verified before syncing: ESP32-Logger `main` is at `3154898`, a genuine **fast-forward** from `b924d43` with no history rewritten, and 17 consuming libraries each received a separate `chore: update logger_submodule` commit on top of existing work (`ESP32-PersistentStorage`'s `aceb916`, the formatter removal above, is preserved as an ancestor of `da98448`). The three libraries without a bump - `ESP32-LibraryCommon`, `ESP32-Syslog`, `ESP32-Logger` itself - were checked and carry no `logger_submodule` at all, so the set is complete rather than short. All 20 dev clones are level with their remotes, 0 ahead and 0 behind.
+
+`3154898` brings the `LOG_DEFERRED_FORMAT` work, which **compiles to nothing here**: `LOG_DEFERRED_FORMAT` is defined nowhere in `platformio.ini`, `src/` or `include/`, and `DeferredLog.cpp.o` in this build has **0 defined symbols and 0 bytes of `.text`**. Every line of `3154898`, including the logger-task auto-start, sits behind the flag - checked line by line, zero unguarded. So the deferred path is inert, and enabling it remains a separate decision that should not precede a hardware test: it has only ever been built and statically measured, never run on hardware, and deferring the formatter means a panic can lose the last log lines, which are the ones worth having.
+
+What does ship regardless is the one unguarded change, ~33 lines in `Logger.cpp` extracting subscriber notification into `Logger::invokeSubscribers()`. Reviewed as a faithful extraction: it still snapshots the callback array under `subscriberMutex` and releases before invoking (so reentrant logging cannot deadlock), adds a benign `subscriberCount == 0` early-out, and its mutex-acquire-failure path has the same outcome as the old inline code. Measured effect on the 19 task bounds: **RYN4Proc 2384 -> 2320 B and RelayControl 2304 -> 2240 B, both -64 B; the other 17 unchanged, none worse.** 269/269 native tests, `esp32_test` at zero warnings, full clean rebuild after a fresh `libdeps` re-clone.
+
+One operational note recorded while syncing: `pio pkg update` **failed** on 17 libraries with "local changes would be overwritten by checkout", because each libdeps clone carries an uncommitted `logger_submodule` gitlink that now differs from the bumped pointer. Nothing compiles from `logger_submodule`, no libdeps clone held any commit absent from a remote, and no tracked source file differed - so the fix is to delete `.pio/libdeps/<env>` and let PlatformIO re-clone, rather than running git surgery across 17 build-output copies.
+
+### Shared resource handles: pointer-keyed fast path, and a dead cache removed
+
+`SystemResourceProvider::takeSensorReadingsMutex()` and `giveSensorReadingsMutex()` each built a `std::string`, took the global `SharedResourceManager::accessMutex_` with a timeout, hashed 14 characters and probed an `unordered_map` - to fetch a handle that has been fixed since boot. Both the take *and* the give, at 11 call sites including `BurnerStateMachine.cpp:411`, `HeatingControlTask.cpp:346/538`, `WheaterControlTask.cpp:543` and `MonitoringTask.cpp:513`, against the standing rule that runtime paths keep clear of `std::string` and the heap. Every caller passes a `static constexpr const char*` constant and identical literals are merged, so the **pointer** identifies the resource: new `const char*` overloads of `getMutex`/`getEventGroup` consult a fixed slot table and touch no string, no map and no lock once the handle exists. No call site changed. Slot keys are installed in the constructor and never rewritten, and `handle` is only ever stored with the value the map already returned for that key - one naturally-aligned pointer store - so a reader sees either `nullptr` (and correctly takes the slow path) or the finished handle, never a torn value, and no new lock was needed. **`cleanup()` zeroes the handles along with `resources_.clear()`, and that is load-bearing rather than hygiene:** `ErrorHandler::enterFailsafeMode()` runs *after* `SystemInitializer::cleanup()` and still reaches these accessors, so leaving the slots populated would hand the failsafe path freed handles; zeroed, those callers fall back to the map and recreate exactly as before. The map fallback keeps `std::string` and the libstdc++ throw/unwind tail statically reachable, which initially made bounds **worse** (+80 B on RYN4Proc and RelayControl) - no task can reach it, because `initializeStandardResources()` creates all 11 event groups and all 4 mutexes through these same overloads at `InitStage::SHARED_RESOURCES` before `initializeTasks()`, so `tools/stack_walker.excludes` now cuts the miss branch as boot-only with that ordering recorded. Net across the 19 measured tasks: **10 improve, none regress, -544 B**. Also **removed `SystemResourceCache`** (`src/core/SystemResourceCache.cpp`, `include/core/SystemResourceCache.h`): it was written to solve exactly this problem, had zero readers, and was absent from the linked image - dead code whose existence made the problem look already fixed. The fast path supersedes it and needs no `initialize()` call and no not-initialized fallback
+
+### `tools/stack_walker.py` reports phantom call edges instead of believing them
+
+objdump loses instruction sync on the alignment padding after an unconditional `j`/`retw` and then prints instructions that are not there; **13.6% of this image's 7493 functions contain at least one such spot** (worst: `__ssvfiscanf_r` 121, `_vfprintf_r` 117, `BoilerTempControlTask` 37). Usually the fiction is harmless. Once measured, it was not: two padding bytes after a `j` at `401ac01f`, objdump decoded from `401ac022` straight over the real branch target `401ac024` and manufactured `call4 HealthMonitor::initialize()` at `401ac028` - inside newlib's `__ssvfiscanf_r`, which cannot call a project C++ method. The walker believed the edge and reported **NTPTask at 3248 B against a true 1984 B**: 800 B invented out of padding, on the task whose stack had been trimmed the same day. It surfaced only because a peer session questioned the number, and it was corroborated three ways - the target appears in none of the function's 72 `l32r` literal values, nowhere else in its `0x1db0` extent, and the adjacent phantom `call0` targets an address past `_etext`. On Xtensa every branch target *is* an instruction boundary, so an instruction that **straddles** a branch target is provably misaligned; edges whose call site sits in such a span **and which carry the reported bound** now print as `** PHANTOM-EDGE SUSPECT`. Reporting at function granularity was tried first and is useless noise (16 functions on one path); per-edge leaves 13 of 19 tasks with zero suspects and the worst with 3. **Labelled, never dropped, deliberately:** the real instructions in a mis-decoded span are ones objdump never emitted so their edges were always missing, a span can only be *proven* closed where a printed address is a branch target, and blocks reachable only through a jump table have no branch naming them - dropping on a weaker signal risks discarding a real edge and UNDER-stating a bound, the one unsafe direction here. All 19 task bounds verified unchanged; four mutations of the new logic verified to fail `tools/test_stack_walker.py`, two of which initially passed because each defence masked the other and are now pinned separately
+
+### ESP32-PersistentStorage: MQTT topics and NVS keys without the formatter (library `aceb916`)
+
+Three `snprintf()` calls in the library formatted nothing that needs a formatter - two `"%s/status/%s"` topic concatenations in `publishGroupedCategory()` and `publishAllParameters()`, and `"p%lu"` in `sanitizeNvsKey()` - and each pulled newlib's `_svfprintf_r`, an 800 B stack frame, plus its malloc tail onto the calling task. That lands on `PersistentStorageTask`, which already carries the largest single frame in the firmware (`processCommandQueue`, 1328 B), and `sanitizeNvsKey()` runs on every parameter load and save. Replaced with two file-local helpers, differential-tested against the `snprintf` they replace: byte-identical over 211 hash values (including 0, `UINT32_MAX` and the decimal boundaries) and over every prefix/leaf combination at buffer sizes 1..128, including truncation and NUL-termination. One deliberate divergence: the key builder refuses a buffer under 12 bytes rather than truncating, because a truncated key is a *different* NVS key that would silently read or write the wrong entry; `UINT32_MAX` is 10 digits so 12 always suffices and the only caller passes 16. **Honest scope: this moves no stack bound today** - measured, `PersistentStorageTask` stays at 3904 B, because the logger chain through `MQTTManager::publish` is deeper and is what actually binds it. The gain is the removed formatter and heap allocation on those paths; as a bound it is worth **-48 B, and only once logging moves off caller stacks** (3488 -> 3440 B simulated). Recorded because the earlier note describing this snprintf as "~1520 B of a 3488 B chain" conflated a branch's depth with the bound it sets - removing it only helps down to the next-deepest branch
+
+### Investigated, not resolved: OTATask has +96 B of static headroom, and none of it is ours
+
+`OTATask::taskFunction`'s worst case is **2608 B chain / 2964-2976 B used against a 3072 B stack - +96 B**, the tightest of the 19 measured tasks, and the entire bound sits in the Arduino core: `ArduinoOTAClass::_onRx()` alone has an **880 B** frame and reaches `Print::printf` -> `vsnprintf` -> `_svfprintf_r` (800 B) -> `_malloc_r`. The printf is `_udp_ota.printf("AUTH %s", _nonce.c_str())`, on the authentication branch - and `OTATask.cpp:246` passes `OTA_PASSWORD`, so that branch is live on this device, not dead. Nothing here is fixable in this repo or in our libraries without vendoring the framework, so no change was made. Two qualifiers on the +96 B, pulling in opposite directions: the new phantom-edge check reports **no** suspects on this path, so the bound is not inflated by decode desync; but the walk leaves **152 unresolved indirect calls**, which per the tool's own limits can *hide* depth. So +96 B is an optimistic floor rather than a conservative ceiling, on the task that is how firmware reaches the boiler - see also the OTA DRAM-starvation history. Candidate response is raising `STACK_SIZE_OTA_TASK` from 3072, which costs DRAM that is already scarce; deferred pending a decision
+
+### Investigated, not resolved: why LOG_MODE_RELEASE misses its stacks
+
+Chosen approach was to attack the demand side - the ~1312 B of stack per `LOG_*` call. Measuring first changed the picture, and the headline number from the earlier review turns out to be **overstated**.
+
+**The deepest release chains are not logging-dominated in the way the estimate assumed.** They run *through* logging and continue into the heap. `BurnerControlTask`'s binding path on the release image:
+
+```
+BurnerControlTask 128 -> processBurnerRequest 256
+  -> TemperatureSensorFallback::canContinueOperation/updateSensorStatus(Locked) 160
+  -> publishFallbackModeChange 368 -> MQTTTask::publish 464
+  -> QueueManager::send 32 -> handleOverflow 48 -> dropOldestItem 560      (cum 2016)
+  -> log_write_impl 80 -> custom_log_write 64 -> Logger::logV 64
+  -> vsnprintf 64 -> _vsnprintf_r 144 -> _svfprintf_r 800                  (cum 3232)
+  -> _malloc_r 32 -> heap_caps_malloc... -> xPortEnterCriticalTimeout      (cum 3584)
+```
+
+So the tail past the formatter is **heap allocation**, not more logging - and for `MQTTTask` it is the heap-corruption assertion path (`verify_allocated_region -> ets_printf@rom -> _cvt@rom`). Reducing per-call logging cost would not have addressed either.
+
+**More importantly, that path is already known to be impossible, and the tool cannot see it on an optimised build.** `tools/stack_walker.excludes:24` cuts `dropOldestItem -> log_write_impl` with a verified reason: the `LOG_ERROR` fires only when `itemSize > MAX_QUEUE_ITEM_SIZE` (512) and both queues pass `sizeof(MQTTPublishRequest)` = 392. That cut applies on the debug image. On the release image it does **not**, because the callee is a GCC clone - `_ZL14log_write_impl15esp_log_level_tPKcS1_z$constprop$0` - and the `$constprop$` suffix defeats objdump's demangler, so the name never matches. The edge is confirmed present in the disassembly (`400f4828 -> 400f4764`), and `--stale-excludes-ok` therefore skipped a conservative cut.
+
+**Consequence: `BurnerControlTask`'s release bound of 3952 B is overstated by roughly 1568 B** - everything past cumulative 2016. The earlier claim that "13 of 18 tasks exceed their stack" in release is pessimistic and should not be used as the measure of how far release is from fitting. A second, smaller source of pessimism sits on the same path: the per-call-site float attribution sets its bit on *entering* a function that holds a `%f` format string, so an ancestor's float format charges `_svfprintf_r -> _malloc_r` to a `dropOldestItem` log line that contains no float.
+
+**Not fixed.** Two attempts at clone-aware symbol matching (strip `$constprop$`/`.isra.` suffixes; then match the Itanium length-prefixed component `14log_write_impl` inside the mangled string) did not make the cut apply, and I reverted both rather than ship an unproven matcher - one that makes a *cut* match more can silently **shrink** a bound, which is the defect class this review round exists to catch.
+
+**Next step, bounded:** make `ElfImage.lookup()` resolve clone symbols, with a test that pins it, then re-measure release. Until then the honest position on `LOG_MODE_RELEASE` is *unknown*, not *18 kB short* - and it stays `#error`-gated either way.
+
+### Corrected (2026-09-18 second review)
+
+A fresh review of the day's own work found six claims in the entries below to be false. They are corrected here rather than quietly edited, because the commit messages and this file both carried them.
+
+- **`e58f077` did not fix a live hazard.** `defaultPumpFailsafe`'s `EMERGENCY` branch has **no caller**: it runs only from `executeFailsafeActions`, and no site in the firmware passes `EMERGENCY` or `SHUTDOWN` to `triggerFailsafe` (all seven pass `DEGRADED` or `CRITICAL`). The real emergency pump-ON is `emergencyStop()`, which stores `currentLevel = EMERGENCY` directly and calls `BurnerSystemController::emergencyShutdown()` **without** going through `executeFailsafeActions`, so the registered callbacks never fire - and that path already used the emergency setter. The change is right as defence in depth; describing it as "live on the device" and "the same shape as the 2026-09-12/13 overheat" was wrong
+- **The failsafe dispatch was not "hiding ~1.9 kB".** `defaultBurnerFailsafe` is already called *directly* at `CentralizedFailsafe.cpp:203` and `:209`, so its 1872 B chain was in both bounds all along. Only `defaultPumpFailsafe` was invisible, and its branch is *shallower*. Net depth recovered by the two `edge:` entries: **0 B**. "The bounds did not move" was arithmetic, not luck
+- **`RYN4Proc`'s pre-raise margin was ~16 B, not 96 B.** The `edge:` entries shortcut the `std::function` trampoline (`operator()` -> `_M_invoke`), measured at 48 + 32 B in a build where those thunks survive; they are inlined away in the current image so the hop cannot be modelled here. The raise was *better* justified than argued, but every margin figure on that path is up to ~80 B optimistic
+- **`--stale-excludes-ok` claimed conservatism it cannot have for `edge:`.** `edge:` is the one kind that *adds* a call edge, so skipping it *shrinks* the bound - measured at -1760 B and a verdict flip from `STATIC BOUND EXCEEDS STACK` to `fits`, while the tool printed the reassurance. Both entries added that day are `edge:`. It is now fatal even under the flag, and the note lists the kinds the claim actually holds for
+- **The chunk-retry rationale misread the throttle.** `getQueueUtilization()` is a weighted blend, `0.6*(high/5) + 0.4*(normal/5)`; with the high queue empty a *completely full* normal queue is 40%, below the 50% LOW threshold, and three pending chunks is 24%. The refusal being retried essentially never happens. The real loss is `DROP_OLDEST` **eviction**, where `xQueueSend` succeeds and `publish()` returns true, so no per-call check can see it. Retrying also could not have worked: the handler runs inline from esp-mqtt's `MQTT_EVENT_DATA` holding the API lock that `esp_mqtt_client_publish` needs, so the queue cannot drain while it waits - at 5 retries x 50 ms x 12 chunks it cost up to **3.3 s** of blocked MQTT with that lock held
+- **NTP was not "one of the last two hardcoded task stacks".** Two remain: `SyslogTask` 4096 and `ModbusInit` 4096, both outside the tier system and the `configMINIMAL_STACK_SIZE` assertions
+
+### Fixed
+- The last two task stacks that were inline literals - `SyslogTask` 4096 and `ModbusInit` 4096 - moved into `STACK_SIZE_SYSLOG_TASK` / `STACK_SIZE_MODBUS_INIT_TASK` in `ProjectConfig.h` and covered by the `configMINIMAL_STACK_SIZE` assertions. **Every task stack in the firmware is now macro-driven and asserted**; a search for bare numeric literals at creation sites returns nothing. Neither is mode-tuned - both are short-lived boot-path tasks whose work does not vary with log level - and the "do not trim Syslog" reasoning moved with it
+- **`processSingleRelay()` no longer contains any decision.** `RelayCommandPolicy` gained `Outcome`, `decide()` and `pumpCheckRequired()`, and the function now locks, calls `gateToggle()`, optionally calls `checkPumpProtection()`, and switches on `decide()`. This matters because `env:native_test` **cannot** compile `RelayControlTask.cpp` - its include cone pulls in RYN4, TaskManager, `esp_task_wdt` and `SystemResourceProvider` - so anything deciding in that file was structurally untestable. Rather than build a FreeRTOS shim layer (large, fragile, and a shim that drifts gives false confidence), the decision moved to where the existing tests already live, which is the same pattern as `BurnerTransitions::step()` and `WaterChargePolicy`. `pumpCheckRequired()` gating the *call* rather than its result is part of the contract: `checkPumpProtection()` takes `relayStateMutex_` for up to 10 ms, and asking it about a no-op or an emergency command is the F13 hazard. New exhaustive test over all 3x2 inputs, mutation-verified - dropping the `pumpCheckRequired` guard (which re-opens F13) and reordering rate-limit against pump protection both fail it (269 native tests). Honest limit: this shrinks the untested surface to two lines of wiring, it does not test the `.cpp`
+- **The NTPTask trim was too aggressive and the device said so.** 4096 -> 3072 respected the static bound (2816, so 256 B above it) but left only **360 B free** in practice - under `LOW_STACK_WARN_BYTES` (512), so the running firmware raised a genuine low-stack warning on a task that had just been trimmed. Sizing to the static bound alone is not enough when a warning threshold sits above the result. Now 3584: 768 B above the bound, ~870 B free. The RYN4Proc raise is therefore funded at **net zero**, not the -512 B claimed earlier
+- **`NTPTask` printed `time_t` with `%ld`, and `time_t` is 64-bit on this toolchain** (verified with a `static_assert` against the real `xtensa-esp32-elf` compiler). `%ld` reads only half the vararg and desynchronises every argument after it - at `:303` the epoch shares a call with `%s`. Five sites fixed to `%lld` with an explicit cast, plus a `%u` against a `uint32_t`. Found by temporarily giving the logger a printf format attribute (see below); these are genuine wrong-output bugs, not ABI pedantry
+- Seventeen `%d`/`%X`/`%lu` mismatches in `src/` where the argument is `uint32_t`, `int32_t`, `EventBits_t` or `PIDValue_t` - all 32-bit on this ABI, so benign at runtime, but they are the noise that hid the `time_t` bugs above. Fixed with explicit casts across `TaskInitializer`, `SystemInitializer`, `main`, `ModbusDeviceInitializer`, `BurnerRequestManager`, `CentralizedFailsafe`, `CriticalDataStorage`, `MemoryPool`, `RuntimeStorageSchedules`, `HeatingControlModuleFixedPoint`, `SafetyInterlocks`, `BurnerControlTask`, `ErrorRecovery`
+
+### Fixed
+- **The logger blind spot is closed, across all seven repositories.** `log_write_impl` (ESP32-Logger) now carries `__attribute__((format(printf, 3, 4)))`, so every `LOG_*` call site in the firmware **and in every `ESP32-*` library** is type-checked for the first time. That surfaced 30 mismatches; all are fixed, and a full clean build of the project plus all libraries now reports **zero warnings of any kind**. Six were genuine undefined behaviour:
+  - `ESP32-MB8ART` `MB8ART.cpp:530` and `MB8ARTSensor.cpp:431` - `"%.2f"` given `sensorReadings[].temperature`, an `int16_t` in **tenths** (`MB8ART.h:191`, "244 = 24.4C"). An `int` in a `%f` varargs slot is undefined, and the scale was wrong besides, so the sensor-temperature log line has been printing nonsense. Now integer-formatted, which also keeps `_dtoa_r`/`_Balloc` and its heap allocation off the caller's stack
+  - `ESP32-MB8ART` `MB8ARTState.cpp:203,204` - `"%s"` given the `std::string` **returned by value** from `baudRateToString()`/`parityToString()`
+  - `ESP32-PersistentStorage` `PersistentStorage.cpp:647,659` - `"%s"` given `param.name`, a `std::string` **object**, on the out-of-range parameter paths, i.e. exactly when the log matters
+  - this project's `NTPTask` - `"%ld"` given a **64-bit** `time_t` (already fixed in `077fbf1`)
+  The other 24 were specifier widenings where the argument is `uint32_t`/`int32_t`/`TickType_t`/`EventBits_t` - all 32-bit on this ABI, so the values were already right, but they were the noise that hid the six above. Library versions are unchanged at `0.1.0` and no tags were cut: `lib_deps` uses bare git URLs with no `#ref`, so the pushed `main` of each repo is picked up directly
+
+### Changed
+- The relay-policy equivalence test is replaced by a **stated expectation table** over `gateToggle()`. The old `test_relay_policy_decomposed_matches_admit` compared `admit()` to a local `decomposedAdmit()` that was a character-for-character copy of `admit()`'s body, so any change moved both sides together and it could not fail. Two real regressions were demonstrated to pass it: `gateToggle` returning `ALLOWED` instead of `NOT_APPLICABLE` (which sends no-op *and emergency* commands to pump protection - the F13 hazard) and evaluating `consumeToggle` before `appliesProtection` (the 2026-09-14 emergency-stop regression). Both now fail the new test, mutation-verified. A second new test pins the *arguments* `admit()` forwards to pump protection, since swapping `requestedState` for `desiredState` leaves count, return value and limiter arrays identical. `admit()`'s doc now states plainly that it has no production caller and exists as the testable composition of `gateToggle()` plus the pump step. The known gap is stated rather than implied: `env:native_test` sets no `test_build_src`, so `src/` is not compiled and **nothing in the native suite constrains `processSingleRelay()`** - not its statement order, not its critical-section placement (268 native tests)
+
+### Added
+- `tools/watch_dram.sh` samples `boiler/status/health` into a CSV (`--report` summarises it). `heap_dram_min` is the minimum free DRAM since boot: it only ever falls, nothing on the device or in Home Assistant keeps a history of it, and every reflash resets it - so the question "is this a slow consumer or just fragmentation under ordinary polling?" was unanswerable from single readings. Measured while writing it: 4424 B at 63 s uptime falling to 1896 B at 1683 s. Installed as a 15-minute cron entry; remove with `crontab -l | grep -v watch_dram.sh | crontab -`. The 90 s subscribe window is deliberate - `health` is published every 60 s and is not retained, so a shorter wait lands in the gap and reports a false "device offline". The CSV is gitignored: it is device-specific evidence, not source
+- `tools/stack_walker.py` accepts `NAME:STACK` (no measured peak) and `--stale-excludes-ok`. The first answers the pre-flash question - does the static bound fit a configured stack? - which is the only form available for a build that has never run; passing a fake free of 0 instead would read as "measured used == stack" and trip the bound-violated check. The second downgrades stale `stack_walker.excludes` entries from fatal to a listed warning, needed because the excludes were verified against `esp32dev_usb_debug_selective` and an entry can legitimately not apply to another log mode (a cut whose `LOG_*` call compiles away has no edge to cut). Every skipped entry is printed, with a note that skipping one makes the bound more pessimistic and never less, so a "fits" verdict still holds. The primary environment still fails hard - there the loud failure is what catches rot
+- `tools/stack_walker.py` charges float formatting per **call site** rather than to every task alike. Every literal-pool string is scanned for a `%f`/`%e`/`%g` conversion, and the search runs over a product graph of (function, *a float formatter is already on this path*): the expensive float path (`_svfprintf_r` -> `_dtoa_r` -> first-use `_Balloc`/`calloc` -> heap, 600+ B) can only be entered once that bit is set, so a deep chain whose own format strings hold no float is not charged for it even when the task formats floats elsewhere. All six tasks that previously read as float-conditional now fit. Five - HeatingPump, WaterPump, OTATask, RYN4Proc, TimerSched - reference no float format anywhere. `WheaterControl` reaches exactly one, `calculateBoilerTarget()` logging `"Invalid charge delta: %.2f, using default"` on a validation-failure branch; that chain measures 2756-2768 B, *shallower* than its float-free deep chain through `publishFallbackModeChange` -> `MQTTTask::publish`, so attributing the cost correctly takes its bound from 3824 B to **3520 B** against a 3584 B stack. `HeatingControl` improved the same way, 3584 -> **3280 B**, having sat at exactly zero bound headroom. Re-validated across all 19 measured tasks of image 8ee1446: zero bound violations, and only those two tasks moved, each by exactly -304 B. The model still cross-checks itself - NTPTask's measured peak exceeds its no-float bound, implying it formatted a float, which `NTPClient.cpp`'s `"Average sync time: %.1fms"` confirms independently. **Conclusion on the current image: no task is at risk**, and no stack needs raising. The three remaining worst-case exceedances (HeatingPump/WaterPump 2624 B, RYN4Proc 2768 B against 2560 B stacks) are all carried by `SharedResourceManager::SharedResourceManager()`, which runs on the boot task - `main.cpp:249` constructs it and `InitStage::SHARED_RESOURCES` completes before `initializeTasks()` - so those tasks never execute it. Remaining limit: the float bit is set by *entering* a function that holds such a string, not by the call that consumes it, so a function holding both a float and a non-float format charges the float cost to either
+- `tools/stack_walker.py`: static worst-case stack bounds for FreeRTOS tasks, read from the linked image and checked against peaks measured on the device (`NAME:STACK:FREE`). It models what a high-water mark really contains - task prefix (96 B coprocessor save area, two 32 B wrappers, alignment) + call chain + a 192 B interrupt frame that lands on the task's own stack - with each part read from the binary rather than hardcoded. Calls are resolved directly, through the `-mlongcalls` literal pool, through vtables (the `custom_log_write` -> `Logger::logV` dispatch a naive walker never follows) and into mask ROM. It reports three bounds - worst case, nominal (failure-only and one-time code removed) and no-float (a call graph cannot see format strings, so every log call is otherwise charged the float path) - and exits non-zero when a measured peak exceeds the nominal bound. Graph adjustments live in `tools/stack_walker.excludes`, where every entry carries a reason verified in the disassembly and a stale entry fails loudly. **Validated on all 19 measured tasks of image 8ee1446: every peak is within its nominal bound**, NTPTask to within 32 B; see `tools/stack_walker.md`. Two resolution bugs were found and fixed while building it: targets were initially resolved during parsing, silently dropping every call to a function later in address order, and a signed immediate was wrapped twice, reporting a 96 B area as 4294967392 B
+- `boiler/status/health` publishes `heap_dram` (free `MALLOC_CAP_8BIT`), `heap_dram_blk` (largest `MALLOC_CAP_DEFAULT` block, the real allocation ceiling) and `heap_def` (`esp_get_free_heap_size()`), plus `heap_dram_min` (minimum DRAM since boot), and the diagnostics memory dump prints the same including "DRAM min since boot". Measured on the device: DRAM 7.1-7.4 kB free, minimum 5.4 kB, largest block 5.2-6.1 kB - and running the diagnostics dump itself transiently costs about 1 kB, which is what pushed the recorded minimum down. The existing `heap_free`/`heap_min`/`heap_max_blk`/`heap_frag` are `MALLOC_CAP_INTERNAL` and count IRAM-only memory that `malloc()` cannot hand out: measured 57404 free with a 49140 largest block (15% fragmented) while byte-addressable DRAM was 7.0 kB with a 4.2 kB ceiling (93% fragmented). No thresholds were changed - `MIN_FREE_HEAP_*` still compare against `ESP.getFreeHeap()`, because repointing them at DRAM today would put ~7 kB against a 10 kB critical limit and trip every low-memory path on a live boiler. Note the low-memory chain is currently inert end to end (`HealthMonitor` and `ErrorHandler::attemptMemoryRecovery()` both measure `ESP.getFreeHeap()`, `MemoryManager` has no callers), so nothing warns before an allocation failure
+- MQTT command `boiler/cmd/diagnostics` (payload `memory`, `tasks`, `events`, `sensors`, `relays` or `network`): publishes the `RuntimeDiagnostics` dump on `boiler/status/diagnostics/report`, split into 320-byte chunks (at most 8, 25 ms apart); errors and `truncated` go to `boiler/status/diagnostics/error`. The 642-line `RuntimeDiagnostics` was compiled but had no caller at all; this makes it reachable (~9.7 kB flash, ~400 B RAM). Read-only by construction: the payload selects a fixed enum value and is never passed into the class as text, because `DiagnosticCommand::FORCE_REBOOT` is implemented and calls `ESP.restart()`. `mutexes`, `modbus` and `selftest` exist but are stubs and reply `not_implemented`
+- `boiler/cmd/diagnostics` payload `health`: a compact `HealthMonitor` report on `boiler/status/diagnostics/report` as a single 320-byte payload, never chunked - overall status, uptime, largest free DRAM block, lowest free DRAM since boot, allocation failures, network connected/disconnects/availability, and **only** those subsystems that are unhealthy or have recorded errors (unhealthy first, trimmed to fit, publishing `n` included out of `nt` notable so a trimmed list is detectable rather than silently short). This gives `overallHealth_` its first consumer; until now `getOverallHealth()` and `generateHealthReport()` were defined but called from nowhere. `generateHealthReport()` was **replaced rather than supplemented** - it serialises into a caller-provided buffer instead of returning a `std::string` built from an elastic `JsonDocument` (~700-900 B of report plus its own allocations, on a device whose free DRAM floor under ordinary HA polling was measured at 576 B); adding a second compact serialiser beside it would have left the original dead, which is the same trap this class has already produced four times. Task metrics were dropped from the report: `HealthMonitor::registerTask()` turns out to have no callers either (`SystemInitializer::registerTask()` is an unrelated method that only fills its own cleanup list), so `taskCount_` is always 0, `checkTaskHealth()` iterates nothing, and every task field would have been a constant - the fifth inert path found in this class. Failing to get the lock now reports `{"st":"unknown","err":"busy"}` instead of `{}`, which was indistinguishable from a clean report with nothing to say. **Corrected after the first flash:** `min` initially carried `memoryMetrics_.minFreeHeap` (`ESP.getMinFreeHeap()`, `MALLOC_CAP_INTERNAL`) and so reported 55732 B on the device while the real DRAM floor was 4640 B - a 12x overstatement sitting directly beside the genuine DRAM figure in `blk`, i.e. the precise misreading the heap notes in MQTT_API.md warn against. `MemoryMetrics` gained `minFreeDram` from `heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)`, the same source as `heap_dram_min` on `boiler/status/health` and the diagnostics memory dump, so all three now agree. `memoryMetrics_`/`networkMetrics_` are also value-initialised in the constructor - both are plain structs with no default member initialisers, and the report publishes their fields verbatim
+- Header-only helpers with native tests: `AutotuneClock.h` (wrap-safe run time), `AutotuneGainTarget.h` (which gain set a tuning result belongs to) and `BoilerPowerLevel::bangBangCycleStart()`
+- `boiler/cmd/scheduler/disable` as an alias of `enable` with the state in the topic: `{"id":N}` is a complete payload. A payload asking for the opposite state is rejected with `enabled_conflicts_with_topic` instead of disabling the schedule
+- `boiler/cmd/scheduler/clear` erases all schedules, requiring the explicit payload `confirm` like the FRAM format command. Running schedules are ended first so their water or heating request is released; the empty list is saved to FRAM. Replies `{"status":"ok","cleared":N}`
+- TROUBLESHOOTING.md - Consolidated troubleshooting guide
+- CHANGELOG.md - This file
+- BurnerDemandGate: BurnerControlTask publishes an arming permission (`getBurnerDemandPermission()`) and arms a new or changed request only when BoilerTempControlTask would; BoilerTempControlTask publishes its PID decision (`getBoilerTempDecision()`)
+- `BurnerTransitions::step()`: burner state machine transition logic (IDLE, PRE_PURGE, IGNITION, RUNNING, MODE_SWITCHING, early restart from POST_PURGE) as a header-only, native-testable function; decision rules in `BurnerTransitionPolicy`
+- `notifyWheaterTaskSwitchedOff()`: called by `StateManager::setBoilerEnabled(false)`, `setWaterEnabled(false)`, `setWaterOverrideOff(true)` and `CentralizedFailsafe::emergencyStop()`; wakes WheaterControlTask, which ends a running charge on its next run even if water heating was re-enabled within the same cycle
+- Header-only helpers with native tests: `PIDGainFixedPoint`, `RelayExtrema::Tracker`, `RelayCommandPolicy`, `WaterChargePolicy`
+- PID autotune limits: start only with a valid, fresh boiler output within 15-75°C (`{"status":"rejected"}`), abort above 80°C or on an invalid/stale boiler sensor (`{"status":"aborted"}`)
+- Autotune method persisted: loaded from settings at init, `method:<name>` command saves it
+- Native tests: `test_pid_gain_fixed_point.cpp`, `test_relay_extrema_tracker.cpp`, `test_burner_transition_policy.cpp`, `test_burner_transitions.cpp`, `test_burner_demand_gate.cpp`, `test_relay_command_policy.cpp`, `test_stage_c_policies.cpp`
+- MQTT command `boiler/cmd/emergency_reset` (payload `reset`): `CentralizedFailsafe::clearEmergencyStop()` releases a latched emergency stop once the boiler output/return are below 110°C, the sensors are available and no SENSOR_FAILURE/MODBUS/RELAY error bit is set; restores `BOILER_ENABLED` from the saved setting; result on `boiler/status/burner` (`emergency_released`, `emergency_not_active`, `emergency_release_refused:<reason>`). Rules in `EmergencyStopRelease.h`, native test `test_emergency_stop_release.cpp`
+- Removed native tests `test_burner_state_machine.cpp` (30) and `test_burner_safety.cpp` (10): they tested local copies of the logic with behaviour the firmware lacks (flame-loss ERROR, exhaust/min-return/rise-rate checks); real burner logic stays covered by `test_burner_transitions.cpp`, `test_burner_transition_policy.cpp` and `test_stage_c_policies.cpp` (native suite now 209 `RUN_TEST`)
+- MQTT command `boiler/cmd/scheduler/enable` (`{"id":N,"enabled":true|false}`): sets the stored schedule's enabled flag (FRAM format unchanged), ends a running schedule when disabled, replies `{"status":"ok","id":N,"enabled":..}` / `not_found` / validation errors on `boiler/scheduler/response`; `boiler/status/scheduler/info` adds `disabledIds`; space heating schedules without `target_temp` use the mode default (COMFORT 21, ECO 18, FROST 10 instead of always 21), invalid `mode` is rejected (`invalid_mode`). Rules in `SchedulerCommandPolicy.h`, native test `test_scheduler_command_policy.cpp`
+
+### Changed
+- Closed the `sf:1` question from the 2026-09-18 review: it is **not** a fault. `sf` carries `TemperatureSensorFallback::getCurrentMode()` where `0 = STARTUP (waiting)`, `1 = NORMAL (OK)` and `2 = SHUTDOWN (degraded)`, so `1` is the healthy steady state and had been misread as a boolean "fallback active" flag. Investigating it is what surfaced the two dump defects above
+- Recorded why `STACK_SIZE_PERSISTENT_STORAGE_TASK` stays at 5120 rather than replacing "Keep - not stress tested yet" with a trim. Its measured peak is 1860 B, which makes it look like ~3 kB of spare DRAM and made it the obvious candidate to fund the pump and BoilerTempCtrl increases. It is not spare: `tools/stack_walker.py` puts the worst-case bound at **4272 B** (chain 3904 plus prefix and interrupt frame), i.e. 848 B of real headroom, and `PersistentStorage::processCommandQueue` alone has a 1328 B frame - the largest in the image. Trimming the 1536 B that would have funded both increases would have left the stack roughly 690 B **below its own static bound**. The high-water mark was the misleading number here, exactly as the stack notes warn
+- **Two comments corrected where they stated something false.** (1) `BurnerRequestManager.cpp` justified removing a function-local `portMUX_TYPE` with "a stack-local spinlock excludes no other task/core". That premise is **wrong on this port**: `portENTER_CRITICAL` -> `vPortEnterCritical` -> `xPortEnterCriticalTimeout` masks interrupts on the calling core before taking the lock (`portmacro.h:552`, `XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL)`), and all six pinned tasks in `TaskInitializer` run on core 1, so such a mux did suppress preemption by the other writers. The removal remains correct for the reasons that actually hold - the function already runs under `requestMutex`, and wrapping `xEventGroupSetBits` (which calls `vTaskSuspendAll`) inside a masked-interrupt region is an ESP-IDF violation that can trip `configASSERT` - and the same premise was cited as precedent in `6e1136c`, so it is now flagged as not reusable. (2) `TaskInitializer`'s SyslogTask note said the task "runs once, hits the disabled branch and calls `vTaskDelete(NULL)`". It does not do so promptly: `SyslogInitializer.cpp` blocks on `xEventGroupWaitBits(NETWORK_READY | STORAGE_READY, ..., 30000)` **before** reaching that branch, so all 4096 B are held until those bits arrive or for a full 30 s if Ethernet never comes up - and the task is created before the pumps and MonitoringTask in the same function, so the allocation overlaps theirs during boot. 4096 also exceeds the 3828 B largest free block measured after the pump increase, so `startTask` can simply fail with only a `LOG_WARN`. Kept at 4096, but recorded as a boot-window DRAM item rather than spare steady-state capacity
+- `RelayCommandPolicy` gained `gateToggle()`, the protection decision that has to run under the rate-limiter lock, and `admit()` is now written in terms of it. `processSingleRelay()` calls the same function inside its critical section and does the pump check outside, so the two paths can no longer diverge on whether a command is a real change or whether it passes the limiter. Previously that sequence existed **three times** - in `admit()`, retyped in `processSingleRelay()`, and retyped again in the test - and the production comment claimed `test_relay_policy_decomposed_matches_admit` pinned the equivalence. It did not: the test compared `admit()` against its own local copy, and the native build never compiles `RelayControlTask.cpp`, so reordering the production steps left the suite green. The comment has been corrected to state what is actually guaranteed (a shared gate, not statement order in `processSingleRelay`). The test was also strengthened, because it could not have caught two real bugs: `nowTicks` was the constant 5000 across all 160 iterations with a zeroed limiter, so `RATE_LIMITED` was never generated for a valid relay - the case the lock exists for - and only the pump-check *count* was asserted, not its arguments, so swapping `requestedState` for `desiredState` passed. It now sweeps three limiter pre-states (fresh, inside the 150-tick minimum interval, at the per-window cap), asserts the arguments, and fails if either `RATE_LIMITED` or `PUMP_PROTECTED` stops being exercised. Mutation-checked: the argument swap now fails two tests. New `test_relay_policy_window_reset_readmits` covers the minute rollover that `rateLimitMux` guards and that nothing exercised (267 native tests)
+- Removed a self-deadlock in the MQTT publish path (requires ESP32-MQTTManager 30252a3). esp-mqtt aborts the connection when a transport write stalls past the network timeout, and dispatches `MQTT_EVENT_DISCONNECTED` **inline in the publishing task**; since `publish()` held the non-recursive instance mutex across the call into esp-mqtt, that task re-entered a mutex it already held and blocked permanently, then never fed its watchdog again - the same 30 s panic reboot the bounded publish mutex was added to prevent. The connection flag is now atomic and written outside the guard, both event handlers take a bounded 100 ms wait, and the network timeout moved 3 s -> 5 s because the shorter value made that path easier to reach
+- `boiler/cmd/diagnostics` no longer counts dropped chunks as sent: a LOW-priority publish is discarded at 50% queue utilisation and DROP_OLDEST can evict a queued chunk, so dumps arrived with silent holes and no `truncated` marker
+- The OTA teardown now keys off `disconnect()`'s return value instead of `isConnected()`. The two use different sources of truth and diverge during disconnect handling, so the teardown could be skipped while both log lines claimed success - leaving the OTA to starve for DRAM exactly as before the fix
+- MQTTTask bounds its publish drain at 5 s instead of feeding the watchdog after every message. Per-message feeds restarted the 30 s budget each time, so a task publishing one slow message per iteration would never trip - wedged but invisible; a single publish that blocks past the watchdog still trips it
+- The circuit-breaker cooldown no longer reconnects during an OTA, which would re-allocate the ~8 kB the teardown had just freed
+- Removed the write-only burner status bits from `BurnerControlTask`. Both sites - the boiler-disabled branch and the state-publish tail - cleared and re-set `BURNER_OFF` / `BURNER_HEATING_LOW|HIGH` / `BURNER_WATER_LOW|HIGH` / `BURNER_ERROR` (bits 16-21), and **nothing in the firmware ever tests those bits**: no condition, no consumer outside that one file. **Correction (2026-09-18 review): the "no MQTT publish" half of that claim was wrong.** Two published surfaces carry the raw SystemState word, bits 16-21 included - `ErrorContextCapture.cpp:89` snapshots it unmasked and `ErrorContextFormat.h:93` emits it as `ss` on the retained `boiler/error/context` topic (documented at MQTT_API.md:877), and `RuntimeDiagnostics::decodeEventBits` covers 24 bits so they appeared in the `events` dump too. Bits 16-20 now publish as permanently 0. No forensic information is actually lost: the same payload carries `rd`/`ra` (relay desired/actual), whose bit 0 `BURNER_ENABLE`, bit 1 `POWER_BOOST` and bit 2 `WATER_MODE` (`RelayIndices.h:17-19`) encode burner on/off, half vs full power and water vs heating mode - exactly what bits 16-20 duplicated. So the deletion removed a redundant second encoding, not a telemetry source; what it did leave behind was documentation describing dead bits, now corrected in EVENT_SYSTEM.md, EVENT_FLOW.md, TASK_ARCHITECTURE.md, generated/events.md and tools/event_config.yaml. Burner state also reaches Home Assistant through the `r` and `s` fields of `boiler/status/sensors`. `BURNER_ON` (bit 7) is untouched - it is the only burner bit anything reads (`RelayControlTask:618`) and `BurnerStateMachine` owns it
+- That deletion also retires the cross-task `BURNER_ERROR` clobber flagged when the useless critical sections were removed: `BurnerControlTask` had been clearing a bit written by `BurnerStateMachine` (`:343, :702, :786, :811, :922`) and `CentralizedFailsafe` (`:163, :557`), with no synchronisation on either side. The bit now has a single set of writers, so the race is gone rather than merely harmless. The generated `SystemEventsGenerated.h` still defines the constants and was deliberately **not** edited - it carries a "DO NOT EDIT" header and is produced from `tools/event_config.yaml`; unused constants there cost nothing, whereas regenerating would churn a file for no behavioural gain
+- `QueueManager::ManagedQueue::handleOverflow()` split into `noinline` per-strategy helpers, cutting ~368 B from the worst-case stack of **every** MQTT-publishing task. The function held four large locals in mutually exclusive `switch` branches - `dummy[512]`, `MQTTPublishRequest tempMsg` (~396 B), `oldestMsg` (~396 B) and a second `dummy[512]` - and Xtensa allocates the whole frame at `entry`, so every caller paid for all branches at once: a measured **960 B** frame sitting on the stack of whichever task was publishing, reached exactly when the queue is full, i.e. under load. `MQTTTask::publish` is called from 12 modules including `BurnerStateMachine`, `TemperatureSensorFallback`, `MonitoringTask` and `PersistentStorageTask`
+- Measured with `objdump` before and after (Xtensa `entry a1, N` prologue): `handleOverflow` **960 -> 32 B**, with the live path now in `dropOldestItem()` at 560 B and the priority-drop locals isolated in `dropLowestPriorityItem()` at 960 B. Both queues in this firmware are configured `DROP_OLDEST` (`MQTTTask.cpp:546,552`, the only two `createQueue` calls in the project), so `DROP_LOWEST_PRIORITY`, `DROP_NEWEST`, `BLOCK` and `CALLBACK` are never selected - the 960 B was being charged for branches that cannot execute. `noinline` is required, or the compiler merges the frames back. **Caveat on the headline metric:** a naive deepest-path walk over the call graph now reports 2800 B versus 2768 B before, because it still follows the edge into the unreachable `dropLowestPriorityItem`; the *reachable* worst case is what improved, from 960 B to 32 + 560 B in that segment
+- **Retracted:** an earlier revision of this entry claimed the queue fix also explained the unaccounted ~940 B in `BoilerTempCtrl`'s peak, via `publishDecision()` -> `MQTTTask::publish` -> `handleOverflow` on every control cycle. That is **wrong**, and the device disproved it: after flashing, `BoilerTempCtrl`'s peak went 2428 -> 2540 B, i.e. unchanged rather than ~368 B lower. The reason is that `handleOverflow()` only runs when a queue is **full**, which had not happened - so it was never part of the observed peak. The queue refactor stands on its own merits (a measured 960 -> 32 B frame that would land on every publisher during queue-full under load), but it explains nothing about the steady-state peak, and that gap is open again
+- **The residual is explained, and my calibration claim was wrong.** An earlier revision of this entry reported the walker predicting `PumpControlTask` at "1632 B against an observed 1632 B - exact". That agreement was **coincidence**: a bare frame-sum was being compared against a high-water figure that also contains fixed prologue and interrupt overhead. Verified in the disassembly of the current image, a task's measured "used" is not just the call chain but `prefix + chain + interrupt frame`:
+  - **~164-176 B fixed prologue** carved out of the allocated stack and counted as used - `pxPortInitialiseStack` reserves a 96 B coprocessor save area (`addi a7, a2, -96`) plus alignment loss, and the task runs under two 32 B wrappers (`vPortTaskWrapper`, `TaskManager::safeTaskWrapper`)
+  - **192 B per interrupt, on the TASK stack.** `_xt_lowint1` executes `addmi a1,a1,-256; addi a1,a1,64` (net -192) against the interrupted task's SP and saves registers there *before* `_frxt_int_enter` switches to the ISR stack; `_xt_coproc_exc` is identical and `_xt_user_exc` jumps into it. So `CONFIG_FREERTOS_ISR_STACKSIZE 2096` holds the handler *body*, not the entry frame - the earlier note citing it to dismiss interrupt overhead was wrong
+  - **A virtual call the walker never followed.** `custom_log_write` loads a vtable slot and dispatches `callx8` into `Logger::logV`, so every logging path sum was silently truncated at that instruction. The deepest real chain continues through `vsnprintf` (64) -> `_vsnprintf_r` (144) -> `_svfprintf_r` (800) -> `_dtoa_r` (160) and, on a task's **first** `%f`, into `_Balloc` -> `_calloc_r` -> the heap allocator and its spinlock. Note `vsnprintf` is 64 B and `_vsnprintf_r` 144 B - an earlier entry conflated the two
+- That first-use allocation explains why the peak is static from 64 s onward: newlib's per-task `_reent` freelist is empty only at the first `%.2f/%.4f` this task formats, so later float logs stop at `_Balloc` and can never raise the mark. It also means the pump tasks, which never format floats, skip that chain entirely - which is why their peaks sit ~700 B lower despite similar logging. **Forward-looking risk:** a `%f` log issued from a deeper call site (e.g. beneath `MQTTTask::publish`, frame 464) would push that first-use chain past 3072 B. The raise to 3584 therefore was justified, though not for the reason originally given
+- `BoilerTempCtrl` stack raised 3072 -> 3584 B (+512 B DRAM). This is a **margin decision, not a repeat of the pump defect**: its local `STACK_SIZE_BOILER_TEMP_TASK` shadows nothing, since ProjectConfig has no macro of that name, so 3072 was the intended size. Measured 644 B free (2428 B peak), and that figure is *identical* across four task dumps spanning two firmware builds and uptimes of 64 s, 424 s, 5103 s and 40264 s - so the peak is set at task init and is static rather than load-driven. Frame sizes only partly explain it: the task frame is 336 B and its callees are small (`predictHeatDemand` 160, `calculateModulating` 112, `calculate` 112, `updateMode` 96), giving a deepest single-log path of ~1490 B including `_vfprintf_r`'s 800 B - roughly 940 B short of the observed peak, which remains unaccounted for and is recorded as such
+- The increase is justified by what those measurements do **not** cover: the autotune-completion branch (`BoilerTempControlTask.cpp:388-390`) declares a 160 B local buffer and `snprintf`s three `%.4f` floats, pulling `_vfprintf_r` plus `_dtoa_r`. That is the deepest path in the task, autotune was not running during any dump, and a water autotune with a cold tank is still planned - so 644 B is a best case that excludes the path most likely to exceed it. Cost takes the observed DRAM floor (`heap_dram_min` 1812 B at 11.2 h) to roughly 1300 B, still clear of zero and of `MIN_DRAM_BLOCK_WARNING`
+- Pump task stacks raised 2048 -> 2560 B, at a real cost of **+1024 B of DRAM** (corrected - see below; an attempt to fund this by trimming `SyslogTask` was withdrawn because it frees nothing). `TaskInitializer.cpp:316` declared a function-local `constexpr STACK_SIZE_PUMP_TASK = 2048` that **bypassed** ProjectConfig's `STACK_SIZE_PUMP_CONTROL_TASK`, which had been deliberately raised to 3072 after profiling ("Dec 2025: was 2560, had 700-768 free"). The pumps never received that increase and were running below even the size already judged too small: measured on the device, **WaterPump had 288 B and HeatingPump 420 B of free stack** - the two tightest of 32 tasks, both driving pumps on a live boiler. The diagnostics dump's own low-stack warning fires below 256 B, so 288 B sat just under the alarm and went unnoticed
+- Root cause measured rather than guessed, by reading frame sizes out of the compiled image (`objdump`, Xtensa `entry a1, N`): a **single `LOG_*` call costs ~1312 B of stack on any task** - `PumpControlTask` 160 + `log_write_impl` 80 + `custom_log_write` 64 + `Logger::logV` 64 + `vsnprintf` 144 + **`_vfprintf_r` 800**. Against a measured peak of 1760 B, that is ~75% of the pump's stack in one log call, while the task's own logic accounts for just 160 B. **There is therefore no demand-side saving available** short of removing logging from a safety-relevant task. Three candidate fixes were investigated and rejected on evidence: the pump task formats no floats (so the "float formatting" note in ProjectConfig does not apply to it); the logger uses pooled buffers, not stack ones (`formatBuffer` comes from `BufferPool`); and switching to newlib's integer-only printf would save only ~96 B (`_svfiprintf_r` is 704 B vs 800 B) and is impossible anyway while eight linked libraries format floats. `Syslog::sendInternal`'s 1088 B frame is **not** a hazard: syslog is registered as an async Logger *subscriber*, not a backend, so it runs on its own task rather than the caller's stack
+- The pumps are at 2560 rather than the configured 3072 purely for DRAM budget: free DRAM measured 4608 B with a 476 B floor since boot, so a net +1024 B would drop the largest free block below `MIN_DRAM_BLOCK_WARNING` (2560) and push that floor negative. Reaching the profiled 3072 needs another 1024 B, for which the OTA task's 3072 B stack is the obvious source if OTA is ever dropped. **Correction, caught by checking the device after flashing:** the pump increase was initially described as funded at zero net cost by trimming `SyslogTask` 4096 -> 3072. That was wrong on two counts. The "2064 B free of 4096" figure actually belonged to **`LogSub`**, the Logger library's subscriber task - a different task - and `SyslogTask` does not appear in a task dump at all: `syslogEnabled` defaults false, so it runs once, takes the disabled branch in `SyslogInitializer::SyslogTask` and calls `vTaskDelete(NULL)`, releasing its stack. Trimming it frees nothing at steady state, so the trim was reverted to 4096 (it would also have become a trap if syslog were ever enabled via `boiler/cmd/config/syslog_enabled`, since that task then becomes persistent and needs the room for EthernetUDP plus `Syslog::sendInternal`'s 1088 B frame). Measured on the device at matched 63-64 s uptime across the two builds: free DRAM 6380 -> 5668 B, largest free block 5108 -> 3828 B. The cost is accepted deliberately: a 288 B stack margin on a task driving a pump is a worse failure mode than a tighter heap floor, which the DRAM gate at least reports. `LogSub` (5120 B via `platformio.ini:143`, peak usage 3056 B) was considered as real funding and rejected - its spare evaporates if syslog is enabled, which is the same trap in the opposite direction
+- **Verified on hardware at 40264 s uptime (11.2 h), through a full water heating cycle:** WaterPump 288 -> **720 B free** (28% of 2560, peak 1840 B), HeatingPump 420 -> **808 B** (32%, peak 1752 B), no low-stack warnings. The marks read identically at 64 s, 424 s and 40264 s, which shows the pump peak is established during **task initialisation** - the two startup `LOG_INFO` calls - and never exceeded by the running loop, not even by the state-change path with its `LOG_INFO` and FRAM counter increment. So the original 288 B was likewise an init-time peak: the margin was thin from boot and static, rather than creeping toward overflow. And the DRAM floor came out *better* than before despite the +1024 B: `heap_dram_min` 1812 B at 11.2 h versus 476 B over ~9 h on the previous build, which suggests that earlier floor was substantially caused by repeated diagnostics probing (a tasks dump alone takes ~1280 B contiguous) rather than by ordinary polling. Next tightest task is now `BoilerTempCtrl` at 644 B free (21% of 3072), untouched
+- Removed the last two function-local `portMUX_TYPE` critical sections, at `BurnerControlTask.cpp:596` and `:896`. Each had two defects, both already documented and fixed once at `BurnerRequestManager.cpp:114-125`: the spinlock was declared on the stack, so it excluded no other task or core and provided no atomicity at all, and it wrapped `xEventGroupSetBits()` - which calls `vTaskSuspendAll()` internally - inside `portENTER_CRITICAL`, an ESP-IDF violation that can trip `configASSERT`. So the sections were not merely useless; they were a latent assert risk taken for no benefit. A repo-wide sweep confirms these were the last two instances: the remaining `portENTER_CRITICAL` sites (the MQTT dedup spinlock and the new relay rate-limiter guard) are file-static and contain no FreeRTOS calls
+- Removing them is observably safe rather than merely harmless: the comment claiming they prevented "a race with other tasks reading state" was false. Bits 16-21 (`BURNER_OFF`, `BURNER_HEATING_LOW/HIGH`, `BURNER_WATER_LOW/HIGH`, `BURNER_ERROR`) are **never tested anywhere in the firmware** - no condition, no MQTT publish, no consumer outside `BurnerControlTask` - so the clear-then-set window cannot be observed. `BURNER_ON`, the one burner bit that is read (`RelayControlTask:618`, and only to emit a debug log on change), is bit 7 and appears in neither mask. **Flagged, not actioned:** those six status bits are therefore write-only, and `BURNER_ERROR` is written from several tasks with no synchronisation - harmless today only because nothing reads it. Either they should feed telemetry or they should go. (Resolved by the next commit, which deleted bits 16-20; `BURNER_ERROR` remains, still written by `BurnerStateMachine` and `CentralizedFailsafe` without synchronisation, and it lost the periodic clear that this block performed - see the correction above. The premise "a function-local spinlock excludes no other task or core" is itself wrong on this port; see the 2026-09-18 correction below)
+- Fixed an unsynchronised read-modify-write on the relay rate limiter. `processSingleRelay()` runs in **more than one task**: the relay task drains requests through `RelayCommandProcessor` and also clears the counters in `updateRateLimitCounters()`, while `BurnerControlTask` and `BoilerTempControlTask` reach the same code through `BurnerStateMachine`, `SafetyInterlocks` and the ten **non-emergency** `setRelayState()` calls in `CentralizedFailsafe`. `RelayCommandPolicy::consumeToggle()` is a check-then-act across `toggleCount[]` and `lastToggleTicks[]` with no lock, so two tasks commanding the *same* relay could lose an increment (the limiter then under-limits) or read a stale `lastToggleTicks` and **spuriously reject a genuine command** - and a spurious rejection is precisely what escalated to an emergency stop on 2026-09-14 15:41:25. `pumpLastStateChangeTime[2]` was equally unguarded. A file-static `portMUX_TYPE` now guards `consumeToggle()`, `restartPumpTimer()`'s write and the minute `memset`. It must be file-static: a stack-local spinlock excludes nothing, as `BurnerRequestManager.cpp:115-118` already documents
+- `RelayCommandPolicy::admit()` is decomposed at its one production call site rather than wrapped. The lock cannot enclose the whole call, because `checkPumpProtection()` takes `relayStateMutex_` for up to 10 ms and blocking on a mutex inside `portENTER_CRITICAL` is illegal - while reusing `relayStateMutex_` itself would self-deadlock, since it is non-recursive and that callback already holds it. Emergency commands never touch the arrays at all: `appliesProtection()` returns early on `emergencyBypass`, before `consumeToggle()`. To stop the production sequence and `admit()` drifting apart - the "limiter re-implemented" trap (`io-6`) - the new native test `test_relay_policy_decomposed_matches_admit` asserts both the returned `Admission` **and** the resulting limiter side effects are identical across every input combination, and the test helper `sendRelay()` was updated to mirror the new order. Native suite 265 -> 266. Deliberately left unguarded: the `pumpLastStateChangeTime` reads inside `RelayVerificationManager` (single aligned 32-bit loads, at worst one command stale, which the previous code already tolerated) and the `init()` memsets, which run before the mutex or any other task exists
+- Removed the empty `resetForTesting()` stubs from `ModbusCoordinator` and `SharedResourceManager`. Both were no-op bodies under `#ifdef UNIT_TEST` carrying a comment that they were "intentionally not implemented" - worse than having no function at all, because a caller compiles cleanly, believes the singleton was reset, and gets silence with no compile error and no runtime signal. Same trap as `shouldEnterFailsafe()` and the write-only threshold setters. Neither had a caller anywhere. The design rationale they carried - why these two genuinely cannot be reset (live FreeRTOS timer and task notifications; event groups, mutexes and queues held across the system) and the recommendation to use mocks or dependency injection - is preserved as a comment at each site, so the guidance survives without the callable stub. `test/README.md` already lists both under "Non-Resetable Singletons", which is now literally true. Verified in `esp32_test`, the only environment that compiles these blocks at all: 0 warnings
+- `MB8ARTTasks::updateSensorData()` no longer declares a local that only `LOG_DEBUG` reads. `fixedPressure` was consumed solely inside the debug log, so at log levels where `LOG_DEBUG` compiles away - as in `esp32_test` - it became an unused variable (`MB8ARTTasks.cpp:383`, `-Wunused-variable`). It was **not** dead code, and deleting it would have broken the debug line; instead the `pressureFixed` local declared a few lines below for the alarm comparison is hoisted above the log and now serves both, which also removes a duplicate read of `SRP::getSensorReadings().systemPressure` (nothing modifies it in between). Verified: `esp32_test` builds with 0 warnings, down from 1, and the production build is unchanged at 0
+- `test/README.md` now documents `pio run -e esp32_test` as the compile check for `#ifdef UNIT_TEST` code in `src/`, with a table of which of the two `UNIT_TEST` environments actually compiles `src/`. `native_test` is `platform = native` and builds only `test_native/`, so guarded blocks inside `src/` never reach a compiler there; `esp32_test` is the only environment that compiles them, and because it normally wants a board in order to run, it rarely gets built - which is exactly how the `HealthStatus::UNKNOWN` compile error survived unnoticed
+- Fixed a build break in `HealthMonitor::resetForTesting()`: it assigned `HealthStatus::UNKNOWN`, which is not a member of that enum (`EXCELLENT`/`GOOD`/`WARNING`/`CRITICAL`/`FAILED`). It now assigns `GOOD`, matching what the constructor initialises `overallHealth_` to, so a reset restores the constructed state. This was **not** merely latent, as first assumed when it was spotted: `UNIT_TEST` is defined in two environments, and while `native_test` is `platform = native` and does not compile `src/`, `esp32_test` extends the ESP32 base and does - so `pio run -e esp32_test` could not have built at all, and evidently had not been run. Verified by building that env (SUCCESS, 109 s) and confirming the guarded block genuinely compiled rather than being preprocessed away: `HealthMonitor::resetForTesting()` is present in `.pio/build/esp32_test/src/monitoring/HealthMonitor.cpp.o` and absent from the normal env's object file. `test/README.md` documented the non-existent value in a worked example and now shows `GOOD`. `esp32_test` also surfaces one pre-existing unrelated warning (`MB8ARTTasks.cpp:383`, unused variable `fixedPressure`), left alone
+- Removed `HealthMonitor::setMemoryWarningThreshold()`/`setMemoryCriticalThreshold()` and the `memoryWarningThreshold_`/`memoryCriticalThreshold_` members they wrote - two public setters that silently did nothing. Nothing read either member: memory is judged directly against `MIN_DRAM_BLOCK_WARNING` (2560 B) and `MIN_DRAM_BLOCK_CRITICAL` (1536 B) in both `updateMemoryMetrics()` and `calculateHealthStatus()`. They were deleted rather than wired up because the two scales are incompatible - the constructor seeded them from `MIN_FREE_HEAP_CRITICAL` (10000) and `MIN_FREE_HEAP_WARNING` (20000), which are `MALLOC_CAP_INTERNAL` figures, so routing them into the DRAM-block comparison would have tested a largest block measured at 5108 B on the live device against a 10000 B critical limit and pinned a healthy boiler at CRITICAL permanently. Re-seeding them from the DRAM constants would instead have produced runtime-tunable thresholds with no caller, which is a subtler trap than a setter that plainly does nothing. `MIN_FREE_HEAP_*` itself is untouched and still used by `main.cpp`, `CentralizedFailsafe`, `ErrorHandler`, `MonitoringTask` and `PersistentStorageTask`
+- Removed `HealthMonitor::registerTask()`, `checkTaskHealth()`, the `TaskMetrics` struct and the `taskMetrics_`/`taskCount_` members. `registerTask()` had no callers anywhere in the firmware - the `registerTask` calls in `TaskInitializer.cpp` are `SystemInitializer::registerTask`, an unrelated method that only appends to its own cleanup list and never forwards - so `taskCount_` was permanently 0, `checkTaskHealth()` iterated nothing on every 5 s health tick, `stackHighWaterMark` was only ever assigned inside the registration that never ran, and the low-stack warning the apparatus existed to raise could not fire. The `// Check tasks` loop in `calculateHealthStatus()` was dead for the same reason and went with it; it could only raise the status to `WARNING`, so nothing else is lost. This was the fifth inert path found in this one class, and it frees a 20-element `std::array<TaskMetrics>` (~320 B of instance state). No API change: the report on `boiler/cmd/diagnostics health` never carried task fields, and `health.tasks`/`health.stack_hwm` on `boiler/status/health` come from `MQTTPublisher` and are untouched
+- Subsystem health can now actually fail. `SubsystemHealth::isHealthy` was initialised `true` and only ever re-set to `true`, so `calculateHealthStatus()`'s `if (!health.isHealthy) return FAILED;` could never fire and the health report's per-subsystem `healthy` field was a hardcoded constant - `HealthStatus::FAILED` was unreachable. A subsystem is now marked unhealthy once its error rate exceeds `SUBSYSTEM_UNHEALTHY_RATE_FP` (2500 = 25%, above the 10%/5% levels the overall status already used), and recovery deliberately stays time-based (5 minutes without an error). Rate-based recovery would latch some subsystems unhealthy forever, because `errorRateFP` is cumulative since boot and never decays and several subsystems only ever call `recordError()` and never `recordSuccess()` - MQTT among them - so a single error pins them at 100%. Testing recovery first also supplies hysteresis. `calculateErrorRates()` now runs before `updateSubsystemHealth()` so the decision uses the current cycle's rate rather than the previous one's. These paths only became reachable at all once HealthMonitor was wired up; `overallHealth_` now has a consumer as well - the `health` payload on `boiler/cmd/diagnostics` (see Added)
+- `calculateHealthStatus()` now judges memory on the largest free DRAM block too, with the same 2560/1536 B limits and the same OTA suppression as the gate in `updateMemoryMetrics()`. This was the last surviving inert `currentFreeHeap` comparison: it tested a ~57 kB value (which counts IRAM the allocator cannot hand out) against 10/20 kB limits, so neither branch could ever be taken even at 192 bytes of real free DRAM, and `overallHealth_` could not reflect memory pressure. **Hygiene when written, functional since:** at the time `overallHealth_` had no consumers at all - `getOverallHealth()` and `generateHealthReport()` were defined but called from nowhere - so nothing observed the corrected value. The `health` payload on `boiler/cmd/diagnostics` (see Added) now publishes it. Fixed anyway because a third inert comparison sitting in live code is exactly the trap that hid the dead DRAM gate. This left `memoryWarningThreshold_`/`memoryCriticalThreshold_` written but never read; they and their two public setters have since been removed (see below)
+- **HealthMonitor is now actually wired up, so the memory gating below is in effect.** It had never been instantiated: `gHealthMonitor` stayed `nullptr`, so `SystemResourceProvider::getHealthMonitor()` returned null to every caller and the entire class - including every `HEALTH_RECORD_ERROR` site across the firmware - was a silent no-op. MonitoringTask now initialises it at startup (publishing the global only *after* `initialize()` succeeds, since `initialize()` runs a metric pass of its own) and drives `updateMetrics()` on the existing 5 s health tick. The re-entrancy behind it is fixed too: `updateMetrics()` holds `healthMutex_` and its helpers called the public `recordError()`/`recordSuccess()`, which re-take that same non-recursive mutex - they blocked for the full 50 ms timeout and then recorded nothing. Internal callers now use unlocked `recordErrorLocked()`/`recordSuccessLocked()` variants. `shouldEnterFailsafe()` was **removed** rather than repaired. It had no callers anywhere and could not have worked if it had: it re-entered the non-recursive `healthMutex_` three times via `getSubsystemHealth()`, so its critical-subsystem check was structurally dead (150 ms of guaranteed timeouts); its memory test compared `ESP.getFreeHeap()` against a limit that value can never reach; and every failure path returned `false`. A failsafe predicate that fails silent, in parallel with the real one in `CentralizedFailsafe`, was a trap for whoever adopted it next
+- **Earlier retraction, now resolved - the memory gating below was NOT IN EFFECT when first shipped.** A code review found `HealthMonitor` is never instantiated (`gHealthMonitor` is `nullptr` and never assigned; `initialize()` has no callers), so the DRAM gate added in `ac78743` never executes and no `Low DRAM`/`Critical DRAM` line can ever be logged. Every `SRP::getHealthMonitor()->recordError(...)` call site is likewise a no-op. A second defect sits behind it: `recordError()` re-takes the non-recursive `healthMutex_` its caller already holds, so even once wired up it would record nothing. The published telemetry (`heap_dram`, `heap_dram_blk`, `heap_dram_min`) is unaffected and real. Pending a decision to either wire it up or drop the claim
+- Memory monitoring now gates on the **largest free DRAM block** instead of `ESP.getFreeHeap()`. The old check compared internal heap (~58 kB, mostly IRAM that `malloc()` cannot hand out) against 10/20 kB limits, so it could never fire - measured 2026-09-16, ordinary Home Assistant polling took free DRAM to 576 B with nothing noticing. Gating on the largest block rather than total free matters because allocations fail on contiguity and total free legitimately dips during a poll burst: new limits are `MIN_DRAM_BLOCK_WARNING` 2560 B and `MIN_DRAM_BLOCK_CRITICAL` 1536 B, set below the observed load floor of 3572 B and just above the 1436 B a network receive buffer needs. Suppressed during an OTA, where `Update.begin()`'s sector buffer drops the largest block to ~1.5 kB by design. Detection only - `recordError()` counts and logs, and the DEGRADED failsafe path through `attemptMemoryRecovery()` is deliberately untouched until the thresholds are confirmed over a cold-day cycle
+- `boiler/cmd/diagnostics tasks` refuses with `insufficient_memory` when the largest DRAM block is below the warning limit: `dumpTaskInfo()` takes a single ~1280 B contiguous allocation, which is enough to push other allocations over when DRAM is tight
+- OTA: the MQTT restore in `onOTAError` now runs exactly once. A failed OTA delivers more than one error callback (`OTA_CONNECT_ERROR` then `Aborted` were both observed), so the restore ran twice
+- OTA: `onOTAStart` now stops the MQTT client for the duration of the transfer. OTA here fails for lack of byte-addressable DRAM, not bandwidth: `Update.begin()` takes a 4096 B flash-sector buffer and `NetworkClient::fillBuffer()` then needs 1436 B contiguous, and the device was left with **1460 B** - a margin of 24 bytes. Measured on the device, the teardown frees 8952 B and lifts the largest block from 1460 to 9204 B. It is done only when actually connected (otherwise `loopStarted` would be left set and the client never re-initialised), with auto-reconnect disabled first (or `onDisconnect()` restores the client within a second), synchronously in OTATask (the IDF forbids stop/destroy from the MQTT event handler, and deferring would race the first read); `onOTAError` restores MQTT. Requires ESP32-MQTTManager 43d963c / ESP32-MQTTClient 551cb79, which bound esp-mqtt's network timeout to 3 s: at the 10 s default `esp_mqtt_client_stop()` blocked for ~10.4 s and overran the 10 s window espota allows for answering an invitation, which cannot be extended host-side (`espota.py` hardcodes `sock.settimeout(10)` for the connect-back). **Verified end to end on 2026-09-16**: the teardown now takes 8 ms (was ~10.4 s), frees 2684 -> 12932 B with the largest block going 1588 -> 9204 B, and the transfer ran 10% to 100% in ~13 s and rebooted cleanly with no watchdog. This also exercised the OTA rollback guard for the first time: `Updated firmware confirmed after 64 s - rollback cancelled`
+- `boiler/params/get/all` followed by single `get/<param>` reads no longer loses replies. PersistentStorage's command queue held 5 entries and `handleMqttCommand()` drops the NEWEST command on overflow without telling the caller or the broker: measured on the live boiler, `get/all` plus 8 single reads honoured exactly 5 commands and silently discarded the last 4. `PersistentStorageTask` now wakes on a new `STORAGE_COMMAND_PENDING_BIT` instead of waiting out its 1 s event timeout, and `ESP32-PersistentStorage` raises `COMMAND_QUEUE_SIZE` to 16 (~1.9 kB). Verified: the same burst returns 20 of 20 messages, previously 16
+- MQTTTask feeds the task watchdog at the top of its loop and once per drained publish, not only at the end of the loop, and `ESP32-MQTTManager::publish()` waits at most 5 s on its instance mutex instead of `portMAX_DELAY`. NOTE: this does NOT fix the OTA-triggered reboot - an OTA upload still trips the task watchdog on MQTTTask and resets the controller; the root cause is still open and OTA remains unusable (flash over USB)
+- Removed the unused `BurnerSafetyValidator::validateTemperatureSensors()` (no callers, ignored its config parameter; the rules live in `BurnerSafetyRules::validSensorCount()`)
+- Native tests pin the edges that mutation testing found unprotected: PID low-side saturation and anti-windup direction, clamping before the int16 narrowing, derivative truncation, the exact OFF/HALF/FULL switch errors and the bang-bang full-power threshold, the missing-pressure check order against the temperature limits and sensor count, and invalid relay indices
+- CLAUDE.md: Corrected "8-state" to "9-state" burner FSM
+- Burner leaves IDLE only with an active mode demand (`HEATING_ON` + heating request or `WATER_ON` + water request); PRE_PURGE aborts to IDLE when the mode request or the heat demand is withdrawn; RUNNING stops after 10 s without an active mode request (anti-flapping bypassed)
+- BoilerTempControlTask brings the heat demand in line with its PID decision every cycle (level-triggered): arms a missing demand while permitted, drops a demand re-armed while coasting
+- BurnerControlTask re-evaluates a blocked standing request every 10 s; autotune power-on requires the demand permission
+- Explicit disable of the running mode or the boiler stops the burner immediately (minimum on-time bypassed)
+- MODE_SWITCHING waits for a heating request only while heating is likely wanted, at most 15 s; a mode revert resumes only with the ON bit set; 30 s StateMachine hard timeout to POST_PURGE
+- POST_PURGE restarts to PRE_PURGE when heat demand returns (same conditions as from IDLE, minimum off-time applies)
+- Power level relay fault while entering RUNNING_LOW/HIGH: DEGRADED failsafe and POST_PURGE instead of an emergency stop; the third fault within 10 min escalates
+- Emergency shutdown switches off only the burner relays (BURNER_ENABLE, POWER_BOOST, WATER_MODE); the pumps stay with PumpControlModule
+- Relay rate limiting and pump motor protection apply only to commands that change the relay state; the pump protection timestamp is updated only on a real change
+- IGNITION StateMachine timeout is `IGNITION_TIME_MS + IGNITION_BACKSTOP_MARGIN_MS` (backstop only)
+- PID gain changes apply live (`BoilerTempController::updateMode()` reads the active gains every cycle, PID reset on change)
+- `pid/waterHeater/kp|ki|kd` ranges 0-100 / 0-10 / 0-50 (were 0-10 / 0-5 / 0-5)
+- PID reset after a control pause of more than 10 s
+- Autotune maximum duration 90 min (was 40 min); default autotune method ZN_PI (0)
+- `heating/outsideThreshold` range 5-25°C (was 5-20°C)
+- Water heating: `tempLimitLow >= tempLimitHigh` pauses water heating with one WARN (`WaterChargePolicy::limitsValid`); two-threshold decision in `WaterChargePolicy::nextChargeNeeded`
+- Water heating: switching it off (water or boiler disable, water OFF override) clears the charge latch; after re-enable a new charge starts only below `tempLimitLow` (heating preemption and sensor loss still resume)
+- ANDRTF3 temperature pointers no longer bound (`bindTemperaturePointers(nullptr, nullptr)`); ANDRTF3Task is the sole writer of the room temperature
+- Autotune reads `pid/autotune/amplitude` and `pid/autotune/hysteresis` (defaults 50 % / 1.0°C, were 40 % / 2.0°C and ignored); a warning shows the gain scale when the amplitude differs from the OFF/FULL swing
+- Removed unused `SystemConstants::Burner::POST_PURGE_TIME_MS`, `ERROR_RECOVERY_DELAY_MS` and the unconsumed `RelayControl::WATER_PUMP_ON/OFF` writes in WheaterControlTask
+- `BurnerSafetyValidator::SafetyConfig::maxBoilerTemp` default is `MAX_BOILER_TEMP_C` (110°C, was 85°C): BurnerControlTask and BoilerTempControlTask check the boiler output against the same limit
+- Removed the BurnerSafetyValidator runtime limit check (1 h continuous / 4 h daily, counters never updated), `checkDailyReset()`, `RUNTIME_EXCEEDED` and the validator state mutex
+- Removed unused code: `ErrorRecoveryManager` (never constructed) and its native test, `PIDControlTask` (never started), `CentralizedFailsafe::monitorSystemHealth()` (no caller)
+
+### Removed
+- Scheduler topic macros without an implementation (`/update`, `/command`, `/vacation`, `/pump_exercise`) from `include/MQTTTopics.h`; added `MQTT_CMD_SCHEDULE_STATUS` for the `status` command, which was handled but had no macro. Removing a macro does not unsubscribe anything (the wildcard subscription delivers every sub-topic), so the replies above are what makes them non-silent. `update` stays unimplemented: change a schedule with `remove` + `add`
+- Dead code: four subsystems removed after verifying they had no callers. Runtime behaviour is unchanged except that the boot log line `Initializing fail-open monitor...` is gone
+  - `FailOpenMonitor`: only `initialize()` was ever called, `recordFailOpen()` had no call site, so the counters stayed zero and `boiler/alert/degraded_operation` / `boiler/status/degraded_checks` were never published. Their topic macros went with it; `alert/critical` and `alert/warning` use string literals in `ErrorHandler.cpp` and are unaffected. Wiring it up would have meant adding new monitoring calls at four safety-check sites, so removal was preferred
+  - `MQTTDiagnostics` (with `MQTTDiagnostics_MemoryRecovery.cpp` and `DiagnosticsRecoveryTimer`): `initialize()` was never called, so its task never ran and it stayed disabled; every other entry point was reachable only from that task, and the emergency buffer clear was never called by the real memory recovery path. `QueueManager::publishMetrics()` went with it (its only caller), including `lastMetricsPublish_` and `METRICS_PUBLISH_INTERVAL_MS`
+  - `TaskDependencyManager` (515 lines): no caller anywhere, its "TaskHealthMonitor" task was never started
+  - The four unused memory pools (`diagnosticBufferPool`, `configBufferPool`, `calcBufferPool`, `errorBufferPool`): nothing ever allocated from them. Pools initialise lazily, so they never held heap; this is a clarity change, not the 6 KB RAM saving the docs claimed. The pools in use (`getTempBuffer()` 64 B, `getString()` 128 B, `getLogBuffer()` 256 B, and the MQTTPublisher pools) are unchanged
+
+### Fixed
+- The `RYN4ProcessingTask` raise above is **funded**, not just spent. On the device the +512 B pushed `heap_dram_blk` from 3316 to **2548 B** - twelve bytes under `MIN_DRAM_BLOCK_WARNING` (2560) - and the health report duly went to `"warning"`. `heap_dram_blk` is the real allocation ceiling, so that is the metric that matters. `NTPTask` was trimmed 4096 -> 3072 to pay for it, giving a **net 512 B more free DRAM than before either change**. NTPTask is the right donor for a reason: its bound is *empirically confirmed* - measured peak 2784 against a static bound of 2816, a 32 B gap - so there is no hidden depth to discover, which is the exact opposite of RYN4Proc's situation where the deep path had never run. 3072 leaves 256 B above the bound, and the task is not safety-critical: its failure mode is "no time sync", not "no heat". Its size also moves out of a hardcoded literal in `main.cpp` into `STACK_SIZE_NTP_TASK`, so it is now tier-tunable and covered by the `configMINIMAL_STACK_SIZE` assertions like the rest
+- **`RYN4ProcessingTask` - the task that writes the relays - had 96 B above its static bound, on an emergency path that has never executed.** Its deepest runtime chain is `handleReadTick` -> `RelayVerificationManager::checkRelayHealthAndEscalate` -> `triggerFailsafe` -> `executeFailsafeActions` -> `emergencyStop` -> `BurnerSystemController::emergencyShutdown`; only the final `SharedResourceManager` *constructor* is boot-only, so this is real runtime depth rather than init code. Measured peak is 1640 B, so none of it is empirically confirmed. Raised 2560 -> 3072 (+512 B DRAM), which takes the nominal margin to 608 B and makes the verdict "fits, including the worst case" - previously the worst case was 208 B *over*. The decisive argument was not the 96 B in isolation but what had just been found on that exact path: an unresolved indirect call was hiding ~1.9 kB of failsafe-callback depth, and 69 unresolved indirects remain on this task, so 96 B could not absorb one more such discovery or a single added frame
+- `CentralizedFailsafe::executeFailsafeActions()` invokes its registered subsystem callbacks as `callback.second(level, reason)` - a call through a container of callables that no call-graph walk can follow, reported as `[1 unresolved indirect]`. `tools/stack_walker.excludes` now models it with two `edge:` entries (`defaultBurnerFailsafe`, chain 1872 B; `defaultPumpFailsafe`, 1728 B), so the deepest thing the failsafe path does is no longer invisible to the analysis. The bounds did not move - the callback branch reaches 224 + 1872 = 2096 B, exactly matching the already-modelled `emergencyStop` branch - but that was luck rather than design, and a future change to those callbacks is now visible. Checked the other tasks on that chain: `RelayControlTask` has 1712 B of margin and `BurnerControlTask` 896 B, and the pump tasks do not reach it at all (their worst path runs through the boot-only ctor and the `failure:`-cut `ErrorHandler::logError`, leaving 240 B on an ordinary logging path)
+- **`LOG_MODE_RELEASE` now refuses to build: its stack tier is measurably too small, not merely unvalidated.** Two independent methods agree. Against the **measured** high-water marks from the debug_selective image - a generous lower bound, since release removes only `LOG_DEBUG`/`LOG_VERBOSE` while `INFO`/`WARN`/`ERROR` remain at ~1312 B of stack per call - **11 of 18 tasks have a release stack below their already-measured peak**: MQTTTask by 900 B, PersistentStorage by 324, OTATask by 264, MB8ART by 260, TimerSched by 252, BurnerControl by 232, RelayControl by 160, RYN4Proc by 152, ANDRTF3 by 124, ControlTask by 96, HeatingControl by 68. Against the static bounds from `tools/stack_walker.py` run on the release ELF, **13 of 18 exceed their stack**, including BurnerControl (needs 3952, has 1536), WheaterControl (4000 vs 2048), PersistentStorage (4256 vs 1536) and RYN4Proc - the task that writes the relays - at 2944 vs 1536. Sizing the tier properly needs roughly **+18 kB of DRAM**; the debug build measures ~5 kB free with a 4 kB largest block, so that memory does not exist. Release mode's premise - that much smaller stacks are safe because there is less logging - is false here, because the bounds are driven by the same call chains either way. A release image would overflow the burner, relay and pump-adjacent stacks on a live gas boiler, so this is a `#error` rather than a comment. `ALLOW_UNVALIDATED_RELEASE_STACKS` opts in for bench hardware not connected to a boiler. Note the `configMINIMAL_STACK_SIZE` assertions added earlier had made these environments *buildable* for the first time, removing an accidental barrier - this replaces it with a deliberate one
+- **Every temperature in the `sensors` diagnostics dump was garbage.** `dumpSensorInfo()` printed `Temperature_t` - an `int16_t` of tenths - with `%.1f`, passing an integer where printf expects a double. That is undefined behaviour in a varargs call, and on the device all five sensors read **`1.8°C`** while MQTT correctly reported 33.1 / 23.9 / 22.7 / 12.4 / 50.8. A diagnostic tool confidently reporting that every sensor had collapsed - the worst possible failure mode for the thing you reach for when you suspect a sensor. Root cause of the silence: `RuntimeDiagnostics::output(const char*, ...)` had no `__attribute__((format(printf, 1, 2)))`, so none of these call sites were type-checked. Adding it immediately surfaced **five** `%f`-with-int bugs plus `EventBits_t` into `%X`, `size_t` and `uint32_t` into `%d`, and eight zero-length format strings. All fixed. Temperatures now format with integer maths rather than `tempToFloat()`, deliberately: this runs on the esp-mqtt task and the first `%f` on any task pulls in `_svfprintf_r` -> `_dtoa_r` -> `_Balloc` -> `calloc`, about 600 B of stack plus a heap allocation, which is not worth spending on a diagnostic string. Sign is handled before the tenths split, because integer division truncates toward zero and `-3` tenths would otherwise print as `0.3` - which matters for the outside temperature
+- The sensor dump also printed `Inside Humidity: 0.0%` unconditionally - a value that does not exist, presented as a measurement. ANDRTF3 has no humidity channel (`ANDRTF3Task.cpp` sets `isInsideHumidityValid = false`), nothing ever writes through `SensorBindings`' `insideHumidityPtr`, and the member keeps its `0.0f` initialiser. It now honours the validity flag and reports `N/A (no humidity sensor)`. Same family as the temperatures: a diagnostic inventing data is worse than one admitting it has none
+- Chunked diagnostics dumps no longer lose content to transient queue pressure. `MQTTTask::publish()` refuses a `PRIORITY_LOW` message once queue utilisation reaches 50% (3 of 5 slots) and refuses **before** enqueueing, so the chunk was dropped on the floor rather than displacing anything - and since the payloads carry no index the receiver could not tell. A refused chunk is now retried up to 5 times with a 50 ms drain delay, and `DIAG_MAX_CHUNKS` went 8 -> 12. 8 was not headroom: a 32-task dump needs about 7 chunks, and every refused chunk still consumed one of the 8, so a dump that hit a moment of pressure ran out of budget before it ran out of content. Waiting is sound here because the handler runs in the esp-mqtt task (priority 5, the subscribe callback is invoked straight from `MQTT_EVENT_DATA`) while `MQTTTask` (priority 2) drains the queue, so `vTaskDelay()` blocks the producer and lets the consumer run - this would be useless, or a self-deadlock, if it ran on `MQTTTask` itself, and that is now written down at the constants
+- **The `truncated` marker for a chunked diagnostics dump was published at `PRIORITY_LOW` - the same priority whose dropping causes truncation.** `LOW` publishes are dropped once queue utilisation reaches 50%, so the message announcing the loss was the most likely casualty of the condition it reports, and since the chunks carry no index the receiver had no way to detect the gap. Observed on the device: a 32-task dump arrived with **27 tasks, missing both pump tasks and `RYN4Proc`** - precisely the tasks a stack check is looking for - with no marker. The marker is now `PRIORITY_MEDIUM`: high enough to survive the pressure that caused the truncation, not high enough to displace sensor data, and only ever sent on failure. The per-chunk drop detection added earlier was working correctly; it was the reporting of it that got lost
+- The low-stack warning no longer fires for stacks we do not own. Unifying the threshold on `LOW_STACK_WARN_BYTES` (512 B) made `IDLE0` (456 B free) and `ipc1` (480 B) warn on every detailed monitor cycle - FreeRTOS/ESP-IDF tasks with framework-fixed sizes that run deliberately tight and offer no action to take. A report that cries wolf about two untouchable tasks is how a real 288 B margin on a pump task gets scrolled past, so `isFrameworkOwnedStack()` excludes `IDLE*`, `ipc*`, `Tmr Svc` and `esp_timer` from the **warning** only; they still appear in every listing with their true figures. Caught by reading the dump after flashing, not before
+- The diagnostics task dump printed `tskNO_AFFINITY` as a raw `2147483647` in the Core column for every unpinned task (`HeatingControl`, `ControlTask`, `WheaterControl`, `emac_rx`, `Tmr Svc`). Now renders `ANY`, matching `MonitoringTask`. The `char[8]` buffer this needed was caught as `-Werror=format-truncation` by the release build - a worst-case `%d` of an `int` is 11 chars - which is the first thing the newly-buildable release environment paid for
+- **The low-stack monitor had no consumer that survives a release build.** `MonitoringTask::logAllTasks()` counted tasks under its threshold into `lowStackCount` and then fed it to a single `LOG_DEBUG` - and `LOG_DEBUG` is `((void)0)` under `LOG_MODE_RELEASE`, so the whole check was inert in release and merely buried in debug. Both pump tasks sat under the line for months (288 B and 420 B free) printing ` !LOW!` into a stream nobody reads; that, not the threshold value, is why the condition went unnoticed. A `LOG_WARN` now names the worst offender and its margin whenever any task is low, at a level that survives every build mode, and it deliberately repeats on each detailed cycle because the condition is persistent rather than an edge. The threshold itself moved to `SystemConstants::System::LOW_STACK_WARN_BYTES`: `logAllTasks()` used 512 B while `RuntimeDiagnostics` used 256 B, so the same task could read low in one report and fine in the other - which is exactly how the pumps looked alarming in the monitor and silent in the diagnostics dump. 512 B is about a third of the ~1312 B a single `LOG_*` call costs here, so a task below it cannot safely log once more
+- Two more hardcoded values that bypassed central config, both the same shape as the pump-stack shadow: `SafetyConfig.cpp` duplicated the burner anti-flapping minimum as a function-local `constexpr uint32_t MIN_OFF_TIME_MS = 20000` while `BurnerAntiFlapping` reads `SystemConstants::Burner::MIN_OFF_TIME_MS` throughout - raising the central constant would have left this cross-validator checking the stale 20 s and **admitting an error-recovery delay shorter than the real anti-flap hold, permitting the rapid burner cycling it exists to prevent**. And `BurnerPowerController::shouldIncreasePower()` held its 80.0 °C HIGH-power cutoff, a hard burner safety threshold, in a function body with no central owner; it now lives in `SystemConstants::Temperature` as `HIGH_POWER_LIMIT_TEMP_C`, beside `MAX_BOILER_TEMP_C` and `CRITICAL_BOILER_TEMP_C` where anyone adjusting those can see it
+- `STACK_SIZE_BOILER_TEMP_TASK` moved from a function-local `constexpr` in `TaskInitializer` into `ProjectConfig`. Unlike the pump case it shadowed nothing when written (no such macro existed), but it kept the size invisible to the build-mode tiers and to the new `configMINIMAL_STACK_SIZE` assertions - the same blind spot. Still resolves to 3584 under `LOG_MODE_DEBUG_SELECTIVE`, so the flashed value is unchanged; `DEBUG_FULL` gets 4096 and release 3072, both above the 2540 B measured peak. `NetworkInitializer`'s raw `xTaskCreate` literal became `STACK_SIZE_NETWORK_MONITOR_TASK` for the same reason, with its lack of watchdog registration and restart supervision now stated in place
+- Deleted `STACK_SIZE_MODBUS_STATUS_TASK`, `STACK_SIZE_RELAY_STATUS_TASK` and `STACK_SIZE_DEBUG_TASK`. All three were defined across three build-mode tiers and referenced **nowhere** in `src/`, `lib/`, `include/` or `test/` - nine lines of config that looked live, tuned per mode, and controlled nothing. Dead configuration that appears authoritative is the same hazard as the pump shadow, so it is gone rather than commented
+- **Release builds would have silently failed to create five tasks, including the one that writes the relays.** `TaskManager::startTask`/`startTaskPinned` reject any request below `configMINIMAL_STACK_SIZE` and return `false` (`TaskManager.cpp:124`, `:217`); nothing aborts the boot on that path, so `TaskInitializer` logs a `LOG_WARN`/`LOG_ERROR` and carries on and the task simply does not exist. On this framework the constant is `CONFIG_FREERTOS_IDLE_TASK_STACKSIZE` (1024) + `configSTACK_OVERHEAD_TOTAL`, and `CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK` is 1, contributing 60 -> **1084 B**. The `LOG_MODE_RELEASE` tier set eight macros below that line, five of them on tasks that are actually created: `RYN4_PROCESSING` (768 - the relay writer), `CONTROL` (1024, used twice), `SENSOR` (1024), `MODBUS_CONTROL` (1024) and `OTA` (1024). All eight raised to 1536, and a `static_assert` per task now makes any future violation a **build** failure instead of a silent runtime one - verified by mutation: restoring 768 fails the release build with `static assertion failed: STACK_SIZE_RYN4_PROCESSING_TASK below configMINIMAL_STACK_SIZE`. Only the release tier was affected; both debug tiers were already above the floor. No release env has ever been flashed, and `default_envs` remains `esp32dev_usb_debug_selective`
+- **The pump stack shadow is gone, not just widened.** `6dc0f49` raised a function-local `STACK_SIZE_PUMP_TASK` from 2048 to 2560, which fixed the symptom but froze the bug: `ProjectConfig` kept tuning `STACK_SIZE_PUMP_CONTROL_TASK` across three build modes and all three values stayed dead, so the next profiling pass would have missed the pumps exactly as the last one did. `TaskInitializer` now uses `STACK_SIZE_PUMP_CONTROL_TASK`/`PRIORITY_PUMP_CONTROL_TASK`, and the macro carries the **measured** 2560 (928 B free, peak 1840 B, static from boot, verified at 11.2 h through a full water cycle) rather than the aspirational 3072 it had never delivered. The flashed configuration is byte-identical - `LOG_MODE_DEBUG_SELECTIVE` still resolves to 2560. The release tier's pump value was raised 1536 -> 2560 in passing, because 1536 sat below the measured 1840 B peak
+- `uxTaskGetStackHighWaterMark(NULL) * 4` in `RYN4ProcessingTask.cpp` and `MB8ARTProcessingTask.cpp` reported **4x the real free stack** - the high-water mark is already bytes on ESP32 (`portSTACK_TYPE` is `uint8_t`). A genuine 400 B margin on the relay-writing task printed as `Stk:1600`. Both now use `* sizeof(StackType_t)`, matching `MonitoringTask.cpp:706` and `RuntimeDiagnostics.cpp`. Four log strings that called the value "words" when it is bytes were relabelled (`RelayControlTask.cpp` x2, `WheaterControlTask.cpp`, `SystemStrings.h` `FMT_TASK_STACK`). Same "looks safe, isn't" class as the pump stack itself
+- `RelayControlTask::updateRateLimitCounters()` read `rateWindowStart` outside the `rateLimitMux` section while writing it inside. Safe only because the function has exactly one caller - an invariant nothing asserted; a second caller could observe the 60 s expiry twice and reset the window twice, under-limiting for one window. The window test now runs inside the section with the `memset`, and only the logging stays outside
+- Removed a third byte-identical empty `resetForTesting()` stub, `QueueManager.h` under `#ifdef UNIT_TEST`, which `96b3634` missed when it deleted the `ModbusCoordinator` and `SharedResourceManager` copies. The argument it made applies verbatim: an empty stub is worse than no function, because a caller compiles cleanly, believes the singleton was reset and gets silence
+- **`CentralizedFailsafe::defaultPumpFailsafe()` could have its emergency pump-ON silently refused.** Registered for `HEATING_PUMP` and `WATER_PUMP` (`CentralizedFailsafe.cpp:65-71`) and reached through `triggerFailsafe` -> `executeFailsafeActions`, it turned both pumps on for heat dissipation at `FailsafeLevel::EMERGENCY` using the ordinary `setRelayState()` and discarded both return values. That setter runs the full admission chain, so a pump switched off within the last `pumpProtectionMs` (15 s default) had its ON command rejected by `checkPumpProtection()` - and a toggle inside the 150 ms rate-limit window was rejected one step earlier. The refusal was unrecoverable from there: these calls bypass the relay-request event bits, so `pumpRequestResendDue` never retries them. Outcome: burner shut down, residual heat in the exchanger, no circulation - the same shape as the 2026-09-12/13 overheat-without-pump events. Now uses `setRelayStateEmergency()`, exactly as `emergencyStop():305-306` already did with an F13 comment spelling out this reason; `BurnerSystemController::emergencyShutdown()` was likewise already correct. The hazard had been understood and fixed in two of three places. Found by a 2026-09-18 review of `fd2e810..work`; **pre-existing, not introduced by that range**, and live on the device since well before it
+- `boiler/cmd/scheduler/add` rejected every `"days":[1,2,3]` payload with `invalid_days_format`, although the array is the documented primary form: `MQTTValidator::validateScheduleAdd()` tested `is<JsonArray>()` on its `const JsonDocument&`, and in ArduinoJson v7 a const variant never matches the mutable `JsonArray` type, so the array branch was unreachable and only the `days` bitmask worked (found while answering the Home Assistant session, 2026-09-16)
+- Autotune results are persisted to the gain set of the run: the water/space mode is captured at `startAutoTuning()` and re-checked against the active burner request when the result is saved. `updateMode()` does not run while tuning, so the previous choice used a stale `isWaterMode_` and could write the tuned gains to the wrong set. A mode change during a run rejects the result (`{"status":"rejected","reason":"mode changed"}`) instead of writing either set
+- Autotune safety validation during a run uses the mode of the active request instead of the same stale flag, so a water request starting mid-run is checked against the water temperature limit
+- Autotune run time is measured as a `millis()` difference (`AutotuneClock`) instead of an absolute `millis()/1000`: a wrap after ~49 days can no longer abort, extend or corrupt a run, and the peak/trough timestamps keep their resolution at high uptime (the float base quantised to 0.5 s steps near the wrap). PIDAutoTuner compares elapsed times only and fails a run cleanly if its time base runs backwards
+- Two-stage (bang-bang) control resets the power level to OFF after a pause, like the modulating path: a stale HALF/FULL from an earlier request could hold the burner on until 5 °C above the new target. Bang-bang thresholds unchanged
+- Scheduler MQTT commands never reply silently: `boiler/cmd/scheduler/+` delivers every sub-topic to `TimerScheduler::processMQTTCommand`, so a command without a handler was accepted and ignored, which looked like a hung command. Unhandled commands now answer on `boiler/scheduler/response` with `not_implemented` (`update`, `vacation`, `pump_exercise`, `command`) or `unknown_command`; commands arriving before the scheduler task runs reply `not_initialized`, and the add handler's unknown-type and missing-handler paths reply `invalid_type`
+- `scripts/check_credentials.py` checks `ota_password`, the key the espota upload environments expand as `--auth=${credentials.ota_password}`; a `credentials.ini` without it failed the OTA upload with an error that did not name the missing key. The auto-generated minimal `credentials.ini` now contains a real `[credentials]` section (it wrote every key commented out, so `${credentials.build_flags}` was undefined for every environment), and the example-value warning matches the placeholders `credentials.example.ini` actually uses
+- While the boiler is idle BurnerControlTask refreshes the sensor fallback mode at most every 30 s for reporting, so the `sf` field of `boiler/status/sensors` and the retained `boiler/status/sensor_mode` no longer keep the startup value (evaluating it on every read caused NORMAL/SHUTDOWN flapping with retained publishes); nothing arms from that path
+- `tools/event_config.yaml` and the README named `tools/generate_events.py`, which emits a different header; both now point at `tools/generate_events_zero_overhead.py`, which produces the committed `SystemEventsGenerated.h`
+- TROUBLESHOOTING: the pressure sensor entry quoted a build warning that cannot occur (`USE_REAL_PRESSURE_SENSOR` is defined); it now describes the simulated-pressure symptom and the real fix
+- Sensor failure severity follows the missing sensor: the fallback sets `SENSOR_FAILURE` (critical in the 5 s full safety check, emergency stop and ERROR for `errorRecoveryMs`) only while the boiler output reading is missing, since the overheat protection is blind without it. A missing room, tank or return reading only marks `SENSOR_DEGRADED`: the heating/water task stops the burner normally and BurnerControlTask's 10 s confirmation (`SensorFailureConfirm`) applies, so a single room-sensor glitch no longer locks the burner out for 5 minutes
+- Burner demand: the PID power level is reset to OFF together with the PID after a pause, so a request that ended at HALF (or FULL after an autotune stop) can no longer arm and ignite the burner above target; the arming prediction reads the shared PID timestamp before `millis()` so a concurrent cycle cannot fake a pause
+- Burner demand: revoking the arming permission for missing sensors now also writes heat demand OFF, and the sensor-failure stop is confirmed against the armed demand plus an active mode request instead of a cached flag, so a room sensor dropping out during heating no longer forces ERROR 10 s after the burner already stopped normally
+- Sensors: the operation mode is updated from the current requests before the sensor fallback check, so a failed room sensor no longer blocks water heating; the fallback is only evaluated while a request is active or the demand is armed (no more NORMAL/SHUTDOWN flapping with retained publishes while idle) and its state changes are mutex-guarded (non-blocking in timer callbacks)
+- Autotune: stopping the tuner (no request left, or by command) publishes an OFF decision and disarms the demand, like the excursion abort; the demand during tuning follows `BurnerDemandGate::decideAutotune()`
+- Burner demand arming is atomic with BurnerControlTask's permission: the permission lives in BurnerStateMachine and `setHeatDemand(true)` refuses under `demandMutex` while it is revoked (a revoked demand could be re-armed for one PID cycle; review bsm-6)
+- PID autotune drives the burner demand level-triggered and publishes its decision every cycle (a demand armed during a tuner OFF phase corrupted the relay test, a blocked ON edge was never retried; review pid-3)
+- BurnerControlTask arms without a fresh PID decision only if the controller's next cycle would heat (`BoilerTempController::predictHeatDemand()`: PID on-threshold and hysteresis), no longer whenever the boiler is below target, which allowed short starts (review tests-4)
+- Water-to-heating handover in weather mode no longer waits up to 15 s with the burner firing when the room is in the overheat hysteresis band: `BurnerTransitionPolicy::heatingLikelyWanted()` now uses HeatingControlTask's restart limit (target + margin - `heating_hysteresis`) (review tests-3)
+- Refactoring without behaviour change, so native tests run firmware code: PID step and power level mapping in `FixedPointPIDStep.h` / `BoilerPowerLevel.h` (fuzz-compared with the old code, review pid-8), relay command decision in `RelayCommandPolicy` (`admit`, `consumeToggle`, `skipDuplicate`, `restartPumpTimer`; review io-6), validator checks in `BurnerSafetyRules::evaluate()`. Removed `test_safety_cascade.cpp` (copy with wrong limits) and copied relay/PID test logic
+- `RelayCommandPolicy`: `desiredBit()` and `consumeToggle()` reject relay numbers outside 1-8 again (the check was lost when `checkRateLimit()` was replaced); index 0 shifted by -1 and indexed the rate-limit arrays at 255
+- MB8ART channel table (`SensorHardware::CONFIGS`): labels and bits followed an old channel order (index 3 was WATER_OUTPUT, `SensorIndices` has OUTSIDE); now follows `SensorIndices` with a compile-time index check. ESP32-MB8ART (1af4113) now honours the table's event bits instead of fixed interleaved bits. These bits live in the library's own event group, so the controller's behaviour is unchanged
+- Per-channel `SensorUpdate` bits (`BOILER_OUTPUT`, `BOILER_RETURN`, `WATER_TANK`, `OUTSIDE`) were never set in SRP's sensor event group (the MB8ART library keeps its channel bits in its own group): BoilerTempControlTask ran on its 5 s wait timeout and BurnerControlTask's sensor failure check never ran. MB8ARTTasks now sets each channel's update or error bit after every read, so the boiler PID runs once per read (~2.5 s) and the check runs per read. The burner emergency stop now needs the required sensors missing for 10 s with heat demand (`SensorFailureConfirm`, native-tested); a single bad reading only makes the heating/water tasks drop their request. `DATA_AVAILABLE` is still never cleared after the first read (a lost sensor link is caught by the stale-sensor emergency stop)
+- OTA: new images were marked valid before `setup()`, so the bootloader rollback never applied. `OtaRollbackGuard` confirms an updated image after 60 s with sensor data and network (`OtaValidationPolicy`, native-tested); a reset before that boots the previous image, and no confirmation within 10 minutes rolls back
+- `boiler/cmd/errors` replied `unknown_command`; it now takes the command in the payload (`stats`, `list 20`, `list 20,2`)
+- MQTT init and subscribe waited forever for the MQTT mutex; bounded to 1 s
+- Version history: the section called 1.0.0 (2025-12-22) is the 0.1.0 release (tag `v0.1.0`, 2025-12-20)
+- Design notes `DESIGN_SAFETY_SIMPLIFICATION.md`, `DESIGN_UNIFIED_HARDWARE_MAPPING.md` and `REFACTOR_RELAY_MAPPING.md` moved to `docs/history/`
+- ANDRTF3 HAL: Removed ineffective retry loop (was generating 4 errors instead of 1)
+- TempSensorFallback: Changed mode transition log from WARN to INFO (no longer sent to syslog)
+- Burner fired on a stale heat demand with no mode active (pump off) after an emergency stop and ERROR recovery
+- ANDRTF3 library wrote uncalibrated room temperature and cleared validity on every failed read, bypassing the 3-failure hysteresis and `roomTempOffset`
+- `Error::SAFETY` stayed latched after burner safety validation passed
+- Boiler PID inert: float gains were truncated by the fixed-point PID (now `PIDGainFixedPoint::fromFloat()`, x1000); BoilerTempControlTask holds OFF level-triggered
+- PID output wrapped its sign when narrowed to int16 before clamping (`PIDGainFixedPoint::clampToAdjustment()`)
+- Live temperature parameter changes were reverted on the next save (`TemperatureParameterWrapper::applyToSettings()` writes only sensor offsets)
+- Burner ignited above target when a request started with a hot boiler
+- Seamless HEATING -> WATER switch ended in an emergency stop (unchanged relay command counted by the rate limiter)
+- Pumps switched off by the emergency shutdown stayed off with the exchanger hot
+- Autotune recorded values at the relay switch points instead of the real peaks/troughs of the lagging boiler; warm-up phase counted depending on tracker call order
+- Autotune method setting was never read (every reboot fell back to ZN_PID)
+- Ignition retries unreachable: a failed start locked out after one attempt
+- MODE_SWITCHING could wait without limit while the burner kept firing; mode revert bounced RUNNING_LOW <-> MODE_SWITCHING
+- Inverted tank limits toggled water and heating every control cycle
+- Interrupted water charge resumed after switching water heating off and on, also within one task cycle
+- Autotune ignored the `pid/autotune/amplitude` and `pid/autotune/hysteresis` settings (hard-coded 50 % / 1.0°C)
+- A latched emergency stop could only be released by a reboot: only the sensor fallback cleared `EMERGENCY_STOP` (on recovery from SHUTDOWN) and `BOILER_ENABLED` was never restored
+- `EMERGENCY_STOP` was not a latch: BurnerControlTask read-and-cleared it within 3 s, so the pump heat dissipation stopped after seconds, `boiler/cmd/system on` restarted without checks and `emergency_reset` found nothing to release. It is now read without clearing and acted on once per onset; while it is set both pumps run until the boiler output is below 60.0°C (again from 65.0°C, always without a valid, fresh reading). Native tests in `test_emergency_stop_release.cpp`
+- Sensor recovery (TemperatureSensorFallback SHUTDOWN -> NORMAL) cleared `EMERGENCY_STOP` whatever had set it; it now releases only a stop caused by stale sensor data (`EmergencyStopRelease::Cause`, `CentralizedFailsafe::releaseAfterSensorRecovery()`)
+- MQTT_API.md boiler enable example used `boiler/cmd/boiler` (handled topic: `boiler/cmd/system`); MQTT_QUICK_REFERENCE.txt listed non-existent `cmd/boiler/...` topics and test scripts, rewritten from the handlers
+- Removed unused `STACK_SIZE_PID_CONTROL_TASK` and `PRIORITY_PID_CONTROL_TASK`
+- MQTT high-priority publish queue 3 -> 5 slots (`HIGH_PRIORITY_QUEUE_SIZE`): `emergency_reset` as the first sensor check after boot queued the sensor fallback status, its mode string and the reply at once and logged `Queue 'mqtt_high_priority' at 100% capacity`
+- Pump request refused by pump motor protection (15 s) was lost: the request bit is cleared regardless and PumpControlModule only requested on state changes, so e.g. heating restarting within 15 s of a pump OFF left the heating pump off while the burner fired. The pump task now re-sends every 2 s while `g_relayState` differs (`RelayCommandPolicy::pumpRequestResendDue()`); this also switches off pumps that `CentralizedFailsafe::emergencyStop()` turned on directly when the boiler was below 60.0°C
+- Releasing an emergency stop ended the pump heat dissipation at once, even at 100°C; the pumps now continue until the boiler output is below 60.0°C (`EmergencyStopRelease::dissipationAfterRelease()`)
+- Boiler PID integral wound up while power was already 100 %: output limits were ±1000 but the power mapping saturates at ±500; limits now ±500 (`PIDGainFixedPoint::POWER_ADJUSTMENT_LIMIT`, mapping shared with the native tests)
+- Water `override_on` (WATER_ON without a water request) while heating ran made the burner bounce RUNNING_LOW <-> MODE_SWITCHING every tick; the revert resumes only when the ON bits select the running mode
+- While an emergency stop was latched, ERROR recovery re-ran `emergencyShutdown()` and logged errors every tick after 5 min
+- Ignition retry counter was kept when LOCKOUT expired, so the next failed start locked out after one attempt; reset at every start and on lockout exit
+- No-mode-request grace timer (`nowMs | 1` sentinel) stopped a running burner at once when two steps ran in the same millisecond
+- Heating/water `override_on`/`override_off` never reached the mode tasks: ControlTask consumed the bits and set `HEATING_ON`/`WATER_ON` directly (no burner request), and the mode tasks cleared the bits before reading them. The mode tasks now handle the overrides; water `override_on` charges up to `tempLimitHigh`
+- PRE_PURGE -> IGNITION was a StateMachine timeout checked before the handler, so a demand or mode request withdrawn in the last second of the pre-purge still ignited; now a step() decision after the checks (timeout 4 s as backstop)
+- A stop from MODE_SWITCHING did not record OFF in BurnerAntiFlapping, so the restart from POST_PURGE skipped the 20 s minimum off-time
+- Disabling water during a charge took the mode-switch path and could keep the burner firing up to 15 s; explicit disable is now checked first, also in MODE_SWITCHING
+- Autotune method was read before NVS was loaded (lost after reboot) and `pid/autotune/method` via `boiler/params` was not applied; `startAutoTuning()` now reads the saved setting
+- Documentation audited against the code (2026-09-15): corrected relay wiring, I2C pins and Modbus addresses (HARDWARE_SETUP, INITIALIZATION_ORDER), event bit tables and flows (EVENT_SYSTEM, EVENT_FLOW, generated/events.md), validation results that stop the burner (SAFETY_SYSTEM, STATE_MACHINES), scheduler day numbering and undocumented topics (MQTT_API), removed descriptions of checks that do not exist (ALGORITHMS), real log lines (TROUBLESHOOTING), OTA safety and recovery (OTA guides), task, mutex and memory tables, diagrams, CLAUDE.md paths and snippets; design notes marked implemented/obsolete
+- `tools/event_config.yaml` now matches `include/events/SystemEventsGenerated.h` (regeneration verified byte-identical apart from the timestamp line): BurnerRequest change bits 5-7, one `Error` group, quoted HeatingEvent names; the generator gained optional `comment`, `next_free_bit` and `migration_macro_order` keys, and `docs/generated/events.md` is generated again
+- `errors/list` answered `export_failed` as soon as the error log held entries (128-byte buffer) and `errors/critical` was cut off without a check. Both now use a buffer the size of the MQTT payload and include as many entries as fit (`n`); `errors/list` accepts `N,offset` to page through the log
+- Preheat settings (`boiler/cmd/config/preheat_*`), `pump_cooldown_ms` and `boiler_pid_enabled` were never saved and were lost on reboot, so `boiler_pid_enabled` (which needs a reboot) could not take effect. They are now registered parameters (`preheat/*`, `pump/cooldownMs`, `boiler/pidEnabled`). `weather_control_enabled` and `room_curve_shift_factor` also go through the parameter storage now and are saved immediately. BoilerTempControlTask now waits (at most 3 s) for the saved parameters before it reads the PID mode; it started about 150 ms before they were loaded
+- Emergency stops raised directly (critical temperature, stale sensors, request watchdog) left no FRAM emergency record; they now save one, like a failsafe escalation to CRITICAL
+- Error context snapshot (`ErrorContextCapture`) was never called and its ~400-character JSON could not fit the 320-byte MQTT payload. Critical errors logged through `ErrorHandler::logError()` now record a snapshot (static slot, no stack copy or heap, at most every 30 s), and MQTTTask publishes it retained on `boiler/error/context` as compact JSON (`ErrorContextFormat.h`, native-tested)
+- `boiler/cmd/fram_errors stats` and `errors/stats` replies were cut off (about 76 characters in a 64-byte `MemoryPools::getTempBuffer()`); the FRAM status/counters/runtime and both stats replies now use the 128-byte `MemoryPools::getString()` buffer
+- Scheduler MQTT replies (`list`, `add`/`remove` success, validation errors, `boiler/status/scheduler/info`) were published empty: `SchedulerResponseFormatter` formatted into a StringPool `ScopedBuffer` and returned `c_str()`, but the buffer was released and cleared when the function returned. The formatters now write into caller buffers (no heap: a reply buffer sized to the 320-byte MQTT payload, a local buffer for the status); the list includes as many schedules as fit. MQTT_API.md scheduler reply formats corrected to what the firmware sends
+- Weather-compensated mode had no hysteresis on the outside threshold: readings around `heating/outsideThreshold` switched heating (pump, burner request) on and off every 5 s cycle. Now starts below the threshold and stops at threshold + 1.0°C (`SpaceHeatingPolicy::outsideColdForHeating()`)
+- Weather-compensated heating curve was 10x too weak: the adjustment was divided by 10^7 (whole °C) but used as tenths, so the heating target stayed at the space-heating minimum (`h/sLo`, 40°C) regardless of outside temperature. Now `HeatingCurve::target()` (header, native-tested) with scale 10^6; defaults `heating/curveCoeff` 1.4 and `heating/curveShift` 0.0°C (were 2.0 / 20.0, which with the corrected curve would ask for 64-75°C on most autumn days)
+- Boiler/heating/water enable, water priority and the heating/water OFF overrides changed by command (`boiler/cmd/system|heating|water`, ControlTask) were never saved: `StateManager::markSettingsDirty()` only set a flag nobody read, and PersistentStorageTask saves only on request. A reboot restored the previous state (water heating switched off came back on after a reset). `markSettingsDirty()` now requests a save
+- `boiler/cmd/config/outside_heating_threshold` accepted only up to 20.0°C (parameter allows 25.0°C), and it and `room_overheat_margin` wrote SystemSettings only, so the next parameter save stored the old registered value again. Both now go through the parameter storage (`PersistentStorageTask_SetParameter()`, same path as `boiler/params/set/...`)
+- OTA upload password was the public default `update-password` hard-coded in all espota envs of platformio.ini (`--auth=update-password`); the envs now use `--auth=${credentials.ota_password}` from the uncommitted credentials.ini, which must equal `-DOTA_PASSWORD`. credentials.example.ini used section `[env]` instead of `[credentials]` and lacked `ota_password`
+- OTA_UPDATE_GUIDE.md / OTA_QUICK_REFERENCE.txt used non-existent `cmd/boiler/diagnostics/memory/response` and `cmd/boiler/ota/start` topics, an MQTT OTA progress payload that is never published (`OTATask::initWithMQTT()` has no caller) and missing scripts (`ota_update.sh`, `test_ota_update.py`, `monitor_ota_status.py`); memory monitoring now points to `boiler/status/health`, password to `credentials.ini`
+- BoilerTempControlTask refused to arm the heat demand above 85°C boiler output (validator default), capping water charge targets below what the request check allowed
+
+---
+
+## [0.1.0] - 2025-12-20
+
+### Initial Production Release
+
+First production-ready release after comprehensive 20-run analysis scoring 9.5/10.
+
+#### Architecture
+- **SRP Pattern**: Zero global variables, all resources via SystemResourceProvider
+- **Event-Driven**: 18 FreeRTOS tasks, 100% event-driven (zero polling)
+- **Fixed-Point Arithmetic**: Complete PID control without floating point
+- **5-Layer Safety**: Validator → Interlocks → Failsafe → DELAY Watchdog → Hardware
+
+#### Features
+- 9-state burner finite state machine with anti-flapping
+- Two-stage burner control (nameplate 23.3kW / 42.2kW)
+- Space heating with weather compensation
+- Hot water tank scheduling with progressive preheating
+- MQTT remote monitoring and control (100+ topics)
+- NVS persistent parameter storage
+- OTA firmware updates
+- Syslog remote logging
+
+#### Hardware Support
+- MB8ART 8-channel temperature sensor
+- RYN4 8-channel relay module with DELAY watchdog
+- ANDRTF3 room temperature sensor
+- DS3231 RTC for scheduling
+- LAN8720A Ethernet PHY
+
+#### Safety Features
+- BurnerSafetyValidator: Pre-operation 7-point validation
+- SafetyInterlocks: Continuous runtime monitoring
+- CentralizedFailsafe: Emergency shutdown coordinator
+- Hardware DELAY watchdog: Auto-OFF in 10s if ESP32 fails
+- Thermal shock protection: 30°C differential limit
+
+---
+
+## Development History
+
+### Major Improvement Rounds
+
+The codebase includes evidence of 20+ rounds of iterative improvement, documented in code comments with markers like `Round X Issue #Y`.
+
+#### Memory Optimization (M1-M16)
+- 6.7KB+ RAM recovered through profiling
+- Three-tier stack sizing (DEBUG_FULL/DEBUG_SELECTIVE/RELEASE)
+- Static buffer justification in MEMORY_OPTIMIZATION.md
+
+#### Thread Safety (Round 12-14)
+- Atomic check-and-reserve patterns (TOCTOU prevention)
+- 5-level mutex hierarchy (deadlock prevention)
+- Zero `portMAX_DELAY` (all 217 mutex acquisitions use timeouts)
+
+#### State Machine Refinements (SM-CRIT, SM-HIGH)
+- MODE_SWITCHING state for seamless water ↔ heating transitions
+- Defensive initialization in every state
+- Anti-flapping: 2min on, 20s off, 15s power change delay
+
+#### Safety Hardening (Round 15-21)
+- Circuit breaker pattern (3 mutex failures → failsafe)
+- Aggressive emergency save retry (5 attempts)
+- FRAM persistence for critical state
+
+#### Performance (H1-H15)
+- Event group caching (eliminates mutex overhead)
+- ModbusCoordinator (tick-based, zero bus collisions)
+- Priority queue with CRITICAL bypass
+
+---
+
+## Library Updates
+
+### ESP32-ANDRTF3 (2025-12-22)
+- Fixed: Use sync result directly instead of async queue race condition
+- Fixed: Duplicate tag in log macros
+
+### ESP32-RYN4 (2025-12-22)
+- Changed: Disabled runtime retries in RetryPolicy (ModbusCoordinator handles scheduling)
+- modbusDefault(): maxRetries 3 → 0
+- modbusBackground(): maxRetries 2 → 0
+
+### ESP32-Syslog (2025-12-22)
+- Added: `sendUnfiltered()` method to bypass minLevel filter
+
+---
+
+## Versioning Notes
+
+This project uses semantic versioning starting from v0.1.0 (git tag `v0.1.0`, `PROJECT_VERSION`; older notes call this release 1.0.0):
+- **MAJOR**: Breaking changes to MQTT API or safety behavior
+- **MINOR**: New features, non-breaking enhancements
+- **PATCH**: Bug fixes, documentation updates
+
+Prior development history is preserved in code comments and git history.
+
+---
+
+## Quality Metrics (v0.1.0)
+
+From a 20-run analysis performed for v0.1.0. **Not re-run since** - the scores below
+describe the December release, not the current tree, and are kept for history rather than
+as a current claim. What can be stated for the current tree without re-scoring: 287 native tests
+(up from 269), 251 files in src/ + include/, and the "Testing 7/10" line above remains the
+honest weak spot - a 2026-10-18 review found that roughly 80 of those tests compile no
+firmware at all, exercising only header-only policy code.
+
+| Category | Score |
+|----------|-------|
+| Architecture | 10/10 |
+| Safety | 10/10 |
+| Thread Safety | 10/10 |
+| Fixed-Point | 10/10 |
+| Memory Mgmt | 10/10 |
+| Control Systems | 9/10 |
+| Communication | 9.5/10 |
+| Documentation | 9/10 |
+| Testing | 7/10 |
+| **Overall** | **9.5/10** |
+
+---
+
+*Last updated: 2026-10-18*

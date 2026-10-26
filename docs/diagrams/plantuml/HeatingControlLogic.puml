@@ -1,0 +1,147 @@
+@startuml HeatingControlLogic
+!include theme.puml
+
+' File-local: the theme has no activity colours, so stock PlantUML draws light
+' activity boxes and diamonds under the theme's white text.
+skinparam activity {
+    BackgroundColor #4682B4
+    BorderColor #ffffff
+    FontColor #ffffff
+    DiamondBackgroundColor #36648B
+    DiamondBorderColor #ffffff
+    DiamondFontColor #ffffff
+}
+
+title Heating Control Logic - HeatingControlTask\nWeather Compensation, Room Mode and Burner Request
+
+start
+
+:HeatingControlTask\n(5 s timer and control events);
+
+if (HEATING_ON set while state is HeatingOff?) then (yes)
+  :Invariant heal - clearHeatingActive()\n(a leaked flag ran the pump with no burner request);
+else (no)
+endif
+
+if (Boiler and heating enabled?) then (no)
+  :stopHeating() - clear HEATING_ON\nclearRequest(HEATING);
+  stop
+else (yes)
+endif
+
+if (PID autotune running?) then (yes)
+  :Keep heating demand;
+elseif (heatingOverrideOff set?) then (yes)
+  :Heating not needed;
+  stop
+else (no)
+  if (Weather-compensated control?) then (yes)
+    :Needed when outside is below outsideThreshold\n(stops only at threshold + 1.0 °C)\nand the room is not overheated\n(stop above target + overheat margin,\nrestart below that limit - heating_hysteresis);
+  else (room mode)
+    :When off: start when room is below target\nWhen on: stop at room >= target + heating_hysteresis;
+  endif
+endif
+
+if (Heating needed, FROST demand, or HEATING_ON_OVERRIDE?) then (no)
+  :If heating: stopHeating()\nclearRequest(HEATING);
+  stop
+else (yes)
+endif
+
+if (Water request active and WATER_PRIORITY set?) then (yes)
+  :Defer heating\n(clear HEATING_ON_OVERRIDE);
+  stop
+else (no)
+endif
+
+if (Required sensors available?) then (no)
+  :Heating not started\n(HEATING_ON stays clear);
+  stop
+else (yes)
+endif
+note right
+  Checked BEFORE startHeating() since b3f3b06.
+  It used to sit AFTER, and HEATING_ON is not a
+  private flag: PumpControlModule runs the heating
+  pump off it (modeActiveBit), WheaterControlTask
+  refuses a water charge while it is set with water
+  priority off, and SafetyInterlocks and
+  BurnerStateMachine both read it.
+
+  So a sensor outage ran the pump with no burner
+  request behind it and locked out hot water - and
+  nothing cleared it, because every clear was keyed
+  on state == HeatingOn, which it never became.
+end note
+
+:startHeating() - set HEATING_ON;
+
+:Boiler target from the heating curve\n(room deviation shift in weather mode);
+note right
+  HeatingControlModuleFixedPoint:
+  coefficients 1.4347, 0.021, 0.000248
+  shift: heating/curveShift (WHOLE °C, float)
+  + room deviation x heating/roomCurveShiftFactor
+  TWO clamps, and only the second one is
+  what the boiler commands:
+  1. inside HeatingCurve::target() to
+     burner_low_limit h/bLo (default 38 °C)
+     .. heating_high_limit h/sHi (75 °C)
+  2. in setHeatingRequest() to
+     heating_low_limit h/sLo (default 38 °C)
+     .. h/sHi - so h/sLo is the EFFECTIVE
+     floor. It was 40 °C until 2026-10-19,
+     which pinned the curve flat above
+     ~10.5 °C outside; at 38 it matches
+     h/bLo and the curve modulates down
+     to the boiler's own minimum
+end note
+
+if (Curve calculation got the mutex?) then (no)
+  :clearHeatingActive()\n- undoes the whole start;
+  stop
+else (yes)
+endif
+
+:BurnerRequestManager::setHeatingRequest(target)\nHEATING + POWER_LOW + target in bits 16-23;
+note right
+  Example: 70 °C = 0x00460001
+  Power level HALF/FULL is decided
+  by BoilerTempControlTask.
+end note
+
+:BurnerControlTask arms the heat demand\n(BurnerDemandGate);
+
+:publishControlDiagnostics()\nboiler/status/heating/control (retained);
+note right
+  Observability for everything above:
+  mode, demand, the block reason
+  (outside gate vs room backstop vs
+  sensor/override/disabled), the
+  PRE-clamp curve value, the room
+  shift on its own, and which clamp
+  bound won. See docs/MQTT_API.md.
+end note
+
+stop
+
+floating note right
+  Frost protection is a demand source for this task
+  and overrides HEATING_ENABLED. It has its own
+  diagram: FrostProtection.puml.
+
+  All four teardown sites call one clearHeatingActive()
+  helper, so HEATING_ON and the request always clear
+  together.
+end note
+
+floating note right
+  heating_hysteresis (default 0.5 °C):
+  room mode starts below the target and stops
+  at target + hysteresis; weather mode uses it
+  for the room overheat restart limit.
+  There is no static wasHeating flag - the task
+  uses its current heating state.
+end note
+
+@enduml

@@ -1,0 +1,118 @@
+@startuml BurnerStateMachine
+!include theme.puml
+
+title Burner State Machine - 9 States\nTransition logic in BurnerTransitions::step() (pure function, native scenario tests)
+
+[*] --> IDLE : System ready
+
+IDLE : Burner relays off
+IDLE : Waiting for heat demand
+
+PRE_PURGE : Entry: burner relays off
+PRE_PURGE : Duration: 2 s, then IGNITION only if demand
+PRE_PURGE : and mode request are still present (step())
+PRE_PURGE : StateMachine backstop 4 s
+
+IGNITION : Entry: activate R1 (heating) or R3 (water)
+IGNITION : and start the requested power level
+IGNITION : Flame checked after 3 s, handler timeout 5 s
+IGNITION : StateMachine backstop 7 s
+
+RUNNING_LOW : Half power (R2 POWER_BOOST off)
+RUNNING_HIGH : Full power (R2 POWER_BOOST on)
+
+MODE_SWITCHING : Switch burner relays between R1 and R3
+MODE_SWITCHING : Bounded waits 15 s, hard timeout 30 s
+
+POST_PURGE : Entry: burner relays off
+POST_PURGE : Duration: postPurgeMs (default 90 s, 30-180 s)
+
+LOCKOUT : Entry: burner off, alarm R8 ON
+LOCKOUT : Exit: alarm R8 OFF
+LOCKOUT : Duration: 5 min
+
+ERROR : Entry: emergency shutdown (R1-R3 off)
+ERROR : Recovery delay: errorRecoveryMs (default 5 min, 1-30 min)
+
+IDLE --> PRE_PURGE : heat demand AND active mode request\nAND safety OK AND minimum off-time (20 s) over
+
+PRE_PURGE --> IGNITION : after 2 s
+PRE_PURGE --> IDLE : mode request or\nheat demand withdrawn
+PRE_PURGE --> ERROR : safety failure
+
+IGNITION --> RUNNING_HIGH : flame after 3 s\n(high power requested and allowed)
+IGNITION --> RUNNING_LOW : flame after 3 s\n(high power not requested or not allowed)
+IGNITION --> PRE_PURGE : no flame at 5 s:\nretry (1st and 2nd failure)
+IGNITION --> LOCKOUT : 3rd failed attempt\nor 7 s backstop
+IGNITION --> ERROR : safety interlock failure\nor emergencyStop()
+
+RUNNING_LOW --> RUNNING_HIGH : PID requests high power\n(15 s between changes, boiler below 80 °C)
+RUNNING_HIGH --> RUNNING_LOW : PID requests low power\n(15 s between changes)
+
+RUNNING_LOW --> MODE_SWITCHING : WATER_ON / HEATING_ON changed\n(safety OK, flame present)
+RUNNING_HIGH --> MODE_SWITCHING : WATER_ON / HEATING_ON changed\n(safety OK, flame present)
+
+RUNNING_LOW --> POST_PURGE : stop (see note)
+RUNNING_HIGH --> POST_PURGE : stop (see note)
+
+RUNNING_LOW --> ERROR : safety interlock failure\nor emergencyStop()
+RUNNING_HIGH --> ERROR : safety interlock failure\nor emergencyStop()
+
+MODE_SWITCHING --> RUNNING_HIGH : relays switched\n(high power requested and allowed)
+MODE_SWITCHING --> RUNNING_LOW : relays switched (low power), or\ndemand reverted and the ON bits\nselect the running mode
+MODE_SWITCHING --> POST_PURGE : explicit disable,\nno request for the new mode,\nrelay switch failed,\nrevert not confirmed after 15 s,\nor 30 s hard timeout
+MODE_SWITCHING --> ERROR : safety failure
+
+POST_PURGE --> IDLE : after postPurgeMs (90 s)
+POST_PURGE --> PRE_PURGE : early restart: heat demand + active mode request\n+ safety OK + minimum off-time over,\nand the mode was not just disabled
+
+LOCKOUT --> IDLE : after 5 min\nor manual reset (MQTT)
+ERROR --> IDLE : recovery delay over,\nEMERGENCY_STOP released,\nsafety conditions pass
+
+note right of IDLE
+  A latched heat demand without an active mode
+  request (HEATING_ON + HEATING request, or
+  WATER_ON + WATER request) is ignored.
+end note
+
+note right of RUNNING_HIGH
+  Stop to POST_PURGE:
+  - explicit disable of the running mode or boiler:
+    immediate, bypasses the minimum on-time
+  - no active mode request for 10 s
+    (bypasses anti-flapping)
+  - heat demand ended or safety check failed,
+    once the 2 min minimum on-time is over
+  - flame lost (no flame sensor: flame means
+    the burner relays are active)
+  - mode change while a seamless switch is not possible
+  - power level relay fault on entering RUNNING_LOW/HIGH
+    (3rd within 10 min: emergency stop to ERROR)
+
+  High power is blocked while boiler output >= 80.0 °C.
+end note
+
+note right of POST_PURGE
+  The burner never commands pumps.
+  PumpControlModule keeps them running
+  (follows HEATING_ON / WATER_ON, 5 min overrun).
+end note
+
+note right of ERROR
+  emergencyStop() leads here from any state;
+  safety interlocks are checked continuously
+  in IGNITION, RUNNING_LOW and RUNNING_HIGH.
+
+  While EMERGENCY_STOP is latched the burner
+  stays in ERROR, also after the recovery delay.
+  Release: boiler/cmd/emergency_reset, or sensor
+  recovery after a stale-sensor stop.
+end note
+
+note right of MODE_SWITCHING
+  Leaving MODE_SWITCHING records the power level
+  for anti-flapping, so a restart after a stop
+  from here keeps the 20 s minimum off-time.
+end note
+
+@enduml

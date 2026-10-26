@@ -1,0 +1,602 @@
+// src/modules/tasks/BoilerTempControlTask.cpp
+// Boiler temperature control task - cascade control inner loop
+#include "modules/tasks/BoilerTempControlTask.h"
+
+#include "config/SystemConstants.h"
+#include "modules/control/BoilerTempController.h"
+#include "modules/control/BurnerBoostPolicy.h"
+#include "modules/control/CentralizedFailsafe.h"
+#include "modules/control/BurnerStateMachine.h"
+#include "modules/control/BurnerRequestManager.h"
+#include "modules/control/BurnerSafetyValidator.h"  // F2: validate before arming demand
+#include "modules/control/ReturnPreheater.h"        // F2: thermal-shock mitigation
+#include "modules/control/BurnerDemandGate.h"       // Arming rules shared with BurnerControlTask
+#include "modules/control/AutotuneGainTarget.h"     // Gain set an autotune result belongs to
+#include "modules/tasks/BurnerControlTask.h"        // getBurnerDemandPermission()
+#include "shared/SharedResources.h"
+#include "events/SystemEventsGenerated.h"
+#include "core/SystemResourceProvider.h"
+#include "core/StateManager.h"
+#include "config/SystemSettingsStruct.h"  // For SystemSettings full definition
+#include "utils/ResourceGuard.h"  // For TaskCleanupHandler
+#include "modules/tasks/PersistentStorageTask.h"  // For NVS save
+#include "modules/tasks/MQTTTask.h"  // For MQTT publish
+#include "LoggingMacros.h"
+#include <TaskManager.h>
+#include <atomic>
+
+static const char* TAG = "BoilerTempCtrl";
+
+// Task handle for external access
+static TaskHandle_t taskHandle = nullptr;
+
+// Cached event group handles
+static struct {
+    EventGroupHandle_t sensorEventGroup = nullptr;
+    EventGroupHandle_t burnerRequestEventGroup = nullptr;
+    bool initialized = false;
+} cachedHandles;
+
+// Controller instance
+static BoilerTempController controller;
+
+// Statistics tracking
+static struct {
+    uint32_t cycleCount = 0;
+    uint32_t powerChanges = 0;
+    uint32_t lastCycleTime = 0;
+} stats;
+
+// Latest PID decision for BurnerControlTask's arming check (BurnerDemandGate)
+static std::atomic<bool> decisionWantsHeat{false};
+static std::atomic<int16_t> decisionTarget{0};
+static std::atomic<uint32_t> decisionMs{0};  // 0 = no decision yet
+
+static void publishDecision(bool wantsHeat, Temperature_t target) {
+    decisionWantsHeat.store(wantsHeat);
+    decisionTarget.store(static_cast<int16_t>(target));
+    decisionMs.store(millis() | 1);
+}
+
+TaskHandle_t getBoilerTempControlTaskHandle() {
+    return taskHandle;
+}
+
+BoilerTempController* getBoilerTempController() {
+    return controller.isInitialized() ? &controller : nullptr;
+}
+
+bool getBoilerTempDecision(bool& wantsHeat, Temperature_t& target, uint32_t& ageMs) {
+    const uint32_t ms = decisionMs.load();
+    if (ms == 0) {
+        return false;
+    }
+    wantsHeat = decisionWantsHeat.load();
+    target = static_cast<Temperature_t>(decisionTarget.load());
+    ageMs = millis() - ms;
+    return true;
+}
+
+void BoilerTempControlTask(void* parameter) {
+    (void)parameter;
+
+    LOG_INFO(TAG, "Started C%d Stk:%d", xPortGetCoreID(), uxTaskGetStackHighWaterMark(NULL));
+
+    // Cache event group handles
+    if (!cachedHandles.initialized) {
+        cachedHandles.sensorEventGroup = SRP::getSensorEventGroup();
+        cachedHandles.burnerRequestEventGroup = SRP::getBurnerRequestEventGroup();
+
+        if (!cachedHandles.sensorEventGroup || !cachedHandles.burnerRequestEventGroup) {
+            LOG_ERROR(TAG, "Failed to get event group handles");
+            vTaskDelete(NULL);
+            return;
+        }
+        cachedHandles.initialized = true;
+    }
+
+    // initialize() reads the burner type (boiler/pidEnabled) once: wait for the saved
+    // parameters, which were loaded ~150 ms after this point, so a saved PID mode was
+    // ignored (2026-09-15). Bounded well below the task watchdog.
+    static constexpr uint32_t PARAMETER_LOAD_WAIT_MS = 3000;
+    uint32_t waitedMs = 0;
+    while (!PersistentStorageTask_ParametersLoaded() && waitedMs < PARAMETER_LOAD_WAIT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        waitedMs += 50;
+    }
+    if (!PersistentStorageTask_ParametersLoaded()) {
+        LOG_WARN(TAG, "Parameters not loaded after %lu ms - using defaults for the burner type",
+                 static_cast<unsigned long>(waitedMs));
+    }
+
+    // Initialize the controller
+    if (!controller.initialize()) {
+        LOG_ERROR(TAG, "Failed to initialize BoilerTempController");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Register with watchdog - use 2x sensor interval plus margin
+    constexpr uint32_t WATCHDOG_TIMEOUT_MS =
+        SystemConstants::Timing::MB8ART_SENSOR_READ_INTERVAL_MS * 2 + 5000;
+
+    if (!SRP::getTaskManager().feedWatchdog()) {
+        LOG_WARN(TAG, "Initial watchdog feed failed");
+    }
+    LOG_INFO(TAG, "WDT OK %lums", WATCHDOG_TIMEOUT_MS);
+
+    // Register cleanup handler
+    TaskCleanupHandler::registerCleanup([&]() {
+        LOG_WARN(TAG, "BoilerTempControlTask cleanup");
+        controller.reset();
+    });
+
+    LOG_INFO(TAG, "Entering main loop - waiting for sensor updates");
+
+    // Main control loop
+    while (true) {
+        // Wait for boiler output temperature sensor update
+        // This synchronizes our control loop with the sensor read interval (~2.5s)
+        EventBits_t bits = xEventGroupWaitBits(
+            cachedHandles.sensorEventGroup,
+            SystemEvents::SensorUpdate::BOILER_OUTPUT,
+            pdTRUE,  // Clear on exit
+            pdFALSE, // Wait for any bit
+            pdMS_TO_TICKS(SystemConstants::Timing::MB8ART_SENSOR_READ_INTERVAL_MS * 2)
+        );
+
+        // Feed watchdog
+        (void)SRP::getTaskManager().feedWatchdog();
+
+        // Check if we got a sensor update or timeout
+        if (!(bits & SystemEvents::SensorUpdate::BOILER_OUTPUT)) {
+            LOG_DEBUG(TAG, "Timeout waiting for sensor - checking state anyway");
+        }
+
+        // Check for auto-tuning requests
+        EventBits_t controlBits = SRP::getControlRequestsEventBits();
+
+        if (controlBits & SystemEvents::ControlRequest::PID_AUTOTUNE) {
+            SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::PID_AUTOTUNE);
+
+            // Get current boiler target from any active request
+            Temperature_t tuneSetpoint = BurnerRequestManager::getCurrentTargetTemp();
+            if (tuneSetpoint == 0 || tuneSetpoint == TEMP_INVALID) {
+                // Default to 55°C if no active request
+                tuneSetpoint = tempFromFloat(55.0f);
+            }
+
+            // Only start from a sane, fresh boiler temperature (Autotune::MIN/MAX_BOILER_TEMP)
+            SharedSensorReadings startReadings = StateManager::getSensorReadingsCopy();
+            bool startTempOk = startReadings.isBoilerTempOutputValid &&
+                !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT) &&
+                startReadings.boilerTempOutput >= SystemConstants::PID::Autotune::MIN_BOILER_TEMP &&
+                startReadings.boilerTempOutput <= SystemConstants::PID::Autotune::MAX_BOILER_TEMP;
+
+            if (!startTempOk) {
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                LOG_WARN(TAG, "Auto-tuning not started: boiler output %.1f°C invalid, stale or outside %.1f-%.1f°C",
+                         tempToFloat(startReadings.boilerTempOutput),
+                         tempToFloat(SystemConstants::PID::Autotune::MIN_BOILER_TEMP),
+                         tempToFloat(SystemConstants::PID::Autotune::MAX_BOILER_TEMP));
+                MQTTTask::publish("boiler/status/pid/autotune/result",
+                    "{\"status\":\"rejected\",\"reason\":\"boiler temp\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
+            } else if (controller.startAutoTuning(tuneSetpoint)) {
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
+                SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_COMPLETE |
+                                           SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+            } else {
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                LOG_ERROR(TAG, "Failed to start auto-tuning");
+            }
+        }
+
+        if (controlBits & SystemEvents::ControlRequest::PID_AUTOTUNE_STOP) {
+            SRP::clearControlRequestsEventBits(SystemEvents::ControlRequest::PID_AUTOTUNE_STOP);
+            const bool wasTuning = controller.isAutoTuning();
+            controller.stopAutoTuning();
+            if (wasTuning) {
+                // Like the excursion abort (review R1-4): drop the tuner's demand and its
+                // possibly ON decision. With a request left, the normal path below re-arms
+                // in this cycle if the PID wants heat.
+                const Temperature_t stopTarget = BurnerRequestManager::getCurrentTargetTemp();
+                BurnerStateMachine::setHeatDemand(false, stopTarget, false);
+                publishDecision(false, stopTarget);
+            }
+            SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
+            LOG_INFO(TAG, "Auto-tuning stopped by user");
+        }
+
+        // Handle auto-tuning if active
+        if (controller.isAutoTuning()) {
+            // SAFETY: Check if there's still an active heating/water request
+            // Auto-tuning MUST stop if heating is disabled to prevent running
+            // burner without pump (pump control follows HEATING_ON bit)
+            EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
+            bool hasActiveRequest = (requestBits & SystemEvents::BurnerRequest::HEATING) ||
+                                   (requestBits & SystemEvents::BurnerRequest::WATER);
+            // Mode of this cycle for the safety validation below: controller.isWaterMode()
+            // is only updated by updateMode(), which does not run during a tuning run
+            // (review 2026-09-14 pid-4), so a water request that started after the run
+            // began would skip the water temperature limit check
+            const bool waterModeNow = (requestBits & SystemEvents::BurnerRequest::WATER) != 0;
+
+            if (!hasActiveRequest) {
+                LOG_WARN(TAG, "No active heating request - stopping auto-tuning for safety");
+                controller.stopAutoTuning();
+                // Disarm and publish OFF like the excursion abort (review R1-4): the tuner's
+                // last ON decision stayed fresh for DECISION_MAX_AGE_MS and let
+                // BurnerControlTask arm a returning request whatever the boiler temperature
+                BurnerStateMachine::setHeatDemand(false, BurnerRequestManager::getCurrentTargetTemp(), false);
+                publishDecision(false, BurnerRequestManager::getCurrentTargetTemp());
+                SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                stats.cycleCount++;
+                continue;
+            }
+
+            SharedSensorReadings readings = StateManager::getSensorReadingsCopy();
+
+            // SAFETY: abort on lost/stale boiler temperature or excursion above
+            // Autotune::MAX_TEMP_EXCURSION. Previously an invalid reading just skipped
+            // the cycle and left the burner at the tuner's last level (possibly FULL),
+            // and the excursion limit was defined but never checked.
+            bool boilerTempUsable = readings.isBoilerTempOutputValid &&
+                !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT);
+            if (!boilerTempUsable ||
+                readings.boilerTempOutput > SystemConstants::PID::Autotune::MAX_TEMP_EXCURSION) {
+                LOG_ERROR(TAG, "Auto-tuning aborted: %s (boiler output %.1f°C, limit %.1f°C)",
+                          boilerTempUsable ? "boiler temperature excursion" : "boiler output sensor invalid or stale",
+                          tempToFloat(readings.boilerTempOutput),
+                          tempToFloat(SystemConstants::PID::Autotune::MAX_TEMP_EXCURSION));
+                controller.stopAutoTuning();
+                BurnerStateMachine::setHeatDemand(false, BurnerRequestManager::getCurrentTargetTemp(), false);
+                // BurnerControlTask must not re-arm from the tuner's last (possibly ON) decision
+                publishDecision(false, BurnerRequestManager::getCurrentTargetTemp());
+                SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
+                SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                MQTTTask::publish("boiler/status/pid/autotune/result",
+                    "{\"status\":\"aborted\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
+                stats.cycleCount++;
+                continue;
+            }
+
+            if (readings.isBoilerTempOutputValid) {
+                auto output = controller.updateAutoTuning(readings.boilerTempOutput);
+
+                // Apply the auto-tuner's relay output
+                // During auto-tuning, we MUST actively control the burner for oscillations
+                Temperature_t tuneTarget = BurnerRequestManager::getCurrentTargetTemp();
+                if (tuneTarget == 0 || tuneTarget == TEMP_INVALID) {
+                    tuneTarget = tempFromFloat(55.0f);  // Default
+                }
+
+                // Level-triggered like the normal path, not only on tuner edges (review
+                // 2026-09-14 pid-3): a demand BurnerControlTask armed with the request's
+                // power during an OFF phase stayed on and corrupted the relay test, and an
+                // ON edge blocked by a missing permission was never retried. Publishing
+                // the tuner's decision keeps BurnerControlTask's arming check following
+                // the tuner instead of "boiler below target".
+                const bool tunerWantsHeat = (output.powerLevel != BoilerTempController::PowerLevel::OFF);
+                publishDecision(tunerWantsHeat, tuneTarget);
+
+                bool demandArmed = false;
+                bool demandHighPower = false;
+                Temperature_t smTarget = 0;
+                // Unknown state: write the desired state
+                const bool demandKnown =
+                    BurnerStateMachine::getHeatDemandState(demandArmed, smTarget, demandHighPower);
+
+                static bool tuneBlockedLogged = false;
+                const bool tunePermitted = getBurnerDemandPermission().permitted;
+                if (!tunerWantsHeat) {
+                    tuneBlockedLogged = false;
+                } else if (!tunePermitted && (output.changed || !tuneBlockedLogged)) {
+                    // BurnerControlTask blocked the request (stale sensors, safety
+                    // validation, return preheating, runtime limit)
+                    LOG_WARN(TAG, "Autotune power-on blocked - burner demand not permitted by BurnerControlTask");
+                    tuneBlockedLogged = true;
+                }
+
+                // BurnerDemandGate::decideAutotune(): level-triggered, retries a refused ON
+                switch (BurnerDemandGate::decideAutotune(tunerWantsHeat, tunePermitted, output.changed,
+                                                         demandKnown, demandArmed, demandHighPower)) {
+                    case BurnerDemandGate::AutotuneAction::ASSERT_OFF:
+                        // Auto-tuner wants burner OFF (actively stop it), or ON is not permitted
+                        BurnerStateMachine::setHeatDemand(false, tuneTarget, false);
+                        if (!tunerWantsHeat) {
+                            LOG_INFO(TAG, "%s", output.changed ? "Autotune: Burner OFF"
+                                                               : "Autotune: re-asserting burner OFF");
+                        }
+                        break;
+
+                    case BurnerDemandGate::AutotuneAction::ASSERT_FULL: {
+                        // Auto-tuner wants burner ON at FULL power - still gate on
+                        // Layer-1 safety validation (F2): autotune oscillations can
+                        // drive the same thermal-shock/pressure conditions.
+                        BurnerSafetyValidator::SafetyConfig safetyConfig;
+                        safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
+                        auto vr = BurnerSafetyValidator::validateBurnerOperation(
+                            readings, safetyConfig, waterModeNow);
+                        if (vr == BurnerSafetyValidator::ValidationResult::SAFE_TO_OPERATE) {
+                            // Refused if BurnerControlTask revoked the permission meanwhile;
+                            // retried next cycle
+                            if (BurnerStateMachine::setHeatDemand(true, tuneTarget, true)) {
+                                tuneBlockedLogged = false;
+                                LOG_INFO(TAG, "%s", output.changed ? "Autotune: Burner FULL"
+                                                                   : "Autotune: re-asserting burner FULL");
+                            }
+                        } else {
+                            BurnerStateMachine::setHeatDemand(false, tuneTarget, false);
+                            if (output.changed || !tuneBlockedLogged) {
+                                LOG_WARN(TAG, "Autotune power-on blocked by safety validation: %s",
+                                         BurnerSafetyValidator::getValidationErrorMessage(vr));
+                                tuneBlockedLogged = true;
+                            }
+                        }
+                        break;
+                    }
+
+                    case BurnerDemandGate::AutotuneAction::NONE:
+                    default:
+                        break;
+                }
+
+                // Check if tuning completed
+                if (!controller.isAutoTuning()) {
+                    SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
+
+                    // Gain set of the run: the mode captured at startAutoTuning() compared
+                    // with the active request. controller.isWaterMode() cannot be used
+                    // here - updateMode() does not run while tuning, so it still holds the
+                    // mode of the last normal control cycle (review 2026-09-14 pid-4).
+                    const AutotuneGainTarget::Target gainTarget = controller.getTunedGainTarget();
+
+                    if (gainTarget == AutotuneGainTarget::Target::REJECT_MODE_CHANGED) {
+                        // Water and space were measured on the same run: the result
+                        // describes neither loop, and the live water gains are hand
+                        // corrected values that must not be overwritten by it
+                        SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                        LOG_WARN(TAG, "Auto-tuning result discarded - heating mode changed during the run");
+                        MQTTTask::publish("boiler/status/pid/autotune/result",
+                            "{\"status\":\"rejected\",\"reason\":\"mode changed\"}", 0, true,
+                            MQTTPriority::PRIORITY_HIGH);
+                    } else if (controller.applyAutoTuningResults()) {
+                        SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_COMPLETE);
+
+                        // Get the tuned gains
+                        float kp, ki, kd;
+                        if (controller.getTunedGains(kp, ki, kd)) {
+                            // Update SystemSettings for persistence
+                            SystemSettings& settings = SRP::getSystemSettings();
+
+                            // Save to the gain set the relay test actually measured
+                            if (gainTarget == AutotuneGainTarget::Target::WATER) {
+                                settings.wHeaterKp = kp;
+                                settings.wHeaterKi = ki;
+                                settings.wHeaterKd = kd;
+                                LOG_INFO(TAG, "Auto-tuning complete - WATER heating PID gains saved");
+                            } else {
+                                settings.spaceHeatingKp = kp;
+                                settings.spaceHeatingKi = ki;
+                                settings.spaceHeatingKd = kd;
+                                LOG_INFO(TAG, "Auto-tuning complete - SPACE heating PID gains saved");
+                            }
+
+                            // Request NVS save
+                            PersistentStorageTask_RequestSave();
+
+                            // Publish MQTT notification with mode
+                            char buffer[160];
+                            snprintf(buffer, sizeof(buffer),
+                                "{\"status\":\"complete\",\"mode\":\"%s\",\"kp\":%.4f,\"ki\":%.5f,\"kd\":%.4f}",
+                                AutotuneGainTarget::toString(gainTarget),
+                                kp, ki, kd);
+                            MQTTTask::publish("boiler/status/pid/autotune/result", buffer, 0, true,
+                                MQTTPriority::PRIORITY_HIGH);
+                        }
+
+                        LOG_INFO(TAG, "Auto-tuning complete - PID gains applied");
+                    } else {
+                        SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
+                        MQTTTask::publish("boiler/status/pid/autotune/result",
+                            "{\"status\":\"failed\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
+                        LOG_ERROR(TAG, "Auto-tuning completed but failed to apply results");
+                    }
+                }
+            }
+
+            // Continue loop - don't process normal control during tuning
+            stats.cycleCount++;
+            continue;
+        }
+
+        // Check if there's an active burner request
+        EventBits_t requestBits = BurnerRequestManager::getCurrentRequests();
+
+        // Only process if there's an active heating or water request
+        bool hasActiveRequest = (requestBits & SystemEvents::BurnerRequest::HEATING) ||
+                               (requestBits & SystemEvents::BurnerRequest::WATER);
+
+        if (!hasActiveRequest) {
+            // No active request - controller should not interfere
+            // The HeatingControlModule/WheaterControlModule handle request clearing
+            stats.cycleCount++;
+            continue;
+        }
+
+        // Get target temperature from BurnerRequest
+        Temperature_t targetTemp = BurnerRequestManager::getCurrentTargetTemp();
+
+        // Get current boiler output temperature
+        SharedSensorReadings readings = StateManager::getSensorReadingsCopy();
+
+        // Validate sensor data
+        if (!readings.isBoilerTempOutputValid) {
+            LOG_WARN(TAG, "Boiler output temp invalid - skipping cycle");
+            stats.cycleCount++;
+            continue;
+        }
+
+        Temperature_t currentTemp = readings.boilerTempOutput;
+
+        // Check for sensor staleness
+        if (StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT)) {
+            LOG_WARN(TAG, "Boiler output temp stale - skipping cycle");
+            stats.cycleCount++;
+            continue;
+        }
+
+        // Check and update mode (switches PID gains if mode changed)
+        controller.updateMode();
+
+        // BurnerControlTask decides whether arming is permitted at all; this task
+        // decides when (BurnerDemandGate). Sensor fallback limits the target.
+        const BurnerDemandGate::Permission permission = getBurnerDemandPermission();
+        targetTemp = BurnerDemandGate::cappedTarget(targetTemp, permission.maxTargetTemp);
+
+        // Calculate control output
+        auto output = controller.calculate(targetTemp, currentTemp);
+        const bool pidWantsHeat = (output.powerLevel != BoilerTempController::PowerLevel::OFF);
+        publishDecision(pidWantsHeat, targetTemp);
+
+        if (output.changed && !pidWantsHeat) {
+            // Above target - burner off, pump continues because PumpControlModule
+            // watches the HEATING_ON/WATER_ON bits, not the burner
+            LOG_INFO(TAG, "Coasting - burner OFF (target:%.1f curr:%.1f) - pump continues",
+                     tempToFloat(targetTemp),
+                     tempToFloat(currentTemp));
+        }
+
+        // Level-triggered, not only on output edges: a demand armed elsewhere while
+        // this controller wants OFF is dropped, and a demand that is missing while
+        // the PID wants heat is armed (e.g. after BurnerControlTask lifted a block).
+        bool demandArmed = false;
+        Temperature_t smTarget = 0;
+        if (!BurnerStateMachine::getHeatDemandState(demandArmed, smTarget)) {
+            // Unknown: force the desired state
+            demandArmed = !(permission.permitted && pidWantsHeat);
+        }
+
+        switch (BurnerDemandGate::decide(permission.permitted, pidWantsHeat, output.changed, demandArmed)) {
+            case BurnerDemandGate::Action::DISARM:
+                BurnerStateMachine::setHeatDemand(false, targetTemp, false);
+                if (pidWantsHeat) {
+                    LOG_INFO(TAG, "Dropping burner demand - not permitted by BurnerControlTask (target:%.1f curr:%.1f)",
+                             tempToFloat(targetTemp),
+                             tempToFloat(currentTemp));
+                } else if (!output.changed) {
+                    LOG_INFO(TAG, "Re-asserting burner OFF - demand was re-armed while coasting (target:%.1f curr:%.1f)",
+                             tempToFloat(targetTemp),
+                             tempToFloat(currentTemp));
+                }
+                break;
+
+            case BurnerDemandGate::Action::ARM:
+            case BurnerDemandGate::Action::SET_POWER: {
+                // Arm or change power only after the same Layer-1 safety validation
+                // BurnerControlTask runs. F2 (CRITICAL): without this gate a PID
+                // coast OFF->HALF/FULL re-armed demand that BurnerSafetyValidator
+                // had just blocked (thermal shock, system pressure, runtime
+                // limits), igniting into the exact condition Layer-1 rejected.
+                static bool armBlockedLogged = false;
+                BurnerSafetyValidator::SafetyConfig safetyConfig;
+                safetyConfig.maxWaterTemp = SRP::getSystemSettings().wHeaterConfTempSafeLimitHigh;
+                auto vr = BurnerSafetyValidator::validateBurnerOperation(
+                    readings, safetyConfig, controller.isWaterMode());
+
+                if (vr != BurnerSafetyValidator::ValidationResult::SAFE_TO_OPERATE) {
+                    // Fail safe: do not arm demand. Mirror BurnerControlTask's
+                    // thermal-shock handling (start return preheating); leave any
+                    // emergency-stop escalation to BurnerControlTask's own path so
+                    // we do not double-trigger it.
+                    if (output.changed || !armBlockedLogged) {
+                        LOG_WARN(TAG, "PID power-on blocked by safety validation: %s",
+                                 BurnerSafetyValidator::getValidationErrorMessage(vr));
+                        armBlockedLogged = true;
+                    }
+                    BurnerStateMachine::setHeatDemand(false, targetTemp, false);
+                    if (vr == BurnerSafetyValidator::ValidationResult::THERMAL_SHOCK_RISK &&
+                        ReturnPreheater::getState() == ReturnPreheater::State::IDLE) {
+                        LOG_INFO(TAG, "Starting return preheating to mitigate thermal shock");
+                        ReturnPreheater::start();
+                    }
+                } else {
+                    armBlockedLogged = false;
+                    // Pump control is independent (PumpControlModule watches HEATING_ON bit)
+                    // Stage 2 is gated three ways: the bang-bang must want it, the burner
+                    // state machine must permit it (hot-boiler ceiling), and for space
+                    // heating the flow target must be high enough that stage 2 can actually
+                    // leave through the emitters (BurnerBoostPolicy.h - this is the
+                    // shoulder-season lock; water charges and autotune runs are exempt).
+                    const bool boostAllowed = BurnerBoostPolicy::fullPowerAllowed(
+                        controller.isWaterMode(), controller.isAutoTuning(), targetTemp,
+                        SRP::getSystemSettings().heating_boost_min_target);
+                    // Fourth gate: a DEGRADED-or-worse failsafe withholds stage 2. This is
+                    // where "limiting burner to half power" actually happens - in
+                    // CentralizedFailsafe it was a log line above an empty comment until the
+                    // 2026-10-25 review. Enforced here because this is the only place that can
+                    // withhold stage 2 without fighting the controller for the relay.
+                    const bool failsafeAllowsFull = CentralizedFailsafe::fullPowerPermitted();
+                    const bool highPower = (output.powerLevel == BoilerTempController::PowerLevel::FULL) &&
+                                           permission.highPowerAllowed && boostAllowed &&
+                                           failsafeAllowsFull;
+                    static bool boostDeniedLogged = false;
+                    if (output.powerLevel == BoilerTempController::PowerLevel::FULL && !boostAllowed) {
+                        if (!boostDeniedLogged) {
+                            LOG_INFO(TAG, "Stage 2 withheld: flow target %.1f below h/boostMin %.1f",
+                                     tempToFloat(targetTemp),
+                                     tempToFloat(SRP::getSystemSettings().heating_boost_min_target));
+                            boostDeniedLogged = true;
+                        }
+                    } else {
+                        boostDeniedLogged = false;
+                    }
+                    static bool failsafeDeniedLogged = false;
+                    if (output.powerLevel == BoilerTempController::PowerLevel::FULL && !failsafeAllowsFull) {
+                        if (!failsafeDeniedLogged) {
+                            LOG_WARN(TAG, "Stage 2 withheld: failsafe level %s - the boiler runs "
+                                          "at half power until this clears",
+                                     CentralizedFailsafe::getFailsafeStatusString());
+                            failsafeDeniedLogged = true;
+                        }
+                    } else {
+                        failsafeDeniedLogged = false;
+                    }
+                    // The state machine re-checks the permission under its demand mutex:
+                    // `permission` is a snapshot from the start of this cycle (bsm-6)
+                    if (BurnerStateMachine::setHeatDemand(true, targetTemp, highPower)) {
+                        LOG_INFO(TAG, "%s: %s (target:%.1f curr:%.1f)",
+                                 demandArmed ? "Power" : "Arming burner demand",
+                                 BoilerTempController::powerLevelToString(output.powerLevel),
+                                 tempToFloat(targetTemp),
+                                 tempToFloat(currentTemp));
+                    }
+                }
+                break;
+            }
+
+            case BurnerDemandGate::Action::NONE:
+            default:
+                break;
+        }
+
+        if (output.changed) {
+            stats.powerChanges++;
+        }
+
+        stats.cycleCount++;
+        stats.lastCycleTime = millis();
+
+        // Log status periodically (every ~30 seconds = 12 cycles at 2.5s)
+        if (stats.cycleCount % 12 == 0) {
+            [[maybe_unused]] auto lastOutput = controller.getLastOutput();
+            LOG_DEBUG(TAG, "Status: cycles=%lu changes=%lu power=%s target=%.1f curr=%.1f",
+                     stats.cycleCount,
+                     stats.powerChanges,
+                     BoilerTempController::powerLevelToString(lastOutput.powerLevel),
+                     tempToFloat(targetTemp),
+                     tempToFloat(currentTemp));
+        }
+    }
+}

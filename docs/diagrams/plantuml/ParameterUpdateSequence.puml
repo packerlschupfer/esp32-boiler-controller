@@ -1,0 +1,71 @@
+@startuml ParameterUpdateSequence
+!include theme.puml
+
+' File-local: stock PlantUML draws section dividers as a white box, which
+' leaves the theme's white text unreadable.
+skinparam sequenceDividerBackgroundColor #2F4F4F
+skinparam sequenceDividerBorderColor #708090
+skinparam sequenceDividerFontColor #ffffff
+
+title Parameter Update Sequence - MQTT-Driven Configuration\nESP32-PersistentStorage: command queue, range check, callbacks, NVS
+
+participant "MQTT Client" as Client
+participant "MQTT Broker" as Broker
+participant "MQTTTask" as MQTTTask
+participant "PersistentStorageTask" as PSTask
+participant "ESP32-PersistentStorage" as Storage
+participant "NVS (Preferences)" as NVS
+participant "Control Module" as Module
+
+autonumber
+
+== Set Parameter ==
+
+Client -> Broker : publish\nboiler/params/set/heating/targetTemp
+Broker -> MQTTTask : deliver
+MQTTTask -> PSTask : parameter message
+PSTask -> Storage : handleMqttCommand(topic, payload)
+Storage -> Storage : queue command\n(dropped if the queue is full)
+Storage -> Storage : processCommandQueue()
+Storage -> Storage : range check against\nregistered min / max
+
+alt value in range
+    Storage -> Storage : write registered variable
+    Storage -> Module : setOnChange callback
+    Storage -> MQTTTask : publish\nboiler/params/status/heating/targetTemp
+    MQTTTask -> Broker : publish
+    Broker -> Client : status
+else out of range
+    Storage -> Storage : value rejected\n(response format not verified)
+end
+
+== Save ==
+
+Client -> Broker : publish boiler/params/save
+Broker -> MQTTTask : deliver
+MQTTTask -> PSTask : parameter message
+PSTask -> Storage : handleMqttCommand(topic, payload)
+Storage -> NVS : saveAll()\nPreferences put*
+
+== Get / List ==
+
+Client -> Broker : publish boiler/params/get/{name},\nget/all or list
+Broker -> MQTTTask : deliver
+MQTTTask -> PSTask : parameter message
+PSTask -> Storage : handleMqttCommand(topic, payload)
+Storage -> MQTTTask : publish boiler/params/status/...\n(per parameter, category, summary, complete)
+MQTTTask -> Broker : publish
+Broker -> Client : values
+
+note over Client, Module
+  52 registered parameters: system 5, heating 8, h/ 4, w/ 2,
+  wheater 7, pid 9, sensor/offset 9, syslog 8.
+  heating/targetTemp is an int in tenths of °C, range 100-300.
+  Other saves: setOnChange callbacks and StateManager::markSettingsDirty()
+  (enable, priority, override changes) request saveAll() from PersistentStorageTask.
+  boiler/cmd/config outside_heating_threshold / room_overheat_margin use the set path.
+  SAVE_INTERVAL_MS (5 min) is defined but unused: no periodic auto-save.
+  There is no SETTINGS_CHANGED event bit.
+end note
+
+@enduml
