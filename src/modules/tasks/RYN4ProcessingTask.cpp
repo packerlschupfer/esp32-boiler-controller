@@ -389,6 +389,65 @@ static void handleReadTick(RYN4* ryn4) {
     }
 }
 
+/**
+ * @brief Clear a latched RYN4 offline state, or finish a boot init that failed.
+ *
+ * ONE OWNER FOR BOTH CASES. A failed boot probe and a mid-life module death now land in the
+ * same place - statusFlags.moduleOffline - and both make every relay write refused, which the
+ * pre-ignition gate in BurnerSystemController turns into "no burner". So both need the same
+ * recovery, and this task is the only one that can do it: it runs for the life of the device
+ * and already owns the relay path. The boot-time retry briefly lived in the ModbusInit task
+ * instead, which was wrong - that task self-deletes, and it watched isInitialized(), which
+ * stays TRUE through a runtime death.
+ *
+ * THE ESCAPE HATCH MATTERS. Once moduleOffline latches, the library short-circuits its public
+ * control and read methods with MODBUS_ERROR, so no amount of ordinary polling will clear it -
+ * nothing goes out on the wire. isModuleResponsive() is the documented way out: it issues a
+ * bare read through the base class, bypassing the gate, and a reply clears the latch through
+ * the normal response path. Without this, the library's new runtime latching would turn a
+ * recoverable bus glitch into a permanently dead relay layer.
+ *
+ * Rate-limited because an unresponsive probe costs a ~1 s bus timeout on a half-duplex bus
+ * shared with both sensor modules and this same relay board.
+ */
+static void attemptRYN4Recovery(RYN4* ryn4) {
+    if (!ryn4) {
+        return;
+    }
+    const bool needsRecovery = !ryn4->isInitialized() || ryn4->isModuleOffline();
+    if (!needsRecovery) {
+        return;
+    }
+
+    static uint32_t lastAttemptMs = 0;
+    constexpr uint32_t RECOVERY_INTERVAL_MS = 30000;
+    const uint32_t nowMs = millis();
+    if (lastAttemptMs != 0 && (nowMs - lastAttemptMs) < RECOVERY_INTERVAL_MS) {
+        return;
+    }
+    lastAttemptMs = nowMs;
+
+    // Probe first: this is the only call that reaches the wire while the latch is set, and on
+    // success the library clears the latch itself.
+    if (ryn4->isModuleResponsive() && !ryn4->isModuleOffline()) {
+        LOG_WARN(TAG, "RYN4 answered again - offline latch cleared, relays are controllable");
+        return;
+    }
+
+    // Still offline, or never initialised at all: a full init is the heavier option and is
+    // what a boot-time failure actually needs.
+    if (!ryn4->isInitialized()) {
+        LOG_WARN(TAG, "RYN4 uninitialised - retrying initialize()");
+        if (ryn4->initialize()) {
+            LOG_WARN(TAG, "RYN4 initialised on retry - relays are controllable again");
+            ryn4->setWatchdogSeconds(SystemConstants::Relay::DELAY_WATCHDOG_SECONDS);
+        }
+        return;
+    }
+
+    LOG_ERROR(TAG, "RYN4 is offline and not answering - every relay write is being refused");
+}
+
 void RYN4ProcessingTask(void* parameter) {
     auto* ryn4 = static_cast<RYN4*>(parameter);
 
@@ -483,6 +542,11 @@ void RYN4ProcessingTask(void* parameter) {
     constexpr TickType_t WAIT_TIMEOUT = pdMS_TO_TICKS(SystemConstants::Timing::TASK_NOTIFICATION_TIMEOUT_MS);  // 3s timeout for watchdog
 
     while (true) {
+        // Before anything else: if the relay layer is unusable, try to get it back. Deliberately
+        // outside the notification branch - a latched module means no traffic, and recovery must
+        // not depend on ticks we might not be getting.
+        attemptRYN4Recovery(ryn4);
+
         // Wait for coordinator notification. F35: the coordinator now notifies
         // with eSetBits (a distinct bit per SensorType) so a SET and a READ tick
         // that both land while a slow transaction was in flight are coalesced
