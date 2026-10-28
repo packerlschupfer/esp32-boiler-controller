@@ -163,14 +163,26 @@ RoomSensorRegisterReport::Snapshot readRoomSensorDiagnostics() {
     // readDiagnostics() would attempt the read anyway while the firmware is UNKNOWN, but then
     // `fw` would be 0 and the whole point is attributing numbers to a build.
     if (dev->getFirmware() == andrtf3::ANDRTF3::Firmware::UNKNOWN) {
-        (void)dev->detectFirmware();  // a false here just leaves openFirmware false below
+        (void)dev->detectFirmware();
     }
+    const andrtf3::ANDRTF3::Firmware fw = dev->getFirmware();
     snap.firmwareVersion = dev->getFirmwareVersion();
-    snap.openFirmware = (dev->getFirmware() == andrtf3::ANDRTF3::Firmware::OPEN);
+    snap.firmwareKnown = (fw != andrtf3::ANDRTF3::Firmware::UNKNOWN);
+    snap.openFirmware = (fw == andrtf3::ANDRTF3::Firmware::OPEN);
+
+    // A still-UNKNOWN firmware means the detection frame itself got no answer: the sensor is
+    // absent, mid-reflash, or the RS485 pair is broken. Stop here rather than spending a
+    // second ~1 s bus timeout on registers that cannot answer either - readDiagnostics()
+    // only skips for ORIGINAL, so with UNKNOWN it would transact and time out again. That
+    // second timeout is what let one diagnostics request hold the shared bus for ~3 s across
+    // the RYN4 and MB8ART slots while the sensor was dead. Found 2026-10-28.
+    if (!snap.firmwareKnown) {
+        return snap;  // ok stays false; the formatter reports "no_answer"
+    }
 
     andrtf3::Diagnostics d;
     if (!dev->readDiagnostics(d)) {
-        return snap;  // ok stays false; the formatter reports which of the two reasons it was
+        return snap;  // ok stays false; the formatter says which of the three reasons it was
     }
     snap.ok = true;
 

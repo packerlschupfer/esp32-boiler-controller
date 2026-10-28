@@ -106,12 +106,24 @@ void ANDRTF3Task_requestDiagnostics() {
  * retained copy would be read months later as if it were current. The payload carries the
  * sensor's uptime, so a reader can always see which period the counters cover.
  */
-static void serveDiagnosticsRequest() {
+static void serveDiagnosticsRequest(bool sensorAnswering) {
     if (!s_diagRequested.exchange(false, std::memory_order_relaxed)) {
         return;
     }
 
-    const RoomSensorRegisterReport::Snapshot snap = HAL::readRoomSensorDiagnostics();
+    // If the temperature read we just did got nothing, the sensor is dark and so is every
+    // register in it. Answer from what we already know instead of spending another ~1 s bus
+    // timeout on a device that cannot reply - this runs on the SHARED half-duplex bus, and
+    // the RYN4 relay and MB8ART temperature slots are waiting behind it. Found 2026-10-28:
+    // with a dead sensor one request held the bus for ~3 s across those slots.
+    RoomSensorRegisterReport::Snapshot snap;
+    if (!sensorAnswering) {
+        snap.available = true;   // the device object exists; it is just not answering
+        LOG_WARN(TAG, "Register read skipped - the last temperature read failed, "
+                      "so the sensor is not answering");
+    } else {
+        snap = HAL::readRoomSensorDiagnostics();
+    }
 
     char payload[sizeof(MQTTPublishRequest::payload)];
     const size_t len = RoomSensorRegisterReport::format(payload, sizeof(payload), snap);
@@ -124,10 +136,16 @@ static void serveDiagnosticsRequest() {
                            MQTTPriority::PRIORITY_LOW)) {
         // Someone asked and will otherwise wait forever: LOW priority lands in the 5-slot
         // normal queue with drop-oldest, so a refusal here is real.
-        LOG_WARN(TAG, "Sensor register report dropped by the publish queue");
+        LOG_WARN(TAG, "Sensor register report refused by the publish queue");
         return;
     }
-    LOG_INFO(TAG, "Published sensor registers: fw=0x%04X ok=%d fail=%u good=%u up=%lus",
+    // QUEUED, not published. publish() returns true once the request is copied into the
+    // 5-slot DROP_OLDEST normal queue and it never checks broker connectivity, so a true here
+    // is not delivery: during a broker drop the periodic publishers can evict this entry
+    // before it goes out, and the requester gets neither an answer nor an error. The topic is
+    // deliberately not retained, so there is nothing to find afterwards either. Say "queued"
+    // rather than "published" - the log line used to claim delivery it could not know about.
+    LOG_INFO(TAG, "Sensor registers queued: fw=0x%04X ok=%d fail=%u good=%u up=%lus",
              snap.firmwareVersion, snap.ok ? 1 : 0,
              static_cast<unsigned>(snap.failedReadings),
              static_cast<unsigned>(snap.goodReadings),
@@ -342,7 +360,8 @@ void ANDRTF3Task(void* parameter) {
         if (notified) {
             // Timer triggered - read temperature
             // This may block waiting for Modbus bus mutex, so feed watchdog after
-            if (processTemperatureReading()) {
+            const bool readOk = processTemperatureReading();
+            if (readOk) {
                 readCount++;
                 consecutiveErrors = 0;
             } else {
@@ -379,7 +398,7 @@ void ANDRTF3Task(void* parameter) {
             // After the temperature read, not before: the control path gets the bus first,
             // and the watchdog has just been fed, so a second transaction here has the full
             // interval of margin rather than competing with the read we actually need.
-            serveDiagnosticsRequest();
+            serveDiagnosticsRequest(readOk);
             (void)SRP::getTaskManager().feedWatchdog();
         }
 

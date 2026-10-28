@@ -139,10 +139,17 @@ void TemperatureSensorFallback::setOperationMode(OperationMode mode) {
         return;
     }
     if (currentStatus.currentOperationMode != mode) {
-        const char* modeNames[] = {"NONE", "SPACE_HEATING", "WATER_HEATING", "BOTH"};
+        // FROST_PROTECTION was added to OperationMode and this table was not extended, so
+        // modeNames[4] read one past the end and handed the garbage pointer to LOG_INFO's %s,
+        // which then dereferences it. It fired on exactly the transitions you least want it
+        // on: the start and the end of every frost burn. Found 2026-10-28.
+        //
+        // The static_assert is the actual fix - the table is now pinned to the enum, so adding
+        // a sixth mode fails the build instead of reading out of bounds. operationModeName()
+        // keeps the runtime bound as a backstop for a cast-from-int value.
         LOG_INFO(TAG, "Operation mode changed: %s -> %s",
-                modeNames[static_cast<int>(currentStatus.currentOperationMode)],
-                modeNames[static_cast<int>(mode)]);
+                operationModeName(currentStatus.currentOperationMode),
+                operationModeName(mode));
         currentStatus.currentOperationMode = mode;
 
         // Force immediate sensor status update when mode changes
@@ -192,6 +199,11 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
     currentStatus.missingWaterTemp = false;
     currentStatus.missingRoomTemp = false;
     
+    // Did this pass actually re-read the shared readings? The debounce step below is gated on
+    // it: acting on last pass's flags as if they were a new sample is how one bad reading plus
+    // one mutex timeout reached SHUTDOWN.
+    bool flagsRefreshed = false;
+
     // Get current sensor readings
     {
         auto guard = MutexRetryHelper::acquireGuard(
@@ -199,6 +211,7 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
             "SensorReadings-Fallback"
         );
         if (guard) {
+            flagsRefreshed = true;
             const auto& readings = SRP::getSensorReadings();
 
             // Check if sensor data is fresh
@@ -247,6 +260,10 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
         }
     }
     
+    // Did we actually re-read the shared readings this pass? See the guard on the counter
+    // step below - a pass that could not take the sensor mutex is working from the PREVIOUS
+    // pass's flags, and must not be allowed to advance the debounce on them.
+
     // Determine fallback mode based on sensor availability with hysteresis
     // This prevents mode chattering when sensors are intermittently failing
     FallbackMode previousMode = currentStatus.currentMode;
@@ -286,7 +303,22 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
         // It is NOT 5 s of wall clock: MB8ART samples alternate 1.5 s / 3.5 s apart (ticks
         // {2,5} of ten), so the 1.5 s sample after a counted one is always skipped and three
         // steps span 8.5-10 s. See the header for why that is documented rather than fixed.
-        if (shouldCountInvalid(invalidCounting, now, lastInvalidCountMs,
+        // ONLY COUNT ON FRESHLY READ FLAGS. The rate limit is time-based on purpose (a dead
+        // MB8ART stops advancing its timestamp, so a sample-arrival gate would never escalate
+        // at all), but combined with STALE flags that let a pass which failed to take the
+        // sensor mutex count a second step against the SAME bad sample. With the boiler-output
+        // threshold at 2, that is one real bad reading plus one mutex timeout - about 1 s
+        // apart, since the holder is MB8ARTTask writing the next, good, sample - reaching
+        // SHUTDOWN, Error::SENSOR_FAILURE and a stopped burn. The mutex timeout is not
+        // evidence about the sensor, and the 2026-10-23 change from 1 -> 3 existed precisely
+        // to stop a momentary glitch killing a burn. Found by the 2026-10-28 review.
+        //
+        // A pass that cannot read is simply not a sample: it does not step and does not reset,
+        // so the next successful pass decides. A genuinely dead MB8ART still escalates, because
+        // its reads keep succeeding and keep reporting the data as stale.
+        if (!flagsRefreshed) {
+            LOG_WARN(TAG, "Sensor status not refreshed (mutex busy) - debounce not advanced");
+        } else if (shouldCountInvalid(invalidCounting, now, lastInvalidCountMs,
                                SystemConstants::Timing::MB8ART_SENSOR_READ_INTERVAL_MS)) {
             invalidCounting = true;
             lastInvalidCountMs = now;

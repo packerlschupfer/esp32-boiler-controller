@@ -22,6 +22,80 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Fixed: 21 findings from a multi-agent review of the preceding six commits
+
+A six-dimension Fable review with adversarial verification over `915d416..529722a` - six
+commits written in two days and reviewed by nobody. 22 findings, 21 survived verification.
+Four were independently re-verified by hand before fixing. Two dimensions found the first item
+below separately.
+
+**High**
+
+- **`attemptRecovery()` could fire the burner against the operator's master switch.** The
+  caller added in `68c45fb` sat *above* the existing `!boilerEnabled` guard, the full safety
+  evaluation and the latch re-check, and `attemptRecovery()` reads none of them - it sets
+  `BOILER_ENABLED` on its own. With the boiler switched off in HA, a bare `CRITICAL` from three
+  relay read-back mismatches plus an operator `emergency_reset` re-enabled the bit while the
+  setting stayed false and HA still showed OFF; every burner gate keys on the bit and nothing
+  re-syncs bit-from-setting at runtime, so with demand present it fired until the next reboot.
+  Both paths that can set that bit now go through the same gates, and the master switch wins.
+- **Out-of-bounds read passed to `%s`.** `modeNames[]` had four entries;
+  `OperationMode::FROST_PROTECTION` is 4. It fired on the start and end of every frost burn.
+  Replaced with a bounds-checked `operationModeName()` plus a `static_assert` tying the table
+  to the enum, so the next mode added fails the build instead of reading past the end.
+- **Recovery's root-cause check was vacuous for the only cause that reaches it.**
+  `RELAY_OPERATION_FAILED` matched none of the three checks, so "Root cause appears resolved"
+  was printed without verifying anything. It now requires `Error::RELAY` to be clear, and an
+  unrecognised cause refuses rather than proceeding - the action re-enables the boiler.
+
+**Medium**
+
+- **The health topic would have stopped publishing at 11.57 days uptime.** Measured at 250 B of
+  a 256 B pooled buffer; `timestamp` and `uptime` are the same clock and both grow in digits,
+  reaching exactly 256 at 1,000,000 s, where `written >= sizeof(...)` drops the whole publish
+  silently. Adding `stack_min_task` is what moved that cliff into range. `timestamp` removed -
+  nothing consumed it - plus an hourly warning once headroom falls below 24 B.
+- **The inverted-flow-limit fix did not work and its warning was false.** `orderFlowLimits()`
+  was applied only in `BurnerRequestManager`, the last stop; the target computations upstream
+  still clamped on the raw pair, so with `w/hLo 70.0 > w/hHi 60.0` a 68.0 tank target was
+  already collapsed to 60.0 before the ordering ran. Now ordered at both clamp sites.
+- **The boiler-output debounce could reach SHUTDOWN on one bad sample.** The step was gated on
+  elapsed time but not on the flags having been re-read, so a pass that failed to take the
+  sensor mutex counted a second step against the *same* bad reading - one real glitch plus one
+  mutex timeout, about a second apart, stopping a burn. A pass that cannot read is no longer a
+  sample: it neither steps nor resets.
+- **A dead sensor was reported as "the stock firmware answered".** `Firmware::UNKNOWN`
+  collapsed into `not_open_firmware`, so an absent, mid-reflash or disconnected sensor was
+  reported as a positively identified stock unit. Now `no_answer`, and the diagnostics read is
+  skipped entirely when the preceding temperature read failed - which also removes a ~3 s hold
+  of the shared RS485 bus across the relay and temperature slots.
+- **Negative temperatures published as unsigned.** Register 57 is a signed int16 in 0.01 °C and
+  went out through a `uint16_t` cast: −30.00 °C read `62536`, −0.01 °C read `65535`.
+- **Syslog config had two parsers and replied from the lenient one.** The handler accepted a
+  trailing space or newline and forwarded the *raw* payload; the storage task parses it
+  differently and could drop the set after the handler logged success. It now forwards a
+  canonical value rendered from the integer it validated, and says "accepted (queued)" rather
+  than claiming the set was applied.
+- **The mock-only test count was understated.** The banner said 45 of 392; the true figure is
+  88 of 401, adding `test_concurrency` (14), `test_memory_pool` (9) and 20 of 23 in
+  `test_pid_autotuner` - three of which run *above* the banner.
+
+**Low** — `scanTaskStacks()`'s ~1.3 kB allocation is now gated on free DRAM like the on-demand
+dump already was, and a skipped or failed scan is counted and published as
+`health.stack_min_age` so a frozen `stack_min` is no longer indistinguishable from a fresh one;
+`stack_min_task` is double-buffered with an atomic index instead of documenting that the name
+could tear; the inverted-limit dedup flag is atomic because two tasks write it;
+`boiler/status/heating/control`'s `i` is documented as **not** the curve's anchor (reconstruct
+from `tgt`, not `i`, or you get 448 against a published 522); and the unreachable
+`{"err":"no_device"}` reply is labelled as such so nobody tests for it.
+
+**And a correction to this project's own tests.** The anchoring tests asserted only on the
+pre-clamp `raw`, which made the `h/sLo`/`h/sHi` arguments inert - so the file claimed
+"−2.0 K/K at every outside temperature" while the flow the burner actually receives moves
+**1.1 K/K** at 12 °C outside, where the curve sits on the floor. A verifier confirmed by
+mutation that disabling the lower clamp left all eight tests green. There is now a test on the
+commanded value at both ends of the clamp.
+
 ### Fixed: the room-deviation curve shift had the wrong sign
 
 The weather curve's Parallelverschiebung was supposed to raise the flow target when the house

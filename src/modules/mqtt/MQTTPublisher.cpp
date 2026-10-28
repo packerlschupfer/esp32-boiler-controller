@@ -105,7 +105,17 @@ void publishSystemStatus() {
 
     // Create JSON status message
     JsonDocument doc;  // ArduinoJson v7
-    doc["timestamp"] = millis();
+
+    // `timestamp` (raw millis()) was REMOVED here 2026-10-28. It was the same clock as
+    // `uptime` below - millis() against millis()/1000 - and both grow in digits, so this
+    // payload grew with uptime toward a hard cliff: measured at 250 B of a 256 B pooled
+    // LogBuffer, reaching exactly 256 at 1,000,000 s (11.57 days), when timestamp hits 10
+    // digits and uptime 7. At that point `written >= sizeof(buffer->data)` below drops the
+    // WHOLE health publish, silently, until a reboot - and adding stack_min_task (~26 B) is
+    // what moved that cliff from out of reach into range. Nothing consumed it: no HA entity
+    // references health.timestamp, and `uptime` carries the same information in the unit a
+    // reader actually wants. Dropping a redundant field is the right fix rather than growing
+    // a pooled buffer that three other callers share.
 
     uint32_t heapFree = ESP.getFreeHeap();
     uint32_t heapMaxBlock = ESP.getMaxAllocHeap();
@@ -154,6 +164,12 @@ void publishSystemStatus() {
     // that on the health publish path to report on the memory budget would be self-defeating.
     doc["health"]["stack_min"] = MonitoringTask_getMinTaskStackFree();
     doc["health"]["stack_min_task"] = MonitoringTask_getMinTaskStackName();
+    // How many scheduled scans in a row could not run. Omitted when 0 (the normal case), so
+    // this costs nothing in the payload budget above until it actually matters - and when it
+    // is present, stack_min is that many 60 s periods stale rather than current.
+    if (const uint16_t stale = MonitoringTask_getStackScanFailures()) {
+        doc["health"]["stack_min_age"] = stale;
+    }
 
     auto buffer = MemoryPools::logBufferPool.allocate();
     if (!buffer) {
@@ -162,6 +178,22 @@ void publishSystemStatus() {
     }
 
     size_t written = serializeJson(doc, buffer->data, sizeof(buffer->data));
+
+    // Backstop for the next field someone adds: warn with headroom left rather than
+    // discovering the limit by the topic going silent. Hourly, so it cannot flood.
+    constexpr size_t HEALTH_HEADROOM_WARN = 24;
+    if (written > 0 && written + HEALTH_HEADROOM_WARN >= sizeof(buffer->data)) {
+        static uint32_t lastTightWarnMs = 0;
+        const uint32_t nowMs = millis();
+        if (lastTightWarnMs == 0 || (nowMs - lastTightWarnMs) >= 3600000UL) {
+            lastTightWarnMs = nowMs;
+            LOG_WARN(TAG, "Health payload %u B of %u - once it no longer fits, the whole "
+                          "publish is DROPPED, not truncated",
+                     static_cast<unsigned>(written),
+                     static_cast<unsigned>(sizeof(buffer->data)));
+        }
+    }
+
     if (written == 0 || written >= sizeof(buffer->data)) {
         LOG_ERROR(TAG, "JSON serialization failed or truncated for health data");
         MemoryPools::logBufferPool.deallocate(buffer);

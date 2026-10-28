@@ -452,7 +452,13 @@ is correct and is what a flame sensor would need - and now carry a banner saying
 passing test called "flame loss bypasses min on time" reads like evidence the controller
 detects flame loss.
 
-**Measured again 2026-10-26: it is 45 cases of 392, not 89 of 350.** The old figure predates
+**Re-measured 2026-10-28: it is 88 cases of 401, not 45 of 392 and not 89 of 350.**
+The 45 figure counted only the mock-driven *integration* suites. A review added the
+test-local reimplementations it missed: `test_concurrency.cpp` (14), `test_memory_pool.cpp`
+(9, a test-local `MemoryPool`/`PooledPtr` under `#ifdef NATIVE_TEST` with no path to
+`src/utils/MemoryPool.h`) and 20 of 23 in `test_pid_autotuner.cpp` (only the three
+`AutotuneClock` cases touch firmware). Three of those four suites run *before* the banner,
+which is why the banner now states the total rather than bracketing one group. The old figure predates
 the struct swap above. The test runner now prints a banner before the group, so a green run
 cannot be mistaken for firmware coverage.
 

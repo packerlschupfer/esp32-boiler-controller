@@ -35,6 +35,11 @@ int16_t legacyTarget(int16_t outside, int16_t room) {
 }
 
 // The fixed formulation, through the policy the firmware now calls.
+// NOTE both helpers return the PRE-CLAMP raw value. That is the right oracle for the
+// sensitivity property, which is a property of the curve - but it is NOT what the burner
+// receives. See commandedTarget() and the clamp tests below: the 2026-10-28 review pointed
+// out that every assertion here ignored the LO/HI arguments, so the file's own claim of
+// "-factor at EVERY outside temperature" was true of raw and false of the commanded flow.
 int16_t fixedTarget(int16_t outside, int16_t room, bool weather = true,
                     bool measured = true, int16_t target = TARGET) {
     const HeatingCurve::Anchoring a =
@@ -42,6 +47,13 @@ int16_t fixedTarget(int16_t outside, int16_t room, bool weather = true,
     int32_t raw = 0;
     HeatingCurve::target(a.inside, outside, COEFF, a.shift, LO, HI, &raw);
     return static_cast<int16_t>(raw);
+}
+
+// What the BURNER is actually commanded: the clamped return value, not rawOut.
+int16_t commandedTarget(int16_t outside, int16_t room) {
+    const HeatingCurve::Anchoring a =
+        HeatingCurve::anchoring(SHIFT, TARGET, room, FACTOR10, true, true);
+    return HeatingCurve::target(a.inside, outside, COEFF, a.shift, LO, HI, nullptr);
 }
 
 }  // namespace
@@ -67,10 +79,14 @@ void test_anchor_colder_room_now_raises_the_flow_target() {
 }
 
 void test_anchor_sensitivity_is_exactly_minus_the_factor() {
-    // Anchoring on the target makes d(flow)/d(room) exactly -roomCurveShiftFactor at EVERY
+    // Anchoring on the target makes d(RAW)/d(room) exactly -roomCurveShiftFactor at EVERY
     // outside temperature. Under the old formulation it was weather-dependent AND positive
     // (+0.70 K/K at 12 C, +0.20 K/K at 0 C), which is why no value of the factor could fix
     // it - the value needed merely to reach zero varied from 2.71 to 2.11.
+    //
+    // THIS IS A PROPERTY OF THE CURVE, NOT OF THE COMMANDED FLOW. The commanded value is
+    // clamped to [h/sLo, h/sHi], so where the curve sits on the floor the burner sees less
+    // than this - see test_anchor_commanded_flow_is_clamped_not_the_raw_sensitivity.
     const int16_t outsides[] = {120, 80, 40, 0, -50, -100};
     for (int16_t outside : outsides) {
         const int16_t warm = fixedTarget(outside, TARGET + 10);  // 1 K warm
@@ -146,4 +162,38 @@ void test_anchor_shift_cannot_overflow_int16() {
     const HeatingCurve::Anchoring b =
         HeatingCurve::anchoring(-32000, 0 + 1, 32767, 100, true, true);
     TEST_ASSERT_EQUAL_INT16(INT16_MIN, b.shift);
+}
+
+void test_anchor_commanded_flow_is_clamped_not_the_raw_sensitivity() {
+    // THE CORRECTION THE 2026-10-28 REVIEW FORCED. Every other test in this file asserts on
+    // the pre-clamp rawOut, which makes the LO/HI arguments inert - so the file could claim
+    // "-2.0 K/K at every outside temperature" while the value the burner is handed moves by
+    // much less wherever the curve is below the h/sLo floor. A reader concluded the house gets
+    // +4.0 K of flow for a 2 K deficit at 12 C outside; it gets +1.1 K.
+    //
+    // Assert the real behaviour at both ends so neither can drift:
+    //  - mild weather, curve under the floor -> commanded is pinned at LO and the room
+    //    deviation buys less than the factor suggests;
+    //  - cold weather, curve above the floor -> commanded tracks raw exactly.
+    const int16_t mild = 120;  // 12.0 C outside
+
+    // Raw moves the full 2 K per K of room, by construction.
+    TEST_ASSERT_EQUAL_INT16(40, fixedTarget(mild, TARGET - 10) - fixedTarget(mild, TARGET + 10));
+
+    // The commanded value cannot go below the floor, so it moves LESS. This is the assertion
+    // that would have caught the overstated claim.
+    const int16_t cmdWarm = commandedTarget(mild, TARGET + 10);
+    const int16_t cmdCold = commandedTarget(mild, TARGET - 10);
+    TEST_ASSERT_EQUAL_INT16(LO, cmdWarm);                 // pinned at the floor
+    TEST_ASSERT_LESS_THAN_INT16(40, cmdCold - cmdWarm);   // strictly less than raw's 40
+    TEST_ASSERT_GREATER_THAN_INT16(0, cmdCold - cmdWarm); // but still the right SIGN
+
+    // Cold enough that the curve is clear of the floor: commanded == raw, so the full
+    // sensitivity does reach the burner there.
+    const int16_t cold = 0;  // 0.0 C outside
+    TEST_ASSERT_EQUAL_INT16(fixedTarget(cold, TARGET - 10), commandedTarget(cold, TARGET - 10));
+    TEST_ASSERT_EQUAL_INT16(40, commandedTarget(cold, TARGET - 10) - commandedTarget(cold, TARGET + 10));
+
+    // And the upper clamp is live on this path too, so a huge deficit cannot exceed h/sHi.
+    TEST_ASSERT_EQUAL_INT16(HI, commandedTarget(-200, 0));
 }

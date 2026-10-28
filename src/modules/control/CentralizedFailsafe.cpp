@@ -474,6 +474,38 @@ bool CentralizedFailsafe::attemptRecovery() {
         }
     }
 
+    // RELAY_OPERATION_FAILED is the ONLY cause that actually reaches this function on this
+    // hardware: it is the single runtime producer of a bare CRITICAL (RelayVerificationManager,
+    // three consecutive BURNER_ENABLE read-back mismatches), and a bare CRITICAL is what the
+    // operator's emergency_reset routes here. Until 2026-10-28 it matched none of the checks
+    // above, so "Root cause appears resolved" was printed without verifying anything at all -
+    // the verification was vacuous for the one case it had to cover.
+    if (lastError == SystemError::RELAY_OPERATION_FAILED) {
+        EventBits_t errorBits = xEventGroupGetBits(SRP::getErrorNotificationEventGroup());
+        if (errorBits & SystemEvents::Error::RELAY) {
+            LOG_WARN(TAG, "Recovery blocked: relay verification still failing");
+            canRecover = false;
+        }
+    }
+
+    // Anything else: refuse rather than assume. Reaching here with an unrecognised cause means
+    // a new triggerFailsafe(CRITICAL) call site appeared and nobody taught recovery how to
+    // check it, and the action below RE-ENABLES THE BOILER. Defaulting to "resolved" for an
+    // unknown cause is the wrong direction for that.
+    switch (lastError) {
+        case SystemError::SYSTEM_LOW_MEMORY:
+        case SystemError::SENSOR_READ_FAILED:
+        case SystemError::SENSOR_INVALID_DATA:
+        case SystemError::MODBUS_COMMUNICATION_ERROR:
+        case SystemError::RELAY_OPERATION_FAILED:
+            break;  // checked above
+        default:
+            LOG_WARN(TAG, "Recovery blocked: no root-cause check exists for error %d",
+                     static_cast<int>(lastError));
+            canRecover = false;
+            break;
+    }
+
     if (!canRecover) {
         LOG_WARN(TAG, "Recovery attempt %lu failed - root cause not resolved",
                  static_cast<unsigned long>(recoveryAttempts));
@@ -542,34 +574,47 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
     // just on the latch being clear - re-enabling over a hot boiler or a failed sensor would
     // be worse than the dead end.
     if (result == EmergencyStopRelease::Result::NOT_ACTIVE) {
-        // No latch, but the LEVEL may still be elevated with nothing able to lower it.
-        // triggerFailsafe(CRITICAL) from ErrorHandler::enterFailsafeMode or
-        // RelayVerificationManager sets no EMERGENCY_STOP, and triggerFailsafe never
-        // downgrades - so a bare CRITICAL was unclearable except by reboot, the same shape as
-        // the DEGRADED half-power lock fixed in 3674614.
-        //
-        // attemptRecovery() is the right tool and existed all along with NO CALLER: it verifies
-        // the root cause against lastError (memory still low? sensor bits still set? comms
-        // still down?) before clearing anything, and it is self-limiting - MAX_RECOVERY_ATTEMPTS
-        // 3 and RECOVERY_DELAY_MS 30 s. Wired here, to the OPERATOR's command, rather than to a
-        // periodic caller: it re-enables the boiler, it has never run on this hardware, and an
-        // autonomous path through never-exercised code that turns the boiler back on is not a
-        // trade worth making. A human asking is the right trigger for a first outing.
-        if (currentLevel.load() >= FailsafeLevel::CRITICAL) {
-            const bool recovered = attemptRecovery();
-            LOG_WARN(TAG, "No emergency latch but level %s - recovery %s",
-                     getFailsafeStatusString(), recovered ? "succeeded" : "refused");
-            return recovered ? EmergencyStopRelease::Result::BOILER_RE_ENABLED
-                             : EmergencyStopRelease::Result::SYSTEM_ERRORS;
-        }
-
         const bool boilerBitSet =
             (xEventGroupGetBits(SRP::getSystemStateEventGroup()) &
              SystemEvents::SystemState::BOILER_ENABLED) != 0;
-        if (!boilerEnabled || boilerBitSet) {
+
+        // Two things can need doing with no latch present, and BOTH of them end up setting
+        // BOILER_ENABLED, so both go through the same gates below.
+        //
+        // levelStuck: the LEVEL is elevated with nothing able to lower it.
+        // triggerFailsafe(CRITICAL) from RelayVerificationManager sets no EMERGENCY_STOP and
+        // triggerFailsafe never downgrades, so a bare CRITICAL was unclearable except by
+        // reboot - the same shape as the DEGRADED half-power lock fixed in 3674614.
+        //
+        // bitNeedsRepair: releaseAfterSensorRecovery() clears EMERGENCY_STOP but deliberately
+        // leaves the boiler disabled for a human to restart, so the operator finds the latch
+        // gone, the boiler dead, and HA still showing ON because the setting was never cleared.
+        const bool levelStuck = currentLevel.load() >= FailsafeLevel::CRITICAL;
+        const bool bitNeedsRepair = !boilerBitSet;
+        if (!levelStuck && !bitNeedsRepair) {
             LOG_WARN(TAG, "Emergency stop release: %s", EmergencyStopRelease::toString(result));
             return result;  // nothing latched and nothing to repair
         }
+
+        // THE OPERATOR'S MASTER SWITCH WINS, for recovery as well as repair.
+        //
+        // This gate used to sit BELOW the attemptRecovery() call, and attemptRecovery() reads
+        // neither the setting nor the conditions - it sets BOILER_ENABLED on its own. So with
+        // the boiler switched off in HA, a bare CRITICAL from one flaky relay read-back plus an
+        // operator emergency_reset re-enabled the bit while the setting stayed false and the HA
+        // switch still read OFF. Every burner gate keys on the BIT, and nothing re-syncs
+        // bit-from-setting at runtime, so with demand present the burner fired against the
+        // switch until the next reboot. Found by two independent reviewers, 2026-10-28.
+        //
+        // Refusing is right rather than clearing the level without the bit: attemptRecovery()
+        // does both as one action, and an operator who wants the error cleared can switch the
+        // boiler on and ask again.
+        if (!boilerEnabled) {
+            LOG_WARN(TAG, "Refusing to clear the failsafe level - the boiler is switched OFF "
+                          "(level %s); switch it on and retry", getFailsafeStatusString());
+            return EmergencyStopRelease::Result::SYSTEM_ERRORS;
+        }
+
         const EmergencyStopRelease::Result safety = EmergencyStopRelease::evaluateSafety(conditions);
         if (safety != EmergencyStopRelease::Result::RELEASED) {
             LOG_WARN(TAG, "Boiler stays disabled: %s", EmergencyStopRelease::toString(safety));
@@ -591,6 +636,17 @@ EmergencyStopRelease::Result CentralizedFailsafe::clearEmergencyStop() {
             LOG_WARN(TAG, "Boiler stays disabled - an emergency stop latched while we were checking");
             return EmergencyStopRelease::Result::NOT_ACTIVE;
         }
+
+        // Now, and only now, past the master switch, the full safety set and the latch
+        // re-check. The stuck LEVEL is the harder problem, so it goes first.
+        if (levelStuck) {
+            const bool recovered = attemptRecovery();
+            LOG_WARN(TAG, "No emergency latch but level %s - recovery %s",
+                     getFailsafeStatusString(), recovered ? "succeeded" : "refused");
+            return recovered ? EmergencyStopRelease::Result::BOILER_RE_ENABLED
+                             : EmergencyStopRelease::Result::SYSTEM_ERRORS;
+        }
+
         xEventGroupSetBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
         setLevel(FailsafeLevel::WARNING);
         recoveryAttempts = 0;

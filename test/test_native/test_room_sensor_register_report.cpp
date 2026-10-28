@@ -22,6 +22,7 @@ static Snapshot healthySnapshot() {
     s.available = true;
     s.ok = true;
     s.openFirmware = true;
+    s.firmwareKnown = true;
     s.firmwareVersion = 0x8001;
     s.uptimeSeconds = 74000;
     s.goodReadings = 61000;
@@ -45,23 +46,66 @@ void test_report_no_device_is_not_a_zero_reading() {
 void test_report_distinguishes_stock_firmware_from_a_failed_read() {
     char buf[PAYLOAD];
 
+    // THREE distinct reasons, and conflating two of them was a real defect: a sensor that
+    // answered NOTHING used to be reported as "not_open_firmware", which the docs describe as
+    // "the stock Andivi firmware answered" - a positive identification of a unit that was not
+    // there. Fixed 2026-10-28; these assertions are what keep them apart.
+
+    // (a) Stock firmware POSITIVELY identified: detection succeeded and said ORIGINAL.
     Snapshot stock;
     stock.available = true;
     stock.ok = false;
+    stock.firmwareKnown = true;
     stock.openFirmware = false;
     stock.firmwareVersion = 7;  // the Andivi firmware seen on these units
     TEST_ASSERT_GREATER_THAN(0u, format(buf, sizeof(buf), stock));
     TEST_ASSERT_NOT_NULL(strstr(buf, "not_open_firmware"));
 
+    // (b) Nothing answered at all: absent, mid-reflash, or a broken RS485 pair.
+    Snapshot dark;
+    dark.available = true;
+    dark.ok = false;
+    dark.firmwareKnown = false;   // detection itself got no reply
+    dark.openFirmware = false;
+    TEST_ASSERT_GREATER_THAN(0u, format(buf, sizeof(buf), dark));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "no_answer"));
+    TEST_ASSERT_NULL(strstr(buf, "not_open_firmware"));   // must NOT claim a stock unit
+
+    // (c) Open firmware identified, but the register read itself failed.
     Snapshot failed;
     failed.available = true;
     failed.ok = false;
+    failed.firmwareKnown = true;
     failed.openFirmware = true;
     failed.firmwareVersion = 0x8001;
     TEST_ASSERT_GREATER_THAN(0u, format(buf, sizeof(buf), failed));
     TEST_ASSERT_NOT_NULL(strstr(buf, "read_failed"));
     // The firmware version survives a failed read - it comes from a different register.
     TEST_ASSERT_NOT_NULL(strstr(buf, "0x8001"));
+}
+
+void test_report_publishes_negative_temperatures_signed() {
+    // `tc` is register 57, a SIGNED int16 in 0.01 C. It was published through a uint16 cast,
+    // so every sub-zero reading came out as 65536+value: -30.00 C read 62536 and -0.01 C read
+    // 65535. The sensor accepts 500..3000 Ohm, which reaches far below freezing, so the input
+    // is reachable on any cold night. The one test that set a negative value asserted nothing
+    // about this key, which is exactly why it shipped. Found 2026-10-28.
+    Snapshot s = healthySnapshot();
+    char buf[PAYLOAD];
+
+    s.temperatureCenti = -3000;                 // -30.00 C
+    TEST_ASSERT_GREATER_THAN(0u, format(buf, sizeof(buf), s));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tc\":-3000"));
+    TEST_ASSERT_NULL(strstr(buf, "62536"));     // the old wrong rendering
+
+    s.temperatureCenti = -1;                    // -0.01 C, the subtlest case
+    TEST_ASSERT_GREATER_THAN(0u, format(buf, sizeof(buf), s));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tc\":-1"));
+    TEST_ASSERT_NULL(strstr(buf, "65535"));
+
+    s.temperatureCenti = 2207;                  // and positives still render plainly
+    TEST_ASSERT_GREATER_THAN(0u, format(buf, sizeof(buf), s));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tc\":2207"));
 }
 
 void test_report_always_emits_zero_failures_explicitly() {

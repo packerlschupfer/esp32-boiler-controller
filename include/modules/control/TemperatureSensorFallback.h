@@ -34,8 +34,29 @@ public:
         // started again - a 10-15 s loop with the fallback flapping NORMAL/SHUTDOWN. Frost is
         // the only path that starts heating while the room is not a measurement, which is why
         // nothing else exposed this.
-        FROST_PROTECTION
+        FROST_PROTECTION,
+        COUNT              // keep last: pins the name table below to this enum
     };
+
+    /**
+     * @brief Name of an OperationMode, bounds-checked.
+     *
+     * Exists because the log line in setOperationMode() indexed a hand-written 4-entry table
+     * with FROST_PROTECTION (= 4), read one past the end and passed the result to a %s that
+     * dereferences it - on the start and end of every frost burn. The static_assert is the
+     * real guard: add a mode without a name and the build fails. The runtime clamp covers a
+     * value cast in from an int, which the %s cannot survive.
+     */
+    static inline const char* operationModeName(OperationMode mode) {
+        static const char* const NAMES[] = {
+            "NONE", "SPACE_HEATING", "WATER_HEATING", "BOTH", "FROST_PROTECTION"
+        };
+        static_assert(sizeof(NAMES) / sizeof(NAMES[0]) ==
+                          static_cast<size_t>(OperationMode::COUNT),
+                      "OperationMode name table must have one entry per mode");
+        const size_t i = static_cast<size_t>(mode);
+        return i < static_cast<size_t>(OperationMode::COUNT) ? NAMES[i] : "INVALID";
+    }
     
     struct SensorStatus {
         bool boilerOutputValid = false;

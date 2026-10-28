@@ -991,6 +991,17 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     }
 
     uint32_t value = static_cast<uint32_t>(parsed);
+
+    // CANONICAL payload for the parameter store, NOT the raw one. The check above accepts a
+    // single trailing ' ' or '\n', but PersistentStorageTask_SetParameter only QUEUES the
+    // string and the storage task parses it with different rules: strtod leaves the trailing
+    // whitespace unconsumed, the value gets wrapped as a JSON string, and the set can then be
+    // dropped - while this handler had already logged success. Two parsers, one payload, and
+    // the reply came from the lenient one. Found 2026-10-28. Re-rendering from the integer we
+    // just validated removes the divergence rather than trying to keep the parsers in step.
+    char canonicalValue[12];
+    snprintf(canonicalValue, sizeof(canonicalValue), "%lu", static_cast<unsigned long>(value));
+
     bool success = false;
     bool syslogSettingChanged = false;  // Track syslog settings for PersistentStorage save
     bool storedAsParameter = false;     // Saved by the parameter storage, not SafetyConfig
@@ -1188,7 +1199,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     }
     else if (strstr(topic, "syslog_port") != nullptr) {
         if (value > 0 && value <= 65535) {
-            if (!PersistentStorageTask_SetParameter("syslog/port", payload)) {
+            if (!PersistentStorageTask_SetParameter("syslog/port", canonicalValue)) {
                 LOG_ERROR(TAG_CMD, "Syslog port not stored - parameter queue refused");
                 return;
             }
@@ -1199,7 +1210,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     }
     else if (strstr(topic, "syslog_facility") != nullptr) {
         if (value <= 23) {  // Valid facility range 0-23
-            if (!PersistentStorageTask_SetParameter("syslog/facility", payload)) {
+            if (!PersistentStorageTask_SetParameter("syslog/facility", canonicalValue)) {
                 LOG_ERROR(TAG_CMD, "Syslog facility not stored - parameter queue refused");
                 return;
             }
@@ -1211,7 +1222,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     else if (strstr(topic, "syslog_min_level") != nullptr) {
         // ESP_LOG levels: 0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG, 5=VERBOSE
         if (value <= ESP_LOG_VERBOSE) {
-            if (!PersistentStorageTask_SetParameter("syslog/minLevel", payload)) {
+            if (!PersistentStorageTask_SetParameter("syslog/minLevel", canonicalValue)) {
                 LOG_ERROR(TAG_CMD, "Syslog min level not stored - parameter queue refused");
                 return;
             }
@@ -1239,7 +1250,10 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
             SafetyConfig::saveToNVS();
         }
         publishSafetyConfig();  // Confirm new values
-        LOG_INFO(TAG_CMD, "Config updated successfully");
+        // "accepted", not "applied": for storedAsParameter keys SetParameter only queues the
+        // set, so this task cannot know the storage task took it. publishSafetyConfig() above
+        // reports the values this task holds, which for a queued set is the pre-set state.
+        LOG_INFO(TAG_CMD, "Config value accepted%s", storedAsParameter ? " (queued to storage)" : "");
     } else {
         LOG_WARN(TAG_CMD, "Invalid config value: %s = %lu", topic, value);
         MQTTTask::publish(MQTT_STATUS_ERROR, "invalid_config_value", 0, false, MQTTPriority::PRIORITY_HIGH);

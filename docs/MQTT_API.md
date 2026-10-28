@@ -171,6 +171,7 @@ matching `t.*` on `boiler/status/sensors`.
 | `cmd` | the curve's answer after clamping to `h/sLo`..`h/sHi` |
 | `clp` | which bound won: `none`, `floor` (h/sLo - weather compensation is inert), `ceil` (h/sHi) |
 | `o`, `i`, `tgt` | outside, room and room-target values **this evaluation used** |
+| | **`i` is NOT the curve's anchor.** Since 2026-10-26 the curve is evaluated on `tgt` whenever `mode` is `weather`, `isrc` is `meas`/`held` and `tgt > 0`; `i` is the live room reading, which enters only through `shift`. So reconstruct `raw` from **`tgt` + `shift` + `o`**, not from `i`. Using `i` gives a number tens of tenths wrong (448 against a published 522 in one live case) and reads like a firmware fault. In room mode, or with `isrc` `tgt`/`nom`, the anchor IS `i`. See `docs/ALGORITHMS.md`. |
 | `isrc` | where `i` came from: `meas` (the sensor), `held` (the sensor, up to 10 min ago), `tgt` (room target assumed), `nom` (20.0 assumed) |
 
 `blk` values: `none` (heating wanted), `outside` (outside >= `outsideThreshold` + 1.0),
@@ -309,8 +310,9 @@ Error replies on the same topic, so a caller always gets an answer:
 
 | Payload | Meaning |
 |---------|---------|
-| `{"err":"no_device"}` | no ANDRTF3 device was ever created |
-| `{"err":"not_open_firmware","fw":"0x0007"}` | the stock Andivi firmware answered; registers 50..77 do not exist there |
+| `{"err":"no_device"}` | no ANDRTF3 device was ever created. **Not reachable on this device**: the serving task exits before its main loop when the HAL has no room sensor, so nothing consumes the request flag. Kept as a guard on the HAL function, which is public - do not write a test expecting this payload |
+| `{"err":"no_answer","fw":"0x0000"}` | the sensor did not reply at all - absent, mid-reflash, or a broken RS485 pair. Also returned without any bus transaction when the preceding temperature read failed, so a dark sensor cannot hold the shared bus |
+| `{"err":"not_open_firmware","fw":"0x0007"}` | the stock Andivi firmware **answered and was identified**; registers 50..77 do not exist there. Until 2026-10-28 a sensor that answered nothing was also reported this way, i.e. as a positively identified stock unit - that case is now `no_answer` |
 | `{"err":"read_failed","fw":"0x8001"}` | open firmware, but the transaction failed |
 
 `ANDRTF3::readDiagnostics()` had been in the library since the start and nothing in this
@@ -1341,6 +1343,14 @@ There are no `diagnostics/tasks` or `diagnostics/memory` topics. The `MQTTDiagno
 - The same figures are in `boiler/cmd/diagnostics` with payload `memory` (`DRAM (8BIT)`, `malloc (DEFAULT)`, `Largest free block`)
 - `uptime`: seconds (`millis()` based, wraps after 49.7 days)
 - `health.tasks`: number of FreeRTOS tasks
+- **`timestamp` was removed from this payload on 2026-10-28.** It was raw `millis()`, the same
+  clock as `uptime`, and both grow in digits - the payload was measured at 250 B of a 256 B
+  buffer and would have hit exactly 256 at 11.57 days uptime, at which point the **whole health
+  publish is dropped**, silently, until a reboot. Use `uptime`.
+- `health.stack_min_age`: scheduled stack scans in a row that could not run (DRAM gate refused
+  or the allocation failed). **Omitted when 0**, the normal case. Present means `stack_min` is
+  that many 60 s periods stale rather than current - the scan keeps the last real figure rather
+  than publishing a fake 0, which was previously indistinguishable from a fresh reading.
 - `health.stack_min` / `health.stack_min_task`: **minimum free stack across the tasks this project
   controls**, and which task it is, from MonitoringTask's last pass. Framework-owned stacks (IDLE,
   ipc) are excluded - their sizes are not ours to set and IDLE's ~456 B free is normal, so

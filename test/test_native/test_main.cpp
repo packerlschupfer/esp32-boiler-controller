@@ -490,6 +490,7 @@ void test_report_failure_breakdown_is_published();
 void test_report_fits_the_payload_with_every_counter_set();
 void test_report_marks_truncation_instead_of_losing_the_tail();
 void test_report_refuses_rather_than_emit_half_a_payload();
+void test_report_publishes_negative_temperatures_signed();
 
 // Heating curve anchoring - both formulations compared (2026-10-26)
 void test_anchor_room_at_target_is_identical_to_the_old_behaviour();
@@ -500,6 +501,7 @@ void test_anchor_room_mode_is_untouched();
 void test_anchor_substituted_room_gets_no_deviation();
 void test_anchor_zero_factor_disables_only_the_deviation();
 void test_anchor_shift_cannot_overflow_int16();
+void test_anchor_commanded_flow_is_clamped_not_the_raw_sensitivity();
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
@@ -544,7 +546,19 @@ int main(int argc, char **argv) {
     // library to compile and run on the host, i.e. a FreeRTOS/NVS shim. That is a project, not
     // a cleanup, and half-doing it would be worse than the honest label.
     // ---------------------------------------------------------------------------------
-    UnityPrint("--- mock-driven suites follow (45 cases): they exercise NO firmware code ---");
+    // AND THE FIGURE WAS UNDERSTATED. The 2026-10-28 review counted the test-local
+    // reimplementations this banner did not: test_concurrency.cpp (14 cases, only unity +
+    // MockTime, file-static mutex/event state), test_memory_pool.cpp (9 cases - a test-local
+    // MemoryPool/PooledPtr under #ifdef NATIVE_TEST with no path to src/utils/MemoryPool.h,
+    // and they run BEFORE this banner), and 20 of 23 in test_pid_autotuner.cpp (test-local
+    // TestPIDAutoTuner/TestCircularBuffer; only the three AutotuneClock cases are real). So
+    // the honest total is 88, not 45 - and some of it is printed above this line, which is
+    // why the banner now states the whole picture rather than bracketing one group.
+    UnityPrint("--- 88 of the cases in this suite exercise NO firmware code: the 45 ---");
+    UNITY_PRINT_EOL();
+    UnityPrint("--- mock-driven integration cases that follow, plus 14 in concurrency, ---");
+    UNITY_PRINT_EOL();
+    UnityPrint("--- 9 in memory_pool and 20 in pid_autotuner, which ran ABOVE this line ---");
     UNITY_PRINT_EOL();
 
     // Sensor integration tests
@@ -998,6 +1012,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_report_fits_the_payload_with_every_counter_set);
     RUN_TEST(test_report_marks_truncation_instead_of_losing_the_tail);
     RUN_TEST(test_report_refuses_rather_than_emit_half_a_payload);
+    RUN_TEST(test_report_publishes_negative_temperatures_signed);
 
     // The curve was anchored on the live room reading, giving the room shift the wrong sign
     RUN_TEST(test_anchor_room_at_target_is_identical_to_the_old_behaviour);
@@ -1008,6 +1023,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_anchor_substituted_room_gets_no_deviation);
     RUN_TEST(test_anchor_zero_factor_disables_only_the_deviation);
     RUN_TEST(test_anchor_shift_cannot_overflow_int16);
+    RUN_TEST(test_anchor_commanded_flow_is_clamped_not_the_raw_sensitivity);
 
     return UNITY_END();
 }

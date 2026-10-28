@@ -1,6 +1,7 @@
 // src/modules/control/HeatingControlModule.cpp
 #include "modules/control/HeatingControlModule.h"
 #include "modules/control/HeatingCurve.h"  // NOMINAL_ROOM_TENTHS fallback, anchoring()
+#include "modules/control/SpaceHeatingPolicy.h"  // orderFlowLimits
 #include <cmath>  // lroundf, to scale roomCurveShiftFactor into the policy x10 integer
 #include "modules/control/RoomTempFallbackPolicy.h"  // hold the last good room reading
 #include "modules/control/HeatingControlModuleFixedPoint.h"  // For fixed-point heating curve calculations
@@ -156,14 +157,23 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
         outsideWarned = false;
     }
 
+    // Order the curve's own clamp pair before using it, for the same reason the water path
+    // does: BurnerRequestManager orders the pair it receives, but by then this function has
+    // already clamped the curve output to the RAW, possibly inverted, pair - so the ordering
+    // downstream had nothing left to recover. With h/sLo 60.0 and h/sHi 50.0 (each inside its
+    // own registered range) the curve was capped at 50.0 here regardless. Found 2026-10-28.
+    Temperature_t curveLow = settings.burner_low_limit;
+    Temperature_t curveHigh = settings.heating_high_limit;
+    (void)SpaceHeatingPolicy::orderFlowLimits(curveLow, curveHigh);
+
     int32_t rawTarget = 0;
     Temperature_t result = HeatingControlModuleFixedPoint::calculateHeatingCurveTarget(
         curveInside,
         readings.outsideTemp,
         curveCoeff,
         curveShift,
-        settings.burner_low_limit,
-        settings.heating_high_limit,
+        curveLow,
+        curveHigh,
         &rawTarget
     );
 

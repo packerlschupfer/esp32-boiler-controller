@@ -695,14 +695,30 @@ static void logCompactStatus() {
 // system minimum and is not one. Noticed 2026-10-26 only because the published 1604 happened to
 // match MQTTTask exactly in a per-task dump. Same family as heap_free being MALLOC_CAP_INTERNAL.
 static std::atomic<uint16_t> s_minStackFree{0};
-static char s_minStackTask[13] = {0};
+
+// DOUBLE-BUFFERED, with an atomic index naming the stable one. The publisher used to read
+// this array directly while MonitoringTask memcpy'd into it from the other core, and the
+// comment there conceded a torn name was possible and called it acceptable. It costs 13 bytes
+// to not have that: the scan writes the slot the readers are NOT using, then publishes the
+// index with release ordering, so a reader always sees one complete name. It can still be one
+// pass old relative to the number, which is harmless and now visible via stack_min_age.
+static char s_minStackTask[2][13] = {{0}, {0}};
+static std::atomic<uint8_t> s_minStackSlot{0};
+
+// Consecutive scans that could not run (gate refused or malloc failed). Published so a frozen
+// stack_min is distinguishable from a fresh one.
+static std::atomic<uint16_t> s_scanFailures{0};
 
 uint16_t MonitoringTask_getMinTaskStackFree() {
     return s_minStackFree.load(std::memory_order_acquire);
 }
 
 const char* MonitoringTask_getMinTaskStackName() {
-    return s_minStackTask;
+    return s_minStackTask[s_minStackSlot.load(std::memory_order_acquire)];
+}
+
+uint16_t MonitoringTask_getStackScanFailures() {
+    return s_scanFailures.load(std::memory_order_relaxed);
 }
 
 /**
@@ -724,11 +740,32 @@ static void scanTaskStacks(bool verbose) {
         LOG_DEBUG(TAG, "=== TASKS (%u) ===", taskCount);
     }
     
+    // GATE THE ALLOCATION, same rule as the on-demand tasks dump
+    // (MQTTCommandHandlers.cpp): need the array PLUS a critical-block margin left over, so a
+    // diagnostic cannot be the allocation that pushes a control path over. That dump has
+    // gated this since 2026-10-16 because ordinary HA polling was once measured at 576 B
+    // free; this copy was ungated, and ff98106 made it 30x more frequent (60 s instead of
+    // 30 min) on a period that coincides with the 60 s health publish, which allocates too.
+    const size_t needed = taskCount * sizeof(TaskStatus_t);
+    const size_t required = needed + SystemConstants::System::MIN_DRAM_BLOCK_CRITICAL;
+    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    if (largestBlock < required) {
+        s_scanFailures.fetch_add(1, std::memory_order_relaxed);
+        LOG_WARN(TAG, "Stack scan skipped - largest DRAM block %u B, need %u B",
+                 static_cast<unsigned>(largestBlock), static_cast<unsigned>(required));
+        return;
+    }
+
     // Allocate array for task status
-    TaskStatus_t* taskStatusArray = (TaskStatus_t*)pvPortMalloc(taskCount * sizeof(TaskStatus_t));
+    TaskStatus_t* taskStatusArray = (TaskStatus_t*)pvPortMalloc(needed);
     if (taskStatusArray == nullptr) {
-        LOG_ERROR(TAG, "Alloc fail");
-        return;  // leaves s_minStackFree at its previous value, not at 0
+        // Leaves s_minStackFree at the PREVIOUS pass's value rather than at 0. That is the
+        // right choice - a stale real number beats a fake zero - but it was previously
+        // indistinguishable from a fresh measurement on the health topic, so the failure is
+        // now counted and published as stack_min_age.
+        s_scanFailures.fetch_add(1, std::memory_order_relaxed);
+        LOG_ERROR(TAG, "Stack scan alloc fail (%u B)", static_cast<unsigned>(needed));
+        return;
     }
     
     // Get task status
@@ -876,11 +913,16 @@ static void scanTaskStacks(bool verbose) {
     // never a bad access. Said plainly rather than pretending this is synchronised: a mutex for
     // a 13-byte diagnostic read from one task would cost more than it buys.
     if (minStackFreeThisPass != SIZE_MAX) {
-        memcpy(s_minStackTask, minStackTaskThisPass, sizeof(s_minStackTask));
-        s_minStackTask[sizeof(s_minStackTask) - 1] = '\0';
+        // Write the slot nobody is reading, then flip the index. A reader that loads the index
+        // before the flip gets the previous complete name; after it, the new complete name.
+        const uint8_t next = s_minStackSlot.load(std::memory_order_relaxed) ^ 1u;
+        memcpy(s_minStackTask[next], minStackTaskThisPass, sizeof(s_minStackTask[next]));
+        s_minStackTask[next][sizeof(s_minStackTask[next]) - 1] = '\0';
         s_minStackFree.store(static_cast<uint16_t>(
             minStackFreeThisPass > 0xFFFF ? 0xFFFF : minStackFreeThisPass),
             std::memory_order_release);
+        s_minStackSlot.store(next, std::memory_order_release);
+        s_scanFailures.store(0, std::memory_order_relaxed);  // a pass completed
     }
 
     vPortFree(taskStatusArray);

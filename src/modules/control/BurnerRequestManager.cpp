@@ -1,5 +1,6 @@
 // src/modules/control/BurnerRequestManager.cpp
 #include "modules/control/BurnerRequestManager.h"
+#include <atomic>
 #include "core/SystemResourceProvider.h"
 #include "modules/control/SpaceHeatingPolicy.h"
 #include "config/SystemConstants.h"
@@ -241,19 +242,22 @@ bool BurnerRequestManager::setWaterRequest(Temperature_t targetTemp, bool highPo
     // An inverted pair is accepted by the registry one key at a time (overlapping ranges, no
     // cross-field validator), and the low-then-high clamp below would then always land on the
     // LOWER of the two - honouring neither bound, silently. Order them and say so.
-    static bool invertedLoggedWater = false;
+    // Atomic because setWaterRequest() has TWO callers on different tasks: WheaterControlTask
+    // and TimerSchedulerTask (a schedule activation). A plain bool was benign - the worst case
+    // was one duplicated WARN - but it is a data race either way and an atomic flag costs
+    // nothing. Found 2026-10-28.
+    static std::atomic<bool> invertedLoggedWater{false};
     if (SpaceHeatingPolicy::orderFlowLimits(minTemp, maxTemp)) {
-        if (!invertedLoggedWater) {
+        // exchange, so two tasks arriving together produce exactly one warning
+        if (!invertedLoggedWater.exchange(true, std::memory_order_relaxed)) {
             char loBuf[16], hiBuf[16];
             formatTemp(loBuf, sizeof(loBuf), maxTemp);   // as configured: low was the larger
             formatTemp(hiBuf, sizeof(hiBuf), minTemp);
             LOG_WARN(TAG, "Water flow limits are inverted (lo %s°C > hi %s°C) - using them "
                           "swapped; fix the parameters", loBuf, hiBuf);
-            invertedLoggedWater = true;
         }
-    } else if (invertedLoggedWater) {
+    } else if (invertedLoggedWater.exchange(false, std::memory_order_relaxed)) {
         LOG_INFO(TAG, "Water flow limits consistent again");
-        invertedLoggedWater = false;
     }
 
     // Level 2: Enforce absolute safety limits (constants)

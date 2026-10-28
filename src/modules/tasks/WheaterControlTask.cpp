@@ -2,6 +2,7 @@
 // Water heater control task - manages hot water heating
 #include "WheaterControlTask.h"
 #include "modules/control/WaterChargePolicy.h"  // tank limit consistency
+#include "modules/control/SpaceHeatingPolicy.h"  // orderFlowLimits
 #include <atomic>
 #include <cmath>  // Round 15 Issue #10: isfinite, now inside WaterChargePolicy
 
@@ -88,6 +89,18 @@ static Temperature_t calculateBoilerTarget(const SystemSettings& settings, const
     // Clamp to valid range - use water heating mode limits
     Temperature_t minTemp = settings.water_heating_low_limit;   // Water heating min (e.g., 40°C)
     Temperature_t maxTemp = settings.water_heating_high_limit;  // Water heating max (e.g., 90°C)
+
+    // ORDER THE PAIR HERE TOO. 68c45fb applied orderFlowLimits() only in
+    // BurnerRequestManager::setWaterRequest, which is the LAST stop - by then this function
+    // has already collapsed the target onto the inverted pair, so the ordering had nothing
+    // left to save and the warning it printed ("using them swapped") was false.
+    //
+    // Concretely, w/hLo 70.0 with w/hHi 60.0 - each individually inside its registered range,
+    // and there is no cross-field validator - took a tank target of 68.0 up to 70.0 and then
+    // down to 60.0. Every charge then ran at 60.0, exactly as before the fix. Found by the
+    // 2026-10-28 review. No warning here: setWaterRequest still logs it, edge-triggered, and
+    // this function runs on the water control cadence.
+    (void)SpaceHeatingPolicy::orderFlowLimits(minTemp, maxTemp);
 
     // Clamp target to water heating range
     if (boilerTarget < minTemp) {

@@ -101,3 +101,13 @@ uint16_t MonitoringTask_getMinTaskStackFree();
 /// Name of the task reported by MonitoringTask_getMinTaskStackFree(), truncated to 12 chars.
 /// Always NUL-terminated; may be one pass behind the number. See the definition for why.
 const char* MonitoringTask_getMinTaskStackName();
+
+/**
+ * @brief Consecutive stack scans that could not run (DRAM gate refused, or malloc failed).
+ *
+ * 0 means the published stack_min comes from the most recent scheduled pass. Non-zero means
+ * the figure is that many 60-second periods stale: the scan deliberately keeps the previous
+ * real number rather than publishing a fake 0, which left a frozen value indistinguishable
+ * from a fresh one. Published as health.stack_min_age.
+ */
+uint16_t MonitoringTask_getStackScanFailures();

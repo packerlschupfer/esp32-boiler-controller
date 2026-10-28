@@ -39,6 +39,7 @@ namespace RoomSensorRegisterReport {
         bool available = false;        ///< a room sensor device exists at all
         bool ok = false;               ///< the FC04 50..77 read succeeded
         bool openFirmware = false;     ///< detectFirmware() found the open firmware
+        bool firmwareKnown = false;    ///< detection has succeeded at least once
         uint16_t firmwareVersion = 0;  ///< raw input register 2; bit 15 set = open firmware
 
         uint32_t uptimeSeconds = 0;    ///< 58/59 - the denominator, since 54 wraps
@@ -113,11 +114,21 @@ namespace RoomSensorRegisterReport {
             return static_cast<size_t>(n);
         }
         if (!s.ok) {
-            // Distinguish the two reasons a read returns nothing: the original firmware has no
-            // such registers (so this is permanent and expected), versus a failed transaction.
+            // THREE reasons a read returns nothing, and conflating them cost a wrong diagnosis.
+            // Until 2026-10-28 a firmware of UNKNOWN collapsed into openFirmware=false and was
+            // reported as "not_open_firmware", which the docs describe as "the stock Andivi
+            // firmware answered". So a sensor that was ABSENT, mid-reflash, or behind a broken
+            // RS485 pair - i.e. one that answered nothing at all - was reported as a positively
+            // identified stock unit. That is the opposite of the truth and would send someone
+            // looking for the wrong fault.
+            const char* why = "read_failed";          // open firmware, transaction failed
+            if (!s.firmwareKnown) {
+                why = "no_answer";                    // detection itself got nothing back
+            } else if (!s.openFirmware) {
+                why = "not_open_firmware";            // stock firmware positively identified
+            }
             const int n = snprintf(buf, size, "{\"err\":\"%s\",\"fw\":\"0x%04X\"}",
-                                   s.openFirmware ? "read_failed" : "not_open_firmware",
-                                   s.firmwareVersion);
+                                   why, s.firmwareVersion);
             if (n < 0 || static_cast<size_t>(n) >= size) {
                 return refuse();
             }
@@ -156,6 +167,23 @@ namespace RoomSensorRegisterReport {
             }
             used += static_cast<size_t>(w);
         };
+        // Signed variant. `tc` is int16 (register 57, 0.01 C) and was published through a
+        // uint16 cast, so every sub-zero reading came out as 65536+value: -30.00 C read
+        // "tc":62536 and -0.01 C read "tc":65535. The sensor accepts 500..3000 Ohm, which
+        // reaches well below freezing, and nothing downstream corrects it. Found 2026-10-28;
+        // the only test with a negative value asserted nothing about this key.
+        auto putSigned = [&](const char* key, long value) {
+            if (truncated) {
+                return;
+            }
+            const int w = snprintf(buf + used, size - used, ",\"%s\":%ld", key, value);
+            if (w < 0 || static_cast<size_t>(w) + used + TAIL_RESERVE >= size) {
+                buf[used] = '\0';
+                truncated = true;
+                return;
+            }
+            used += static_cast<size_t>(w);
+        };
         auto putHex = [&](const char* key, unsigned value) {
             if (truncated) {
                 return;
@@ -179,7 +207,7 @@ namespace RoomSensorRegisterReport {
         put("age", s.secondsSinceGood, true);
         putHex("st", s.status);
         put("res", s.resistance, true);
-        put("tc", static_cast<unsigned long>(static_cast<uint16_t>(s.temperatureCenti)), false);
+        putSigned("tc", static_cast<long>(s.temperatureCenti));
 
         // Bus health AS THE SENSOR SEES IT, which is the half we have never been able to see.
         // `bcrc` (reg 67) counts a foreign request+reply pair seen as one frame, so it is NOT
