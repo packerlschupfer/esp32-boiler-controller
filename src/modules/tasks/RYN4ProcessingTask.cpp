@@ -402,10 +402,10 @@ static void handleReadTick(RYN4* ryn4) {
  *
  * THE ESCAPE HATCH MATTERS. Once moduleOffline latches, the library short-circuits its public
  * control and read methods with MODBUS_ERROR, so no amount of ordinary polling will clear it -
- * nothing goes out on the wire. isModuleResponsive() is the documented way out: it issues a
- * bare read through the base class, bypassing the gate, and a reply clears the latch through
- * the normal response path. Without this, the library's new runtime latching would turn a
- * recoverable bus glitch into a permanently dead relay layer.
+ * nothing goes out on the wire. probeModule() is the way out: it ALWAYS hits the wire via the
+ * base class, bypassing both the latch gate and the passive shortcut in isModuleResponsive(),
+ * and a reply clears the latch through the normal response path. Without it, the library's
+ * runtime latching would turn a recoverable bus glitch into a permanently dead relay layer.
  *
  * Rate-limited because an unresponsive probe costs a ~1 s bus timeout on a half-duplex bus
  * shared with both sensor modules and this same relay board.
@@ -426,40 +426,24 @@ static void attemptRYN4Recovery(RYN4* ryn4) {
         return;
     }
 
-    // DO NOT PROBE INSIDE THE LIBRARY'S PASSIVE WINDOW.
-    //
-    // isModuleResponsive() short-circuits and returns TRUE, without touching the wire, when a
-    // reply arrived within its own 30 s window. While moduleOffline is latched the gated
-    // methods send nothing, so a recent timestamp is stale evidence from BEFORE the latch -
-    // probing then would return true, the latch would still be set, and this function would
-    // log "not answering" about a module it never asked. Wait the window out instead and say
-    // so honestly.
-    //
-    // The library's RESPONSIVE_TIMEOUT is private, so this is a local lower bound on it rather
-    // than the same number; it only has to be >= the library's window, and being generous
-    // costs one extra 30 s cycle in the worst case. (A library-side probe that skips the
-    // shortcut, or an exposed timeout, would remove the duplication - raised with its owner.)
-    //
-    // This mattered only from 2026-10-28: lastResponseTime used to be stamped on the ASYNC
-    // receive path only, so for a synchronous consumer like us it sat at 0 and the passive
-    // shortcut never fired. The library fixed that in the same change that added the runtime
-    // latch, which is what put this window in our path.
-    constexpr TickType_t LIB_PASSIVE_WINDOW = pdMS_TO_TICKS(30000);
-    const TickType_t sinceReply = xTaskGetTickCount() - ryn4->getLastResponseTime();
-    if (ryn4->isModuleOffline() && sinceReply < LIB_PASSIVE_WINDOW) {
-        LOG_WARN(TAG, "RYN4 offline (%u consecutive failures), last reply %lu ms ago - too "
-                      "recent to probe usefully, retrying shortly",
-                 ryn4->getConsecutiveFailures(),
-                 (unsigned long)(sinceReply * portTICK_PERIOD_MS));
-        return;  // deliberately WITHOUT stamping lastAttemptMs: retry on the next wake
-    }
-
     lastAttemptMs = nowMs;
 
-    // Probe: the only call that reaches the wire while the latch is set, and on success the
-    // library clears the latch itself through its normal response path.
-    if (ryn4->isModuleResponsive() && !ryn4->isModuleOffline()) {
-        LOG_WARN(TAG, "RYN4 answered again - offline latch cleared, relays are controllable");
+    // probeModule() ALWAYS hits the wire. It reads the return-delay register through the base
+    // class, so it bypasses both the moduleOffline latch gate on the RYN4-level methods and
+    // the passive shortcut in isModuleResponsive(); a reply clears the latch through the
+    // library's normal response path, a failure increments the consecutive-failure counter.
+    //
+    // This replaced a local 30 s constant and a "wait out the passive window" branch. The
+    // problem that branch existed for: isModuleResponsive() returns true WITHOUT touching the
+    // wire when a reply arrived inside its own (private) RESPONSIVE_TIMEOUT, and while the
+    // latch is set no traffic goes out - so a recent timestamp is stale evidence from before
+    // the latch, and probing then reported "not answering" about a module never asked. My
+    // workaround duplicated the library's deadline, which is the shape I have spent this
+    // session deleting elsewhere. probeModule() makes the question unambiguous instead:
+    // "is it responsive (cached)" and "ask it right now" are different, and latch recovery
+    // wants the second. Added to ESP32-RYN4 on request, 2026-10-28.
+    if (ryn4->probeModule() && !ryn4->isModuleOffline()) {
+        LOG_WARN(TAG, "RYN4 answered a probe - offline latch cleared, relays are controllable");
         return;
     }
 
