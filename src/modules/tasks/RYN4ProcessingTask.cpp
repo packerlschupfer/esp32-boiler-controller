@@ -425,10 +425,39 @@ static void attemptRYN4Recovery(RYN4* ryn4) {
     if (lastAttemptMs != 0 && (nowMs - lastAttemptMs) < RECOVERY_INTERVAL_MS) {
         return;
     }
+
+    // DO NOT PROBE INSIDE THE LIBRARY'S PASSIVE WINDOW.
+    //
+    // isModuleResponsive() short-circuits and returns TRUE, without touching the wire, when a
+    // reply arrived within its own 30 s window. While moduleOffline is latched the gated
+    // methods send nothing, so a recent timestamp is stale evidence from BEFORE the latch -
+    // probing then would return true, the latch would still be set, and this function would
+    // log "not answering" about a module it never asked. Wait the window out instead and say
+    // so honestly.
+    //
+    // The library's RESPONSIVE_TIMEOUT is private, so this is a local lower bound on it rather
+    // than the same number; it only has to be >= the library's window, and being generous
+    // costs one extra 30 s cycle in the worst case. (A library-side probe that skips the
+    // shortcut, or an exposed timeout, would remove the duplication - raised with its owner.)
+    //
+    // This mattered only from 2026-10-28: lastResponseTime used to be stamped on the ASYNC
+    // receive path only, so for a synchronous consumer like us it sat at 0 and the passive
+    // shortcut never fired. The library fixed that in the same change that added the runtime
+    // latch, which is what put this window in our path.
+    constexpr TickType_t LIB_PASSIVE_WINDOW = pdMS_TO_TICKS(30000);
+    const TickType_t sinceReply = xTaskGetTickCount() - ryn4->getLastResponseTime();
+    if (ryn4->isModuleOffline() && sinceReply < LIB_PASSIVE_WINDOW) {
+        LOG_WARN(TAG, "RYN4 offline (%u consecutive failures), last reply %lu ms ago - too "
+                      "recent to probe usefully, retrying shortly",
+                 ryn4->getConsecutiveFailures(),
+                 (unsigned long)(sinceReply * portTICK_PERIOD_MS));
+        return;  // deliberately WITHOUT stamping lastAttemptMs: retry on the next wake
+    }
+
     lastAttemptMs = nowMs;
 
-    // Probe first: this is the only call that reaches the wire while the latch is set, and on
-    // success the library clears the latch itself.
+    // Probe: the only call that reaches the wire while the latch is set, and on success the
+    // library clears the latch itself through its normal response path.
     if (ryn4->isModuleResponsive() && !ryn4->isModuleOffline()) {
         LOG_WARN(TAG, "RYN4 answered again - offline latch cleared, relays are controllable");
         return;
@@ -445,7 +474,15 @@ static void attemptRYN4Recovery(RYN4* ryn4) {
         return;
     }
 
-    LOG_ERROR(TAG, "RYN4 is offline and not answering - every relay write is being refused");
+    // getConsecutiveFailures() vs the relay read-back verification are two different signals,
+    // which is why both are reported: a climbing failure count means the module is not TALKING,
+    // whereas SYNCHRONIZED dropping with a count of 0 means it is talking and the contacts
+    // disagree with what we commanded. Different faults, different responses.
+    LOG_ERROR(TAG, "RYN4 is offline and not answering (%u consecutive failures, last reply "
+                   "%lu ms ago) - every relay write is being refused",
+              ryn4->getConsecutiveFailures(),
+              (unsigned long)((xTaskGetTickCount() - ryn4->getLastResponseTime())
+                              * portTICK_PERIOD_MS));
 }
 
 void RYN4ProcessingTask(void* parameter) {
