@@ -503,6 +503,16 @@ void test_anchor_zero_factor_disables_only_the_deviation();
 void test_anchor_shift_cannot_overflow_int16();
 void test_anchor_commanded_flow_is_clamped_not_the_raw_sensitivity();
 
+// Outside-sensor fallback (2026-10-28)
+void test_outside_valid_reading_is_used_and_recorded();
+void test_outside_dropout_holds_the_last_reading_so_the_curve_keeps_working();
+void test_outside_hold_lasts_an_hour_then_expires();
+void test_outside_gone_falls_back_to_the_room_not_to_no_heat();
+void test_outside_gone_and_no_usable_room_is_the_only_no_heat_case();
+void test_outside_hold_survives_the_millis_rollover();
+void test_room_thermostat_predicate_is_asymmetric();
+void test_room_thermostat_fallback_would_have_heated_the_house();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -1024,6 +1034,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_anchor_zero_factor_disables_only_the_deviation);
     RUN_TEST(test_anchor_shift_cannot_overflow_int16);
     RUN_TEST(test_anchor_commanded_flow_is_clamped_not_the_raw_sensitivity);
+
+    // A dead outside sensor must not stop space heating (2026-10-28)
+    RUN_TEST(test_outside_valid_reading_is_used_and_recorded);
+    RUN_TEST(test_outside_dropout_holds_the_last_reading_so_the_curve_keeps_working);
+    RUN_TEST(test_outside_hold_lasts_an_hour_then_expires);
+    RUN_TEST(test_outside_gone_falls_back_to_the_room_not_to_no_heat);
+    RUN_TEST(test_outside_gone_and_no_usable_room_is_the_only_no_heat_case);
+    RUN_TEST(test_outside_hold_survives_the_millis_rollover);
+    RUN_TEST(test_room_thermostat_predicate_is_asymmetric);
+    RUN_TEST(test_room_thermostat_fallback_would_have_heated_the_house);
 
     return UNITY_END();
 }

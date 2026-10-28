@@ -12,7 +12,8 @@
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/FrostProtection.h"  // the two frost latches
 #include "modules/control/SpaceHeatingPolicy.h"
-#include "modules/control/RoomTempFallbackPolicy.h"  // the room value the backstop may use
+#include "modules/control/RoomTempFallbackPolicy.h"
+#include "modules/control/OutsideTempFallbackPolicy.h"  // hold + room-thermostat fallback
 #include "modules/control/HeatingControlDiagnostics.h"
 #include "modules/tasks/MQTTTask.h"   // publishControlDiagnostics
 #include "MQTTTopics.h"
@@ -63,6 +64,13 @@ static bool checkIfSpaceHeatingNeededEvent();
 // that exists so "why is heating off" can be answered from the firmware's own state, and
 // for those seconds it answered wrongly. At boot there genuinely is no reading yet, which
 // is exactly what SENSOR_INVALID says.
+// Caller-owned memory for the outside-reading hold, and the last reported source so the
+// transition is logged once rather than every 5 s. Statics are safe: every caller of
+// checkIfSpaceHeatingNeeded() is HeatingControlTask, a single task.
+static OutsideTempFallbackPolicy::Sample g_outsideSample;
+static OutsideTempFallbackPolicy::Source g_lastOutsideSource =
+    OutsideTempFallbackPolicy::Source::MEASURED;
+
 static HeatingControlDiagnostics::Block g_blockReason =
     HeatingControlDiagnostics::Block::SENSOR_INVALID;
 static HeatingControlModule::CurveDebug g_curveDebug;
@@ -822,8 +830,23 @@ static bool checkIfSpaceHeatingNeededEvent() {
             // Weather-compensated mode:
             // - Outside temp determines ON/OFF (not room temp)
             // - Room temp only provides overheat protection (Begrenzung)
-            if (readings.isOutsideTempValid) {
-                Temperature_t outsideTemp = readings.outsideTemp;
+            // Resolve the outside reading FIRST: measured, held, or gone. See
+            // OutsideTempFallbackPolicy for why the hold is an hour (outside temperature is the
+            // slowest-moving input we have) and why "no outside reading" must not mean "no heat".
+            const bool roomIsMeasurement = readings.isInsideTempValid;
+            const OutsideTempFallbackPolicy::Decision outsideDec =
+                OutsideTempFallbackPolicy::resolve(g_outsideSample, readings.isOutsideTempValid,
+                                                   readings.outsideTemp, millis(),
+                                                   roomIsMeasurement, ss.targetInside);
+            if (outsideDec.source != g_lastOutsideSource) {
+                LOG_WARN(TAG, "Outside reading %s -> %s",
+                         OutsideTempFallbackPolicy::toString(g_lastOutsideSource),
+                         OutsideTempFallbackPolicy::toString(outsideDec.source));
+                g_lastOutsideSource = outsideDec.source;
+            }
+
+            if (OutsideTempFallbackPolicy::curveUsable(outsideDec.source)) {
+                Temperature_t outsideTemp = outsideDec.outside;
                 Temperature_t threshold = ss.outsideThreshold;  // H2: from snapshot
 
                 // Outside cold enough for heating? Start below the threshold, stop only at
@@ -921,8 +944,36 @@ static bool checkIfSpaceHeatingNeededEvent() {
                                 roomBuf, limitBuf);
                     }
                 }
+            } else if (OutsideTempFallbackPolicy::Source::ROOM_THERMOSTAT == outsideDec.source) {
+                // NO USABLE OUTSIDE READING, BUT WE STILL KNOW THE ROOM AND ITS TARGET.
+                //
+                // This branch used to be `heatingNeeded = false` full stop, which stopped space
+                // heating completely for as long as the hardware fault lasted and let an
+                // occupied house settle into the 5-10 C frost band with a healthy room sensor
+                // sitting unused. "Weather mode fails safe" means not firing when you cannot
+                // tell if firing is safe - not abandoning the house when you still have exactly
+                // the information a room thermostat runs on. Found 2026-10-28.
+                //
+                // Same predicate as the configured room mode below, deliberately shared rather
+                // than copied. The flow target comes from the curve's own fallback (the floor),
+                // so this is a conservative room thermostat, not full weather compensation.
+                heatingNeeded = SpaceHeatingPolicy::roomThermostatWantsHeat(
+                    currentlyHeating, readings.insideTemp, ss.targetInside, ss.hysteresis);
+                g_blockReason = heatingNeeded ? HeatingControlDiagnostics::Block::OK
+                                              : HeatingControlDiagnostics::Block::ROOM_SATISFIED;
+                static uint32_t lastFallbackWarnMs = 0;
+                const uint32_t nowMs = millis();
+                if (lastFallbackWarnMs == 0 || (nowMs - lastFallbackWarnMs) >= 600000UL) {
+                    lastFallbackWarnMs = nowMs;
+                    char roomBuf[16], tgtBuf[16];
+                    formatTemp(roomBuf, sizeof(roomBuf), readings.insideTemp);
+                    formatTemp(tgtBuf, sizeof(tgtBuf), ss.targetInside);
+                    LOG_ERROR(TAG, "OUTSIDE SENSOR UNAVAILABLE for over an hour - running as a "
+                                   "room thermostat on %s°C against %s°C. CHECK THE OUTSIDE "
+                                   "SENSOR WIRING.", roomBuf, tgtBuf);
+                }
             } else {
-                LOG_DEBUG(TAG, "Weather control enabled but outside temp invalid - heating disabled");
+                LOG_DEBUG(TAG, "No outside reading and no usable room reading - heating disabled");
                 heatingNeeded = false;
                 g_blockReason = HeatingControlDiagnostics::Block::SENSOR_INVALID;
             }
@@ -941,9 +992,14 @@ static bool checkIfSpaceHeatingNeededEvent() {
                 // e.g., target 20°C, hysteresis 0.5°C → oscillates 20.0°C to 20.5°C
                 Temperature_t stopThreshold = tempAdd(setpoint, hysteresis);  // Turn OFF above this
 
+                // One shared predicate (SpaceHeatingPolicy::roomThermostatWantsHeat) rather
+                // than the rule inline here and again in the outside-fallback branch above.
+                const bool wantsHeat = SpaceHeatingPolicy::roomThermostatWantsHeat(
+                    currentlyHeating, currentTemp, setpoint, hysteresis);
+
                 if (!currentlyHeating) {
                     // Currently OFF - turn ON if temperature drops below setpoint
-                    if (currentTemp < setpoint) {
+                    if (wantsHeat) {
                         heatingNeeded = true;
                         g_blockReason = HeatingControlDiagnostics::Block::OK;
                     } else {
@@ -957,7 +1013,7 @@ static bool checkIfSpaceHeatingNeededEvent() {
                     }
                 } else {
                     // Currently ON - turn OFF if temperature rises above (setpoint + hysteresis)
-                    if (currentTemp >= stopThreshold) {
+                    if (!wantsHeat) {
                         heatingNeeded = false;
                         g_blockReason = HeatingControlDiagnostics::Block::ROOM_SATISFIED;
                         char currBuf[16], setBuf[16], threshBuf[16];

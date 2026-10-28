@@ -22,6 +22,71 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Fixed: the three "house goes cold and nothing tells you" findings
+
+From a top-down behavioural review (eight dimensions, adversarial verification, 25 of 28
+findings confirmed). These three were picked first because each ends in no heat with every
+status indicator reading Normal.
+
+**A dead outside sensor stopped space heating completely.** In weather mode the whole decision
+sat under `if (isOutsideTempValid)`, and the else branch was `heatingNeeded = false` with no
+hold, no time bound and no alternative. One open PT1000 lead on the weather-exposed sensor
+therefore stopped heating for as long as the hardware fault lasted, in an occupied house, while
+a healthy room sensor and a valid room target sat unused two branches away - a running burn was
+stopped at the next 5 s tick and logged as "target temperature reached". The only remaining
+automatic heat was frost protection at 5.0 °C to the flow floor, releasing at 10.0 °C, so the
+house settled in a 5-10 °C band. `sensor_mode` stayed NORMAL, because the sensor fallback does
+not require the outside channel for SPACE_HEATING.
+
+New `OutsideTempFallbackPolicy` gives two fallbacks in order: **hold** the last good reading for
+up to an hour - outside temperature is the slowest-moving input in the system, so a bus glitch
+now changes nothing at all - and past that, fall back to **room-thermostat control** rather than
+to no heat, which needs only the room reading and target a plain thermostat runs on. Heating
+stops only when there is no usable outside value *and* no usable room value. The transition is
+logged on change, and the room-thermostat fallback re-states itself every 10 minutes as an
+ERROR naming the wiring, because the previous behaviour's real failure was silence.
+
+"Weather mode fails safe" was the justification for the old branch. Failing safe for a boiler
+means not firing when you cannot tell whether firing is safe; it does not mean abandoning the
+house in winter when you still know the room temperature.
+
+**A failed RYN4 probe at boot left the controller with no controllable relay, for its whole
+uptime, while the burner state machine ran anyway.** `RYN4::initialize()` was attempted twice at
+boot (~2.3 s of probes) and never again; "will retry in background" was a log line and the
+background task only logged. Worse, `performSafetyCheck()` - the pre-ignition gate - never
+checked whether the relays were reachable, and `RelayControlTask::setRelayState()` returns
+success after writing the desired bitmap into RAM, so the state machine ran
+PRE_PURGE → IGNITION → RUNNING with flame assumed (`isFlameDetected()` reports the relay we
+commanded) while every contact stayed open and nothing reported a fault.
+
+Three parts: the background task now retries `initialize()` every 30 s indefinitely and
+reconfigures the HAL on success; `performSafetyCheck()` refuses burner operation when the RYN4
+is uninitialised or offline, keyed on the device rather than on `RelayStatus::SYNCHRONIZED`
+(which is legitimately clear for the first seconds of every boot); and a **library fix** was
+required to make the retry meaningful at all - `RYN4::initialize()` set `moduleOffline` on
+failure and cleared it only in the constructor, so a successful retry still refused every
+command (ESP32-RYN4 `fe40616`).
+
+**The relay DELAY-watchdog margin was 2.5 s, not the 5 s its own comment claimed.**
+`s_lastRenewalMs` was stamped with `millis()` *after* the Modbus transaction returned, so it
+carried the transaction time; SET ticks arrive on a fixed 2.5 s grid, so the tick 5.0 s later
+saw `5000 - δ`, was not due, and the renewal landed at 7.5 s. A single failed renewal then
+retried at 10.0 s - *at* the hardware auto-OFF - so one CRC-corrupted reply mid-burn dropped
+`BURNER_ENABLE` and re-energised it a moment later: an unlogged flame-out and a relight with no
+pre-purge, invisible to the firmware. The bus does produce errors (12 in 8198 reads measured on
+the room sensor). Stamping the tick time restores a real 5 s margin, and the alarm now fires on
+the **first** miss, because with the renewal back on the 5.0 s tick the first miss is already
+the last warning before expiry.
+
+Also extracted `SpaceHeatingPolicy::roomThermostatWantsHeat()` so the room-thermostat rule has
+one definition shared by the configured room mode and the new outside fallback. The review's
+central finding was that "does the house want heat" is computed by five independent predicates
+and that every recent regression came from changing one and not its siblings; adding a sixth
+copy here would have been the same mistake.
+
+16 native tests (410 total), including a mutation check: removing the room fallback turns three
+of them red.
+
 ### Fixed: 21 findings from a multi-agent review of the preceding six commits
 
 A six-dimension Fable review with adversarial verification over `915d416..529722a` - six

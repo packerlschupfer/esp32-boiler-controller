@@ -596,11 +596,52 @@ void ModbusDeviceInitializer::createBackgroundMonitoringTask(SystemInitializer* 
                 if ((readyBits & SystemEvents::DeviceReady::ALL_CRITICAL_READY) == SystemEvents::DeviceReady::ALL_CRITICAL_READY) {
                     LOG_INFO(TAG, "Devices became ready after async wait");
                 } else {
-                    // Log error but don't try to recreate - synchronous init should have handled this
                     LOG_ERROR(TAG, "Device init incomplete - MB8ART:%d RYN4:%d (bits:0x%02lX)",
                              (readyBits & SystemEvents::DeviceReady::MB8ART_READY) ? 1 : 0,
                              (readyBits & SystemEvents::DeviceReady::RYN4_READY) ? 1 : 0,
                              readyBits);
+                }
+            }
+
+            // RYN4 RETRY LOOP. "will retry in background" was a log line and nothing else:
+            // RYN4::initialize() was attempted exactly twice at boot (~2.3 s of probes) and
+            // never again, so a module that was slow, or a bus that was momentarily busy,
+            // left the controller with NO CONTROLLABLE RELAY for the rest of its uptime -
+            // every write refused by the library's moduleOffline guard, while
+            // BurnerStateMachine still ran PRE_PURGE/IGNITION/RUNNING against an open
+            // contactor and every status indicator said Normal. A January power blip was
+            // enough. Found 2026-10-28.
+            //
+            // This needed the library fix too (ESP32-RYN4 fe40616): moduleOffline was cleared
+            // only by the constructor, so before that a successful retry still refused every
+            // command. Retrying without it would have looked like it worked and changed nothing.
+            //
+            // Slow cadence on purpose: this shares one half-duplex RS485 bus with the sensors
+            // and the relay board, and an unresponsive probe costs a ~1 s timeout. 30 s between
+            // attempts, forever - a boiler with no relays is worth retrying for days, and the
+            // task is otherwise about to exit.
+            if (state->ryn4 != nullptr && !state->ryn4->isInitialized()) {
+                constexpr uint32_t RYN4_RETRY_INTERVAL_MS = 30000;
+                uint32_t attempt = 0;
+                while (!state->ryn4->isInitialized()) {
+                    vTaskDelay(pdMS_TO_TICKS(RYN4_RETRY_INTERVAL_MS));
+                    ++attempt;
+                    LOG_WARN(TAG, "RYN4 still uninitialised - retry attempt %lu",
+                             static_cast<unsigned long>(attempt));
+                    if (state->ryn4->initialize()) {
+                        LOG_WARN(TAG, "RYN4 initialised on retry %lu - relays are controllable "
+                                      "again", static_cast<unsigned long>(attempt));
+                        if (HAL::configureRYN4HAL(state->ryn4)) {
+                            LOG_INFO(TAG, "RYN4 HAL configured after retry");
+                        }
+                        if (state->initializer->deviceReadyEventGroup_ != nullptr) {
+                            xEventGroupClearBits(state->initializer->deviceReadyEventGroup_,
+                                                 SystemEvents::DeviceReady::RYN4_ERROR);
+                            xEventGroupSetBits(state->initializer->deviceReadyEventGroup_,
+                                               SystemEvents::DeviceReady::RYN4_READY);
+                        }
+                        break;
+                    }
                 }
             }
 

@@ -2,6 +2,7 @@
 // Controls BURNER relays only (0,1,2). Pump relays (4,5) controlled by PumpControlModule.
 
 #include "modules/control/BurnerSystemController.h"
+#include <RYN4.h>   // isInitialized/isModuleOffline for the actuation gate
 #include "modules/control/SafetyInterlocks.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/tasks/RelayControlTask.h"
@@ -398,6 +399,30 @@ Result<void> BurnerSystemController::performSafetyCheck() {
     // Check critical system errors
     if (!SafetyInterlocks::checkSystemErrors()) {
         return Result<void>(SystemError::SYSTEM_FAILSAFE_TRIGGERED, "Critical system errors detected");
+    }
+
+    // CAN WE ACTUATE AT ALL? This gate did not exist until 2026-10-28, and its absence was
+    // the whole reason a failed RYN4 init at boot was dangerous rather than merely annoying:
+    // the library refuses every relay write once moduleOffline latches, RelayControlTask parks
+    // waiting for a device that never arrives, and setRelayState() still returns success after
+    // writing the desired bitmap into RAM. So this function passed, and the state machine ran
+    // PRE_PURGE -> IGNITION -> RUNNING with flame assumed (isFlameDetected() reports the relay
+    // we commanded, not a flame) while every contact stayed open. Nothing reported a fault.
+    //
+    // Deliberately keyed on the DEVICE being usable rather than on RelayStatus::SYNCHRONIZED:
+    // SYNCHRONIZED is earned per read-back verification and is legitimately clear for the first
+    // few seconds of every boot, so gating on it would refuse a correct early ignition. An
+    // offline or uninitialised RYN4 is unambiguous.
+    if (RYN4* relays = SRP::getRYN4()) {
+        if (!relays->isInitialized() || relays->isModuleOffline()) {
+            LOG_ERROR(TAG, "Refusing burner operation - RYN4 is %s, no relay can be actuated",
+                      relays->isInitialized() ? "offline" : "uninitialised");
+            return Result<void>(SystemError::RELAY_OPERATION_FAILED,
+                                "Relay module unavailable - cannot actuate");
+        }
+    } else {
+        LOG_ERROR(TAG, "Refusing burner operation - no RYN4 instance");
+        return Result<void>(SystemError::RELAY_OPERATION_FAILED, "No relay module");
     }
 
     // Check if boiler is enabled (not an error - just skip burner operations)

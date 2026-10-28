@@ -130,6 +130,30 @@ namespace SpaceHeatingPolicy {
         return low > 0 && high > 0 && low < high;
     }
 
+    /**
+     * @brief The plain room-thermostat decision: ON below target, OFF at target + hysteresis.
+     *
+     * Asymmetric on purpose - the target is a MINIMUM, so heating starts when the room drops
+     * below it and stops only after a slight overshoot. With target 20.0 and hysteresis 0.5 the
+     * room oscillates 20.0-20.5 rather than chattering at a single threshold.
+     *
+     * Extracted 2026-10-28 so there is ONE copy. It was inline in HeatingControlTask's room
+     * branch, and the outside-sensor fallback added that day needs the same rule - a second
+     * copy would have been a sixth independent "does the house want heat" predicate in this
+     * codebase, which is precisely the shape a review had just finished calling out as the
+     * source of six regressions.
+     *
+     * @param currentlyHeating the burner is currently serving space heating (the hysteresis
+     *                         state; without it the two thresholds collapse to one)
+     */
+    inline bool roomThermostatWantsHeat(bool currentlyHeating, int16_t room, int16_t setpoint,
+                                        int16_t hysteresis) {
+        if (!currentlyHeating) {
+            return room < setpoint;
+        }
+        return room < static_cast<int16_t>(setpoint + hysteresis);
+    }
+
     /// Order a flow pair, returning true if it had to be swapped so the caller can warn.
     inline bool orderFlowLimits(int16_t& low, int16_t& high) {
         if (low <= high) {

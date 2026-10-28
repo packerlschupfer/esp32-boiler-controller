@@ -137,20 +137,38 @@ static void handleSetTick(RYN4* ryn4) {
 
     // F14: renew on an elapsed-time schedule (not tick parity) so a single lost
     // renewal is retried on the very next SET tick instead of waiting a full 5s
-    // parity cycle and racing the 10s hardware auto-OFF. renewalIntervalMs is
-    // half the watchdog so there is always a >=5s margin to hardware expiry.
+    // parity cycle and racing the 10s hardware auto-OFF.
+    //
+    // THE MARGIN WAS 2.5 s, NOT 5 s, FOR AS LONG AS THIS CODE EXISTED. renewalIntervalMs is
+    // half the watchdog, but s_lastRenewalMs used to be stamped with millis() AFTER the Modbus
+    // transaction returned, so it carried the transaction time. SET ticks arrive on a FIXED
+    // 2.5 s grid (RYN4_SET_TICKS = {1,6} of ten 500 ms ticks), so the tick 5.0 s later saw
+    // 5000 - delta, was not due, and the renewal actually landed at 7.5 s - leaving 2.5 s to
+    // hardware expiry instead of 5 s. A single failed renewal then retried at 10.0 s, i.e. AT
+    // the auto-OFF, and the "alarm after 2 misses, still before expiry" below fired at 10.0 s
+    // too. One CRC-corrupted reply mid-burn therefore dropped BURNER_ENABLE and re-energised
+    // it a moment later: an unlogged flame-out and a relight with no pre-purge, invisible to
+    // isFlameDetected() because that only reports the relay we commanded. The bus does produce
+    // errors - 12 in 8198 reads measured on the room sensor. Found 2026-10-28.
+    //
+    // Stamping the TICK time instead of the completion time puts the renewal back on the 5.0 s
+    // tick with a real 5 s margin, and leaves the retry at 7.5 s, 2.5 s before expiry.
     static uint32_t s_lastRenewalMs = 0;
     static bool     s_renewalRetryPending = false;
     static uint8_t  s_renewalMissCount = 0;
     const uint32_t renewalIntervalMs =
         (static_cast<uint32_t>(SystemConstants::Relay::DELAY_WATCHDOG_SECONDS) * 1000u) / 2u;
 
+    // The time this tick began, used as the renewal stamp. Deliberately NOT millis() after
+    // the transaction: see above.
+    const uint32_t tickMs = millis();
+
     // Prioritize state changes over renewal
     if (hasPendingWrite) {
         LOG_INFO(TAG, "SET tick - state change: 0x%02X", desired);
         sendDelayCommands(ryn4, desired);
         // A state change also (re)issues DELAY commands, so it counts as a renewal.
-        s_lastRenewalMs = millis();
+        s_lastRenewalMs = tickMs;
         s_renewalRetryPending = false;
         s_renewalMissCount = 0;
 
@@ -162,16 +180,25 @@ static void handleSetTick(RYN4* ryn4) {
         if (due) {
             LOG_DEBUG(TAG, "SET tick - compact DELAY renewal%s", s_renewalRetryPending ? " (retry)" : "");
             if (sendCompactDelayRenewal(ryn4, desired)) {
-                s_lastRenewalMs = millis();
+                s_lastRenewalMs = tickMs;
                 s_renewalRetryPending = false;
                 s_renewalMissCount = 0;
             } else {
-                // Retry on the NEXT SET tick (2.5s) rather than the next parity
-                // cycle. Alarm after 2 consecutive misses (~7.5s) - still before
-                // the 10s hardware expiry but close enough to warrant attention.
+                // Retry on the NEXT SET tick (2.5s) rather than the next parity cycle.
+                //
+                // ALARM ON THE FIRST MISS. With the renewal on the 5.0 s tick, a miss leaves
+                // exactly ONE retry (7.5 s) before the 10 s hardware auto-OFF - so the first
+                // miss is already the last warning, and waiting for a second meant alarming
+                // at the moment the relays dropped. The condition is also the only way to see
+                // this at all: relay read-back verification cannot detect it, because the
+                // relays are still obeying their last command right up to expiry.
                 s_renewalRetryPending = true;
-                if (++s_renewalMissCount >= 2) {
-                    LOG_ERROR(TAG, "DELAY renewal failed %d consecutive times - relay auto-OFF risk", s_renewalMissCount);
+                if (++s_renewalMissCount >= 1) {
+                    LOG_ERROR(TAG, "DELAY renewal failed %d time(s) - every ON relay auto-OFFs "
+                                   "in ~%lu ms unless the retry succeeds",
+                              s_renewalMissCount,
+                              (unsigned long)(SystemConstants::Relay::DELAY_WATCHDOG_SECONDS * 1000u
+                                              - renewalIntervalMs));
                     // This is the case nothing else covers, and the reason COMM_ERROR is now
                     // read by SafetyInterlocks: two missed renewals means every ON relay is
                     // about 2.5 s from a hardware auto-OFF with no post-purge and no pump
