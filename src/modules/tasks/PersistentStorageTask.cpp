@@ -114,6 +114,11 @@ static const uint32_t IMMEDIATE_SAVE_DELAY_MS = 1000; // 1 second debounce
 static EventGroupHandle_t storageEventGroup = nullptr;
 
 // Track if parameters have changed
+// True when the LIVE room target came from boiler/cmd/room_target, which is a temporary
+// override by owner decision and must not reach NVS. See
+// PersistentStorageTask_MarkRoomTargetTemporary() in the header for what this cost.
+static bool g_roomTargetIsTemporary = false;
+
 static bool parametersChanged = false;
 static uint32_t lastChangeTime = 0;
 
@@ -307,6 +312,9 @@ void PersistentStorageTask(void* pvParameters) {
     storage->registerInt("heating/targetTemp", &targetTemp_i32, 100, 300, "Room target (tenths °C)");
     storage->setOnChange("heating/targetTemp", [](const std::string& name, const void*) {
         SRP::getSystemSettings().targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
+        // A durable write: the shadow and the live value now agree AND are meant to persist,
+        // so any earlier temporary override is superseded.
+        g_roomTargetIsTemporary = false;
         LOG_INFO(TAG, "Parameter %s changed to %ld", name.c_str(), targetTemp_i32);
         parametersChanged = true;
         lastChangeTime = millis();
@@ -974,7 +982,14 @@ void PersistentStorageTask(void* pvParameters) {
     // ago.
     static int32_t lastPublishedTarget = -1;  // no real target is negative
     auto syncShadowsFromSettings = [&settings]() {
-        targetTemp_i32 = static_cast<int32_t>(settings.targetTemperatureInside);
+        // The SHADOW is what saveAll() persists, so only sync it when the live value is meant
+        // to be persisted. A boiler/cmd/room_target override is deliberately RAM-only, and
+        // both paths write the same settings field - without this guard every unrelated save
+        // promoted the override to NVS. The retained topic below still publishes the LIVE
+        // value, which is right: HA should show what the house is actually running at.
+        if (!g_roomTargetIsTemporary) {
+            targetTemp_i32 = static_cast<int32_t>(settings.targetTemperatureInside);
+        }
         if (targetTemp_i32 != lastPublishedTarget) {
             char targetBuf[8];
             formatTenths(targetBuf, sizeof(targetBuf), targetTemp_i32);
@@ -1094,6 +1109,21 @@ void PersistentStorageTask(void* pvParameters) {
 }
 
 // Public function to request parameter save
+void PersistentStorageTask_RepublishGroup(const char* group) {
+    if (group == nullptr || *group == '\0') {
+        return;
+    }
+    PersistentStorage* ps = storageInstance.load();
+    if (ps == nullptr) {
+        return;  // before storage is up there is no retained mirror to refresh
+    }
+    (void)ps->publishGroupedCategory(group);
+}
+
+void PersistentStorageTask_MarkRoomTargetTemporary() {
+    g_roomTargetIsTemporary = true;
+}
+
 void PersistentStorageTask_RequestSave() {
     if (storageEventGroup) {
         xEventGroupSetBits(storageEventGroup, STORAGE_SAVE_REQUEST_BIT);

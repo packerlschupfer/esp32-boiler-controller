@@ -1641,3 +1641,42 @@ for .16.27/.18.27/.22.27 but **not** .20.27, even though it is the same multi-ho
 Worth knowing when reading recorder history: every `"Sensor fault"` entry on
 `sensor.heating_status` before 2026-10-29 is a REBOOT, not a sensor problem - the firmware had
 no "not evaluated yet" reason and borrowed `SENSOR_INVALID` for the first ~4 s of every boot.
+
+## The room target: two paths, and only one of them persists
+
+| path | effect | survives a reboot |
+|---|---|---|
+| `boiler/cmd/room_target <n>` (the HA climate card) | changes the running target | **No** - temporary by owner decision |
+| `boiler/params/set/heating/targetTemp <tenths>` | changes and persists it | Yes |
+
+**Until 2026-10-29 the first path persisted by accident.** Both write the same field
+(`settings.targetTemperatureInside`), and `syncShadowsFromSettings()` runs immediately before
+every `saveAll()`, copying the live value into the registered shadow that NVS keeps. So *any*
+unrelated save silently promoted a card adjustment to NVS: every enable/priority/override
+switch, autotune, `fram save_pid`, `boiler/params/save`, and every debounced `params/set` of
+any other parameter. Whether a card change survived a reboot depended on whether something
+else happened to be saved while it was active - and the persisted value was unreadable at
+runtime, because `params/get` reports the RAM-synced shadow. After the next reboot the house
+ran at a stale override setpoint with the curve and backstop following it.
+
+The cmd path now marks the value temporary, so a save keeps the last *persisted* target. The
+retained `boiler/status/heating/target` still shows the LIVE value, which is right: HA should
+display what the house is actually running at. The distinction is now visible in the log line
+the command returns.
+
+Note the sync itself is still required for durable writes - removing it outright would
+reintroduce `57d6456`, where a save wrote a stale shadow back and reverted the room target.
+
+## Retained `boiler/params/status/<group>` mirrors and `boiler/cmd`
+
+These mirrors are published on the **params/set path only**, so a `boiler/cmd` write leaves
+them stale until HA restarts, the device comes online, the add-on reconnects, a `params/set`
+happens to hit the same group, or the operator presses that row's R button.
+
+Mostly that is display-only. For **`wheater/priorityEnabled` it was a write-back hazard**: the
+add-on's Water tab bulk "Set" always publishes the checkbox populated from the stale group, so
+a priority change made through `boiler/cmd/water priority_on|priority_off` was silently
+reverted the next time anyone saved anything on that tab. Since 2026-10-29 those two commands
+republish the `wheater` group. Other `cmd` writes still leave their mirrors stale - that is
+display-only today, but a future add-on writer for another group would recreate the same
+hazard, so republish the group alongside any new mirrored `cmd` write.

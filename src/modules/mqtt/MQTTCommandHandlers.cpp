@@ -265,7 +265,15 @@ void handleRoomTargetCommand(const char* payload) {
             SystemSettings& settings = SRP::getSystemSettings();
             settings.targetTemperatureInside = tempFromFloat(tempValue);
             SRP::giveSystemSettingsMutex();
-            LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C", tempValue);
+            // RAM-ONLY BY OWNER DECISION, and now actually RAM-only. Both this path and
+            // params/set/heating/targetTemp write the same settings field, so the save path
+            // could not tell them apart - and the pre-save shadow sync promoted whatever was
+            // live to NVS on ANY unrelated save (an enable switch, autotune, a debounced
+            // params/set of something else). Marking it keeps the last PERSISTED target in the
+            // shadow, so a reboot restores the configured value rather than a stale override.
+            PersistentStorageTask_MarkRoomTargetTemporary();
+            LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C (temporary - use "
+                              "params/set/heating/targetTemp to persist)", tempValue);
             char response[32];
             snprintf(response, sizeof(response), "%.1f", tempValue);
             MQTTTask::publish(MQTT_STATUS_HEATING "/target", response, 0, true, MQTTPriority::PRIORITY_HIGH);
@@ -311,10 +319,16 @@ void handleWaterCommand(const char* payload) {
         MQTTTask::publish(MQTT_STATUS_WATER, "normal", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "priority_on") == 0 || strcmp(payload, "priority_enable") == 0) {
         StateManager::setWaterPriorityEnabled(true);
+        // REFRESH THE RETAINED MIRROR. boiler/params/status/wheater is published on the
+        // params/set path only, so after a cmd write it still shows the old
+        // priorityEnabled - and the add-on's Water tab bulk "Set" publishes that stale
+        // checkbox back, silently reverting this change. Found 2026-10-28.
+        PersistentStorageTask_RepublishGroup("wheater");
         LOG_INFO(TAG_CMD, "Remote command: Enable water heating priority");
         MQTTTask::publish(MQTT_STATUS_WATER_PRIORITY, "enabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "priority_off") == 0 || strcmp(payload, "priority_disable") == 0) {
         StateManager::setWaterPriorityEnabled(false);
+        PersistentStorageTask_RepublishGroup("wheater");
         LOG_INFO(TAG_CMD, "Remote command: Disable water heating priority");
         MQTTTask::publish(MQTT_STATUS_WATER_PRIORITY, "disabled", 0, true, MQTTPriority::PRIORITY_HIGH);
     }

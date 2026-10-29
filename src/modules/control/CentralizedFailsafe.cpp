@@ -692,6 +692,21 @@ bool CentralizedFailsafe::releaseAfterSensorRecovery() {
 
     xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::EMERGENCY_STOP);
     latchCause_.store(EmergencyStopRelease::Cause::NONE);
+
+    // MAKE THE STATEMENT BELOW TRUE. This used to clear only the latch and ASSUME
+    // BOILER_ENABLED was still clear from emergencyStop() - but HA renders bit 0 of the live
+    // `s` bitmap, so during every emergency stop the Boiler System switch shows OFF although
+    // the owner never touched it. Tapping it ON reaches StateManager::setBoilerEnabled(true)
+    // unconditionally and nothing re-clears it while latched, so at recovery the bit was set,
+    // the burner restarted automatically, and this log line said the opposite.
+    //
+    // The restart did pass the state machine's own gates, so it was never an unsafe
+    // actuation - what it defeated was the deliberate human-at-recovery hold, which exists
+    // because a stale-sensor stop means nobody has looked at the boiler yet. Clearing the bit
+    // here is the whole hold: one line, and the log and the docs become accurate.
+    // Found by the 2026-10-28 review.
+    xEventGroupClearBits(SRP::getSystemStateEventGroup(), SystemEvents::SystemState::BOILER_ENABLED);
+
     setLevel(FailsafeLevel::WARNING);
     LOG_WARN(TAG, "Emergency stop released after sensor recovery - boiler stays disabled "
                   "on purpose, restart it with boiler/cmd/emergency_reset");

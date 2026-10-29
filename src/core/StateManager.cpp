@@ -62,11 +62,28 @@ void StateManager::cleanup() {
 
 void StateManager::setBoilerEnabled(bool enabled, bool persist) {
     // Update settings struct
+    // TRANSACTIONAL: no field write, no bit change, no persist.
+    //
+    // These setters used to commit half a transaction on a mutex timeout - the field
+    // write was skipped SILENTLY (MutexGuard's timeout log is compiled out), the event
+    // bit was changed anyway, and markSettingsDirty() then persisted the OLD field
+    // through its registered pointer. Nothing re-syncs at runtime:
+    // syncEventBitsToSettings() has no callers and syncEnableStatesToEventBits() runs
+    // only at initialize() and the NVS load, so bit and NVS disagreed until a reboot -
+    // and the reboot then restored the STALE field, flipping the switch back under the
+    // operator. Worse for the boiler: field true with the bit false and no latch lets an
+    // operator emergency_reset re-enable immediately, because that path reads the FIELD
+    // as the master switch.
+    //
+    // No reachable trigger was found (the review's candidate was disproved), so this is
+    // latent - but it is the root shape behind this whole group, and refusing is cheap.
     {
         MutexGuard guard(SRP::getSystemSettingsMutex(), pdMS_TO_TICKS(100));
-        if (guard.hasLock()) {
-            SRP::getSystemSettings().boilerEnabled = enabled;
+        if (!guard.hasLock()) {
+            LOG_ERROR(TAG, "setBoilerEnabled: settings mutex timeout - refusing, state unchanged");
+            return;
         }
+        SRP::getSystemSettings().boilerEnabled = enabled;
     }
 
     // Update event bits (atomic, no mutex needed)
@@ -85,11 +102,28 @@ void StateManager::setBoilerEnabled(bool enabled, bool persist) {
 }
 
 void StateManager::setHeatingEnabled(bool enabled, bool persist) {
+    // TRANSACTIONAL: no field write, no bit change, no persist.
+    //
+    // These setters used to commit half a transaction on a mutex timeout - the field
+    // write was skipped SILENTLY (MutexGuard's timeout log is compiled out), the event
+    // bit was changed anyway, and markSettingsDirty() then persisted the OLD field
+    // through its registered pointer. Nothing re-syncs at runtime:
+    // syncEventBitsToSettings() has no callers and syncEnableStatesToEventBits() runs
+    // only at initialize() and the NVS load, so bit and NVS disagreed until a reboot -
+    // and the reboot then restored the STALE field, flipping the switch back under the
+    // operator. Worse for the boiler: field true with the bit false and no latch lets an
+    // operator emergency_reset re-enable immediately, because that path reads the FIELD
+    // as the master switch.
+    //
+    // No reachable trigger was found (the review's candidate was disproved), so this is
+    // latent - but it is the root shape behind this whole group, and refusing is cheap.
     {
         MutexGuard guard(SRP::getSystemSettingsMutex(), pdMS_TO_TICKS(100));
-        if (guard.hasLock()) {
-            SRP::getSystemSettings().heatingEnabled = enabled;
+        if (!guard.hasLock()) {
+            LOG_ERROR(TAG, "setHeatingEnabled: settings mutex timeout - refusing, state unchanged");
+            return;
         }
+        SRP::getSystemSettings().heatingEnabled = enabled;
     }
 
     if (enabled) {
@@ -106,11 +140,28 @@ void StateManager::setHeatingEnabled(bool enabled, bool persist) {
 }
 
 void StateManager::setWaterEnabled(bool enabled, bool persist) {
+    // TRANSACTIONAL: no field write, no bit change, no persist.
+    //
+    // These setters used to commit half a transaction on a mutex timeout - the field
+    // write was skipped SILENTLY (MutexGuard's timeout log is compiled out), the event
+    // bit was changed anyway, and markSettingsDirty() then persisted the OLD field
+    // through its registered pointer. Nothing re-syncs at runtime:
+    // syncEventBitsToSettings() has no callers and syncEnableStatesToEventBits() runs
+    // only at initialize() and the NVS load, so bit and NVS disagreed until a reboot -
+    // and the reboot then restored the STALE field, flipping the switch back under the
+    // operator. Worse for the boiler: field true with the bit false and no latch lets an
+    // operator emergency_reset re-enable immediately, because that path reads the FIELD
+    // as the master switch.
+    //
+    // No reachable trigger was found (the review's candidate was disproved), so this is
+    // latent - but it is the root shape behind this whole group, and refusing is cheap.
     {
         MutexGuard guard(SRP::getSystemSettingsMutex(), pdMS_TO_TICKS(100));
-        if (guard.hasLock()) {
-            SRP::getSystemSettings().waterEnabled = enabled;
+        if (!guard.hasLock()) {
+            LOG_ERROR(TAG, "setWaterEnabled: settings mutex timeout - refusing, state unchanged");
+            return;
         }
+        SRP::getSystemSettings().waterEnabled = enabled;
     }
 
     if (enabled) {
@@ -140,11 +191,17 @@ void StateManager::setWaterEnabled(bool enabled, bool persist) {
 }
 
 void StateManager::setWaterPriorityEnabled(bool enabled, bool persist) {
+    // Transactional for the same reason as the three setters above: on a settings-mutex
+    // timeout the field write was skipped silently while the bit changed anyway, and
+    // markSettingsDirty() then persisted the stale field. Nothing re-syncs at runtime.
     {
         MutexGuard guard(SRP::getSystemSettingsMutex(), pdMS_TO_TICKS(100));
-        if (guard.hasLock()) {
-            SRP::getSystemSettings().wheaterPriorityEnabled = enabled;
+        if (!guard.hasLock()) {
+            LOG_ERROR(TAG, "setWaterPriorityEnabled: settings mutex timeout - refusing, "
+                           "state unchanged");
+            return;
         }
+        SRP::getSystemSettings().wheaterPriorityEnabled = enabled;
     }
 
     if (enabled) {
