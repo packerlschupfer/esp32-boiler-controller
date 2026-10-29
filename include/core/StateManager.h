@@ -138,6 +138,30 @@ public:
      */
     static uint32_t getSensorAge(SensorChannel channel);
 
+    /**
+     * @brief Sensor age, with "could not read" reported SEPARATELY from "stale".
+     *
+     * getSensorAge() returns 0x7FFFFFFF when it cannot take the sensor-readings mutex, which
+     * is indistinguishable from "this sensor has never updated" - and isSensorStale() reports
+     * both as stale. That is fine for reporting and wrong for a safety trip:
+     * continuousSafetyMonitor() turned a single 50 ms mutex miss into an immediate, undebounced
+     * emergency stop with SENSOR_STALE on any 100 ms burner tick during IGNITION or RUNNING.
+     *
+     * The holder is real, not theoretical: MQTTPublisher holds this mutex across nested
+     * 100 ms-retry and 50 ms waits every 10 s, and a hold over 100 ms was measured on
+     * 2026-10-18. So a latched stop with perfectly healthy sensors, clearable only by
+     * boiler/cmd/emergency_reset, was reachable on any burn. Its sibling check in the same
+     * function - checkTemperatureLimits() - already tolerates two such misses.
+     *
+     * @param outAgeMs  set only when this returns true
+     * @return false if the readings could not be read at all. A caller making a safety
+     *         decision must treat that as NO INFORMATION: neither fresh nor stale, so it
+     *         neither trips nor resets a debounce. Same rule as the flagsRefreshed gate in
+     *         TemperatureSensorFallback - do not advance a safety counter on data you did not
+     *         actually read.
+     */
+    static bool sensorAgeIfReadable(SensorChannel channel, uint32_t& outAgeMs);
+
     // ========== Safety Preconditions ==========
 
     /**

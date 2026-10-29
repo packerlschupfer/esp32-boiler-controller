@@ -536,11 +536,15 @@ static bool checkIfWaterHeatingNeededEvent() {
     // H2 fix: Snapshot temperature thresholds under settings mutex BEFORE taking sensor mutex
     // Avoids nested mutex with sensorReadings, and protects Temperature_t reads from MQTT races
     Temperature_t snappedLimitLow = 0, snappedLimitHigh = 0;
+    Temperature_t snappedFlowCeiling = 0;
     bool snappedOverrideOff = false;
     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
         const SystemSettings& s = SRP::getSystemSettings();
         snappedLimitLow  = s.wHeaterConfTempLimitLow;
         snappedLimitHigh = s.wHeaterConfTempLimitHigh;
+        // Snapped in the same hold as the limits it is compared against, so the reachability
+        // check below cannot straddle a parameter change and reject a consistent pair.
+        snappedFlowCeiling = s.water_heating_high_limit;
         snappedOverrideOff = s.waterOverrideOff;
         SRP::giveSystemSettingsMutex();
     } else {
@@ -587,9 +591,42 @@ static bool checkIfWaterHeatingNeededEvent() {
             Temperature_t lowLimit  = snappedLimitLow;   // Start heating below this
             Temperature_t highLimit = snappedLimitHigh;  // Stop heating above this
 
-            // Simple two-threshold control (no symmetric hysteresis calculation)
-            heatingNeeded = WaterChargePolicy::nextChargeNeeded(
-                waterState.lastHeatingNeeded, currentTemp, lowLimit, highLimit);
+            // IS THE STOP LIMIT EVEN REACHABLE? A charge has five exits and none of them is
+            // time- or convergence-based, and the 10-min request watchdog cannot end it
+            // because this task re-asserts the request every 5 min. With WATER_PRIORITY on -
+            // the live configuration - an unreachable limit therefore locks out space heating
+            // AND frost protection indefinitely. No hardware fault is needed: there is no
+            // cross-field check between wheater/tempLimitHigh and w/hHi, so w/hHi 60.0 with
+            // tempLimitHigh 65.0 is accepted and simply never finishes. Found 2026-10-28.
+            //
+            // Refuse to START such a charge rather than silently correcting either parameter:
+            // both are operator intent, and guessing which one is wrong is how the inverted
+            // flow-limit "fix" ended up swapping bounds nobody typed.
+            const Temperature_t waterFlowCeiling = snappedFlowCeiling;
+            // CHARGE_DELTA_MIN is in whole degrees (the single source of truth for the delta
+            // floor); these limits are tenths.
+            const int16_t minHeadTenths =
+                static_cast<int16_t>(WaterChargePolicy::CHARGE_DELTA_MIN * 10.0f);
+            if (!WaterChargePolicy::tankLimitReachable(
+                    highLimit, waterFlowCeiling, minHeadTenths)) {
+                static bool unreachableLogged = false;
+                if (!unreachableLogged) {
+                    char hiBuf[16], flowBuf[16];
+                    formatTemp(hiBuf, sizeof(hiBuf), highLimit);
+                    formatTemp(flowBuf, sizeof(flowBuf), waterFlowCeiling);
+                    LOG_ERROR(TAG, "Tank stop limit %s°C is UNREACHABLE with a water flow "
+                                   "ceiling of %s°C - no charge will be started, because it "
+                                   "could never finish and would lock out heating and frost. "
+                                   "Raise w/hHi or lower wheater/tempLimitHigh.",
+                              hiBuf, flowBuf);
+                    unreachableLogged = true;
+                }
+                heatingNeeded = false;
+            } else {
+                // Simple two-threshold control (no symmetric hysteresis calculation)
+                heatingNeeded = WaterChargePolicy::nextChargeNeeded(
+                    waterState.lastHeatingNeeded, currentTemp, lowLimit, highLimit);
+            }
             if (heatingNeeded && !waterState.lastHeatingNeeded) {
                 char currBuf[16], lowBuf[16];
                 formatTemp(currBuf, sizeof(currBuf), currentTemp);

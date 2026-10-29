@@ -523,6 +523,8 @@ void test_burnkind_the_three_old_predicates_disagreed_exactly_here();
 void test_burnkind_published_state_round_trips_and_clears();
 void test_burnkind_room_measurement_defaults_true();
 void test_dissipation_blind_is_bounded_not_forever();
+void test_charge_tank_limit_reachability();
+void test_charge_overrun_is_bounded();
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
@@ -1066,6 +1068,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_burnkind_published_state_round_trips_and_clears);
     RUN_TEST(test_burnkind_room_measurement_defaults_true);
     RUN_TEST(test_dissipation_blind_is_bounded_not_forever);
+    RUN_TEST(test_charge_tank_limit_reachability);
+    RUN_TEST(test_charge_overrun_is_bounded);
 
     return UNITY_END();
 }

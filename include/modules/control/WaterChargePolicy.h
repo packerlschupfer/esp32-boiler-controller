@@ -34,6 +34,63 @@ namespace WaterChargePolicy {
     }
 
     /**
+     * @brief Can a tank stop limit be reached at all, given the water flow ceiling?
+     *
+     * A running charge has FIVE exits and not one of them is time- or convergence-based:
+     * tank above tempLimitHigh, the water OFF override, water disabled, boiler disabled, or
+     * sensor loss. The 10-minute burner request watchdog cannot end it either, because
+     * WheaterControlTask re-asserts the request every 5 minutes.
+     *
+     * So an unreachable stop limit is an INDEFINITE charge - and with WATER_PRIORITY on (the
+     * live configuration) HeatingControlTask returns before frost demand or the room backstop
+     * is acted on, and a frost burn already running is stopped to yield to water. An
+     * unreachable tank limit therefore locks out space heating AND frost protection for as
+     * long as it stands.
+     *
+     * No hardware fault is needed to arrange this. There is no cross-field check between
+     * wheater/tempLimitHigh (registered 500-850) and w/hHi (600-1000), and the flow is capped
+     * by calculateBoilerTarget's clamp to w/hHi plus the w/bandOff OFF band - so w/hHi 60.0
+     * with tempLimitHigh 65.0 is accepted today and simply never finishes. Found by the
+     * 2026-10-28 review.
+     *
+     * The tank is heated by a coil, so the flow must sit ABOVE the tank temperature for
+     * transfer to happen at all - by the same physical margin the delta bounds describe
+     * below. Requiring the flow ceiling to clear the tank stop limit by that margin is the
+     * weakest check that still rules out "cannot converge".
+     *
+     * @param tempLimitHigh tank stop limit, tenths
+     * @param waterFlowHigh w/hHi, the water flow ceiling, tenths
+     * @param minDelta      the smallest useful flow-above-tank head, tenths
+     */
+    inline bool tankLimitReachable(int16_t tempLimitHigh, int16_t waterFlowHigh,
+                                   int16_t minDelta) {
+        return static_cast<int32_t>(waterFlowHigh) >=
+               static_cast<int32_t>(tempLimitHigh) + minDelta;
+    }
+
+    /**
+     * @brief Hard cap on a single charge, so an unconvergeable one cannot lock out frost.
+     *
+     * The reachability check above rules out the CONFIGURATION case. This bounds the physical
+     * one, which cannot be ruled out from parameters: a coil fouled with scale, a failed tank
+     * sensor reading low, or the boiler's own thermostat cutting the flame below the flow the
+     * curve asked for (suspected at 62-63 C on this boiler but NOT established - two burns,
+     * two undistinguished hypotheses, and a 2026-09-12/13 run to 90 C with the flame on
+     * argues against it).
+     *
+     * Generous rather than tight: a full charge from the low limit measured about 40 minutes,
+     * so three hours is far beyond any legitimate charge and still bounds the lockout. The
+     * point is that space heating and frost get the burner back, and that the operator is told,
+     * rather than the number being exact.
+     */
+    constexpr uint32_t MAX_CHARGE_MS = 10800000;  // 3 h
+
+    inline bool chargeOverran(uint32_t chargeElapsedMs,
+                              uint32_t maxMs = MAX_CHARGE_MS) {
+        return chargeElapsedMs >= maxMs;
+    }
+
+    /**
      * @brief Charge delta bounds: the head the boiler holds above the tank.
      *
      * The water burner target is tank + delta (WheaterControlTask::calculateBoilerTarget),

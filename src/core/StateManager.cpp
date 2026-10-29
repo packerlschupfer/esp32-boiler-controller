@@ -282,6 +282,43 @@ uint32_t StateManager::getSensorAge(SensorChannel channel) {
     return Utils::elapsedMs(timestamp);
 }
 
+bool StateManager::sensorAgeIfReadable(SensorChannel channel, uint32_t& outAgeMs) {
+    MutexGuard guard(SRP::getSensorReadingsMutex(), pdMS_TO_TICKS(50));
+    if (!guard.hasLock()) {
+        return false;  // no information - see the header
+    }
+    const SharedSensorReadings& readings = SRP::getSensorReadings();
+    // Identical channel routing to getSensorAge() above - deliberately, so the two cannot
+    // disagree about what "age" means for a channel. Audit F5: each MB8ART channel keys off
+    // the timestamp ITS source writes, or a loss on one source is masked by another
+    // refreshing a shared field.
+    uint32_t timestamp = 0;
+    switch (channel) {
+        case SensorChannel::PRESSURE:
+            timestamp = readings.lastPressureUpdateTimestamp;
+            break;
+        case SensorChannel::BOILER_OUTPUT:
+        case SensorChannel::BOILER_RETURN:
+        case SensorChannel::WATER_TANK:
+        case SensorChannel::WATER_TANK_TOP:
+        case SensorChannel::WATER_RETURN:
+        case SensorChannel::HEATING_RETURN:
+            timestamp = readings.lastBoilerTempUpdateTimestamp;
+            break;
+        case SensorChannel::OUTSIDE_TEMP:
+        case SensorChannel::INSIDE_TEMP:
+        default:
+            timestamp = readings.lastUpdateTimestamp;
+            break;
+    }
+    if (timestamp == 0) {
+        outAgeMs = 0x7FFFFFFF;  // genuinely never updated, which IS stale
+        return true;
+    }
+    outAgeMs = Utils::elapsedMs(timestamp);
+    return true;
+}
+
 bool StateManager::isSensorStale(SensorChannel channel, uint32_t maxAgeMs) {
     return getSensorAge(channel) > maxAgeMs;
 }

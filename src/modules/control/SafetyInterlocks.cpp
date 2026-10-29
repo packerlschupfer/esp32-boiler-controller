@@ -524,13 +524,43 @@ bool SafetyInterlocks::continuousSafetyMonitor() {
         return false;
     }
 
-    // 3. Sensor staleness check - CRITICAL: Must have fresh sensor data during operation
-    // Uses StateManager which checks lastUpdateTimestamp (15s threshold)
-    if (StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT)) {
-        uint32_t age = StateManager::getSensorAge(StateManager::SensorChannel::BOILER_OUTPUT);
-        LOG_ERROR(TAG, "Critical safety check failed: Sensor data stale (%lu ms)", age);
-        triggerEmergencyShutdown("Sensor data stale during operation", EmergencyStopRelease::Cause::SENSOR_STALE);
-        return false;
+    // 3. Sensor staleness check - CRITICAL: Must have fresh sensor data during operation.
+    //
+    // DEBOUNCED, AND A MUTEX MISS IS NOT EVIDENCE. This used to call isSensorStale() directly,
+    // which reports 0x7FFFFFFF - indistinguishable from "never updated" - whenever
+    // getSensorAge() cannot take the sensor-readings mutex within 50 ms. On any 100 ms burner
+    // tick during IGNITION or RUNNING that became an immediate, undebounced
+    // emergencyStop(SENSOR_STALE): a latched stop with perfectly healthy sensors, clearable
+    // only by boiler/cmd/emergency_reset.
+    //
+    // The holder is real. MQTTPublisher holds this mutex across nested 100 ms-retry and 50 ms
+    // waits every 10 s, and a hold over 100 ms was measured on 2026-10-18. The sibling check
+    // directly above - checkTemperatureLimits() - already tolerates two such misses, so this
+    // was also the odd one out. Found by the 2026-10-28 review.
+    //
+    // Two consecutive GENUINE stale observations now trip it. A read failure is neither: it
+    // does not trip and does not reset, exactly like the flagsRefreshed gate in
+    // TemperatureSensorFallback. A real dead MB8ART still trips on the second tick ~100 ms
+    // later, so this costs nothing in detection latency for the case that matters.
+    {
+        static uint8_t staleStrikes = 0;
+        uint32_t age = 0;
+        if (!StateManager::sensorAgeIfReadable(StateManager::SensorChannel::BOILER_OUTPUT, age)) {
+            LOG_WARN(TAG, "Sensor age unreadable (mutex busy) - staleness check skipped, "
+                          "strikes held at %u", staleStrikes);
+        } else if (age > SafetyConfig::sensorStaleMs) {
+            if (++staleStrikes >= 2) {
+                LOG_ERROR(TAG, "Critical safety check failed: Sensor data stale (%lu ms, "
+                               "%u consecutive)", age, staleStrikes);
+                staleStrikes = 0;
+                triggerEmergencyShutdown("Sensor data stale during operation",
+                                         EmergencyStopRelease::Cause::SENSOR_STALE);
+                return false;
+            }
+            LOG_WARN(TAG, "Sensor data stale (%lu ms) - strike %u of 2", age, staleStrikes);
+        } else {
+            staleStrikes = 0;
+        }
     }
     
     // Perform full check periodically
