@@ -39,6 +39,14 @@ static struct {
     Temperature_t lastBoilerTarget = 0;
     bool initialized = false;
     bool lastHeatingNeeded = false;  // Hysteresis state for checkIfWaterHeatingNeededEvent()
+    // When the current charge started, for the overrun cap. A charge has five exits and none
+    // of them is time- or convergence-based, and the 10-min burner request watchdog cannot end
+    // it because this task re-asserts the request every 5 min - so without a cap an
+    // unconvergeable charge runs forever, and with WATER_PRIORITY on that locks out space
+    // heating AND frost protection. tankLimitReachable() rules out the CONFIGURATION case;
+    // this bounds the physical one (a fouled coil, a tank sensor reading low, or the boiler's
+    // own thermostat cutting the flame below the commanded flow).
+    uint32_t chargeStartMs = 0;
 } waterState;
 
 // Forward declarations
@@ -379,6 +387,7 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
 
                 waterState.state = WheaterOn;
                 waterState.lastBoilerTarget = boilerTargetTemp;
+                waterState.chargeStartMs = millis();
                 if (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE) {
                     // Forced charge: charge up to tempLimitHigh instead of ending on the
                     // next cycle because the tank is already above tempLimitLow
@@ -415,15 +424,35 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
                 break;
             }
 
+            // THE SIXTH EXIT, and the only one that is not a state change: a charge that has
+            // run far longer than any legitimate one. A measured full charge from the low limit
+            // is about 40 minutes, so the 3 h cap is well clear of normal operation and exists
+            // only so that space heating and frost protection get the burner back - and so the
+            // operator is told, which none of the other five exits would do here.
+            const bool chargeOverran = WaterChargePolicy::chargeOverran(
+                millis() - waterState.chargeStartMs);
+            if (chargeOverran) {
+                LOG_ERROR(TAG, "Charge ABANDONED after %lu min - the tank never reached its "
+                               "stop limit. Check the tank sensor, the coil, and the boiler's "
+                               "own thermostat; heating and frost are released now.",
+                          (unsigned long)((millis() - waterState.chargeStartMs) / 60000UL));
+                // Drop the hysteresis latch too, or nextChargeNeeded() would immediately ask
+                // for the same unfinishable charge again on the next tick.
+                waterState.lastHeatingNeeded = false;
+            }
+
             if ((controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) ||
                 !(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED) ||
                 !(systemStateBits & SystemEvents::SystemState::WATER_ENABLED) ||
                 !waterStillNeeded ||
+                chargeOverran ||
                 !sensorsAvailable) {
                 
                 // Determine reason for shutdown
                 const char* reason = "unknown";
-                if (controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) {
+                if (chargeOverran) {
+                    reason = "charge overran its time cap";
+                } else if (controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) {
                     reason = "remote override OFF";
                 } else if (!(systemStateBits & SystemEvents::SystemState::BOILER_ENABLED)) {
                     reason = "boiler disabled";
