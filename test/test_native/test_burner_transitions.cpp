@@ -709,3 +709,34 @@ void test_bsm_step_explicit_disable_during_mode_switch_stops() {
     TEST_ASSERT_TRUE(sim.last.reason == Reason::EXPLICIT_DISABLE);
     TEST_ASSERT_EQUAL_INT(0, sim.env.switchCalls);
 }
+
+void test_bsm_handover_with_no_demand_post_purges_instead_of_firing() {
+    // A DIFFERENT ROUTE to SWITCH_NO_DEMAND than the one above. There,
+    // env.heatingWanted is false, so the POLICY declines the switch. Here the policy WANTS
+    // it - heating is wanted and its mode bit is set - but c.heatDemand is false, because
+    // BurnerControlTask writes the demand OFF during the request gap between the water
+    // request ending and the heating request arriving, and would not re-arm while the flow
+    // sits above the heating target + band (true after essentially every DHW charge).
+    //
+    // modeSwitching() used to actuate the mode relays without consulting heatDemand at all,
+    // so the machine entered RUNNING_LOW and running() stopped it on the next tick: one extra
+    // BURNER_ENABLE ON/OFF per handover plus up to ~1 s of stage-1 fire into an already-warm
+    // circuit, on a boiler with no flame sensing. Found by the 2026-10-28 review.
+    startBurner(true, true);
+    requestWater(false);
+    sim.tick();
+    TEST_ASSERT_TRUE_MESSAGE(sim.state == BurnerSMState::MODE_SWITCHING, "did not reach MODE_SWITCHING");
+
+    // The heating REQUEST arrives, so the policy stops waiting and wants the switch - but the
+    // demand is off, because BurnerControlTask would not arm a heating burn with the flow
+    // still above the heating target + band, which is the state after a DHW charge.
+    requestHeating(true);
+    sim.heatDemand = false;
+    sim.tick();
+
+    TEST_ASSERT_TRUE_MESSAGE(sim.state == BurnerSMState::POST_PURGE, "not POST_PURGE");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(Reason::SWITCH_NO_DEMAND),
+                                  static_cast<int>(sim.last.reason), "reason");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sim.env.switchCalls, "relays were actuated");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sim.visitsOf(BurnerSMState::RUNNING_LOW), "ran at stage 1");
+}

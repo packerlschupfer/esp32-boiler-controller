@@ -344,6 +344,59 @@ void BurnerControlTask(void* parameter) {
         }
         (void)SRP::getTaskManager().feedWatchdog();
 
+        // 2.4. ORPHAN REQUESTS: a request bit with no matching MODE bit.
+        //
+        // A request is only actionable with its mode bit set - hasActiveModeDemand() needs
+        // WATER_ON && WATER, or HEATING_ON && HEATING - because the mode bit is what the
+        // owning task sets when it takes responsibility for the burn. A request without one
+        // belongs to nobody: the burner cannot start on it, it suppresses the other mode
+        // (water priority), and nothing refreshes or clears it.
+        //
+        // Left alone it reaches the 10-minute watchdog below, which clears every request and
+        // triggers an EMERGENCY SHUTDOWN - both pumps forced on, BOILER_ENABLED cleared,
+        // frost protection disabled, operator-only release. That is a catastrophic answer to
+        // a bookkeeping error, and the 2026-10-28 review found two separate ways to get one:
+        // a scheduled water window placing a request its task never adopted (fixed in
+        // e7c97af), and a priority-OFF race re-setting WATER after heating cleared it, which
+        // sticks if heating ends before its own 5-minute refresh.
+        //
+        // So clear an orphan quietly, well before the watchdog, and say so. This is a safety
+        // net for the CLASS rather than for either instance: a request with no owner after
+        // several seconds is a bug, not a state worth escalating. The expiry watchdog below
+        // keeps its emergency response for a genuinely stuck ACTIONABLE demand, which is what
+        // it was written for.
+        {
+            constexpr uint32_t ORPHAN_GRACE_MS = 15000;
+            const EventBits_t reqBits = xEventGroupGetBits(SRP::getBurnerRequestEventGroup());
+            const EventBits_t stateBits = SRP::getSystemStateEventBits();
+            const bool waterOrphan =
+                (reqBits & SystemEvents::BurnerRequest::WATER) &&
+                !(stateBits & SystemEvents::SystemState::WATER_ON);
+            const bool heatingOrphan =
+                (reqBits & SystemEvents::BurnerRequest::HEATING) &&
+                !(stateBits & SystemEvents::SystemState::HEATING_ON);
+
+            static uint32_t orphanSinceMs = 0;
+            if (waterOrphan || heatingOrphan) {
+                const uint32_t nowMs = millis();
+                if (orphanSinceMs == 0) {
+                    orphanSinceMs = nowMs;
+                } else if ((nowMs - orphanSinceMs) >= ORPHAN_GRACE_MS) {
+                    LOG_ERROR(TAG, "Orphan burner request cleared after %lu ms (%s request with "
+                                   "no mode bit - nobody owns it)",
+                              (unsigned long)(nowMs - orphanSinceMs),
+                              waterOrphan ? "WATER" : "HEATING");
+                    BurnerRequestManager::clearRequest(
+                        waterOrphan ? BurnerRequestManager::RequestSource::WATER
+                                    : BurnerRequestManager::RequestSource::HEATING);
+                    orphanSinceMs = 0;
+                }
+            } else {
+                orphanSinceMs = 0;
+            }
+        }
+        (void)SRP::getTaskManager().feedWatchdog();
+
         // 2.5. Check for stale/expired burner requests (watchdog)
         // This prevents runaway burner if a control task crashes
         if (BurnerRequestManager::checkAndClearExpiredRequests(SystemConstants::Burner::REQUEST_EXPIRATION_MS)) {

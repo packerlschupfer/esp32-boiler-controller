@@ -384,6 +384,22 @@ namespace BurnerTransitions {
                 return d;
             }
 
+            // DON'T SWITCH INTO A MODE NOBODY IS ASKING FOR. This used to actuate the mode
+            // relays without consulting heatDemand, even though BurnerControlTask had already
+            // written the demand OFF during the request gap. The state machine then entered
+            // RUNNING_LOW and running() step 4 stopped it on the next tick - one extra
+            // BURNER_ENABLE ON/OFF per handover and up to ~1 s of stage-1 fire into an
+            // already-warm circuit. It happened after essentially every DHW charge, because
+            // the flow sits above the heating target + band by then. No house-visible effect,
+            // but it is a needless ignition cycle on a boiler with no flame sensing, and
+            // post-purge is where a burn with no demand belongs. Found by the 2026-10-28
+            // review.
+            if (!c.heatDemand) {
+                d.next = BurnerSMState::POST_PURGE;
+                d.reason = Reason::SWITCH_NO_DEMAND;
+                return d;
+            }
+
             if (!env.switchMode(d.toWater)) {
                 d.next = BurnerSMState::POST_PURGE;
                 d.reason = Reason::SWITCH_FAILED;

@@ -49,6 +49,28 @@ void OTATask::onOTAStart() {
                  static_cast<int>(burnerState));
         BurnerRequestManager::emergencyClearAll();
         BurnerStateMachine::setHeatDemand(false, 0, false);
+
+        // TELL THE OWNERS. Clearing the request bits without clearing the MODE bits left
+        // HeatingControlTask in HeatingOn and WheaterControlTask in WheaterOn, each believing
+        // it still had a burn. Neither re-evaluates on its own: the heating task re-issues its
+        // request only when the curve target moves more than 1 K or its 300 s refresh elapses,
+        // and the water task's "was I cleared" check only covers the heating-preempted case.
+        // So after a FAILED OTA - onOTAError restores MQTT and nothing else - the burner sat
+        // idle with the mode bit set and the pump circulating for up to 5 minutes before a
+        // normal start re-ignited it.
+        //
+        // Clearing the mode bits makes both tasks re-evaluate on their next tick, so a failed
+        // OTA costs seconds instead of minutes. It also gives the pumps a proper run-on rather
+        // than stopping them dead, now that every stop reason has one (1f7fd33).
+        //
+        // NOT a reboot-with-burner-firing risk, which a reviewer suggested and a verifier
+        // disproved: RESTART_FROM_POST_PURGE requires canTurnOn(), i.e. MIN_OFF_TIME_MS 20 s
+        // from the relay-OFF record, while the measured 1.4 MB transfer is ~13 s. The docs'
+        // "30-60 s" is boilerplate, not a measurement.
+        SRP::clearSystemStateEventBits(SystemEvents::SystemState::HEATING_ON |
+                                       SystemEvents::SystemState::WATER_ON);
+        LOG_WARN(TAG, "Cleared HEATING_ON/WATER_ON so the control tasks re-evaluate "
+                      "immediately rather than after their 5-minute refresh");
     }
 
     // Round 21: Save critical state before OTA update

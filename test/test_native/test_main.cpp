@@ -525,6 +525,7 @@ void test_burnkind_room_measurement_defaults_true();
 void test_dissipation_blind_is_bounded_not_forever();
 void test_charge_tank_limit_reachability();
 void test_charge_overrun_is_bounded();
+void test_bsm_handover_with_no_demand_post_purges_instead_of_firing();
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
@@ -1070,6 +1071,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dissipation_blind_is_bounded_not_forever);
     RUN_TEST(test_charge_tank_limit_reachability);
     RUN_TEST(test_charge_overrun_is_bounded);
+    RUN_TEST(test_bsm_handover_with_no_demand_post_purges_instead_of_firing);
 
     return UNITY_END();
 }
