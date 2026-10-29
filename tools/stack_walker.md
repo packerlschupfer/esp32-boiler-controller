@@ -192,6 +192,55 @@ This is the concrete example of what the "unresolved indirect calls can hide dep
 limit below actually costs: ~1.9 kB, on the deepest path of the task that writes the
 relays, found only by reading the source.
 
+### The callback sweep, 2026-10-30
+
+The failsafe case above was not unique. Checking every task root's measured peak
+against its bound found NTPTask over its bound by 436 B: `performNTPSync()` ends a
+successful sync with `rtcUpdateCallback(utcTime)`, a file-static pointer assigned at
+runtime by `setNTPRTCCallback`, so `updateRTCFromNTP`, `DS3231Controller::setTimeFromUTC`
+and the whole I2C tail were missing. A source sweep of every
+`(set|register)*(Callback|Handler|Hook)` site then found five more of the same shape:
+
+| callback | owning task | modelled chain |
+|---|---|---|
+| `updateRTCFromNTP` (RTC pointer) | NTPTask | 1988 B |
+| `onOTAStart/Progress/End/Error` (ArduinoOTA `std::function`) | OTATask | 1776 B worst |
+| `MQTTTask::publish` (lambda, 4 call sites) | PersistentStorage | 1776 B |
+| `logStateTransition` (StateMachine) | BurnerControl | 1056 B |
+| `mqttEventCallback` (MQTTManager) | MQTTTask | 816 B |
+
+Scheduler action handlers are the one clean case - they dispatch through
+`IScheduleAction`'s vtable, which the tool resolves.
+
+Only PersistentStorage's bound actually moved (3200 -> 3680 B). The others were
+already covered by a deeper path, so the omission cost nothing *in this image* - the
+same luck as the failsafe case. **The measured-peak check cannot find these on its
+own:** a task only violates its bound once the hidden path RUNS, and 17 of 18 tasks
+sat below their bound purely because theirs had not. NTPTask was caught only because
+fixing the silently-discarded RTC registration in 12aab50 made its path live. Read
+the registration sites, do not wait for a violation.
+
+OTA deserves its own note. Its bound omitted 1776 B of a 1120 B apparent headroom,
+and `24b297f` had already raised that stack to 4096 after measuring 384 B free during
+OTA auth - the auth failure path `_onRx -> onOTAError` being one of the missing edges.
+That sizing call was made against a bound blind to the task's own callbacks. It
+happened to be right.
+
+### A residual +20 B on NTPTask
+
+With the edge in place NTPTask's bound is 2756-2768 B against a measured 2788 B, so
+the tool still reports BOUND VIOLATED - by 20 B, down from 436. The cause is visible
+in the unresolved list: `Adafruit_I2CDevice::write` and `::_read` dispatch the I2C
+transport through true indirects, so their frames count as 0. Not worth chasing at a
+796 B margin, but it is why NTPTask does not read "fits" and should not be silenced.
+
+Worth recording for whoever next needs stack back from NTPTask: the deepest path is
+not the NTP code. `DS3231Controller::setTime` calls `DateTime::timestamp()`, which
+`sprintf`s - dragging in `_svfprintf_r` (an 800 B frame) and `_dtoa_r`'s bignum
+allocator for what is a fixed-width date string. That subtree is ~1.5 kB of the
+2788 B peak. Removing that one formatting call would reclaim far more than trimming
+the stack ever could, which is the general rule here: find what deepened the path.
+
 ### Worst case above the stack: nobody, as of 2026-09-18
 
 This section used to list HeatingPump, WaterPump and RYN4Proc. On the current image none of them exceeds its stack: RYN4Proc was raised to 3072 and both pumps now measure a 2544 B worst case against 2560 B. The mechanism is still worth recording, because it is what a future `once:`-carried exceedance will look like. The pumps (2544 B) come within 16 B of their 2560 B stacks

@@ -98,6 +98,49 @@ edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaul
 # re-check: grep -n 'rtcUpdateCallback(' src/modules/tasks/NTPTask.cpp
 edge: performNTPSync() -> updateRTCFromNTP(long long)  # see block comment above
 
+# The NTP->RTC edge above is not a one-off. A 2026-10-30 sweep of every task root
+# found the same shape five more times: a callback registered at runtime and invoked
+# through a pointer or a std::function, so the callee's whole subtree is missing from
+# the owning task's bound. None had been caught, because a task only trips the
+# measured-peak check once the hidden path actually RUNS - 17 of 18 tasks sat below
+# their bound purely because theirs had not. Scheduler action handlers are the one
+# clean case: they dispatch through IScheduleAction's vtable, which the tool resolves.
+# re-check the whole class: grep -rnE '(set|register)[A-Za-z]*(Callback|Handler|Hook)\s*\(' src/ --include=*.cpp
+#
+# OTA is the one that mattered. OTATask's bound was 2976 B of a 4096 B stack, and
+# onOTAStart alone is a 1776 B chain, so the bound omitted more than the headroom it
+# appeared to leave. That is the task 24b297f already raised to 4096 after measuring
+# 384 B free during OTA AUTH - and the auth failure path is _onRx -> onOTAError, also
+# missing. The sizing decision was made against a bound blind to the callbacks.
+# re-check: grep -n '_start_callback\|_error_callback' in framework-arduinoespressif32
+#           libraries/ArduinoOTA/src/ArduinoOTA.cpp (invoked from _runUpdate and _onRx)
+edge: ArduinoOTAClass::_runUpdate() -> OTATask::onOTAStart()  # ArduinoOTA.cpp:356, std::function<void()> set via OTAManager::setStartCallback (OTATask.cpp:252)
+edge: ArduinoOTAClass::_runUpdate() -> OTATask::onOTAProgress(unsigned int, unsigned int)  # ArduinoOTA.cpp:360,428
+edge: ArduinoOTAClass::_runUpdate() -> OTATask::onOTAEnd()  # ArduinoOTA.cpp, end of the update path
+edge: ArduinoOTAClass::_runUpdate() -> OTATask::onOTAError(ota_error_t)  # ArduinoOTA.cpp:347,400 (BEGIN_ERROR)
+edge: ArduinoOTAClass::_onRx() -> OTATask::onOTAError(ota_error_t)  # ArduinoOTA.cpp:314, OTA_AUTH_ERROR - the path 24b297f measured at 384 B free
+#
+# BurnerControl: the burner state machine logs every transition through a callback.
+# 1056 B chain, and LOG_* frames dominate it - see the task_stack notes on ~1312 B
+# per call. Fits, but only because BurnerControl has 4096 B.
+# re-check: src/utils/StateMachine.h:163 (transitionCallback invoked from transitionTo)
+edge: StateMachine<BurnerSMState>::transitionTo(BurnerSMState) -> BurnerStateMachine::logStateTransition(BurnerSMState, BurnerSMState)  # registered at BurnerStateMachine.cpp:177
+#
+# PersistentStorage publishes through a lambda that re-enters MQTTTask::publish
+# (PersistentStorageTask.cpp:887), a 1776 B chain. Four live call sites; the one that
+# matters is processCommandQueue, whose own 1328 B frame is the largest in the image.
+# publishAllAsync and continueAsyncPublish also call it in source but are not in this
+# image - add them back if they ever appear as symbols.
+# re-check: grep -n 'mqttPublishCallback_(' in ESP32-PersistentStorage/src/PersistentStorage.cpp
+edge: PersistentStorage::publishUpdate(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) -> MQTTTask::publish(char const*, char const*, int, bool, MQTTPriority)  # PersistentStorage.cpp:1024
+edge: PersistentStorage::publishAllGrouped() -> MQTTTask::publish(char const*, char const*, int, bool, MQTTPriority)  # PersistentStorage.cpp:1131
+edge: PersistentStorage::publishGroupedCategory(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) -> MQTTTask::publish(char const*, char const*, int, bool, MQTTPriority)  # PersistentStorage.cpp:1242
+edge: PersistentStorage::processCommandQueue() -> MQTTTask::publish(char const*, char const*, int, bool, MQTTPriority)  # PersistentStorage.cpp:1595, on top of the 1328 B frame
+#
+# MQTTTask's own event callback, dispatched from the library.
+# re-check: MQTTManager.cpp:884 (eventCallback invoked from notifyEvent)
+edge: MQTTManager::notifyEvent(MQTTManager::MQTTEvent, void*) -> mqttEventCallback(MQTTManager::MQTTEvent, void*)  # registered at MQTTTask.cpp:157
+
 # The pointer-keyed fast path in SharedResourceManager falls back to the map on a slot
 # miss, which keeps std::string construction, the global accessMutex_ and the libstdc++
 # throw/unwind tail statically reachable from the hot accessors. No TASK can reach it:

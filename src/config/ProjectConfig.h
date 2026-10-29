@@ -348,8 +348,12 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                    // the DS3231 I2C tail were invisible to the tool and
                                                    // its bound read 2340-2352 B. Hardware measures a
                                                    // 2788 B peak. tools/stack_walker.excludes now carries
-                                                   // that edge and the bound reads 2756-2768 B, 20 B off
-                                                   // the device. The branch only went live in 12aab50
+                                                   // that edge and the bound reads 2756-2768 B. The tool
+                                                   // STILL reports BOUND VIOLATED, by 20 B rather than
+                                                   // 436: Adafruit_I2CDevice::write/_read dispatch the
+                                                   // I2C transport through true indirects whose frames
+                                                   // count as 0. Left as-is deliberately at a 796 B
+                                                   // margin - see tools/stack_walker.md. The branch only went live in 12aab50
                                                    // (the callback registration used to be discarded), so
                                                    // the 2026-09-18 figures were honest when measured.
                                                    // Real margin is 796 B free - 284 B above
