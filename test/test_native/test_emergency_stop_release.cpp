@@ -63,12 +63,12 @@ void test_emergency_stop_onset_once_per_latch() {
 }
 
 void test_emergency_dissipation_until_boiler_cooled() {
-    TEST_ASSERT_TRUE(dissipationPumpOn(true, 1150, true));
-    TEST_ASSERT_TRUE(dissipationPumpOn(true, 600, true));
-    TEST_ASSERT_FALSE(dissipationPumpOn(true, 599, true));
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 1150, true, 0));
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 600, true, 0));
+    TEST_ASSERT_FALSE(dissipationPumpOn(true, 599, true, 0));
     // Hysteresis: once stopped, on again only from 65.0 °C
-    TEST_ASSERT_FALSE(dissipationPumpOn(true, 640, false));
-    TEST_ASSERT_TRUE(dissipationPumpOn(true, 650, false));
+    TEST_ASSERT_FALSE(dissipationPumpOn(true, 640, false, 0));
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 650, false, 0));
 }
 
 void test_emergency_sensor_recovery_releases_only_stale_sensor_stop() {
@@ -100,8 +100,8 @@ void test_emergency_dissipation_continues_after_release_until_cooled() {
 }
 
 void test_emergency_dissipation_without_usable_output() {
-    TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, false));
-    TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, true));
+    TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, false, 0));
+    TEST_ASSERT_TRUE(dissipationPumpOn(false, 200, true, 0));
 }
 
 void test_emergency_safety_split_matches_the_latched_evaluation() {
@@ -161,4 +161,25 @@ void test_emergency_safety_refuses_a_re_enable_over_a_hot_boiler() {
                              EmergencyStopRelease::toString(EmergencyStopRelease::Result::BOILER_RE_ENABLED));
     TEST_ASSERT_EQUAL_STRING("emergency_not_active",
                              EmergencyStopRelease::toString(EmergencyStopRelease::Result::NOT_ACTIVE));
+}
+
+void test_dissipation_blind_is_bounded_not_forever() {
+    using namespace EmergencyStopRelease;
+    // THE DEFECT. This used to `return true` with no time input at all, while the
+    // after-release rule capped the identical blind case. Since nothing periodic clears a
+    // latch, the pumps ran until the module returned or someone power-cycled - circulating
+    // the DHW tank through a boiler that had cooled to cellar temperature, for days if the
+    // owner was away. Found 2026-10-28.
+    TEST_ASSERT_TRUE (dissipationPumpOn(false, 0, true, 0));
+    TEST_ASSERT_TRUE (dissipationPumpOn(false, 0, true, MAX_BLIND_DISSIPATION_MS - 1));
+    TEST_ASSERT_FALSE(dissipationPumpOn(false, 0, true, MAX_BLIND_DISSIPATION_MS));
+    TEST_ASSERT_FALSE(dissipationPumpOn(false, 0, true, MAX_BLIND_DISSIPATION_MS * 2));
+    // A usable reading still governs when present - the cap applies ONLY when blind, so a
+    // genuinely hot boiler is never abandoned because a timer expired.
+    TEST_ASSERT_TRUE(dissipationPumpOn(true, 900, true, MAX_BLIND_DISSIPATION_MS * 10));
+    // The two rules now agree in shape: blind -> time-capped, readable -> temperature-driven.
+    TEST_ASSERT_EQUAL(dissipationPumpOn(false, 0, true, 1000, 5000),
+                      dissipationAfterRelease(false, 0, 1000, 5000));
+    TEST_ASSERT_EQUAL(dissipationPumpOn(false, 0, true, 6000, 5000),
+                      dissipationAfterRelease(false, 0, 6000, 5000));
 }

@@ -501,7 +501,7 @@ desired = OFF
 BOILER_ENABLED && mode bit set (HEATING_ON / WATER_ON)  -> ON, overrun cancelled
 BOILER_ENABLED && mode bit cleared since last check      -> start overrun
 overrun running && elapsed < pumpCooldownMs              -> ON  (SystemSettings, default 300000 ms = 5 min)
-BOILER_ENABLED cleared                                    -> OFF (no overrun)
+BOILER_ENABLED cleared                                    -> OFF after the pump cooldown
 heating pump only: ReturnPreheater PREHEATING            -> ReturnPreheater::shouldPumpBeOn()
 EMERGENCY_STOP set                                        -> ON  (heat dissipation, overrides all) until boiler
                                                              output < 60.0°C, ON again from 65.0°C; always ON

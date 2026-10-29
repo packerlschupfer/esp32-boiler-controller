@@ -186,6 +186,12 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         if (latched) {
             dissipatingAfterRelease = false;
         }
+        // Onset time for the blind-dissipation cap below. Stamped once per latch, not per
+        // cycle, or the cap would never be reached.
+        static uint32_t latchStartMs = 0;
+        if (latched && !latchedLastCycle) {
+            latchStartMs = millis();
+        }
         latchedLastCycle = latched;
 
         bool emergencyDissipation = false;
@@ -205,7 +211,8 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
 
             if (latched) {
                 const bool wasDissipating = dissipating;
-                dissipating = EmergencyStopRelease::dissipationPumpOn(outputUsable, output, dissipating);
+                dissipating = EmergencyStopRelease::dissipationPumpOn(
+                    outputUsable, output, dissipating, millis() - latchStartMs);
                 if (wasDissipating != dissipating) {
                     LOG_WARN(TAG, "Emergency heat dissipation %s (boiler output %d.%d°C)",
                              dissipating ? "resumed" : "done", output / 10, abs(output % 10));
@@ -228,21 +235,47 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         // Pump should be on if system is enabled AND in the appropriate mode
         bool modeActive = (systemBits & config->modeActiveBit) != 0;
 
+        // SWITCHING THE BOILER OFF MID-BURN MUST STILL GET A COOLDOWN.
+        //
+        // Clearing BOILER_ENABLED (the HA boiler switch, or params/set system/boilerEnabled)
+        // stops the burner at once - min on-time is bypassed - and used to stop BOTH pumps
+        // within one 500 ms cycle with no overrun, because all three branches below were gated
+        // on systemEnabled and the only override required an EMERGENCY_STOP latch. Nothing
+        // restarted them afterwards either: frost protection requires BOILER_ENABLED, and even
+        // the 115 C critical check is skipped while it is clear. So a 34 kW stage-2 burn at
+        // 72 C flow could be followed by zero circulation, with the after-heat of a 169 kg
+        // cast-iron block soaking into standing water. Every OTHER stop path has run-on
+        // (switch and demand end: pumpCooldownMs; emergency: forced dissipation to 60 C), and
+        // POST_PURGE's own comment asserts "the pumps carry the heat away independently" -
+        // false for exactly this one stop reason. Found by the 2026-10-28 review; it dates to
+        // the initial release and predates the 2026-09-14 emergency-dissipation fix.
+        //
+        // Safe for the drained-for-service case, which is a real reason to switch the boiler
+        // off: the overrun only starts if this pump's mode WAS active, and a drained system
+        // was not circulating or burning.
+        static bool wasSystemEnabled = true;
+        const bool boilerJustSwitchedOff = wasSystemEnabled && !systemEnabled;
+        wasSystemEnabled = systemEnabled;
+
         if (systemEnabled && modeActive) {
             desiredState = PumpState::On;
             inOverrun = false;  // Clear overrun when mode becomes active again
-        } else if (systemEnabled && wasModeActive && !modeActive) {
-            // Mode just turned off - start overrun period
+        } else if ((systemEnabled && wasModeActive && !modeActive) ||
+                   (boilerJustSwitchedOff && (modeActive || wasModeActive))) {
+            // Mode just turned off, OR the boiler was switched off while this pump was serving
+            // an active mode - both leave residual heat that needs carrying away.
             overrunStartTime = millis();
             inOverrun = true;
-            // Get configurable cooldown time from SystemSettings
             SystemSettings& settings = SRP::getSystemSettings();
-            LOG_INFO(TAG, "Starting pump overrun (%lu ms) to dissipate residual heat",
-                     settings.pumpCooldownMs);
+            LOG_INFO(TAG, "Starting pump overrun (%lu ms) to dissipate residual heat%s",
+                     settings.pumpCooldownMs,
+                     boilerJustSwitchedOff ? " (boiler switched off mid-operation)" : "");
         }
 
-        // Check if we're in overrun period
-        if (inOverrun && systemEnabled) {
+        // Check if we're in overrun period. Deliberately NOT gated on systemEnabled: an
+        // overrun that has already started is carrying real heat out of the exchanger, and the
+        // boiler being switched off is not a reason to abandon it halfway.
+        if (inOverrun) {
             uint32_t elapsed = millis() - overrunStartTime;
             // Use configurable cooldown from SystemSettings
             SystemSettings& settings = SRP::getSystemSettings();

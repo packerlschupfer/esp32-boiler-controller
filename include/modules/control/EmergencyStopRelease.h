@@ -107,9 +107,37 @@ namespace EmergencyStopRelease {
     constexpr int16_t DISSIPATION_END_TENTHS = 600;      // 60.0 °C - pumps may stop below this
     constexpr int16_t DISSIPATION_RESTART_TENTHS = 650;  // 65.0 °C - pumps on again (hysteresis)
 
-    inline bool dissipationPumpOn(bool outputUsable, int16_t outputTenths, bool wasOn) {
+    /**
+     * @brief Blind dissipation is BOUNDED, like the after-release rule below.
+     *
+     * This used to `return true` unconditionally when the reading was unusable - no cap, no
+     * time input - while dissipationAfterRelease() capped the identical case at
+     * maxWithoutReadingMs. The asymmetry had no recorded rationale and it is the latched side
+     * that can last forever, because nothing periodic clears a latch.
+     *
+     * What it cost: if the MB8ART dies permanently while the burner is firing,
+     * continuousSafetyMonitor latches a SENSOR_STALE stop at 15 s and both pumps are forced on
+     * and re-asserted every cycle. emergency_reset cannot release it either - the idle fallback
+     * refresh drives the sensor fallback to SHUTDOWN and sets Error::SENSOR_FAILURE, so the
+     * release refuses with system_errors until reads resume. So the only exits were the module
+     * returning or a reboot. Meanwhile the water pump circulates the DHW tank through a boiler
+     * that cooled to cellar temperature within half an hour, and the heating pump moves that
+     * heat into the radiators: the tank drains over hours, and the pumps run for days if the
+     * owner is away. Found by the 2026-10-28 review.
+     *
+     * Bounded is right because WITHOUT A READING WE CANNOT KNOW WE ARE DISSIPATING ANYTHING.
+     * The cast-iron block's after-heat moves into the water within minutes; past that the pumps
+     * are not removing heat, they are redistributing cold. The cap is generous rather than
+     * tight - the point is that it terminates, not that it is exact.
+     */
+    constexpr uint32_t MAX_BLIND_DISSIPATION_MS = 900000;  // 15 min
+
+    inline bool dissipationPumpOn(bool outputUsable, int16_t outputTenths, bool wasOn,
+                                  uint32_t sinceLatchMs,
+                                  uint32_t maxWithoutReadingMs = MAX_BLIND_DISSIPATION_MS) {
         if (!outputUsable) {
-            return true;  // invalid or stale boiler output: keep circulating
+            // Blind: circulate, but not forever.
+            return sinceLatchMs < maxWithoutReadingMs;
         }
         return wasOn ? outputTenths >= DISSIPATION_END_TENTHS
                      : outputTenths >= DISSIPATION_RESTART_TENTHS;

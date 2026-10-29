@@ -842,3 +842,34 @@ mosquitto_pub -t "errors/list" -m "20"
 ---
 
 **Critical Safety Warning**: Only modify safety parameters if you fully understand the implications. Incorrect values can compromise safety. When in doubt, use defaults - they are proven safe in field testing.
+
+## Pump run-on: every stop reason now has one (corrected 2026-10-29)
+
+| stop reason | pump behaviour |
+|---|---|
+| heating/water switch off, demand ends | run on for `pumpCooldownMs` |
+| `BOILER_ENABLED` cleared mid-operation | run on for `pumpCooldownMs` - **this was the exception and had none** |
+| emergency latch, boiler output readable | forced ON until the output is below 60.0 °C (back on at 65.0) |
+| emergency latch, output unreadable | forced ON, **capped at `MAX_BLIND_DISSIPATION_MS` (15 min)** - this was uncapped |
+| after a release, output unreadable | capped at `pumpCooldownMs` (already correct) |
+
+**Why the two corrections.** Clearing `BOILER_ENABLED` stops the burner immediately (minimum
+on-time is bypassed) and used to stop both pumps within one 500 ms cycle, because all three
+branches in `PumpControlModule` were gated on `systemEnabled` and the only override required an
+emergency latch. Nothing restarted them: frost protection requires `BOILER_ENABLED`, and even
+the 115 °C critical check is skipped while it is clear. A stage-2 burn at 72 °C flow could
+therefore be followed by no circulation at all, with the after-heat of a 169 kg cast-iron block
+soaking into standing water - while `POST_PURGE`'s own comment asserted "the pumps carry the
+heat away independently", which was false for precisely this stop reason. The overrun only
+starts if the pump's mode was active, so switching the boiler off on a **drained** system - a
+real reason to do it - still starts nothing.
+
+And blind emergency dissipation ran with no cap while the after-*release* rule capped the
+identical case. Since nothing periodic clears a latch, a permanently dead MB8ART meant both
+pumps ran until the module returned or someone power-cycled: the water pump circulating the DHW
+tank through a boiler that had cooled to cellar temperature, draining the tank over hours, for
+days if the owner was away. `emergency_reset` could not release it either, because the idle
+fallback refresh sets `Error::SENSOR_FAILURE` and the release refuses on `system_errors` until
+reads resume. Without a reading we cannot know we are dissipating anything, so the rule is now
+bounded - generously, because the point is that it terminates, not that it is exact.
+
