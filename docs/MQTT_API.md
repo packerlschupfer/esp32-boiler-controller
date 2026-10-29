@@ -1680,3 +1680,45 @@ reverted the next time anyone saved anything on that tab. Since 2026-10-29 those
 republish the `wheater` group. Other `cmd` writes still leave their mirrors stale - that is
 display-only today, but a future add-on writer for another group would recreate the same
 hazard, so republish the group alongside any new mirrored `cmd` write.
+
+## Schedules express intent; the mode tasks own the burner (2026-10-29)
+
+A behavioural review found four defects in the scheduler, all from one cause: **the schedule
+actions were actuating the burner and writing shared settings directly, instead of telling the
+task that owns the mode.** The space-heating *start* already did it correctly, through
+`HEATING_ON_OVERRIDE`; the water action did not.
+
+| was | now |
+|---|---|
+| water start called `setWaterRequest()` directly | sets `WATER_ON_OVERRIDE`; `WheaterControlTask` owns the charge |
+| water end called `clearRequest(WATER)` unconditionally | clears only its own override |
+| the action re-checked POST_PURGE and priority itself | removed - the state machine and `BurnerRequestManager` already enforce both |
+| a space-heating window end wrote 10.0 °C and left it | restores the pre-window target, RAM-only |
+
+**The water one was the serious defect.** `setWaterRequest()` sets the shared `WATER` request
+bit but **not** `SystemState::WATER_ON`, whose only setter is `WheaterControlTask`. So the
+request was an orphan: the burner cannot start on it, heating is suppressed while priority is
+on, nothing refreshed it, and after `REQUEST_EXPIRATION_MS` (600 s) the request watchdog
+cleared every request and called `triggerEmergencyShutdown` — burner off, **both pumps forced
+on**, `EMERGENCY_STOP` latched, `BOILER_ENABLED` cleared (which also disables frost
+protection), an FRAM record written, and only `boiler/cmd/emergency_reset` to release it. A
+scheduled morning shower could end in a latched emergency stop with no heat and no hot water.
+
+It was intermittent in the most misleading way: if the tank happened to be below the low limit
+at the window start, `WheaterControlTask` adopted the charge normally and the window worked. So
+it would have presented as a random overnight emergency stop.
+
+**Known limitation, stated rather than hidden:** `WATER_ON_OVERRIDE` carries no target, so a
+scheduled charge uses the configured `wheater/tempLimitHigh` and a water schedule's own
+`target_temp` is **not applied**. The old direct path did pass that figure — but it never
+reached the burner, so it honoured the target only in the sense that nothing happened. Carrying
+a per-window target needs plumbing it to the task that owns the charge; that is a feature, and
+adding it here would put a second target source beside the configured limits. The action logs a
+WARN naming the schedule so this is discoverable rather than puzzling.
+
+**On window ends and 10 °C:** nothing in any doc or recorded decision said a space-heating
+window end should let the house fall to 10 °C, and `ECO` mode already exists for a configurable
+setback. The end now restores the target that was in force before the window, marked temporary
+so neither it nor the window's own target reaches NVS. If no pre-window target was captured, it
+leaves the schedule's value alone rather than guessing — the schedule's value is a defensible
+state, 10.0 was not.

@@ -1,6 +1,7 @@
 // src/modules/scheduler/SpaceHeatingScheduleAction.cpp
 // Space heating schedule action handler implementation
 #include "modules/scheduler/SpaceHeatingScheduleAction.h"
+#include "modules/tasks/PersistentStorageTask.h"  // MarkRoomTargetTemporary
 #include "TimerSchedule.h"
 #include "core/SystemResourceProvider.h"
 #include "shared/Temperature.h"
@@ -30,6 +31,22 @@ void SpaceHeatingScheduleAction::onScheduleStart(const TimerSchedule& schedule) 
              schedule.actionData.spaceHeating.mode == MODE_ECO ? "ECO" : "FROST",
              schedule.actionData.spaceHeating.targetTempC);
     
+    // Remember the target in force BEFORE the window, so its end can restore it instead of
+    // parking the house at 10 C. Only on the first start of a window - a re-fire inside one
+    // must not capture the window's own target as the thing to restore.
+    if (targetBeforeWindow_ == 0) {
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+            targetBeforeWindow_ = SRP::getSystemSettings().targetTemperatureInside;
+            SRP::giveSystemSettingsMutex();
+            char prevBuf[16];
+            formatTemp(prevBuf, sizeof(prevBuf), targetBeforeWindow_);
+            LOG_INFO(TAG, "Saved pre-window room target %s°C for restore at window end", prevBuf);
+        } else {
+            LOG_WARN(TAG, "Could not read the pre-window room target - the window end will "
+                          "leave the target as the schedule set it rather than guessing");
+        }
+    }
+
     // Apply heating mode
     applyHeatingMode(schedule.actionData.spaceHeating.mode, 
                     schedule.actionData.spaceHeating.targetTempC);
@@ -43,9 +60,39 @@ void SpaceHeatingScheduleAction::onScheduleStart(const TimerSchedule& schedule) 
 void SpaceHeatingScheduleAction::onScheduleEnd(const TimerSchedule& schedule) {
     LOG_INFO(TAG, "Schedule '%s' ending", schedule.name.c_str());
     
-    // Switch to frost protection mode when schedule ends
-    applyHeatingMode(MODE_FROST_PROTECT, 0);
-    
+    // RESTORE THE PRE-WINDOW TARGET instead of parking at DEFAULT_FROST_TEMP (10.0 C).
+    //
+    // applyHeatingMode(MODE_FROST_PROTECT, 0) wrote 10.0 into the live room target and left it
+    // there, so between windows the curve and the room backstop both followed 10.0 and the
+    // controller withheld heat until the house fell to ~11.5-12 C. For the documented
+    // Mon-Fri 18:00-22:00 example that is every night and the whole weekend. It also became
+    // durable by accident via the pre-save shadow sync, so a reboot's setpoint depended on
+    // whether it happened inside a window.
+    //
+    // Nothing documented says a window end means "let the house go to 10 C" - ECO mode exists
+    // for a configurable setback. If no pre-window target was captured (first ever window, or
+    // the settings mutex was busy at start), leave the target alone rather than guess: the
+    // schedule's own value is a defensible state, 10.0 is not.
+    if (targetBeforeWindow_ != 0) {
+        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+            SRP::getSystemSettings().targetTemperatureInside = targetBeforeWindow_;
+            SRP::giveSystemSettingsMutex();
+            char prevBuf[16];
+            formatTemp(prevBuf, sizeof(prevBuf), targetBeforeWindow_);
+            LOG_INFO(TAG, "Window ended - room target restored to %s°C", prevBuf);
+            // RAM-only, exactly like the HA climate card: a schedule window is a temporary
+            // override, so neither its target nor this restore should reach NVS.
+            PersistentStorageTask_MarkRoomTargetTemporary();
+        } else {
+            LOG_ERROR(TAG, "Window ended but the settings mutex was busy - room target left "
+                           "at the window value, NOT parked at 10 C");
+        }
+        targetBeforeWindow_ = 0;
+    } else {
+        LOG_WARN(TAG, "Window ended with no saved pre-window target - leaving the target as "
+                      "the schedule set it");
+    }
+
     // Clear active schedule info
     activeScheduleName_ = "";
     activeMode_ = MODE_FROST_PROTECT;
