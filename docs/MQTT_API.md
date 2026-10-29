@@ -1618,15 +1618,26 @@ mosquitto_sub -t "boiler/#" -v
 #### `blk` and the Home Assistant mapping
 
 `sensor.heating_status` maps these strings to friendly text in
-`homeassistant/boiler_mqtt_include.yaml`. **Two values have no entry in that map and fall
-through to the raw string:**
+`homeassistant/boiler_mqtt.yaml`, which is a copy of the live `/config/boiler_mqtt.yaml`
+(`configuration.yaml` has `mqtt: !include boiler_mqtt.yaml`). **All nine `blk` values are
+mapped as of 2026-10-29**, including the two that were missing:
 
-- `frost` - added to the firmware 2026-10-26, never added to the template. A frost-only burn
-  therefore renders as a bare lowercase `frost`, with no explanation, at exactly the moment
-  someone is trying to work out why the boiler is firing with the heating switch off. Not yet
-  seen in the wild only because outside has not been below 5.0 °C since it shipped.
-- `startup` - added 2026-10-29 with this change.
+- `frost` - shipped in the firmware 2026-10-26 and the template was never told, so a
+  frost-only burn rendered as a bare lowercase `frost` through the `.get()` default: no
+  explanation, at exactly the moment someone is working out why the boiler is firing with the
+  heating switch off. Unseen only because outside had not been below 5.0 °C since it shipped.
+- `startup` - added 2026-10-29 with `Block::STARTUP`.
 
-Needed in the template: `'startup':'Starting up'` and `'frost':'Frost protection'`. The yaml is
-HA Core config, so an `mqtt.reload` applies it - no add-on Rebuild. Owned by the Home Assistant
-side; the repo copy is resynced FROM the live instance, which is the source of truth.
+Deployed by the Home Assistant session and verified by republishing the real payload
+non-retained with `blk` swapped: "Frost protection" and "Starting up" both rendered, and the
+state returned to the real `backstop` afterwards. The yaml is HA Core config, so an
+`mqtt.reload` applies it - no add-on Rebuild.
+
+**The live instance is the source of truth and this repo copy is resynced FROM it** - never the
+other way round (see the 2026-10-26 drift). Fetch with
+`ssh hassio@192.168.16.27 'sudo cat /config/boiler_mqtt.yaml'`; note the host key is registered
+for .16.27/.18.27/.22.27 but **not** .20.27, even though it is the same multi-homed host.
+
+Worth knowing when reading recorder history: every `"Sensor fault"` entry on
+`sensor.heating_status` before 2026-10-29 is a REBOOT, not a sensor problem - the firmware had
+no "not evaluated yet" reason and borrowed `SENSOR_INVALID` for the first ~4 s of every boot.

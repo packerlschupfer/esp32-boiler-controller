@@ -391,7 +391,7 @@ sensor:
     unique_id: boiler_ctl_block_reason
     state_topic: "boiler/status/heating/control"
     value_template: >-
-      {{ {'none':'Heating','outside':'Too warm outside','backstop':'Room warm enough','roomsat':'Room at target','sensor':'Sensor fault','override':'Summer override','disabled':'Heating disabled'}.get(value_json.blk, value_json.blk) }}
+      {{ {'none':'Heating','outside':'Too warm outside','backstop':'Room warm enough','roomsat':'Room at target','sensor':'Sensor fault','override':'Summer override','disabled':'Heating disabled','frost':'Frost protection','startup':'Starting up'}.get(value_json.blk, value_json.blk) }}
     icon: mdi:radiator
     json_attributes_topic: "boiler/status/heating/control"
     availability:
