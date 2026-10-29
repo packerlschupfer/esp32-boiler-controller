@@ -174,7 +174,7 @@ matching `t.*` on `boiler/status/sensors`.
 | | **`i` is NOT the curve's anchor.** Since 2026-10-26 the curve is evaluated on `tgt` whenever `mode` is `weather`, `isrc` is `meas`/`held` and `tgt > 0`; `i` is the live room reading, which enters only through `shift`. So reconstruct `raw` from **`tgt` + `shift` + `o`**, not from `i`. Using `i` gives a number tens of tenths wrong (448 against a published 522 in one live case) and reads like a firmware fault. In room mode, or with `isrc` `tgt`/`nom`, the anchor IS `i`. See `docs/ALGORITHMS.md`. |
 | `isrc` | where `i` came from: `meas` (the sensor), `held` (the sensor, up to 10 min ago), `tgt` (room target assumed), `nom` (20.0 assumed) |
 
-`blk` values: `none` (heating wanted), `outside` (outside >= `outsideThreshold` + 1.0),
+`blk` values: `startup` (nothing evaluated yet - the first ~4 s after a boot; **not** a fault), `none` (heating wanted), `outside` (outside >= `outsideThreshold` + 1.0),
 `backstop` (room > `targetTemp` + `roomOverheatMargin`), `roomsat` (room thermostat
 satisfied, room mode), `sensor` (outside or room reading invalid - weather mode fails safe),
 `override` (`heatingOverrideOff`, summer mode), `disabled` (`heatingEnabled` false).
@@ -1614,3 +1614,19 @@ mosquitto_pub -t "test/echo" -m "hello"
 # Monitor everything
 mosquitto_sub -t "boiler/#" -v
 ```
+
+#### `blk` and the Home Assistant mapping
+
+`sensor.heating_status` maps these strings to friendly text in
+`homeassistant/boiler_mqtt_include.yaml`. **Two values have no entry in that map and fall
+through to the raw string:**
+
+- `frost` - added to the firmware 2026-10-26, never added to the template. A frost-only burn
+  therefore renders as a bare lowercase `frost`, with no explanation, at exactly the moment
+  someone is trying to work out why the boiler is firing with the heating switch off. Not yet
+  seen in the wild only because outside has not been below 5.0 °C since it shipped.
+- `startup` - added 2026-10-29 with this change.
+
+Needed in the template: `'startup':'Starting up'` and `'frost':'Frost protection'`. The yaml is
+HA Core config, so an `mqtt.reload` applies it - no add-on Rebuild. Owned by the Home Assistant
+side; the repo copy is resynced FROM the live instance, which is the source of truth.

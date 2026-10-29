@@ -62,6 +62,9 @@ void test_heating_diag_block_reasons_are_distinct_strings() {
     TEST_ASSERT_EQUAL_STRING("backstop", toString(Block::ROOM_BACKSTOP));
     TEST_ASSERT_EQUAL_STRING("roomsat",  toString(Block::ROOM_SATISFIED));
     TEST_ASSERT_EQUAL_STRING("sensor",   toString(Block::SENSOR_INVALID));
+    // STARTUP must be its own wire string, not an alias of any other reason: the whole
+    // point is that "not evaluated yet" is distinguishable from "a reading is broken".
+    TEST_ASSERT_EQUAL_STRING("startup", toString(Block::STARTUP));
     TEST_ASSERT_EQUAL_STRING("override", toString(Block::SUMMER_OVERRIDE));
     TEST_ASSERT_EQUAL_STRING("disabled", toString(Block::HEATING_DISABLED));
     TEST_ASSERT_EQUAL_STRING("none",     toString(Block::OK));

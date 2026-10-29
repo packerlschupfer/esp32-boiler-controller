@@ -31,6 +31,15 @@ namespace HeatingControlDiagnostics {
     /// The JSON strings in toString() are unchanged - the wire format is the contract.
     enum class Block : uint8_t {
         OK,              // heating is wanted
+        // Nothing has been evaluated yet - the value this starts at, for the ~4 s between boot
+        // and the first checkIfSpaceHeatingNeededEvent(). It needs to exist because the two
+        // obvious stand-ins are both lies: OK means "heating is wanted" (c1ed1b0 fixed exactly
+        // that - HA rendered "Heating" with dem:false for 4 s at every boot), and SENSOR_INVALID
+        // means a reading is broken, which wrote a "Sensor fault" event into Home Assistant's
+        // history on EVERY reboot. That is worse than untidy: it trains an operator to discount
+        // a genuinely alarming string, and it makes a real sensor fault indistinguishable from
+        // a restart when reading history back. Added 2026-10-29.
+        STARTUP,
         OUTSIDE_GATE,    // outside >= outsideThreshold + OUTSIDE_THRESHOLD_HYSTERESIS (weather mode)
         ROOM_BACKSTOP,   // room > targetTemp + roomOverheatMargin (weather mode)
         ROOM_SATISFIED,  // room thermostat satisfied (room mode)
@@ -74,6 +83,7 @@ namespace HeatingControlDiagnostics {
     inline const char* toString(Block b) {
         switch (b) {
             case Block::OK:               return "none";
+            case Block::STARTUP:          return "startup";
             case Block::OUTSIDE_GATE:     return "outside";
             case Block::ROOM_BACKSTOP:    return "backstop";
             case Block::ROOM_SATISFIED:   return "roomsat";

@@ -55,15 +55,24 @@ static bool checkIfSpaceHeatingNeededEvent();
 // (checkIfSpaceHeatingNeededEvent and processHeatingState both run on it), so no
 // synchronisation is needed; published by publishControlDiagnostics() below.
 //
-// SENSOR_INVALID, not OK, is the honest initial value. Block::OK *means* "heating is
-// wanted", so initialising to it made this topic claim heating was wanted for the ~4 s
-// between boot and the first run of checkIfSpaceHeatingNeededEvent(). Measured at the
-// 2026-10-25 01:48:04 UTC boot: `dem:false blk:"none" i:192 isrc:"tgt"`, then four seconds
-// later the first real evaluation gave `blk:"backstop" i:204 isrc:"meas"`. Nothing actuated
-// - dem stayed false and every relay is de-energised at boot - but this is the one topic
-// that exists so "why is heating off" can be answered from the firmware's own state, and
-// for those seconds it answered wrongly. At boot there genuinely is no reading yet, which
-// is exactly what SENSOR_INVALID says.
+// STARTUP is the honest initial value, and it took two attempts to get here.
+//
+// It was Block::OK, which *means* "heating is wanted" - so for the ~4 s between boot and the
+// first run of checkIfSpaceHeatingNeededEvent() this topic claimed heating was wanted.
+// Measured at the 2026-10-25 01:48:04 UTC boot: `dem:false blk:"none" i:192 isrc:"tgt"`, then
+// four seconds later the first real evaluation gave `blk:"backstop" i:204 isrc:"meas"`.
+// Nothing actuated - dem stayed false and every relay is de-energised at boot - but this is
+// the one topic that exists so "why is heating off" can be answered from the firmware's own
+// state, and for those seconds it answered wrongly.
+//
+// c1ed1b0 changed it to SENSOR_INVALID, which was better but still not true: that reason means
+// a READING IS BROKEN, and Home Assistant renders it "Sensor fault". So every single reboot
+// wrote a "Sensor fault" event into HA's history. Two costs, neither cosmetic: it trains an
+// operator to discount a genuinely alarming string, and it makes a real sensor fault
+// indistinguishable from a restart when reading that history back later.
+//
+// The actual state at boot is "nothing has been evaluated yet", which is now its own reason.
+// Nothing is wrong, and the topic says so. See HeatingControlDiagnostics::Block::STARTUP.
 // Caller-owned memory for the outside-reading hold, and the last reported source so the
 // transition is logged once rather than every 5 s. Statics are safe: every caller of
 // checkIfSpaceHeatingNeeded() is HeatingControlTask, a single task.
@@ -72,7 +81,7 @@ static OutsideTempFallbackPolicy::Source g_lastOutsideSource =
     OutsideTempFallbackPolicy::Source::MEASURED;
 
 static HeatingControlDiagnostics::Block g_blockReason =
-    HeatingControlDiagnostics::Block::SENSOR_INVALID;
+    HeatingControlDiagnostics::Block::STARTUP;
 static HeatingControlModule::CurveDebug g_curveDebug;
 static Temperature_t g_commandedTarget = 0;
 static void publishControlDiagnostics();
