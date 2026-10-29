@@ -258,7 +258,28 @@ toWater = BurnerRequest::WATER && (!BurnerRequest::HEATING || WATER_PRIORITY)
 // MODE_SWITCH_HARD_TIMEOUT_MS (30 s) -> POST_PURGE (StateMachine timeout)
 ```
 
-"Heating likely wanted" (`BurnerTransitionPolicy::heatingLikelyWanted()`) mirrors HeatingControlTask's turn-on decision: `HEATING_ENABLED` set and no heating override off; with weather compensation the outside temperature must be valid and below the heating threshold and the room not above target + overheat margin; without weather compensation the room temperature must be valid and below target.
+"Heating likely wanted" (`BurnerTransitionPolicy::heatingLikelyWanted()`) predicts
+HeatingControlTask's turn-on decision, so the burner can choose WAIT over STOP when a water
+charge ends: `HEATING_ENABLED` set and no heating override off; with weather compensation the
+outside temperature must be valid and below the heating threshold, a configured room target
+must have a usable room value, and the room must not be above target + overheat margin -
+hysteresis; without weather compensation the room must be usable and below target.
+
+**It is a prediction, not a mirror, and the word "mirrors" here was false until 2026-10-29.**
+Two divergences had opened up because the heating task was changed and this was not:
+
+- With a room target configured and **no usable room value** it returned `true` while
+  `SpaceHeatingPolicy::weatherDecision()` returned `ROOM_UNKNOWN` (no heat). The burner
+  therefore waited the full `MODE_SWITCH_MAX_WAIT_MS` (15 s) at the end of every DHW charge,
+  **still firing in water mode**, for a request that could not come. Corrected.
+- "Room valid" must be the **resolved** state - measured or held by `RoomTempFallbackPolicy` -
+  not the raw `isInsideTempValid` flag. Those disagree in both directions: the flag stays true
+  for ~15 s after reads stop, and is false for the remaining ~9.75 min of a hold that is still
+  perfectly usable. The caller now passes `HeatingBurnKind::roomIsMeasurement()`, published by
+  the heating task, which owns the hold.
+
+Any future change to the heating task's decision must be reflected here deliberately. There is
+no mechanism forcing it, which is why both divergences happened.
 
 Entering MODE_SWITCHING keeps the anti-flapping power level; transitions out of MODE_SWITCHING are recorded (see Anti-Flapping Protection).
 

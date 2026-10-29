@@ -74,9 +74,18 @@ void test_policy_heating_wanted_weather_mode_restart_limit_boundaries() {
     // Hysteresis 0 -> restart limit 19.0 is already overheated (>=)
     TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 189, 180, 10, 0));
     TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 190, 180, 10, 0));
-    // Room invalid or no room target: no overheat protection, outside decides
-    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, false, 250, 180, 10, 5));
+    // NO ROOM VALUE WITH A TARGET CONFIGURED: no heat. This asserted TRUE until 2026-10-29,
+    // which is what made this predicate disagree with SpaceHeatingPolicy::weatherDecision()
+    // (ROOM_UNKNOWN -> no heat). The disagreement made the burner wait 15 s still firing in
+    // water mode at the end of a DHW charge, for a heating request the heating task could
+    // never make. The 6th argument is the RESOLVED room state (measured or held), not the raw
+    // validity flag - see HeatingBurnKind.h.
+    TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 100, 150, false, 250, 180, 10, 5));
+    // No room TARGET configured is different and still TRUE: weather-only control is the
+    // intended mode there, so a missing room reading is not a reason to stop. Same carve-out
+    // weatherDecision() makes.
     TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, true, 250, 0, 10, 5));
+    TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 100, 150, false, 250, 0, 10, 5));
     // Outside start rule has no hysteresis: outside < threshold
     TEST_ASSERT_TRUE(heatingLikelyWanted(true, false, true, true, 149, 150, true, 170, 180, 10, 5));
     TEST_ASSERT_FALSE(heatingLikelyWanted(true, false, true, true, 150, 150, true, 170, 180, 10, 5));

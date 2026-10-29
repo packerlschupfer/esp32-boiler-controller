@@ -513,6 +513,16 @@ void test_outside_hold_survives_the_millis_rollover();
 void test_room_thermostat_predicate_is_asymmetric();
 void test_room_thermostat_fallback_would_have_heated_the_house();
 
+// One shared frost-only burn classification (2026-10-29)
+void test_burnkind_no_frost_is_never_frost_only();
+void test_burnkind_frost_with_switch_off_is_frost_only();
+void test_burnkind_frost_with_switch_on_but_nothing_wanted_is_frost_only();
+void test_burnkind_frost_during_real_space_heating_is_not_frost_only();
+void test_burnkind_summer_override_makes_it_frost_only();
+void test_burnkind_the_three_old_predicates_disagreed_exactly_here();
+void test_burnkind_published_state_round_trips_and_clears();
+void test_burnkind_room_measurement_defaults_true();
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     
@@ -1044,6 +1054,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_outside_hold_survives_the_millis_rollover);
     RUN_TEST(test_room_thermostat_predicate_is_asymmetric);
     RUN_TEST(test_room_thermostat_fallback_would_have_heated_the_house);
+
+    // The burn classification that was computed in three places (2026-10-29)
+    RUN_TEST(test_burnkind_no_frost_is_never_frost_only);
+    RUN_TEST(test_burnkind_frost_with_switch_off_is_frost_only);
+    RUN_TEST(test_burnkind_frost_with_switch_on_but_nothing_wanted_is_frost_only);
+    RUN_TEST(test_burnkind_frost_during_real_space_heating_is_not_frost_only);
+    RUN_TEST(test_burnkind_summer_override_makes_it_frost_only);
+    RUN_TEST(test_burnkind_the_three_old_predicates_disagreed_exactly_here);
+    RUN_TEST(test_burnkind_published_state_round_trips_and_clears);
+    RUN_TEST(test_burnkind_room_measurement_defaults_true);
 
     return UNITY_END();
 }

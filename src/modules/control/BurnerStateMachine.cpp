@@ -4,7 +4,8 @@
 #include "modules/control/BurnerAntiFlapping.h"  // Add anti-flapping
 #include "modules/control/BurnerSystemController.h"  // Unified burner control with batch relays
 #include "modules/control/CentralizedFailsafe.h"
-#include "modules/control/FrostProtection.h"  // effective enable: switch OR frost latch
+#include "modules/control/FrostProtection.h"
+#include "modules/control/HeatingBurnKind.h"  // the resolved room state  // effective enable: switch OR frost latch
 #include "modules/control/BurnerSafetyChecks.h"  // Round 21: Extracted safety checks
 #include "modules/control/BurnerPowerController.h"  // Round 21: Extracted power control
 #include "modules/control/BurnerRuntimeTracker.h"  // Round 21: Extracted runtime tracking
@@ -449,7 +450,13 @@ public:
         return BurnerTransitionPolicy::heatingLikelyWanted(
             heatingEnabled(), overrideOff, useWeather,
             readings.isOutsideTempValid, readings.outsideTemp, outsideThreshold,
-            readings.isInsideTempValid, readings.insideTemp, targetInside, overheatMargin,
+            // The RESOLVED room state, not readings.isInsideTempValid. The raw flag stays true
+            // for ~15 s after reads stop and goes false for the remaining ~9.75 min while the
+            // 10-minute hold is still perfectly usable, so it disagrees with what the heating
+            // task actually controls on in BOTH directions. HeatingBurnKind carries the
+            // heating task's own answer; see that header.
+            HeatingBurnKind::roomIsMeasurement(),
+            readings.insideTemp, targetInside, overheatMargin,
             hysteresis);
     }
 

@@ -14,6 +14,7 @@
 #include "modules/control/SpaceHeatingPolicy.h"
 #include "modules/control/RoomTempFallbackPolicy.h"
 #include "modules/control/OutsideTempFallbackPolicy.h"  // hold + room-thermostat fallback
+#include "modules/control/HeatingBurnKind.h"  // the shared frost-only classification
 #include "modules/control/HeatingControlDiagnostics.h"
 #include "modules/tasks/MQTTTask.h"   // publishControlDiagnostics
 #include "MQTTTopics.h"
@@ -293,6 +294,9 @@ static void clearHeatingActive(const char* TAG) {
     SRP::clearSystemStateEventBits(SystemEvents::SystemState::HEATING_ON);
     SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::True);
     BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::HEATING);
+    // The burn is over, so its classification must not outlive it. A stale `frost-only = true`
+    // would weaken the sensor requirements of whatever burn comes next.
+    HeatingBurnKind::clear();
     heatingState.state = HeatingOff;
 }
 
@@ -455,11 +459,21 @@ static void processHeatingState(EventBits_t pendingControl) {
                 // the house to the full curve target. In other words the branch only ever fired
                 // in mild weather and never in a frost, which is the one case it was written
                 // for. Found by the 2026-10-26 review.
-                const bool normalHeatingWanted =
-                    (systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) &&
-                    !(controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) &&
-                    checkIfSpaceHeatingNeededEvent();
-                if (frostDemand() && !normalHeatingWanted) {
+                // One predicate, shared with the refresh path below and with
+                // BurnerControlTask::operationModeForRequests(). All three used to compute this
+                // from different inputs; see HeatingBurnKind.h for what that cost.
+                const bool frostOnlyBurn = HeatingBurnKind::isFrostOnlyBurn(
+                    frostDemand(),
+                    (systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) != 0,
+                    (controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) != 0,
+                    checkIfSpaceHeatingNeededEvent());
+
+                // PUBLISH BEFORE REQUESTING. BurnerControlTask reads this to decide which
+                // sensors the burn requires, and it may evaluate on its own cadence as soon as
+                // the request bit appears - so the classification has to be in place first.
+                HeatingBurnKind::publish(frostOnlyBurn);
+
+                if (frostOnlyBurn) {
                     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                         boilerTargetTemp = SRP::getSystemSettings().heating_low_limit;
                         SRP::giveSystemSettingsMutex();
@@ -588,9 +602,21 @@ static void processHeatingState(EventBits_t pendingControl) {
                     }
                 }
 
-                // Same floor substitution as the turn-on path, or a frost burn that outlived
-                // one target refresh would silently switch to the weather curve.
-                if (frostDemand() && !heatingStillNeeded) {
+                // THE SAME PREDICATE as the turn-on path - now literally, via HeatingBurnKind,
+                // rather than by a comment claiming so. This line used to read
+                // `frostDemand() && !heatingStillNeeded`, dropping the switch and override
+                // terms, so a frost-only burn asked for the floor on its turn-on tick and then
+                // for the FULL WEATHER CURVE (clamped only by h/sHi 75.0) on every tick after -
+                // which is the opposite of the intent, since the curve is a function of outside
+                // temperature and frost happens when outside is cold. The 2026-10-26 fix
+                // corrected the turn-on gate thirteen lines up and not this one.
+                const bool frostOnlyRefresh = HeatingBurnKind::isFrostOnlyBurn(
+                    frostDemand(),
+                    (systemStateBits & SystemEvents::SystemState::HEATING_ENABLED) != 0,
+                    (controlBits & SystemEvents::ControlRequest::HEATING_OFF_OVERRIDE) != 0,
+                    heatingStillNeeded);
+                HeatingBurnKind::publish(frostOnlyRefresh);
+                if (frostOnlyRefresh) {
                     if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(50))) {
                         newBoilerTarget = SRP::getSystemSettings().heating_low_limit;
                         SRP::giveSystemSettingsMutex();

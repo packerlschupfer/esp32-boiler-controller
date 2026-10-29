@@ -2,6 +2,7 @@
 #include "modules/control/HeatingControlModule.h"
 #include "modules/control/HeatingCurve.h"  // NOMINAL_ROOM_TENTHS fallback, anchoring()
 #include "modules/control/SpaceHeatingPolicy.h"  // orderFlowLimits
+#include "modules/control/HeatingBurnKind.h"  // publishes the resolved room state
 #include <cmath>  // lroundf, to scale roomCurveShiftFactor into the policy x10 integer
 #include "modules/control/RoomTempFallbackPolicy.h"  // hold the last good room reading
 #include "modules/control/HeatingControlModuleFixedPoint.h"  // For fixed-point heating curve calculations
@@ -94,6 +95,15 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
         resolveRoomForControl(readings, settings.targetTemperatureInside);
     Temperature_t effectiveInside = room.value;
     RoomTempFallbackPolicy::Source insideSource = room.source;
+
+    // Publish whether the room we are controlling on is a real MEASUREMENT (fresh or held).
+    // BurnerTransitionPolicy's room rule used to be fed the RAW isInsideTempValid flag, which
+    // disagrees with this in both directions: the flag is still true for ~15 s after reads
+    // stop, and false for the remaining ~9.75 min while the hold is still perfectly usable.
+    // This is the only place that knows the answer, because it owns the hold.
+    // See HeatingBurnKind.h for what the disagreement cost.
+    HeatingBurnKind::publishRoomIsMeasurement(
+        RoomTempFallbackPolicy::isMeasurement(insideSource));
 
     // Weather-compensated mode: anchor the curve on the TARGET and put the room deviation
     // in the shift (Parallelverschiebung). Room cold -> curve UP, room warm -> curve DOWN.

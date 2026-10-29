@@ -13,6 +13,7 @@
 #include "modules/control/SafetyInterlocks.h"
 #include "modules/control/CentralizedFailsafe.h"
 #include "modules/control/FrostProtection.h"
+#include "modules/control/HeatingBurnKind.h"  // the shared frost-only classification
 #include "modules/control/ReturnPreheater.h"
 #include "modules/control/SensorFailureConfirm.h"
 #include "modules/control/SensorErrorBitPolicy.h"
@@ -445,12 +446,23 @@ static TemperatureSensorFallback::OperationMode operationModeForRequests(EventBi
         // that turned a frost burn with a dead room sensor into a 10-15 s start/stop loop with
         // the fallback flapping NORMAL/SHUTDOWN. Found by the 2026-10-26 review.
         //
-        // Same discriminator as the frost FLOOR decision in HeatingControlTask: the heating
-        // switch being off is what makes a burn frost-only. With the switch on, normal space
-        // heating is happening and the room genuinely is required.
-        const bool heatingSwitchOn =
-            (SRP::getSystemStateEventBits() & SystemEvents::SystemState::HEATING_ENABLED) != 0;
-        if (!heatingSwitchOn && FrostProtection::demand()) {
+        // READ the classification, do not re-derive it. This used to be
+        // `!heatingSwitchOn && FrostProtection::demand()` under a comment claiming it was the
+        // "same discriminator as the frost FLOOR decision in HeatingControlTask". It was not:
+        // the heating task's gate also includes checkIfSpaceHeatingNeededEvent(), the
+        // weather/room decision, which this task cannot evaluate without duplicating the whole
+        // heating loop.
+        //
+        // The gap bit with the heating switch ON and the room sensor dead: the heating task
+        // classified the burn frost-only (the room is not a measurement, so nothing but frost
+        // authorised it) and asked for the flow floor, while this function returned
+        // SPACE_HEATING - whose required-sensor set includes roomTempValid. The fallback then
+        // hit SHUTDOWN seconds after every start, the heating task dropped the request, the
+        // mode reverted to NONE, the fallback recovered on one pass, and the still-cold latch
+        // restarted it: an ignition roughly every 45-55 s for as long as the flow sat between
+        // the 5 C trigger and the 10 C release. Found by the 2026-10-28 review, which traced
+        // five findings to this one duplicated predicate.
+        if (HeatingBurnKind::isFrostOnly()) {
             return TemperatureSensorFallback::OperationMode::FROST_PROTECTION;
         }
         return TemperatureSensorFallback::OperationMode::SPACE_HEATING;

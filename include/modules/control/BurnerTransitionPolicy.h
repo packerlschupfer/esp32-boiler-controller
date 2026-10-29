@@ -63,7 +63,24 @@ namespace BurnerTransitionPolicy {
             if (!outsideValid || outsideTemp >= outsideThreshold) {
                 return false;
             }
-            if (roomValid && roomTarget > 0) {
+            if (roomTarget > 0) {
+                // NO ROOM VALUE MEANS NO HEAT, matching SpaceHeatingPolicy::weatherDecision()'s
+                // ROOM_UNKNOWN branch. This used to skip the whole block when roomValid was
+                // false and fall through to `return true`, so this predicate said "heating is
+                // likely wanted" while the heating task's own decision said the opposite -
+                // commit 1995d90 changed the heating task and not this mirror of it.
+                //
+                // Consequence of the disagreement: at the end of every DHW charge with no
+                // usable room value, running() entered MODE_SWITCHING and waited
+                // MODE_SWITCH_MAX_WAIT_MS (15 s) with the burner STILL FIRING in water mode,
+                // for a heating request the heating task could never make.
+                //
+                // `roomValid` must be the RESOLVED state (measured or held), not the raw
+                // isInsideTempValid flag - the two disagree in both directions. The caller
+                // passes HeatingBurnKind::roomIsMeasurement() for exactly that reason.
+                if (!roomValid) {
+                    return false;
+                }
                 const int32_t restartLimit = static_cast<int32_t>(roomTarget) + roomOverheatMargin -
                                              heatingHysteresis;
                 if (static_cast<int32_t>(roomTemp) >= restartLimit) {
