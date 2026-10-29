@@ -145,6 +145,24 @@ public:
     void reset();
 
     /**
+     * @brief Tell the controller the burner is actually OFF, without touching the PID.
+     *
+     * The flow dead band keys its ON edge on `wasOn`, taken from lastOutput_.powerLevel - and
+     * NO state-machine-initiated stop reset that field. A refused power-level write
+     * (handlePowerLevelFault -> POST_PURGE), an emergency stop that is later released, ERROR
+     * auto-recovery and a LOCKOUT timeout all leave the demand latched and lastOutput_ at
+     * HALF or FULL while the burner is genuinely off. The band then applied its "keep firing"
+     * edge (target + bandOff) instead of its ON edge (target - bandOn), so the burner relit
+     * anywhere inside the band rather than at the bottom of it - one extra ignition and one
+     * minimum-length burn per fault stop. Found by the 2026-10-28 review; self-correcting
+     * after one cycle, which is why it went unnoticed.
+     *
+     * Deliberately NOT reset(): that also clears the PID integral and the autotuner state.
+     * This says one thing - the flame is out - which is the only fact the band needs.
+     */
+    void syncBurnerOff();
+
+    /**
      * @brief Get the last calculated output
      * @return Last output
      */

@@ -537,6 +537,15 @@ bool BoilerTempController::predictHeatDemand(Temperature_t targetTemp, Temperatu
     return true;
 }
 
+void BoilerTempController::syncBurnerOff() {
+    // Only the flame bit. See the header for why this is not reset().
+    if (lastOutput_.powerLevel != PowerLevel::OFF || lastOutput_.burnerOn) {
+        lastOutput_.burnerOn = false;
+        lastOutput_.powerLevel = PowerLevel::OFF;
+        lastOutput_.modulationPercent = 0;
+    }
+}
+
 void BoilerTempController::reset() {
     MutexGuard guard(mutex_, MUTEX_TIMEOUT);
     if (!guard.hasLock()) {

@@ -456,6 +456,20 @@ void BoilerTempControlTask(void* parameter) {
         targetTemp = BurnerDemandGate::cappedTarget(targetTemp, permission.maxTargetTemp);
 
         // Calculate control output
+        // RESYNC THE FLAME BIT BEFORE COMPUTING. The dead band keys its ON edge on the
+        // controller's own last level, and no state-machine-initiated stop resets that - a
+        // refused power-level write, a released emergency stop, ERROR auto-recovery or a
+        // LOCKOUT timeout all leave it at HALF/FULL with the burner genuinely out. The band
+        // then used its "keep firing" edge instead of its ON edge and relit anywhere inside
+        // the band. This task is the right place for the correction: it already holds both
+        // the controller and the state machine, so neither needs to know about the other.
+        // Found by the 2026-10-28 review.
+        if (BurnerStateMachine::getCurrentState() != BurnerSMState::RUNNING_LOW &&
+            BurnerStateMachine::getCurrentState() != BurnerSMState::RUNNING_HIGH &&
+            BurnerStateMachine::getCurrentState() != BurnerSMState::IGNITION) {
+            controller.syncBurnerOff();
+        }
+
         auto output = controller.calculate(targetTemp, currentTemp);
         const bool pidWantsHeat = (output.powerLevel != BoilerTempController::PowerLevel::OFF);
         publishDecision(pidWantsHeat, targetTemp);

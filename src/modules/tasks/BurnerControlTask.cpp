@@ -712,6 +712,41 @@ static void processBurnerRequest() {
         highPower = (requestBits & SystemEvents::BurnerRequest::POWER_HIGH) != 0;
     }
     
+    // THE STAGE HAS ONE OWNER DURING A BURN, AND IT IS THE PID.
+    //
+    // `highPower` above comes from the REQUEST's static bit - heating always LOW, water always
+    // HIGH - which is the right initial value when arming from idle, because no PID decision
+    // exists yet. But this whole function re-runs whenever the request target moves more than
+    // 1.0 C, and it then re-armed with that static bit, overwriting
+    // BurnerStateMachine::requestedHighPower which BoilerTempControlTask had set from the PID's
+    // computed stage. Nothing reconciled the two until the PID's own level next CHANGED, which
+    // is edge-driven, so the clobbered value stood for the rest of the burn.
+    //
+    // What that cost, measured by the 2026-10-28 review:
+    //  - HEATING: every >1 C target rise demoted a stage-2 burn to stage 1 (~19 kW) for the
+    //    rest of the burn. Worse, it is self-reinforcing on the coldest nights - a sagging room
+    //    raises the target through the room-deviation shift, which re-triggers the demotion,
+    //    exactly when stage 1 cannot carry the load.
+    //  - WATER: with wHeaterKp 1.0 the PID output in a tank+delta charge peaks near 60 %, so it
+    //    never asks for FULL and the stage of every DHW charge was in practice decided by this
+    //    bit, not by the controller.
+    //
+    // So: keep the request bit only when the burner is NOT already running. Once running, carry
+    // the stage the controller currently holds. The gates below still apply either way, and
+    // they only ever force LOW - a veto, never a choice - so h/boostMin and the DEGRADED
+    // fullPowerPermitted rule keep working on both paths.
+    if (heatDemand && BurnerStateMachine::getCurrentState() != BurnerSMState::IDLE) {
+        bool curDemand = false, curHigh = false;
+        Temperature_t curTarget = 0;
+        if (BurnerStateMachine::getHeatDemandState(curDemand, curTarget, curHigh) && curDemand) {
+            if (curHigh != highPower) {
+                LOG_DEBUG(TAG, "Re-arm keeps the controller's stage (%s), not the request bit (%s)",
+                          curHigh ? "HIGH" : "LOW", highPower ? "HIGH" : "LOW");
+            }
+            highPower = curHigh;
+        }
+    }
+
     // Validate and update state
     if (targetTemp < tempFromWhole(20) && heatDemand) {  // 20°C minimum
         targetTemp = tempFromWhole(70);  // 70°C default
