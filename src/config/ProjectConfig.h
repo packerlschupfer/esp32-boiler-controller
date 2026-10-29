@@ -339,6 +339,23 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
                                                    // now zero, not -512 B.
                                                    // NTPTask is not safety-critical and its failure
                                                    // path is "no time sync", not "no heat".
+                                                   //
+                                                   // 2026-10-30: the "no hidden depth" claim above is
+                                                   // NO LONGER TRUE, and it was the walker that was
+                                                   // wrong, not the device. performNTPSync() ends a sync
+                                                   // with rtcUpdateCallback() - an indirect call through
+                                                   // a runtime-assigned pointer - so updateRTCFromNTP and
+                                                   // the DS3231 I2C tail were invisible to the tool and
+                                                   // its bound read 2340-2352 B. Hardware measures a
+                                                   // 2788 B peak. tools/stack_walker.excludes now carries
+                                                   // that edge and the bound reads 2756-2768 B, 20 B off
+                                                   // the device. The branch only went live in 12aab50
+                                                   // (the callback registration used to be discarded), so
+                                                   // the 2026-09-18 figures were honest when measured.
+                                                   // Real margin is 796 B free - 284 B above
+                                                   // LOW_STACK_WARN_BYTES. Do NOT trim this again: at
+                                                   // 3072 the bound alone would fit and the device would
+                                                   // still warn, exactly as it did in September.
     #define STACK_SIZE_BOILER_TEMP_TASK      4096  // 2026-10-16: was 3584, bound 3232 -> was 352 B  // 2026-09-17: was 3072 with 644 B free;
                                                    // raised for the autotune-completion branch
                                                    // (BoilerTempControlTask.cpp snprintfs three

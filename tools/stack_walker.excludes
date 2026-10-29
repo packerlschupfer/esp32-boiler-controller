@@ -85,6 +85,19 @@ once: SharedResourceManager::SharedResourceManager  # constructed under __cxa_gu
 edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultBurnerFailsafe  # lambda at CentralizedFailsafe.cpp:61 (Subsystem::BURNER); also called directly at :203,:209 so this adds no depth - kept for change visibility
 edge: CentralizedFailsafe::executeFailsafeActions -> CentralizedFailsafe::defaultPumpFailsafe  # lambdas at CentralizedFailsafe.cpp:65,69 (HEATING_PUMP, WATER_PUMP); chain 1728 B, shallower than the burner branch
 
+# performNTPSync() ends a successful sync with rtcUpdateCallback(utcTime) - an indirect
+# call through a file-static function pointer that TimerSchedulerTask assigns at runtime
+# (setNTPRTCCallback, TimerSchedulerTask.cpp:152). The tool cannot resolve it, so without
+# this edge updateRTCFromNTP, DS3231Controller::setTimeFromUTC and the whole I2C tail are
+# ABSENT from the graph and NTPTask's bound reads 2340-2352 B. The device measures a 2788 B
+# peak (3584 - 796 free), i.e. the unpatched bound under-reports by ~436 B. With the edge
+# the bound is 2756-2768 B, a 20 B gap to hardware. This branch only became live in
+# 12aab50 - before that the registration was silently discarded and the callback never
+# ran, which is why the 2026-09-18 note calling this bound "CONFIRMED, no hidden depth"
+# was true when written and is not any more.
+# re-check: grep -n 'rtcUpdateCallback(' src/modules/tasks/NTPTask.cpp
+edge: performNTPSync() -> updateRTCFromNTP(long long)  # see block comment above
+
 # The pointer-keyed fast path in SharedResourceManager falls back to the map on a slot
 # miss, which keeps std::string construction, the global accessMutex_ and the libstdc++
 # throw/unwind tail statically reachable from the hot accessors. No TASK can reach it:
