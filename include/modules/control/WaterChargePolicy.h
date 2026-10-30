@@ -34,6 +34,28 @@ namespace WaterChargePolicy {
     }
 
     /**
+     * @brief Must a charge be held off because the previous one was abandoned?
+     *
+     * chargeOverran() ends a charge that has run past its 3 h cap, but ending it is not
+     * enough on its own. nextChargeNeeded()'s START branch is just tankTemp <
+     * tempLimitLow, and that is still true after an abandon - it is the whole premise of
+     * an unfinishable charge - so the next 5 s tick started the same charge again. With
+     * WATER_PRIORITY on, each restart cleared HEATING/HEATING_ON and deferred space
+     * heating, so "heating and frost are released now" in the abandon log was false every
+     * three hours. Found by the 2026-10-30 diff review.
+     *
+     * The hold releases on evidence, not on time: the tank being seen at or above the
+     * start limit means whatever prevented the charge has gone, whether that was a
+     * repaired coil, a corrected sensor, the boiler's own thermostat, or solar gain. It is
+     * deliberately NOT a timeout - retrying a physically impossible charge on a schedule
+     * is what the cap exists to stop. The operator can override by toggling water off/on
+     * or forcing a charge, both of which are explicit intent.
+     */
+    inline bool chargeHeldAfterAbandon(bool abandoned, int16_t tankTemp, int16_t tempLimitLow) {
+        return abandoned && (tankTemp < tempLimitLow);
+    }
+
+    /**
      * @brief Can a tank stop limit be reached at all, given the water flow ceiling?
      *
      * A running charge has FIVE exits and not one of them is time- or convergence-based:

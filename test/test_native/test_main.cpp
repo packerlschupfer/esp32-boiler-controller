@@ -539,6 +539,10 @@ void test_boot_reason_payload_shape();
 void test_boot_reason_payload_worst_case_fits_96();
 void test_boot_reason_overflow_clears_the_buffer();
 void test_boot_reason_rejects_null_and_zero_len();
+void test_abandon_hold_blocks_the_immediate_retry();
+void test_abandon_hold_releases_when_the_tank_recovers();
+void test_abandon_hold_is_inert_without_an_abandon();
+void test_abandon_hold_then_normal_start_still_works();
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
@@ -1098,6 +1102,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_boot_reason_payload_worst_case_fits_96);
     RUN_TEST(test_boot_reason_overflow_clears_the_buffer);
     RUN_TEST(test_boot_reason_rejects_null_and_zero_len);
+    RUN_TEST(test_abandon_hold_blocks_the_immediate_retry);
+    RUN_TEST(test_abandon_hold_releases_when_the_tank_recovers);
+    RUN_TEST(test_abandon_hold_is_inert_without_an_abandon);
+    RUN_TEST(test_abandon_hold_then_normal_start_still_works);
 
     return UNITY_END();
 }

@@ -47,3 +47,48 @@ void test_charge_overrun_is_bounded() {
     TEST_ASSERT_TRUE (chargeOverran(6000, 5000));
     TEST_ASSERT_FALSE(chargeOverran(4999, 5000));
 }
+
+// ---------------------------------------------------------------------------
+// chargeHeldAfterAbandon(): the half of the 3 h cap that was missing.
+//
+// 374b5dc ended an overrunning charge but nothing stopped the next tick from
+// starting it again, because the START branch is only "tank below the low limit"
+// and an unfinishable charge leaves it that way by definition.
+// ---------------------------------------------------------------------------
+
+void test_abandon_hold_blocks_the_immediate_retry() {
+    // The regression: tank still cold after an abandon. Starting again would burn
+    // another 3 h and keep heating and frost locked out.
+    TEST_ASSERT_TRUE_MESSAGE(
+        WaterChargePolicy::chargeHeldAfterAbandon(true, 400, 450),
+        "abandoned and still below the start limit must hold");
+}
+
+void test_abandon_hold_releases_when_the_tank_recovers() {
+    // At or above the low limit, whatever prevented the charge has gone.
+    TEST_ASSERT_FALSE_MESSAGE(
+        WaterChargePolicy::chargeHeldAfterAbandon(true, 450, 450),
+        "exactly at the start limit is no longer below it - release");
+    TEST_ASSERT_FALSE_MESSAGE(
+        WaterChargePolicy::chargeHeldAfterAbandon(true, 520, 450),
+        "above the start limit must release");
+}
+
+void test_abandon_hold_is_inert_without_an_abandon() {
+    // A cold tank with no prior abandon is the normal reason to charge, and this
+    // predicate must never block it.
+    TEST_ASSERT_FALSE_MESSAGE(
+        WaterChargePolicy::chargeHeldAfterAbandon(false, 300, 450),
+        "no abandon means no hold, however cold the tank");
+}
+
+void test_abandon_hold_then_normal_start_still_works() {
+    // The sequence that matters end to end: hold while cold, release on recovery,
+    // and nextChargeNeeded() then free to ask for a charge again on the next dip.
+    TEST_ASSERT_TRUE(WaterChargePolicy::chargeHeldAfterAbandon(true, 400, 450));
+    TEST_ASSERT_FALSE(WaterChargePolicy::chargeHeldAfterAbandon(true, 460, 450));
+    // latch cleared by the task at that point; a later dip is a fresh charge
+    TEST_ASSERT_TRUE_MESSAGE(
+        WaterChargePolicy::nextChargeNeeded(false, 440, 450, 550),
+        "once the hold is gone a cold tank charges normally again");
+}

@@ -47,6 +47,14 @@ static struct {
     // this bounds the physical one (a fouled coil, a tank sensor reading low, or the boiler's
     // own thermostat cutting the flame below the commanded flow).
     uint32_t chargeStartMs = 0;
+    // Set when a charge is abandoned for overrunning its 3 h cap. Without it the abandon is
+    // cosmetic: the cap drops lastHeatingNeeded, but nextChargeNeeded()'s START branch is
+    // simply tankTemp < tempLimitLow, which is still true - that is the whole premise of an
+    // unfinishable charge - so the next 5 s tick starts it again, and with WATER_PRIORITY on
+    // each restart clears HEATING/HEATING_ON and defers space heating once more. The
+    // "heating and frost are released now" in the abandon message was false every 3 hours.
+    // Found by the 2026-10-30 diff review.
+    bool chargeAbandoned = false;
 } waterState;
 
 // Forward declarations
@@ -346,6 +354,18 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
             // Check if we should turn on water heating
             if (checkIfWaterHeatingNeededEvent() ||
                 (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE)) {
+                // A FORCED charge is the operator's retry. The abandoned-charge hold makes
+                // checkIfWaterHeatingNeededEvent() return false, so only this override can
+                // get here while it is set - and if it did, the hold has served its purpose
+                // and must not outlive the charge the operator just asked for. The 3 h cap
+                // restarts from chargeStartMs below, so a still-broken tank is bounded again.
+                if ((controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE) &&
+                    waterState.chargeAbandoned) {
+                    LOG_WARN(TAG, "Forced charge requested while the abandoned-charge hold was "
+                                  "set - clearing it and retrying under a fresh time cap");
+                    waterState.chargeAbandoned = false;
+                }
+
                 // Check if we can start water heating
                 if (!TemperatureSensorFallback::canContinueOperation()) {
                     LOG_WARN(TAG, "Cannot start water heating - required sensors unavailable");
@@ -403,6 +423,30 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
         }
         
         case WheaterOn: {
+            // SOMEONE ELSE CLEARED OUR MODE BIT - same hole as the heating task had, and the
+            // same fix. The yield check below only triggers when heating has taken over
+            // (!WATER && HEATING), so a non-owner clearing BOTH bits - which is exactly what
+            // onOTAStart() does - fell through every exit and left this task in WheaterOn
+            // with WATER_ON clear: an orphan request refreshed every 5 minutes, cleared 15 s
+            // later, for up to the 3 h charge cap. With WATER_PRIORITY on (the live config)
+            // each of those refreshes also killed a running heating burn, so both modes
+            // fought every 5 minutes while neither could fire.
+            //
+            // Healing on the bit rather than on OTA specifically, so any future non-owner
+            // gets a clean stop. The start path sets WATER_ON before state becomes WheaterOn
+            // (:381), so this cannot fire on a legitimately starting charge. Found 2026-10-30.
+            if (!(systemStateBits & SystemEvents::SystemState::WATER_ON)) {
+                LOG_ERROR(TAG, "WATER_ON was cleared by something other than this task while a "
+                               "charge was active - stopping cleanly and re-evaluating");
+                BurnerRequestManager::clearRequest(BurnerRequestManager::RequestSource::WATER);
+                // Release priority, or space heating stays blocked behind a charge that is
+                // no longer running - the same release the normal completion path does.
+                xEventGroupSetBits(SRP::getControlRequestsEventGroup(),
+                                   SystemEvents::ControlRequest::WATER_PRIORITY_RELEASED);
+                waterState.state = WheaterOff;
+                break;
+            }
+
             // Check if we should turn off water heating
             bool waterStillNeeded = checkIfWaterHeatingNeededEvent();
             bool sensorsAvailable = TemperatureSensorFallback::canContinueOperation();
@@ -436,9 +480,11 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
                                "stop limit. Check the tank sensor, the coil, and the boiler's "
                                "own thermostat; heating and frost are released now.",
                           (unsigned long)((millis() - waterState.chargeStartMs) / 60000UL));
-                // Drop the hysteresis latch too, or nextChargeNeeded() would immediately ask
-                // for the same unfinishable charge again on the next tick.
+                // Drop the hysteresis latch, AND latch the abandon. Dropping the
+                // hysteresis alone was not enough: it only makes nextChargeNeeded() take
+                // its START branch, which is still satisfied by the same cold tank.
                 waterState.lastHeatingNeeded = false;
+                waterState.chargeAbandoned = true;
             }
 
             if ((controlBits & SystemEvents::ControlRequest::WATER_OFF_OVERRIDE) ||
@@ -588,6 +634,9 @@ static bool checkIfWaterHeatingNeededEvent() {
     // persisted waterOverrideOff flag is now the single durable block point.
     if (snappedOverrideOff) {
         waterState.lastHeatingNeeded = false;  // an interrupted charge does not resume after the override
+        // Switching water off is an operator action, so it also clears the abandoned-charge
+        // hold: turning water back on is how you ask for a retry once the cause is fixed.
+        waterState.chargeAbandoned = false;
         return false;  // water heating blocked by override - not needed
     }
 
@@ -651,7 +700,35 @@ static bool checkIfWaterHeatingNeededEvent() {
                     unreachableLogged = true;
                 }
                 heatingNeeded = false;
+            } else if (WaterChargePolicy::chargeHeldAfterAbandon(
+                           waterState.chargeAbandoned, currentTemp, lowLimit)) {
+                // A charge was abandoned for overrunning, and nothing has changed: the tank
+                // is still below the start limit, so starting again would just burn another
+                // 3 hours and lock heating and frost out for them. Hold until the tank is
+                // seen at or above the low limit (whatever heated it - a repaired coil, a
+                // corrected sensor, the boiler's own thermostat, solar), or until the
+                // operator says otherwise by toggling water off/on or forcing a charge.
+                static bool abandonHoldLogged = false;
+                if (!abandonHoldLogged) {
+                    char currBuf[16], lowBuf[16];
+                    formatTemp(currBuf, sizeof(currBuf), currentTemp);
+                    formatTemp(lowBuf, sizeof(lowBuf), lowLimit);
+                    LOG_ERROR(TAG, "Charge abandoned earlier and tank is still %s°C, below the "
+                                   "%s°C start limit - NOT retrying. Space heating and frost "
+                                   "have the burner. Toggle water off/on or force a charge to "
+                                   "retry after fixing the cause.", currBuf, lowBuf);
+                    abandonHoldLogged = true;
+                }
+                heatingNeeded = false;
             } else {
+                if (waterState.chargeAbandoned) {
+                    // currentTemp >= lowLimit: whatever stopped the tank heating has gone.
+                    char currBuf[16];
+                    formatTemp(currBuf, sizeof(currBuf), currentTemp);
+                    LOG_INFO(TAG, "Tank reached %s°C - clearing the abandoned-charge hold",
+                             currBuf);
+                    waterState.chargeAbandoned = false;
+                }
                 // Simple two-threshold control (no symmetric hysteresis calculation)
                 heatingNeeded = WaterChargePolicy::nextChargeNeeded(
                     waterState.lastHeatingNeeded, currentTemp, lowLimit, highLimit);

@@ -531,6 +531,32 @@ static void processHeatingState(EventBits_t pendingControl) {
         }
         
         case HeatingOn: {
+            // SOMEONE ELSE CLEARED OUR MODE BIT, so the burn is over whether we agree or not.
+            //
+            // This is the exact mirror of the HeatingOff heal above, and it was missing. The
+            // bit is owned by this task but it is not only written by this task:
+            // onOTAStart() clears HEATING_ON/WATER_ON (ba30452), and nothing made either mode
+            // task re-read its own bit - that commit's message claimed "both tasks
+            // re-evaluate on their next tick", which no code implemented. After a FAILED OTA
+            // the task therefore sat in HeatingOn forever: no exit condition was true, so it
+            // kept refreshing a request every 5 minutes that the orphan clearer removed 15 s
+            // later, the burner could never start (hasActiveModeDemand needs the mode bit),
+            // the heating pump stayed off because it follows HEATING_ON, frost protection was
+            // inert, and boiler/status/heating/control still showed the last healthy
+            // decision. The house cooled until a DHW charge or a manual toggle.
+            //
+            // Healing the CLASS rather than reverting the OTA clear: any future non-owner
+            // that clears the bit - a failsafe, a command, a path not yet written - now gets
+            // a clean stop and a restart through the normal HeatingOff logic instead of a
+            // silent deadlock. startHeating() sets the bit before state becomes HeatingOn, so
+            // this cannot fire on a legitimately starting burn. Found 2026-10-30.
+            if (!(systemStateBits & SystemEvents::SystemState::HEATING_ON)) {
+                LOG_ERROR(TAG, "HEATING_ON was cleared by something other than this task while "
+                               "heating was active - stopping cleanly and re-evaluating");
+                clearHeatingActive(TAG);
+                break;
+            }
+
             // Check if we should turn off heating
             bool heatingStillNeeded = checkIfSpaceHeatingNeededEvent();
             bool sensorsAvailable = TemperatureSensorFallback::canContinueOperation();
