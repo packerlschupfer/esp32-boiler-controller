@@ -20,6 +20,7 @@
 #include <esp_log.h>
 #include "core/SystemResourceProvider.h"
 #include "MQTTTopics.h"
+#include "modules/diagnostics/BootReason.h"
 #include <TaskManager.h>
 #include "utils/PooledString.h"
 #include "utils/MemoryPool.h"
@@ -372,6 +373,27 @@ void MQTTTask::taskFunction(void* parameter) {
             MQTTTask::publish(MQTT_STATUS_DEVICE_IP, ipStr.c_str(), 0, true, MQTTPriority::PRIORITY_MEDIUM);
             MQTTTask::publish(MQTT_STATUS_DEVICE_HOSTNAME, DEVICE_HOSTNAME, 0, true, MQTTPriority::PRIORITY_MEDIUM);
             MQTTTask::publish(MQTT_STATUS_DEVICE_FIRMWARE, FIRMWARE_VERSION, 0, true, MQTTPriority::PRIORITY_MEDIUM);
+
+            // WHY WE LAST RESTARTED. Retained, so it is still there whenever someone
+            // comes looking - which is the point: the reboot that prompted this was
+            // noticed hours later. Published on every connect rather than once, because
+            // a reconnect must not leave a broker-side gap in the only record of it.
+            {
+                char bootPayload[96];
+                if (BootReason::format(bootPayload, sizeof(bootPayload),
+                                       g_bootReasonCode, g_bootCount) > 0) {
+                    MQTTTask::publish(MQTT_STATUS_DEVICE_BOOT, bootPayload, 0, true,
+                                      MQTTPriority::PRIORITY_MEDIUM);
+                }
+                if (BootReason::isAbnormal(g_bootReasonCode)) {
+                    LOG_ERROR(TAG, "Last restart was ABNORMAL: %s (code %u), boot #%lu",
+                              BootReason::name(g_bootReasonCode),
+                              (unsigned)g_bootReasonCode, (unsigned long)g_bootCount);
+                } else {
+                    LOG_INFO(TAG, "Last restart: %s, boot #%lu",
+                             BootReason::name(g_bootReasonCode), (unsigned long)g_bootCount);
+                }
+            }
 
             // Publish initial system state so Home Assistant knows current state
             vTaskDelay(pdMS_TO_TICKS(100));  // Small delay to ensure online status is sent first

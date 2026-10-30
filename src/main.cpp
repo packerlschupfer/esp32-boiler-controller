@@ -3,6 +3,13 @@
 #include "config/ProjectConfig.h"
 #include "config/SystemConstants.h"
 #include <esp_heap_caps.h>
+#include <esp_system.h>
+#include <Preferences.h>
+#include "modules/diagnostics/BootReason.h"
+
+// Boot diagnostics, captured in setup() before any task starts (see BootReason.h).
+uint8_t  g_bootReasonCode = BootReason::UNKNOWN;
+uint32_t g_bootCount = 0;
 #include "init/SystemInitializer.h"
 #include "utils/ErrorHandler.h"
 // #include "utils/EarlyLogCapture.h"  // Not needed - monitor connects early
@@ -165,6 +172,43 @@ void setup() {
     } else {
         Serial.println("NVS initialized successfully");
     }
+
+    // WHY DID WE RESTART? Captured here, the first point at which NVS is usable, and
+    // published retained on boiler/status/device/boot once MQTT is up (MQTTTask.cpp).
+    // Added 2026-10-30: the device restarted during a review - same firmware, no OTA -
+    // and nothing in the tree had ever called esp_reset_reason(), so the question was
+    // unanswerable. A silent reboot makes every later "it has been stable since"
+    // unverifiable.
+    //
+    // The codes are pinned against the framework enum so a renumbering breaks the build
+    // instead of mislabelling a fault report.
+    static_assert(static_cast<int>(ESP_RST_UNKNOWN)    == BootReason::UNKNOWN,    "ESP_RST_UNKNOWN moved");
+    static_assert(static_cast<int>(ESP_RST_POWERON)    == BootReason::POWERON,    "ESP_RST_POWERON moved");
+    static_assert(static_cast<int>(ESP_RST_SW)         == BootReason::SW,         "ESP_RST_SW moved");
+    static_assert(static_cast<int>(ESP_RST_PANIC)      == BootReason::PANIC,      "ESP_RST_PANIC moved");
+    static_assert(static_cast<int>(ESP_RST_INT_WDT)    == BootReason::INT_WDT,    "ESP_RST_INT_WDT moved");
+    static_assert(static_cast<int>(ESP_RST_TASK_WDT)   == BootReason::TASK_WDT,   "ESP_RST_TASK_WDT moved");
+    static_assert(static_cast<int>(ESP_RST_WDT)        == BootReason::WDT,        "ESP_RST_WDT moved");
+    static_assert(static_cast<int>(ESP_RST_BROWNOUT)   == BootReason::BROWNOUT,   "ESP_RST_BROWNOUT moved");
+    static_assert(static_cast<int>(ESP_RST_CPU_LOCKUP) == BootReason::CPU_LOCKUP, "ESP_RST_CPU_LOCKUP moved");
+
+    g_bootReasonCode = static_cast<uint8_t>(esp_reset_reason());
+    {
+        // Own namespace, so an NVS erase of the parameter store does not lose the
+        // reboot history and vice versa.
+        Preferences bootPrefs;
+        if (bootPrefs.begin("boot", false)) {
+            g_bootCount = bootPrefs.getUInt("count", 0) + 1;
+            bootPrefs.putUInt("count", g_bootCount);
+            bootPrefs.putUChar("last", g_bootReasonCode);
+            bootPrefs.end();
+        }
+    }
+    Serial.printf("BOOT #%lu reason=%s (code %u)%s\n",
+                  (unsigned long)g_bootCount, BootReason::name(g_bootReasonCode),
+                  (unsigned)g_bootReasonCode,
+                  BootReason::isAbnormal(g_bootReasonCode) ? "  <-- ABNORMAL" : "");
+    Serial.flush();
 
     // Note: Safety configuration is loaded by PersistentStorageTask
     // Note: ESP32 global task watchdog cannot be fully disabled (Arduino framework requirement)

@@ -329,6 +329,7 @@ as the sensor offsets and the parameter-save debounce.
 | `boiler/status/water` | Yes | `enabled`, `disabled`, `override_on`, `override_off`, `normal` |
 | `boiler/status/water/priority` | Yes | `enabled`, `disabled` |
 | `boiler/status/device/firmware` | Yes | Firmware version (on connect) |
+| `boiler/status/device/boot` | Yes | Why the controller last restarted (on connect) |
 | `boiler/status/pid/params` | Yes | `{"boilerPID":{"kp":..,"ki":..,"kd":..},"note":".."}` (space heating gains; reply to `pid_autotune` `params`) |
 | `boiler/status/sensor_fallback` | Yes | On fallback mode change: `{"mode":"SHUTDOWN","mode_id":2,"previous_mode":"NORMAL","missing":["boiler_output",...],"timestamp":<ms>}` |
 | `boiler/status/sensor_fallback/recovery` | No | `{"recovered":true}` |

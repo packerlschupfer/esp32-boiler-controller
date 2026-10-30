@@ -12,6 +12,7 @@
 #define MQTT_STATUS_DEVICE_IP           MQTT_STATUS_PREFIX "/device/ip"
 #define MQTT_STATUS_DEVICE_HOSTNAME     MQTT_STATUS_PREFIX "/device/hostname"
 #define MQTT_STATUS_DEVICE_FIRMWARE     MQTT_STATUS_PREFIX "/device/firmware"
+#define MQTT_STATUS_DEVICE_BOOT         MQTT_STATUS_PREFIX "/device/boot"
 #define MQTT_STATUS_HEALTH              MQTT_STATUS_PREFIX "/health"
 #define MQTT_STATUS_SENSORS             MQTT_STATUS_PREFIX "/sensors"
 #define MQTT_STATUS_HOTWATER            MQTT_STATUS_PREFIX "/hotwater"

@@ -531,6 +531,14 @@ void test_burner_lit_running_and_ignition_are_lit();
 void test_burner_lit_purges_are_not_lit();
 void test_burner_lit_stopped_states_are_not_lit();
 void test_burner_lit_covers_every_enumerator();
+void test_boot_reason_names_every_code();
+void test_boot_reason_commanded_restarts_are_not_abnormal();
+void test_boot_reason_faults_are_abnormal();
+void test_boot_reason_unknown_is_abnormal();
+void test_boot_reason_payload_shape();
+void test_boot_reason_payload_worst_case_fits_96();
+void test_boot_reason_overflow_clears_the_buffer();
+void test_boot_reason_rejects_null_and_zero_len();
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
@@ -1082,6 +1090,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_burner_lit_purges_are_not_lit);
     RUN_TEST(test_burner_lit_stopped_states_are_not_lit);
     RUN_TEST(test_burner_lit_covers_every_enumerator);
+    RUN_TEST(test_boot_reason_names_every_code);
+    RUN_TEST(test_boot_reason_commanded_restarts_are_not_abnormal);
+    RUN_TEST(test_boot_reason_faults_are_abnormal);
+    RUN_TEST(test_boot_reason_unknown_is_abnormal);
+    RUN_TEST(test_boot_reason_payload_shape);
+    RUN_TEST(test_boot_reason_payload_worst_case_fits_96);
+    RUN_TEST(test_boot_reason_overflow_clears_the_buffer);
+    RUN_TEST(test_boot_reason_rejects_null_and_zero_len);
 
     return UNITY_END();
 }
