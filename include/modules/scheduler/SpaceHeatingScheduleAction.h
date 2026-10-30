@@ -62,7 +62,6 @@ private:
      *
      * 0 means "nothing saved" - restore nothing, which is the pre-first-window state.
      */
-    Temperature_t targetBeforeWindow_ = 0;
     
     // Helper method to apply temperature based on mode
     void applyHeatingMode(uint8_t mode, uint8_t targetTempC);

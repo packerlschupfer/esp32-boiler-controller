@@ -230,12 +230,16 @@ void handleHeatingCommand(const char* payload) {
         // Check if parsing succeeded (endptr moved past the number)
         if (endptr != payload && (*endptr == '\0' || isspace(*endptr))) {
             if (tempValue >= 15.0f && tempValue <= 30.0f) {
-                // C4: Mutex protection for settings write
-                if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-                    SystemSettings& settings = SRP::getSystemSettings();
-                    settings.targetTemperatureInside = tempFromFloat(tempValue);
-                    SRP::giveSystemSettingsMutex();
-                    LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C", tempValue);
+                // TEMPORARY, like every other boiler/cmd room-target write. This branch
+                // wrote the field and never marked it, so whether it survived a reboot
+                // depended on which writer happened to run last - it persisted if the
+                // flag was clear and did not if some earlier cmd/room_target had set it.
+                // Found by the 2026-10-30 diff review; params/set is still the durable
+                // path, and docs/MQTT_API.md now says so for this command too.
+                if (PersistentStorageTask_SetRoomTarget(tempFromFloat(tempValue),
+                                                        RoomTargetDurability::Temporary)) {
+                    LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C (temporary - "
+                                      "use params/set/heating/targetTemp to persist)", tempValue);
                     char response[32];
                     snprintf(response, sizeof(response), "target:%.1f", tempValue);
                     MQTTTask::publish(MQTT_STATUS_HEATING, response, 0, true, MQTTPriority::PRIORITY_HIGH);
@@ -261,17 +265,17 @@ void handleRoomTargetCommand(const char* payload) {
     }
     if (tempValue >= 15.0f && tempValue <= 30.0f) {
         // C4: Mutex protection for settings write
-        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-            SystemSettings& settings = SRP::getSystemSettings();
-            settings.targetTemperatureInside = tempFromFloat(tempValue);
-            SRP::giveSystemSettingsMutex();
-            // RAM-ONLY BY OWNER DECISION, and now actually RAM-only. Both this path and
-            // params/set/heating/targetTemp write the same settings field, so the save path
-            // could not tell them apart - and the pre-save shadow sync promoted whatever was
-            // live to NVS on ANY unrelated save (an enable switch, autotune, a debounced
-            // params/set of something else). Marking it keeps the last PERSISTED target in the
-            // shadow, so a reboot restores the configured value rather than a stale override.
-            PersistentStorageTask_MarkRoomTargetTemporary();
+        // RAM-ONLY BY OWNER DECISION. Both this path and params/set/heating/targetTemp
+        // write the same settings field, so the save path could not tell them apart - and
+        // the pre-save shadow sync promoted whatever was live to NVS on ANY unrelated save
+        // (an enable switch, autotune, a debounced params/set of something else).
+        //
+        // The mark used to happen HERE, after the mutex was released, which left a window
+        // in which the storage loop could sync the override into the shadow before the
+        // mark arrived - and the shadow then froze holding it. SetRoomTarget does both
+        // under one lock, flag first. Found by the 2026-10-30 diff review.
+        if (PersistentStorageTask_SetRoomTarget(tempFromFloat(tempValue),
+                                                RoomTargetDurability::Temporary)) {
             LOG_INFO(TAG_CMD, "Remote command: Set room target to %.1f°C (temporary - use "
                               "params/set/heating/targetTemp to persist)", tempValue);
             char response[32];

@@ -2,6 +2,7 @@
 #define PERSISTENT_STORAGE_TASK_H
 
 #include <Arduino.h>
+#include "shared/Temperature.h"  // Temperature_t, for the room-target API below
 
 /**
  * @brief Persistent Storage Task
@@ -27,7 +28,14 @@ void PersistentStorageTask(void* pvParameters);
 void PersistentStorageTask_RequestSave();
 
 /**
- * @brief Mark the live room target as a TEMPORARY override that must not be persisted.
+ * @brief Is a room-target write meant to survive a reboot?
+ *
+ * Temporary = the running target changes, NVS does not. Durable = both.
+ */
+enum class RoomTargetDurability : uint8_t { Temporary, Durable };
+
+/**
+ * @brief Write the live room target, recording whether it is a temporary override.
  *
  * The HA climate card writes boiler/cmd/room_target, which by owner decision is a temporary
  * override: it changes the running target and must NOT survive a reboot. The durable path is
@@ -43,12 +51,45 @@ void PersistentStorageTask_RequestSave();
  * params/get reports the RAM-synced shadow. After the next reboot the house ran at a stale
  * override setpoint with the curve and backstop following it. Found by the 2026-10-28 review.
  *
- * Calling this makes the next save keep the last PERSISTED target instead. Cleared
- * automatically when a durable write arrives. Note the sync is still needed for durable
- * writes - removing it outright would reintroduce 57d6456, where a save wrote a stale shadow
- * back and reverted the room target.
+ * A Temporary write makes the next save keep the last PERSISTED target instead. A Durable
+ * write clears that. Note the sync is still needed for durable writes - removing it outright
+ * would reintroduce 57d6456, where a save wrote a stale shadow back and reverted the room
+ * target.
+ *
+ * 2026-10-30: THIS IS NOW THE ONLY WAY TO WRITE THE ROOM TARGET from outside the
+ * storage task. The mark-only function it replaces had to be called as a second step
+ * after the write, and two of the five writers never called it at all (the
+ * boiler/cmd/heating <n> numeric branch and the space-heating window start), while a
+ * third called it AFTER releasing the settings mutex - a window in which the storage
+ * loop's shadow sync could promote the override before the mark landed. Both halves
+ * are gone: one call writes the value and records its durability together.
+ *
+ * ORDERING IS THE WHOLE TRICK. The shadow sync does not take the settings mutex, so
+ * this cannot be made atomic against it. It does not need to be:
+ *   - Temporary: set the flag BEFORE the value, so an interleaving sync sees either
+ *     (flag set, old value) or (flag set, new value) and leaves the shadow alone.
+ *   - Durable:   set the value BEFORE clearing the flag, so a sync sees either
+ *     (flag set, new value) - shadow untouched, corrected next pass - or
+ *     (flag clear, new value) - shadow correct immediately.
+ * The sync runs every loop pass, so both orderings converge. Do not "simplify" this
+ * by setting flag and value in the natural reading order.
+ *
+ * @return false if the settings mutex was busy; the caller must treat that as "the
+ *         target did not change" and say so, not assume success.
  */
-void PersistentStorageTask_MarkRoomTargetTemporary();
+bool PersistentStorageTask_SetRoomTarget(Temperature_t value, RoomTargetDurability durability);
+
+/**
+ * @brief The room target that is currently PERSISTED, i.e. the registered shadow.
+ *
+ * Needed because "go back to the configured target" is a real operation - a schedule
+ * window ending - and the previous implementation answered it by caching the
+ * pre-window value in the action object. That cache was a single slot per schedule
+ * type, so overlapping windows clobbered it, it did not survive a reboot, and
+ * restoring it overwrote any durable params/set the owner made DURING the window.
+ * Reading the shadow has none of those problems and needs no state.
+ */
+Temperature_t PersistentStorageTask_GetDurableRoomTarget();
 
 /**
  * @brief Republish one retained boiler/params/status/<group> mirror.

@@ -116,8 +116,14 @@ static EventGroupHandle_t storageEventGroup = nullptr;
 // Track if parameters have changed
 // True when the LIVE room target came from boiler/cmd/room_target, which is a temporary
 // override by owner decision and must not reach NVS. See
-// PersistentStorageTask_MarkRoomTargetTemporary() in the header for what this cost.
-static bool g_roomTargetIsTemporary = false;
+// PersistentStorageTask_SetRoomTarget() in the header for what this cost.
+static std::atomic<bool> g_roomTargetIsTemporary{false};
+
+// The PERSISTED room target, in tenths. This is the shadow PersistentStorage saves and
+// params/get reports. Moved to file scope 2026-10-30 so a schedule window can ask what
+// the configured target is instead of caching a copy of it. Only PersistentStorageTask
+// writes it; PersistentStorageTask_GetDurableRoomTarget() reads it.
+static int32_t targetTemp_i32 = 0;
 
 static bool parametersChanged = false;
 static uint32_t lastChangeTime = 0;
@@ -308,7 +314,7 @@ void PersistentStorageTask(void* pvParameters) {
                           0.1f, 5.0f, "Water heating rate (°C per minute)");
 
     // Room target temperature - Store as int32_t
-    static int32_t targetTemp_i32 = static_cast<int32_t>(settings.targetTemperatureInside);
+    targetTemp_i32 = static_cast<int32_t>(settings.targetTemperatureInside);
     storage->registerInt("heating/targetTemp", &targetTemp_i32, 100, 300, "Room target (tenths °C)");
     storage->setOnChange("heating/targetTemp", [](const std::string& name, const void*) {
         SRP::getSystemSettings().targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
@@ -801,6 +807,13 @@ void PersistentStorageTask(void* pvParameters) {
     // Same bug pattern as wHeaterConfTempLimitHigh above: setOnChange only fires on MQTT,
     // not on initial NVS load. Without this, room target and hysteresis revert to struct
     // defaults (18.0°C / 0.5°C) on every reboot, ignoring any saved NVS values.
+    // SWEEP NOTE (2026-10-30): this writer and the reload one below deliberately do NOT
+    // go through PersistentStorageTask_SetRoomTarget(). They copy the SHADOW into the live
+    // value - the persisted target becoming the running one - which is by definition a
+    // durable state and already the flag's cleared meaning. Routing them through the
+    // setter would also take the settings mutex while this task may already hold it.
+    // The four writers that DO go through it are the two boiler/cmd handlers and the two
+    // schedule-window paths; all four previously disagreed about marking.
     if (targetTemp_i32 == 0) targetTemp_i32 = 180;  // 18.0°C default (struct default)
     if (hysteresis_i32 == 0) hysteresis_i32 = 5;    // 0.5°C default (struct default)
     settings.targetTemperatureInside = static_cast<Temperature_t>(targetTemp_i32);
@@ -1120,8 +1133,26 @@ void PersistentStorageTask_RepublishGroup(const char* group) {
     (void)ps->publishGroupedCategory(group);
 }
 
-void PersistentStorageTask_MarkRoomTargetTemporary() {
-    g_roomTargetIsTemporary = true;
+bool PersistentStorageTask_SetRoomTarget(Temperature_t value, RoomTargetDurability durability) {
+    if (!SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
+        return false;
+    }
+    if (durability == RoomTargetDurability::Temporary) {
+        // Flag FIRST - see the ordering note in the header. The shadow sync does not take
+        // this mutex, so the only safe orderings are the ones where an interleaving sync
+        // cannot see (flag clear, overridden value).
+        g_roomTargetIsTemporary = true;
+        SRP::getSystemSettings().targetTemperatureInside = value;
+    } else {
+        SRP::getSystemSettings().targetTemperatureInside = value;
+        g_roomTargetIsTemporary = false;
+    }
+    SRP::giveSystemSettingsMutex();
+    return true;
+}
+
+Temperature_t PersistentStorageTask_GetDurableRoomTarget() {
+    return static_cast<Temperature_t>(targetTemp_i32);
 }
 
 void PersistentStorageTask_RequestSave() {

@@ -1,7 +1,7 @@
 // src/modules/scheduler/SpaceHeatingScheduleAction.cpp
 // Space heating schedule action handler implementation
 #include "modules/scheduler/SpaceHeatingScheduleAction.h"
-#include "modules/tasks/PersistentStorageTask.h"  // MarkRoomTargetTemporary
+#include "modules/tasks/PersistentStorageTask.h"  // SetRoomTarget, GetDurableRoomTarget
 #include "TimerSchedule.h"
 #include "core/SystemResourceProvider.h"
 #include "shared/Temperature.h"
@@ -31,21 +31,13 @@ void SpaceHeatingScheduleAction::onScheduleStart(const TimerSchedule& schedule) 
              schedule.actionData.spaceHeating.mode == MODE_ECO ? "ECO" : "FROST",
              schedule.actionData.spaceHeating.targetTempC);
     
-    // Remember the target in force BEFORE the window, so its end can restore it instead of
-    // parking the house at 10 C. Only on the first start of a window - a re-fire inside one
-    // must not capture the window's own target as the thing to restore.
-    if (targetBeforeWindow_ == 0) {
-        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-            targetBeforeWindow_ = SRP::getSystemSettings().targetTemperatureInside;
-            SRP::giveSystemSettingsMutex();
-            char prevBuf[16];
-            formatTemp(prevBuf, sizeof(prevBuf), targetBeforeWindow_);
-            LOG_INFO(TAG, "Saved pre-window room target %s°C for restore at window end", prevBuf);
-        } else {
-            LOG_WARN(TAG, "Could not read the pre-window room target - the window end will "
-                          "leave the target as the schedule set it rather than guessing");
-        }
-    }
+    // NO PRE-WINDOW CAPTURE ANY MORE. This used to stash the live target in a member so
+    // the window end could restore it. That cache was one slot per schedule TYPE, so
+    // back-to-back or overlapping windows clobbered it; it did not survive a reboot
+    // inside a window; and restoring it overwrote any durable params/set the owner made
+    // DURING the window. The window end now reads the persisted target instead - which is
+    // what "back to the configured value" actually means, needs no state, and is correct
+    // across all three of those cases. Found by the 2026-10-30 diff review.
 
     // Apply heating mode
     applyHeatingMode(schedule.actionData.spaceHeating.mode, 
@@ -70,27 +62,28 @@ void SpaceHeatingScheduleAction::onScheduleEnd(const TimerSchedule& schedule) {
     // whether it happened inside a window.
     //
     // Nothing documented says a window end means "let the house go to 10 C" - ECO mode exists
-    // for a configurable setback. If no pre-window target was captured (first ever window, or
-    // the settings mutex was busy at start), leave the target alone rather than guess: the
-    // schedule's own value is a defensible state, 10.0 is not.
-    if (targetBeforeWindow_ != 0) {
-        if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-            SRP::getSystemSettings().targetTemperatureInside = targetBeforeWindow_;
-            SRP::giveSystemSettingsMutex();
+    // for a configurable setback.
+    //
+    // Restore the PERSISTED target: the value params/set last wrote, which is what the
+    // house is configured to run at outside any window. Durable, because live now equals
+    // the stored value, so that is precisely the not-overridden state. Note this
+    // deliberately does NOT restore a temporary cmd/room_target override that was in
+    // force before the window - a temporary override is documented as temporary, and
+    // remembering its durability across a window boundary would put back the per-type
+    // cached state this change removes.
+    const Temperature_t durable = PersistentStorageTask_GetDurableRoomTarget();
+    if (durable > 0) {
+        if (PersistentStorageTask_SetRoomTarget(durable, RoomTargetDurability::Durable)) {
             char prevBuf[16];
-            formatTemp(prevBuf, sizeof(prevBuf), targetBeforeWindow_);
-            LOG_INFO(TAG, "Window ended - room target restored to %s°C", prevBuf);
-            // RAM-only, exactly like the HA climate card: a schedule window is a temporary
-            // override, so neither its target nor this restore should reach NVS.
-            PersistentStorageTask_MarkRoomTargetTemporary();
+            formatTemp(prevBuf, sizeof(prevBuf), durable);
+            LOG_INFO(TAG, "Window ended - room target restored to the configured %s°C", prevBuf);
         } else {
             LOG_ERROR(TAG, "Window ended but the settings mutex was busy - room target left "
                            "at the window value, NOT parked at 10 C");
         }
-        targetBeforeWindow_ = 0;
     } else {
-        LOG_WARN(TAG, "Window ended with no saved pre-window target - leaving the target as "
-                      "the schedule set it");
+        LOG_WARN(TAG, "Window ended before any room target was loaded from NVS - leaving the "
+                      "target as the schedule set it");
     }
 
     // Clear active schedule info
@@ -242,16 +235,19 @@ void SpaceHeatingScheduleAction::applyHeatingMode(uint8_t mode, uint8_t targetTe
              mode == MODE_ECO ? "ECO" : "FROST",
              targetTemp / 10, abs(targetTemp % 10));
 
-    // Update system settings with new target temperature
-    if (SRP::takeSystemSettingsMutex(pdMS_TO_TICKS(100))) {
-        auto& settings = SRP::getSystemSettings();
-        settings.targetTemperatureInside = targetTemp;
-
+    // TEMPORARY. This write had no mark at all, so the storage loop synced the window's
+    // target into the save shadow within a second of the window starting, and the mark
+    // applied at window END then FROZE the shadow holding it - after which any later save
+    // persisted the window target and a reboot ran the house at it indefinitely. The
+    // highest-severity finding of the 2026-10-30 diff review; it needed no save during the
+    // window at all, and fired after every window.
+    //
+    // SetRoomTarget takes and releases the settings mutex itself, so this block must NOT
+    // give it back - it no longer holds it.
+    if (PersistentStorageTask_SetRoomTarget(targetTemp, RoomTargetDurability::Temporary)) {
         // Note: There's no heatingEnabled flag in SystemSettings.
         // The heating system state is controlled via event bits and system state.
         // For frost protection mode, we just set a low target temperature.
-
-        SRP::giveSystemSettingsMutex();
 
         // Notify heating control task that settings have changed
         // The heating control task will pick up the new target temperature
