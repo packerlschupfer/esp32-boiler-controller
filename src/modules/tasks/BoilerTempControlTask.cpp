@@ -464,9 +464,15 @@ void BoilerTempControlTask(void* parameter) {
         // the band. This task is the right place for the correction: it already holds both
         // the controller and the state machine, so neither needs to know about the other.
         // Found by the 2026-10-28 review.
-        if (BurnerStateMachine::getCurrentState() != BurnerSMState::RUNNING_LOW &&
-            BurnerStateMachine::getCurrentState() != BurnerSMState::RUNNING_HIGH &&
-            BurnerStateMachine::getCurrentState() != BurnerSMState::IGNITION) {
+        //
+        // 2026-10-30: this used to list the three states it considered lit and sync on
+        // the COMPLEMENT, which silently classified MODE_SWITCHING as "burner out". That
+        // state is entered ONLY with the flame already burning, so a seamless
+        // heating->water handover reset the band to its ON edge mid-burn, disarmed the
+        // demand, and ba30452's "!heatDemand -> POST_PURGE" branch cut the flame - the
+        // exact short-cycle the dead band exists to prevent. burnerLit() is now the one
+        // definition (BurnerSMState.h); do not re-inline a state list here.
+        if (!burnerLit(BurnerStateMachine::getCurrentState())) {
             controller.syncBurnerOff();
         }
 

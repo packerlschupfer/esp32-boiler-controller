@@ -740,3 +740,62 @@ void test_bsm_handover_with_no_demand_post_purges_instead_of_firing() {
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, sim.env.switchCalls, "relays were actuated");
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, sim.visitsOf(BurnerSMState::RUNNING_LOW), "ran at stage 1");
 }
+
+// ---------------------------------------------------------------------------
+// burnerLit(): the single definition of "could a flame be burning".
+//
+// These exist because the predicate was previously inlined as a three-state list
+// and sync-on-the-complement, which classified MODE_SWITCHING - a state entered
+// ONLY with the flame lit - as "burner out". Two sites had the bug. A test that
+// pins every enumerator is the thing that makes adding a tenth state safe.
+// ---------------------------------------------------------------------------
+
+void test_burner_lit_mode_switching_is_lit() {
+    // The regression. running() enters MODE_SWITCHING only when flameDetected() is
+    // true, so anything treating it as "out" cuts a live flame.
+    TEST_ASSERT_TRUE_MESSAGE(burnerLit(BurnerSMState::MODE_SWITCHING),
+                             "MODE_SWITCHING is entered with the flame lit");
+}
+
+void test_burner_lit_running_and_ignition_are_lit() {
+    TEST_ASSERT_TRUE_MESSAGE(burnerLit(BurnerSMState::IGNITION),
+                             "IGNITION opens the gas valve");
+    TEST_ASSERT_TRUE_MESSAGE(burnerLit(BurnerSMState::RUNNING_LOW), "RUNNING_LOW is lit");
+    TEST_ASSERT_TRUE_MESSAGE(burnerLit(BurnerSMState::RUNNING_HIGH), "RUNNING_HIGH is lit");
+}
+
+void test_burner_lit_purges_are_not_lit() {
+    // The fan runs, the valve does not. Getting these wrong the other way would
+    // suppress the flame-bit resync that 9b3d366 added.
+    TEST_ASSERT_FALSE_MESSAGE(burnerLit(BurnerSMState::PRE_PURGE),
+                              "PRE_PURGE is fan-only, before ignition");
+    TEST_ASSERT_FALSE_MESSAGE(burnerLit(BurnerSMState::POST_PURGE),
+                              "POST_PURGE is fan-only, after shutdown");
+}
+
+void test_burner_lit_stopped_states_are_not_lit() {
+    TEST_ASSERT_FALSE_MESSAGE(burnerLit(BurnerSMState::IDLE), "IDLE is off");
+    TEST_ASSERT_FALSE_MESSAGE(burnerLit(BurnerSMState::LOCKOUT), "LOCKOUT is off");
+    TEST_ASSERT_FALSE_MESSAGE(burnerLit(BurnerSMState::ERROR),
+                              "ERROR follows an emergency shutdown, relays off");
+}
+
+void test_burner_lit_covers_every_enumerator() {
+    // Exhaustiveness: exactly 4 of the 9 states are lit. If someone adds a state and
+    // forgets burnerLit(), the switch has no default so the compiler warns - and this
+    // count changing is the second line of defence.
+    const BurnerSMState all[] = {
+        BurnerSMState::IDLE, BurnerSMState::PRE_PURGE, BurnerSMState::IGNITION,
+        BurnerSMState::RUNNING_LOW, BurnerSMState::RUNNING_HIGH,
+        BurnerSMState::MODE_SWITCHING, BurnerSMState::POST_PURGE,
+        BurnerSMState::LOCKOUT, BurnerSMState::ERROR,
+    };
+    int lit = 0;
+    for (BurnerSMState s : all) {
+        if (burnerLit(s)) lit++;
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(9, (int)(sizeof(all) / sizeof(all[0])),
+                                  "all 9 enumerators must be listed here");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, lit,
+                                  "IGNITION, RUNNING_LOW, RUNNING_HIGH, MODE_SWITCHING");
+}

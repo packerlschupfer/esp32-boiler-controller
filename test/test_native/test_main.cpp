@@ -526,6 +526,11 @@ void test_dissipation_blind_is_bounded_not_forever();
 void test_charge_tank_limit_reachability();
 void test_charge_overrun_is_bounded();
 void test_bsm_handover_with_no_demand_post_purges_instead_of_firing();
+void test_burner_lit_mode_switching_is_lit();
+void test_burner_lit_running_and_ignition_are_lit();
+void test_burner_lit_purges_are_not_lit();
+void test_burner_lit_stopped_states_are_not_lit();
+void test_burner_lit_covers_every_enumerator();
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
@@ -1072,6 +1077,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_charge_tank_limit_reachability);
     RUN_TEST(test_charge_overrun_is_bounded);
     RUN_TEST(test_bsm_handover_with_no_demand_post_purges_instead_of_firing);
+    RUN_TEST(test_burner_lit_mode_switching_is_lit);
+    RUN_TEST(test_burner_lit_running_and_ignition_are_lit);
+    RUN_TEST(test_burner_lit_purges_are_not_lit);
+    RUN_TEST(test_burner_lit_stopped_states_are_not_lit);
+    RUN_TEST(test_burner_lit_covers_every_enumerator);
 
     return UNITY_END();
 }

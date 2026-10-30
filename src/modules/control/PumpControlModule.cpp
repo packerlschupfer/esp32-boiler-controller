@@ -143,6 +143,19 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
 
     // Emergency heat dissipation (starts ON at every emergency stop onset)
     bool dissipating = true;
+
+    // PER-TASK, NOT static. Both HeatingPumpTask and WaterPumpTask run this one body
+    // (see :63-70), so a function-local static is ONE object shared by two tasks and an
+    // edge detected by whichever ticks first is invisible to the other. That is exactly
+    // what happened to the boiler-switch run-on added in 1f7fd33: the first pump to tick
+    // consumed the switched-off edge and the second never started its overrun, leaving
+    // the heat-carrying pump stopped with a stage-2 charge in a cast-iron block. Found by
+    // the 2026-10-30 review; docs/SAFETY_SYSTEM.md called it closed. Initialised true so
+    // a task that starts while the boiler is already off does not see a false edge.
+    bool wasSystemEnabled = true;
+    // Same reason: the latch onset must be stamped once per latch PER PUMP, or the second
+    // pump inherits the first pump's clock for the blind-dissipation cap.
+    uint32_t latchStartMs = 0;
     bool latchedLastCycle = false;
     bool dissipatingAfterRelease = false;
     uint32_t releaseTimeMs = 0;
@@ -187,8 +200,7 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
             dissipatingAfterRelease = false;
         }
         // Onset time for the blind-dissipation cap below. Stamped once per latch, not per
-        // cycle, or the cap would never be reached.
-        static uint32_t latchStartMs = 0;
+        // cycle, or the cap would never be reached. Declared per-task above.
         if (latched && !latchedLastCycle) {
             latchStartMs = millis();
         }
@@ -253,7 +265,7 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
         // Safe for the drained-for-service case, which is a real reason to switch the boiler
         // off: the overrun only starts if this pump's mode WAS active, and a drained system
         // was not circulating or burning.
-        static bool wasSystemEnabled = true;
+        // wasSystemEnabled is declared per-task above - NOT static. See the note there.
         const bool boilerJustSwitchedOff = wasSystemEnabled && !systemEnabled;
         wasSystemEnabled = systemEnabled;
 

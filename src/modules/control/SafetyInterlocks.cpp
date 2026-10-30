@@ -402,7 +402,8 @@ bool SafetyInterlocks::checkCommunicationStatus() {
     //
     // Both are checked rather than just one, because they fail on different evidence:
     // SYNCHRONIZED drops when the relays stop matching what was commanded, COMM_ERROR is also
-    // set when the RYN4 DELAY renewal fails twice - and that one nothing else can see, because
+    // set when the RYN4 DELAY renewal fails twice - restored to twice on 2026-10-30, having been
+// moved to one miss by accident in 6ce62f9 - and that one nothing else can see, because
     // the relays are still following their last command while being ~2.5 s from a hardware
     // auto-OFF with no post-purge.
     EventBits_t relayBits = xEventGroupGetBits(SRP::getRelayStatusEventGroup());
@@ -540,15 +541,30 @@ bool SafetyInterlocks::continuousSafetyMonitor() {
     //
     // Two consecutive GENUINE stale observations now trip it. A read failure is neither: it
     // does not trip and does not reset, exactly like the flagsRefreshed gate in
-    // TemperatureSensorFallback. A real dead MB8ART still trips on the second tick ~100 ms
-    // later, so this costs nothing in detection latency for the case that matters.
+    // TemperatureSensorFallback.
+    //
+    // THE ORIGINAL COMMENT HERE WAS WRONG TWICE and the 2026-10-30 diff review caught it.
+    // (1) This check runs inside performFullSafetyCheck(), which continuousSafetyMonitor()
+    //     calls on a FULL_CHECK_INTERVAL_MS = 5 s cadence - not "~100 ms". So the second
+    //     strike is 5 s after the first, not 100 ms.
+    // (2) 07a191f replaced isSensorStale() with SafetyConfig::sensorStaleMs, swapping this
+    //     check from the 15 s bar onto the 30 s one. SafetyConfig.h:19-27 - written four
+    //     days earlier - says in as many words that the split is deliberate: 15 s for THIS
+    //     emergency stop because it only applies while the burner is firing, 30 s for
+    //     deciding whether to START. It even ends "change one and check whether the other
+    //     should follow". The swap pushed the first trip for a comm-dead MB8ART mid-burn
+    //     from under 25 s to under 40 s, while the commit message claimed detection latency
+    //     was unchanged. It is also the FIRST detector for that failure: the library's
+    //     handleDisconnection() never clears the bound validity pointer.
+    // The 2-strike rule and the mutex-miss rule from 07a191f are kept - they were the
+    // correct half of that change. Only the threshold goes back.
     {
         static uint8_t staleStrikes = 0;
         uint32_t age = 0;
         if (!StateManager::sensorAgeIfReadable(StateManager::SensorChannel::BOILER_OUTPUT, age)) {
             LOG_WARN(TAG, "Sensor age unreadable (mutex busy) - staleness check skipped, "
                           "strikes held at %u", staleStrikes);
-        } else if (age > SafetyConfig::sensorStaleMs) {
+        } else if (age > SystemConstants::Safety::SENSOR_STALE_THRESHOLD_MS) {
             if (++staleStrikes >= 2) {
                 LOG_ERROR(TAG, "Critical safety check failed: Sensor data stale (%lu ms, "
                                "%u consecutive)", age, staleStrikes);

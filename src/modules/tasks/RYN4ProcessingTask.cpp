@@ -152,7 +152,9 @@ static void handleSetTick(RYN4* ryn4) {
     // errors - 12 in 8198 reads measured on the room sensor. Found 2026-10-28.
     //
     // Stamping the TICK time instead of the completion time puts the renewal back on the 5.0 s
-    // tick with a real 5 s margin, and leaves the retry at 7.5 s, 2.5 s before expiry.
+    // tick, and leaves the retry at 7.5 s, 2.5 s before expiry. The "real 5 s margin" this
+    // comment used to claim needed the tolerant compare below as well - without it the exact
+    // >= test still lost the renewal to wake jitter on some cycles (fixed 2026-10-30).
     static uint32_t s_lastRenewalMs = 0;
     static bool     s_renewalRetryPending = false;
     static uint8_t  s_renewalMissCount = 0;
@@ -176,7 +178,23 @@ static void handleSetTick(RYN4* ryn4) {
         // Compact renewal: Send only contiguous ON relay blocks
         // Example: R1,R2,R5 ON → 2 transactions (R1-R2: 4 bytes, R5: 2 bytes)
         uint32_t sinceRenewal = static_cast<uint32_t>(millis() - s_lastRenewalMs);
-        bool due = s_renewalRetryPending || (sinceRenewal >= renewalIntervalMs);
+        // ONE TICK OF TOLERANCE, or the exact compare loses the renewal to jitter.
+        // Both stamps are ms-truncated millis() taken after a priority-1 timer-daemon
+        // wake and a 10 ms mutex, so sinceRenewal is the true 5000 ms grid interval plus
+        // (this tick's latency - the stamping tick's latency). When that difference is
+        // negative across a millisecond boundary the read is 4999, the tick is not due,
+        // and the renewal slides to the next SET tick at 7.5 s - re-opening the 2.5 s
+        // margin the tick-stamp fix in 6ce62f9 was written to remove. Found 2026-10-30.
+        //
+        // Any tolerance strictly below the SET-tick spacing is safe, because the previous
+        // SET tick sits exactly renewalIntervalMs/2 back and must never satisfy the
+        // compare. Expressed as a fraction of renewalIntervalMs rather than borrowing the
+        // coordinator's tick constant, so the bound and the value it must stay under are
+        // in the same terms and both follow DELAY_WATCHDOG_SECONDS automatically:
+        // 5000/10 = 500 ms, i.e. due at >= 4500 ms, well under the 2500 ms spacing and
+        // far more than any plausible wake latency.
+        const uint32_t dueToleranceMs = renewalIntervalMs / 10u;
+        bool due = s_renewalRetryPending || (sinceRenewal + dueToleranceMs >= renewalIntervalMs);
         if (due) {
             LOG_DEBUG(TAG, "SET tick - compact DELAY renewal%s", s_renewalRetryPending ? " (retry)" : "");
             if (sendCompactDelayRenewal(ryn4, desired)) {
@@ -193,18 +211,29 @@ static void handleSetTick(RYN4* ryn4) {
                 // this at all: relay read-back verification cannot detect it, because the
                 // relays are still obeying their last command right up to expiry.
                 s_renewalRetryPending = true;
-                if (++s_renewalMissCount >= 1) {
-                    LOG_ERROR(TAG, "DELAY renewal failed %d time(s) - every ON relay auto-OFFs "
-                                   "in ~%lu ms unless the retry succeeds",
-                              s_renewalMissCount,
-                              (unsigned long)(SystemConstants::Relay::DELAY_WATCHDOG_SECONDS * 1000u
-                                              - renewalIntervalMs));
-                    // This is the case nothing else covers, and the reason COMM_ERROR is now
-                    // read by SafetyInterlocks: two missed renewals means every ON relay is
-                    // about 2.5 s from a hardware auto-OFF with no post-purge and no pump
-                    // overrun. Stopping the burn deliberately beats being dropped by the
-                    // watchdog. Relay read-back verification cannot see this at all - the
-                    // relays are still following their last command, for now.
+                ++s_renewalMissCount;
+
+                // ALARM on the first miss, ESCALATE on the second. 6ce62f9 lowered one
+                // threshold from 2 to 1 to alarm earlier and moved BOTH, because the log
+                // and the COMM_ERROR bits shared an if. SafetyInterlocks reads those bits
+                // raw and answers with emergencyStop(), so a single CRC-corrupted reply -
+                // the exact thing the 7.5 s retry exists to absorb - could stop a burn for
+                // the 5 minute error-recovery hold. Found 2026-10-30; the surrounding
+                // comments had kept saying "twice" throughout.
+                LOG_ERROR(TAG, "DELAY renewal failed %d time(s) - every ON relay auto-OFFs "
+                               "in ~%lu ms unless the retry succeeds",
+                          s_renewalMissCount,
+                          (unsigned long)(SystemConstants::Relay::DELAY_WATCHDOG_SECONDS * 1000u
+                                          - renewalIntervalMs));
+
+                if (s_renewalMissCount >= 2) {
+                    // This is the case nothing else covers, and the reason COMM_ERROR is
+                    // read by SafetyInterlocks: TWO missed renewals means the 7.5 s retry
+                    // has also failed, so every ON relay is about 2.5 s from a hardware
+                    // auto-OFF with no post-purge and no pump overrun. Stopping the burn
+                    // deliberately beats being dropped by the watchdog. Relay read-back
+                    // verification cannot see this at all - the relays are still following
+                    // their last command, for now.
                     EventGroupHandle_t relayStatusEventGroup = SRP::getRelayStatusEventGroup();
                     if (relayStatusEventGroup) {
                         xEventGroupSetBits(relayStatusEventGroup, SystemEvents::RelayStatus::COMM_ERROR);

@@ -196,9 +196,15 @@ void BurnerStateMachine::update() {
         return;
     }
 
-    if (currentState == BurnerSMState::IGNITION ||
-        currentState == BurnerSMState::RUNNING_LOW ||
-        currentState == BurnerSMState::RUNNING_HIGH) {
+    // BEHAVIOUR CHANGE 2026-10-30: this was the same three-state list as the flame-bit
+    // resync and had the same hole - MODE_SWITCHING was excluded, so while the flame
+    // burned through a seamless handover (up to the 30 s switch timeout) the continuous
+    // safety monitor did not run at all. Monitoring a lit burner is the whole point of
+    // this branch, so MODE_SWITCHING is now included via burnerLit(). This can stop a
+    // burn that previously ran unmonitored; that is the intended direction, and it is
+    // paired in this commit with the COMM_ERROR escalation fix below, without which a
+    // single corrupt Modbus reply during a handover could have stopped the burn.
+    if (burnerLit(currentState)) {
 
         // Check safety interlocks during operation
         if (!SafetyInterlocks::continuousSafetyMonitor()) {
