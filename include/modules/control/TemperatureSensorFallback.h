@@ -149,6 +149,11 @@ private:
     // threshold. Reset whenever the boiler output is readable, even if another sensor is not.
     static uint8_t boilerOutputInvalidCount;
 
+    // Was the RS485 bus released on the previous evaluation? Used to detect the
+    // released -> not-released edge and start the first post-window evaluation from
+    // clean debounce counters. See updateSensorStatusLocked().
+    static bool wasBusReleased;
+
     // Hysteresis thresholds (different for entering vs leaving NORMAL mode). Deliberately
     // asymmetric: slow to shut down, immediate to recover.
     //

@@ -93,6 +93,7 @@ uint8_t TemperatureSensorFallback::consecutiveValidCount = 0;
 uint8_t TemperatureSensorFallback::consecutiveInvalidCount = 0;
 uint8_t TemperatureSensorFallback::boilerOutputInvalidCount = 0;
 
+bool TemperatureSensorFallback::wasBusReleased = false;
 void TemperatureSensorFallback::initialize() {
     LOG_INFO(TAG, "Initializing temperature sensor fallback system with hysteresis");
     // Called by SystemInitializer and again by BurnerControlTask: create the mutex once
@@ -125,6 +126,7 @@ void TemperatureSensorFallback::cleanup() {
     consecutiveValidCount = 0;
     consecutiveInvalidCount = 0;
     boilerOutputInvalidCount = 0;
+    wasBusReleased = false;
     if (locked) {
         giveFallbackMutex();
     }
@@ -159,27 +161,6 @@ void TemperatureSensorFallback::setOperationMode(OperationMode mode) {
 }
 
 TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorStatus() {
-    // FREEZE the fallback while the RS485 bus is deliberately released. No reads happen in a
-    // window, so every reading is frozen at its entry value and goes stale at the same rate -
-    // but "stale because we stopped asking" is not a fault, and escalating for it would set
-    // Error::SENSOR_FAILURE (a CRITICAL_ERROR) for handing the bus to another master on
-    // purpose, then need the first good read afterwards to clear it.
-    //
-    // This was in ONE caller - BurnerControlTask's idle refresh - and the 2026-10-26 review
-    // reported the gap three times over, from three dimensions: HeatingControlTask and
-    // WheaterControlTask also call canContinueOperation() and had no suppression, so a heating
-    // ON override arriving mid-window would escalate after all. Suppressing in the evaluation
-    // itself covers all eight call sites, which is the only way to make
-    // BusReleasePolicy.h's claim about this actually true.
-    //
-    // Reporting the LAST mode rather than a fresh verdict is the point: the window is short
-    // (900 s cap), entry required an idle boiler, and the burner cannot be armed while released
-    // anyway (BurnerStateMachine::setHeatDemand consults the same flag). The first evaluation
-    // after the window re-decides honestly.
-    if (ModbusBusRelease::isReleased()) {
-        return currentStatus.currentMode;
-    }
-
     if (!takeFallbackMutex()) {
         // Another task (or the timer task found the mutex taken): report the last mode and
         // change nothing - the holder is evaluating the same readings
@@ -191,6 +172,41 @@ TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorS
 }
 
 TemperatureSensorFallback::FallbackMode TemperatureSensorFallback::updateSensorStatusLocked() {
+    // FREEZE the fallback while the RS485 bus is deliberately released. No reads happen in a
+    // window, so every reading is frozen at its entry value and goes stale at the same rate -
+    // but "stale because we stopped asking" is not a fault, and escalating for it would set
+    // Error::SENSOR_FAILURE (a CRITICAL_ERROR) for handing the bus to another master on
+    // purpose, then need the first good read afterwards to clear it.
+    //
+    // THE CHECK LIVES HERE, in the evaluation itself, as of 2026-11-01. It used to sit in
+    // updateSensorStatus() one level up, and the comment there claimed that covered "all
+    // eight call sites". It did not: setOperationMode() calls this function DIRECTLY, so a
+    // mode change during a window - which is exactly what a heating ON override or a frost
+    // transition does - evaluated unfrozen and could publish a retained SHUTDOWN and
+    // "Sensor fault" for a bus we handed over on purpose. Ninth call site, missed by a
+    // suppression that announced it was complete. Found by the 2026-10-30 diff review.
+    // Do not move it back up: this is the only place every path must pass through.
+    //
+    // Reporting the LAST mode rather than a fresh verdict is the point: the window is short
+    // (900 s cap), entry required an idle boiler, and the burner cannot be armed while released
+    // anyway (BurnerStateMachine::setHeatDemand consults the same flag). The first evaluation
+    // after the window re-decides honestly - and for that to be true it must not inherit a
+    // debounce streak from before a window in which nothing was observed. Two pre-window
+    // invalid strikes plus one failed read on the just-reacquired bus would otherwise reach
+    // INVALID_COUNT_TO_SHUTDOWN and stop the boiler on two samples and a guess.
+    if (ModbusBusRelease::isReleased()) {
+        wasBusReleased = true;
+        return currentStatus.currentMode;
+    }
+    if (wasBusReleased) {
+        wasBusReleased = false;
+        consecutiveValidCount = 0;
+        consecutiveInvalidCount = 0;
+        boilerOutputInvalidCount = 0;
+        LOG_INFO(TAG, "Bus reacquired - fallback debounce counters cleared, re-deciding from "
+                      "the first fresh readings");
+    }
+
     uint32_t now = millis();
     
     // Reset missing sensor flags
