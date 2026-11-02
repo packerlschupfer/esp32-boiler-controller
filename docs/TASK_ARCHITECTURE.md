@@ -296,7 +296,11 @@ Task creation: `src/init/TaskInitializer.cpp`, `src/init/ModbusDeviceInitializer
 **Reading Interval**: 2.5s (critical boiler temperatures)
 
 **Safety**:
-- Staleness detection (15s threshold)
+- Staleness detection. TWO deliberate thresholds, do not conflate them:
+  `SystemConstants::Safety::SENSOR_STALE_THRESHOLD_MS` = 15 s for the burn-time emergency
+  stop (tight, it only applies while firing), and `SafetyConfig::sensorStaleMs` = 30 s for
+  whether to START and for the sensor fallback. A burn is held to a stricter freshness bar
+  than the decision to begin one. See the note at `SafetyConfig.h:19-27`.
 - Modbus error detection (0xFFFF, 0x0000, 0x7530)
 - Invalid temperature range filtering
 

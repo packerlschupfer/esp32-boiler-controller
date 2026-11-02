@@ -164,9 +164,18 @@ void publishSystemStatus() {
     // that on the health publish path to report on the memory budget would be self-defeating.
     doc["health"]["stack_min"] = MonitoringTask_getMinTaskStackFree();
     doc["health"]["stack_min_task"] = MonitoringTask_getMinTaskStackName();
-    // How many scheduled scans in a row could not run. Omitted when 0 (the normal case), so
-    // this costs nothing in the payload budget above until it actually matters - and when it
-    // is present, stack_min is that many 60 s periods stale rather than current.
+    // How many scheduled scans in a row could not run. Omitted when 0 (the normal case); when
+    // it is present, stack_min is that many 60 s periods stale rather than current.
+    //
+    // IT DOES NOT COST NOTHING, which is what this comment used to claim. MEASURED
+    // 2026-11-02: the live payload is 230 B against the hard 256 B drop below, so there are
+    // 26 B of margin, and this field is 18-22 B of it ("stack_min_age" plus a 1-5 digit
+    // value). It fits today only because the minimum task is NTPTask, 7 characters. A
+    // 12-character task name becoming the minimum spends 5 more, and then one skipped scan
+    // is enough to cross 256 and silently drop the WHOLE health topic - the same cliff the
+    // commit that added this field had just cleared by removing `timestamp`. Flagged by the
+    // 2026-10-30 review. If this ever needs headroom, drop heap_def: its own comment above
+    // calls it temporary and it currently duplicates heap_dram exactly.
     if (const uint16_t stale = MonitoringTask_getStackScanFailures()) {
         doc["health"]["stack_min_age"] = stale;
     }

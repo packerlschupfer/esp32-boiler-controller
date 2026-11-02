@@ -122,12 +122,14 @@ struct SystemSettings {
     // (and hardware-deactivated), so anyone wiring an outside calibration by following
     // them would have sent it to a dead channel (2026-10-19).
     //
-    // CAUTION: of the seven below, only roomTempOffset and pressureOffset are applied
-    // to anything. The MB8ART library writes temperatures straight into
-    // SharedSensorReadings through the pointers bound in SensorBindings.cpp, so this
-    // layer has no interception point; see MB8ART::applyTemperatureCorrection(), a
-    // stub that is never called. Per-channel correction is being added to the library
-    // - wire these through its setter then, and keep CH4 out of it (CURRENT mode).
+    // HISTORY, because the note that used to be here is no longer true: for most of the
+    // project's life only roomTempOffset and pressureOffset were applied to anything, and
+    // the six MB8ART offsets were accepted, persisted, published and read by nothing. The
+    // library had no interception point. It does now - MB8ART::setChannelOffsets()
+    // (MB8ARTConfig.cpp) stores them in an atomic array and the library applies them per
+    // reading - and pushSensorOffsetsToMB8ART() in PersistentStorageTask feeds it on every
+    // offset change and after each load. So all six MB8ART offsets below are live. CH4 is
+    // deliberately excluded (CURRENT mode, pressure, see pressureOffset).
     Temperature_t boilerOutputOffset = 0;   // CH0: Boiler output temperature
     Temperature_t boilerReturnOffset = 0;   // CH1: Boiler return temperature
     Temperature_t waterTankOffset = 0;      // CH2: Hot water tank temperature
@@ -137,7 +139,22 @@ struct SystemSettings {
     // CH4 is PRESSURE (4-20 mA, not a temperature); its offset is pressureOffset below.
     // CH5 WATER_TANK_TOP has no offset parameter.
     // ANDRTF3
-    Temperature_t roomTempOffset = -17;     // Room temperature offset (default -1.7°C)
+    // 0 ON PURPOSE SINCE 2026-11-02, AND 0 DOES NOT MEAN "UNCALIBRATED".
+    //
+    // The room correction now lives in the ANDRTF3 itself: holding register 522, signed
+    // int16 in 0.01 C, written to -170 (-1.70 K) and persisted to the sensor's EEPROM via
+    // holding 530 = 0x5AFE. The sensor adds it to every good reading before its median
+    // filter, so registers 50 and 57 arrive already corrected and this firmware must add
+    // NOTHING on top. ANDRTF3Task.cpp still applies this field per read, so a nonzero value
+    // here would stack with the sensor's and read the room low by that much.
+    //
+    // THE DEFAULT HAD TO CHANGE TOO, not just the live value. It was -17 from the first
+    // commit (2025-12-20) to 2026-11-02, and this struct default is what an NVS erase
+    // restores (boiler/cmd/system nvs_erase). Leaving it at -17 would have meant that
+    // erasing NVS silently double-corrected: -1.70 K in the sensor plus -1.70 K here, the
+    // room reading 3.4 K low, and the controller overheating the house by 1.7 K with
+    // nothing visibly wrong. Whoever recalibrates changes 522, not this.
+    Temperature_t roomTempOffset = 0;       // Room temp offset - see the note above before changing
     // Pressure (in hundredths of BAR, e.g., -5 = -0.05 BAR)
     int16_t pressureOffset = 0;             // Pressure sensor offset
 

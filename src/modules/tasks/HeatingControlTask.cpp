@@ -712,12 +712,19 @@ static void publishControlDiagnostics() {
     // A burn that only frost authorised reports blk:"frost" rather than blk:"none". It used to
     // publish dem:true with blk:"none", which reads as ordinary demand and left an operator
     // with nothing to explain a burn running with the heating switch off (2026-10-26 review).
-    // Same "nothing but frost wanted this" discriminator as the floor decision and the
-    // operation mode, so all three agree about what kind of burn it is.
-    const bool frostOnlyBurn =
-        st.demand && frostDemand() &&
-        !((systemBits & SystemEvents::SystemState::HEATING_ENABLED) &&
-          checkIfSpaceHeatingNeededEvent());
+    // READS the published classification rather than recomputing it. The comment here used
+    // to claim this used the "same discriminator ... so all three agree", while in fact it
+    // open-coded a FOURTH copy that omitted heatingOverrideOff - so with the heating OFF
+    // override active during a frost burn it disagreed with the other three and reported
+    // blk:"none" instead of blk:"frost", which is exactly the operator confusion the frost
+    // block was added to remove. Found by the 2026-10-30 review, one commit after
+    // HeatingBurnKind was introduced to end this very divergence.
+    //
+    // isFrostOnly() is the answer the turn-on and refresh paths published via
+    // HeatingBurnKind::publish(), and the same one BurnerControlTask consumes. clearHeatingActive()
+    // clears it when a burn ends; the st.demand guard is kept so a missed clear cannot
+    // report a frost burn while nothing is running.
+    const bool frostOnlyBurn = st.demand && HeatingBurnKind::isFrostOnly();
     st.block = frostOnlyBurn ? HeatingControlDiagnostics::Block::FROST
                              : (st.demand ? HeatingControlDiagnostics::Block::OK : g_blockReason);
 

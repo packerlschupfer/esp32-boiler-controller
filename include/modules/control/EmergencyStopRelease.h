@@ -116,7 +116,8 @@ namespace EmergencyStopRelease {
      * that can last forever, because nothing periodic clears a latch.
      *
      * What it cost: if the MB8ART dies permanently while the burner is firing,
-     * continuousSafetyMonitor latches a SENSOR_STALE stop at 15 s and both pumps are forced on
+     * continuousSafetyMonitor latches a SENSOR_STALE stop 20-25 s later (two strikes against
+     * the 15 s bar on a 5 s cadence) and both pumps are forced on
      * and re-asserted every cycle. emergency_reset cannot release it either - the idle fallback
      * refresh drives the sensor fallback to SHUTDOWN and sets Error::SENSOR_FAILURE, so the
      * release refuses with system_errors until reads resume. So the only exits were the module

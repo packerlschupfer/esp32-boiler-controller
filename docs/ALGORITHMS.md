@@ -278,7 +278,8 @@ BOILER_ENABLED && mode bit just cleared                | ON for pumpCooldownMs (
 BOILER_ENABLED cleared                                  | OFF after the pump cooldown (2026-10-29: was OFF with NO overrun)
 Heating pump only: ReturnPreheater PREHEATING          | ReturnPreheater::shouldPumpBeOn()
 EMERGENCY_STOP set                                      | ON (heat dissipation) until boiler output < 60.0°C,
-                                                        | ON again from 65.0°C, always ON without a usable reading
+                                                        | ON again from 65.0°C; with NO usable reading, ON for at
+                                                        | most MAX_BLIND_DISSIPATION_MS (15 min), not forever
 EMERGENCY_STOP released while still dissipating         | ON until boiler output < 60.0°C (no usable reading:
                                                         | at most pumpCooldownMs)
 ```

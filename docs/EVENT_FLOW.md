@@ -941,9 +941,14 @@ MB8ART Communication Timeout
 └─ BurnerControl responds
    ├─ If burner in IGNITION/RUNNING:
    │  └─ Continue with last known temp (short term)
-   │  └─ Boiler output older than SENSOR_STALE_THRESHOLD_MS (15s):
+   │  └─ Boiler output older than SENSOR_STALE_THRESHOLD_MS (15s), seen TWICE
+   │     in a row on the 5 s performFullSafetyCheck cadence - so the first trip
+   │     lands 20-25 s after the last good read, not at 15 s. A mutex miss is
+   │     neither a strike nor a reset. Then
    │     SafetyInterlocks::triggerEmergencyShutdown() (latched EMERGENCY_STOP,
-   │     released on sensor recovery)
+   │     released on sensor recovery).
+   │     (07a191f briefly moved this onto the 30 s SafetyConfig::sensorStaleMs
+   │     bar, pushing the trip past 35 s; restored 2026-10-30.)
    └─ If burner IDLE:
       └─ Block start until sensor restored
 ```

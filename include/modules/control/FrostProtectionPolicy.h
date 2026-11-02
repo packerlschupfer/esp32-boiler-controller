@@ -32,10 +32,15 @@
  *    cannot fire at all. The original Vaillant controller is not in the loop, and the STB and
  *    tandem thermostat can only ever STOP the burner, never start it. Only a hardware frost
  *    thermostat wired around the relay would close that gap.
- *  - **A dead room sensor.** In SPACE_HEATING, TemperatureSensorFallback::hasRequiredSensors()
- *    requires roomTempValid, so a room-sensor failure stops the burner however cold the water
- *    is. This guard deliberately does not bypass the sensor fallback: firing autonomously on
- *    an unvalidated sensor set is a worse failure than the one it would prevent.
+ *  - **A dead room sensor - NO LONGER A GAP for frost, as of 2026-10-26.** This used to read
+ *    "a room-sensor failure stops the burner however cold the water is", because
+ *    hasRequiredSensors() demanded roomTempValid in SPACE_HEATING. A frost burn now runs in
+ *    OperationMode::FROST_PROTECTION, which requires the BOILER OUTPUT reading only - the
+ *    frost burn heats to the flow floor, so the room is not an input to it. The old text was
+ *    describing the limitation that 055234a removed; the 2026-10-30 review caught it still
+ *    standing here. The guard still does not bypass the sensor fallback: a dead boiler-output
+ *    sensor stops a frost burn, because firing on an unvalidated sensor set is a worse
+ *    failure than the one it would prevent.
  *  - **STALE readings, as of 2026-10-25.** A sensor that has stopped answering is treated
  *    exactly like an invalid one: it never triggers a burn. That is the user's call and it
  *    matches the asymmetry below - an unreadable sensor is not evidence of frost. The cost is

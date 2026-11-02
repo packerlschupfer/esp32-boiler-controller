@@ -13,7 +13,7 @@ skinparam activity {
     DiamondFontColor #ffffff
 }
 
-title Frost Protection - Two Independent Latches\nFlow or room protects the house; tank charges the cylinder
+title Frost Protection - ONE Latch\nFlow, room OR tank can set it; it drives space heating
 
 start
 
@@ -72,9 +72,18 @@ floating note right
   Latching, with a static_assert that release is
   above trigger.
 
-  The two latches are INDEPENDENT:
-    heatDemand()  watches flow OR room -> space heating
-    waterDemand() watches tank         -> DHW charge
+  ONE LATCH (corrected 2026-10-30). The API is
+  FrostProtection::evaluate() + demand(), and demand()
+  is set by the boiler water, the room OR the tank. It
+  drives SPACE HEATING.
+
+  This block used to describe two independent latches,
+  heatDemand() and waterDemand(), with the tank driving
+  a DHW charge. A second tank latch did exist briefly
+  and was removed on 2026-10-26 - see the note in
+  FrostProtection.h. waterDemand() does not exist; a
+  cold tank now contributes to the single latch instead
+  of charging the cylinder on its own.
 
   NEITHER overrides boiler_enabled. A drained-for-service
   system is a likely reason to switch the boiler off, and

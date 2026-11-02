@@ -105,8 +105,22 @@ Temperature_t PersistentStorageTask_GetDurableRoomTarget();
  * group, so an HA priority change made via boiler/cmd was silently reverted the next time
  * anyone saved anything on that tab. Found by the 2026-10-28 review.
  *
- * Call after a cmd write that changes a mirrored parameter. Safe from any task: the publish
- * goes through the normal MQTT queue.
+ * Call after a cmd write that changes a mirrored parameter.
+ *
+ * NOT ACTUALLY SAFE FROM ANY TASK - this said it was, and the 2026-10-30 review disproved it.
+ * The queue hop IS safe (MQTTTask::publish copies the payload and sends with timeout 0), but
+ * the group payload is serialised into a FUNCTION-LOCAL STATIC buffer inside
+ * PersistentStorage::publishGroupedCategory() - confirmed in the image as
+ * `publishGroupedCategory(...)::buffer` in .bss. The only callers today are in
+ * MQTTCommandHandlers (esp-mqtt task) while PersistentStorageTask calls the same function
+ * from its own publish loop, so two tasks can be inside it at once and interleave into one
+ * 256 B buffer. The result would be a corrupted or spliced payload on a RETAINED config
+ * topic, which is worse than a dropped one because it persists.
+ *
+ * OPEN, not fixed here: the buffer is in the ESP32-PersistentStorage library, so the real fix
+ * is a caller-supplied buffer or a lock in there. Until then, treat this as "call it from the
+ * MQTT command path only, and accept the race with the storage task's own publishes". Do not
+ * add callers from a third task.
  */
 void PersistentStorageTask_RepublishGroup(const char* group);
 

@@ -504,8 +504,10 @@ overrun running && elapsed < pumpCooldownMs              -> ON  (SystemSettings,
 BOILER_ENABLED cleared                                    -> OFF after the pump cooldown
 heating pump only: ReturnPreheater PREHEATING            -> ReturnPreheater::shouldPumpBeOn()
 EMERGENCY_STOP set                                        -> ON  (heat dissipation, overrides all) until boiler
-                                                             output < 60.0°C, ON again from 65.0°C; always ON
-                                                             without a valid, fresh reading
+                                                             output < 60.0°C, ON again from 65.0°C; with NO usable
+                                                             reading, ON for at most 15 min
+                                                             (EmergencyStopRelease::MAX_BLIND_DISSIPATION_MS) -
+                                                             it terminates, it is not unbounded
 EMERGENCY_STOP released while still dissipating           -> ON  until boiler output < 60.0°C; without a usable
                                                              reading at most pumpCooldownMs
 ```

@@ -356,7 +356,11 @@ three state-machine consumers inherit.
   a dead MB8ART therefore gets nothing from here either. That is the accepted trade: the firmware
   never fires on data it cannot vouch for.
 
-**Both latches survive the stop conditions, as of 2026-10-26.** They did not when they were
+**The frost latch survives the stop conditions, as of 2026-10-26.** There is ONE latch, not
+two: a second one briefly existed for a tank-driven DHW charge and was removed in the same
+change (see `FrostProtection.h` - "that second latch is gone"). An earlier version of this
+paragraph said "both latches", which the 2026-10-30 review flagged as describing a structure
+the code no longer has. It did not survive the stop conditions when it was
 first added: the override was taught to the *start* paths only. The burner state machine fed
 `stopForExplicitDisable()` the RAW switch bits, so a frost heat burn was stopped on its first
 `running()` tick with `EXPLICIT_DISABLE` and relit ~20 s later by the heating task - repeated

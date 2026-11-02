@@ -57,8 +57,19 @@ void WaterHeatingScheduleAction::onScheduleStart(const TimerSchedule& schedule) 
     // only ever disagree with them.
     //
     // So the action now states intent - "the schedule wants hot water now" - and
-    // WheaterControlTask decides when that is safe. No deferral, nothing to lose, and the
-    // "marked active but never acted" finding dissolves rather than needing a bool return.
+    // WheaterControlTask decides when that is safe, which dissolves the "marked active but
+    // never acted" finding rather than needing a bool return.
+    //
+    // "NO DEFERRAL, NOTHING TO LOSE" WAS WRONG, and this comment claimed it. The task does
+    // not defer the intent, it DROPS it: the main loop clears WATER_ON_OVERRIDE before
+    // processing, and WheaterOff can then return without starting - sensors unavailable, or
+    // heating holding the burner with priority off - at which point the bit is gone and the
+    // schedule's window never fires. One-shot, not a level. Found by the 2026-10-30 review.
+    //
+    // OPEN, not fixed here. The proper fix is for the scheduler to expose a LEVEL per type
+    // ("a forced charge is wanted now") that the mode tasks read every tick, like the
+    // thermostat path, instead of a bit one reader consumes. Until then a scheduled charge
+    // that collides with either of those two conditions is silently skipped.
     (void)waterPriority;
 
     // KNOWN LIMITATION, stated rather than hidden. A water schedule carries its own

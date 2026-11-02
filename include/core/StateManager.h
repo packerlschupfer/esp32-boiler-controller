@@ -145,7 +145,11 @@ public:
      * is indistinguishable from "this sensor has never updated" - and isSensorStale() reports
      * both as stale. That is fine for reporting and wrong for a safety trip:
      * continuousSafetyMonitor() turned a single 50 ms mutex miss into an immediate, undebounced
-     * emergency stop with SENSOR_STALE on any 100 ms burner tick during IGNITION or RUNNING.
+     * emergency stop with SENSOR_STALE while the burner was lit. (This used to say "on any
+     * 100 ms burner tick"; the 2026-10-30 review corrected that - 100 ms is only the
+     * xEventGroupWaitBits timeout in BurnerControlTask. The stale check runs inside
+     * performFullSafetyCheck on a 5 s FULL_CHECK_INTERVAL_MS cadence, and update() is driven
+     * by the 1 s state-timeout timer plus each MB8ART read.)
      *
      * The holder is real, not theoretical: MQTTPublisher holds this mutex across nested
      * 100 ms-retry and 50 ms waits every 10 s, and a hold over 100 ms was measured on

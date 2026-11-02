@@ -453,7 +453,7 @@ Scheduler replies were published empty until 2026-09-15 (the formatter returned 
 
 **Response**: `{"status":"ok","id":3,"enabled":false}`
 
-A disabled schedule does not start. Disabling a running schedule ends it at once like `remove` (`schedule_end` event, its water request is cleared or space heating is set to frost protection). An enabled schedule inside its time window starts on the next check (immediately). The flag is saved to FRAM and survives a reboot; `list` shows it as `enabled`. Sending the current state again replies `ok` without saving.
+A disabled schedule does not start. Disabling a running schedule ends it at once like `remove` (`schedule_end` event, its water request is cleared, or a space-heating window restores the persisted room target). Corrected 2026-10-30: this used to say space heating "is set to frost protection", which was true when a window end wrote 10.0 C into the live target and left it there - the house then withheld heat until it fell to ~11.5 C. A window end now restores the value `params/set/heating/targetTemp` last wrote. An enabled schedule inside its time window starts on the next check (immediately). The flag is saved to FRAM and survives a reboot; `list` shows it as `enabled`. Sending the current state again replies `ok` without saving.
 
 **Error Responses**: `{"status":"error","msg":"parse_error"}` (invalid JSON or payload > 64 bytes), `{"status":"error","msg":"not_found"}` (unknown id), `{"status":"error","msg":"<validation error>","id":0}` (`missing_id`, `invalid_id_type`, `id_out_of_range`, `missing_enabled`, `invalid_enabled_type` - `enabled` must be JSON `true`/`false`), `{"success":false,"error":"mutex_timeout"}`
 
@@ -1643,12 +1643,24 @@ Worth knowing when reading recorder history: every `"Sensor fault"` entry on
 `sensor.heating_status` before 2026-10-29 is a REBOOT, not a sensor problem - the firmware had
 no "not evaluated yet" reason and borrowed `SENSOR_INVALID` for the first ~4 s of every boot.
 
-## The room target: two paths, and only one of them persists
+## The room target: FOUR writers, one setter, and only one of them persists
+
+Corrected 2026-10-30. This section said "two paths" and listed two; there were five writers of
+`settings.targetTemperatureInside`, two of which marked their write as temporary and three of
+which did not - so whether a change survived a reboot could depend on which writer had run
+last. They now all go through `PersistentStorageTask_SetRoomTarget(value, Temporary|Durable)`,
+which records the durability in the same locked section as the write.
 
 | path | effect | survives a reboot |
 |---|---|---|
 | `boiler/cmd/room_target <n>` (the HA climate card) | changes the running target | **No** - temporary by owner decision |
-| `boiler/params/set/heating/targetTemp <tenths>` | changes and persists it | Yes |
+| `boiler/cmd/heating <n>` | changes the running target | **No** - same semantics; it was unmarked until 2026-10-30, so before then this depended on history |
+| a space-heating schedule window starting | changes the running target for the window | **No** - temporary; the window end restores the persisted value |
+| `boiler/params/set/heating/targetTemp <tenths>` | changes and persists it | Yes - this is the only durable path |
+
+`boiler/status/heating/target` publishes the PERSISTED value, so during a temporary override it
+can differ from what the house is actually running at (`i`/`tgt` on
+`boiler/status/heating/control` show the live pair).
 
 **Until 2026-10-29 the first path persisted by accident.** Both write the same field
 (`settings.targetTemperatureInside`), and `syncShadowsFromSettings()` runs immediately before
