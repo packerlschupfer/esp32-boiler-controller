@@ -186,7 +186,13 @@ void PersistentStorageTask(void* pvParameters) {
     }
     
     // Initialize PersistentStorage
-    // Use "boiler/params" prefix to match other MQTT topics (boiler/cmd, boiler/status, etc.)
+    // Prefix from MQTT_PARAMS_PREFIX, not a literal. The three "boiler/params" literals
+    // that used to be here (the storage root, the subscribe, and the set-path builder)
+    // ignored MQTT_BASE_PREFIX, so a bench build with its own prefix still owned the
+    // production parameter tree - it would have subscribed to boiler/params/# and
+    // published its parameter mirrors there. Found 2026-11-02 when the prefix became
+    // overridable; the binary still carried plain boiler/... strings afterwards, which is
+    // what gave it away.
     //
     // Round 15 Issue #14: MEMORY MANAGEMENT NOTE
     // This 'storage' pointer is intentionally never deleted because:
@@ -196,7 +202,7 @@ void PersistentStorageTask(void* pvParameters) {
     //   4. If the task were to be deleted, FreeRTOS would reclaim the stack
     //      but not heap allocations - this is a known FreeRTOS pattern
     // The ~200 bytes for PersistentStorage is allocated once at startup.
-    PersistentStorage* storage = new PersistentStorage("esplan", "boiler/params");
+    PersistentStorage* storage = new PersistentStorage("esplan", MQTT_PARAMS_PREFIX);
 
     // Track whether NVS initialized successfully
     bool nvsAvailable = storage->begin();
@@ -926,7 +932,7 @@ void PersistentStorageTask(void* pvParameters) {
         // Subscribe to parameter topics (boiler/params/...)
         // Use # wildcard to match all commands: set/*, get/*, save, list, etc.
         // NOTE: Single wildcard subscription handles everything - no specific subs needed
-        auto result1 = mqttMgr->subscribe("boiler/params/#",
+        auto result1 = mqttMgr->subscribe(MQTT_PARAMS_PREFIX "/#",
             [storage](const String& topic, const String& payload) {
                 LOG_INFO(TAG, "MQTT cmd: %s", topic.c_str());
                 storage->handleMqttCommand(topic.c_str(), payload.c_str());
@@ -1174,7 +1180,7 @@ bool PersistentStorageTask_SetParameter(const char* name, const char* payload) {
         return false;
     }
     // Same queued path as an MQTT boiler/params/set/<name> message
-    return storage->handleMqttCommand(std::string("boiler/params/set/") + name, payload);
+    return storage->handleMqttCommand(std::string(MQTT_PARAMS_PREFIX "/set/") + name, payload);
 }
 
 bool PersistentStorageTask_ParametersLoaded() {

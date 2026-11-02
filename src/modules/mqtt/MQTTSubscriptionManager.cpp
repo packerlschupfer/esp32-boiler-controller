@@ -3,15 +3,20 @@
 #include "modules/mqtt/MQTTCommandHandlers.h"
 #include "modules/tasks/MQTTTask.h"
 #include "core/SystemResourceProvider.h"
+#include "MQTTTopics.h"
 #include <esp_log.h>
 
 static const char* TAG = "MQTTSubMgr";
 
-// MQTT topic prefix constants (avoid including MQTTTopics.h due to macro conflicts)
-#define MQTT_CMD_PREFIX            "boiler/cmd"
-#define MQTT_CMD_SCHEDULER_PREFIX  "boiler/cmd/scheduler"
-#define MQTT_PARAMS_PREFIX         "boiler/params"
-#define MQTT_CONFIG_PREFIX         "boiler/config"
+// Prefixes come from MQTTTopics.h. They used to be redefined here with hardcoded
+// "boiler/..." literals, with a comment blaming "macro conflicts" - but the conflict WAS
+// this duplication: MQTTTopics.h defines the same four names from MQTT_BASE_PREFIX.
+//
+// It mattered as soon as the prefix became overridable for the testbench (2026-11-02).
+// These are the SUBSCRIPTION prefixes, so a bench build published to boilerbench/... while
+// still subscribing to boiler/cmd/# and boiler/params/# - the bench would not have heard
+// its own commands, and had it ever reached the production broker it would have executed
+// the house's. Exactly backwards from the leak the prefix override was added to prevent.
 
 namespace MQTTSubscriptionManager {
 

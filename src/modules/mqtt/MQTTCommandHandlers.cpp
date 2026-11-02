@@ -1161,7 +1161,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
                 oldValue ? "ENABLED" : "DISABLED",
                 newVal ? "ENABLED" : "DISABLED");
         // Publish warning that reboot is needed
-        MQTTTask::publish("boiler/status/config/warning",
+        MQTTTask::publish(MQTT_STATUS_CONFIG_WARNING,
             "{\"message\":\"Boiler PID mode change requires reboot\",\"action\":\"reboot_required\"}",
             0, true, MQTTPriority::PRIORITY_HIGH);
     }
@@ -1176,7 +1176,7 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
         success = true;
         syslogSettingChanged = true;
         LOG_WARN(TAG_CMD, "Syslog: %s (REQUIRES REBOOT)", newVal ? "ENABLED" : "DISABLED");
-        MQTTTask::publish("boiler/status/config/warning",
+        MQTTTask::publish(MQTT_STATUS_CONFIG_WARNING,
             "{\"message\":\"Syslog enable change requires reboot\"}",
             0, true, MQTTPriority::PRIORITY_HIGH);
     }

@@ -94,11 +94,25 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // needing a reset. The in-range value checks (PRESSURE_LOW / PRESSURE_HIGH) were always
 // live and are unaffected.
 //
-// Re-enable ONLY for bench work with no sensor fitted, and note the #warning below is
-// active again so the build will tell you.
+// Re-enable ONLY for bench work with no sensor fitted.
 // #define ALLOW_NO_PRESSURE_SENSOR
+//
+// DOUBLE OPT-IN, 2026-11-02. This used to be a bare #warning, which -Werror=cpp (added
+// later, for src/ only) promotes to a build failure - so the bench use this comment
+// explicitly sanctions could not actually be built. The alternative, -Wno-error=cpp on
+// the bench env, would have silenced EVERY #warning there, and this project uses
+// #warning/#error as real gates (see the LOG_MODE_RELEASE #error and the stack
+// static_asserts). So instead: the flag now needs a second, differently-named
+// acknowledgement. Production cannot build with it even by accident, because nothing in
+// a prod env defines BENCH_NO_PRESSURE_ACK and the #error is unconditional without it.
+// A bench env states both and gets a #pragma message, which is informational and is NOT
+// promoted by -Werror=cpp.
 #ifdef ALLOW_NO_PRESSURE_SENSOR
-    #warning "ALLOW_NO_PRESSURE_SENSOR is enabled - burner can operate without pressure sensor. Remove for production!"
+    #ifndef BENCH_NO_PRESSURE_ACK
+        #error "ALLOW_NO_PRESSURE_SENSOR lets the burner run with NO pressure sensor. If that is really what you want, add -DBENCH_NO_PRESSURE_ACK as well - deliberately a second, separate flag. NEVER in a prod env."
+    #else
+        #pragma message("BENCH BUILD: pressure-sensor gate relaxed (ALLOW_NO_PRESSURE_SENSOR + BENCH_NO_PRESSURE_ACK). The burner may fire with no pressure sensor fitted. Not for production.")
+    #endif
 #endif
 
 // Optional temperature sensors (default disabled)

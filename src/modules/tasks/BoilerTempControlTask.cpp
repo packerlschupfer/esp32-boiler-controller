@@ -1,6 +1,7 @@
 // src/modules/tasks/BoilerTempControlTask.cpp
 // Boiler temperature control task - cascade control inner loop
 #include "modules/tasks/BoilerTempControlTask.h"
+#include "MQTTTopics.h"  // MQTT_STATUS_PID_AUTOTUNE_RESULT
 
 #include "config/SystemConstants.h"
 #include "modules/control/BoilerTempController.h"
@@ -179,7 +180,7 @@ void BoilerTempControlTask(void* parameter) {
                          tempToFloat(startReadings.boilerTempOutput),
                          tempToFloat(SystemConstants::PID::Autotune::MIN_BOILER_TEMP),
                          tempToFloat(SystemConstants::PID::Autotune::MAX_BOILER_TEMP));
-                MQTTTask::publish("boiler/status/pid/autotune/result",
+                MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE_RESULT,
                     "{\"status\":\"rejected\",\"reason\":\"boiler temp\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
             } else if (controller.startAutoTuning(tuneSetpoint)) {
                 SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
@@ -255,7 +256,7 @@ void BoilerTempControlTask(void* parameter) {
                 publishDecision(false, BurnerRequestManager::getCurrentTargetTemp());
                 SRP::clearHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_RUNNING);
                 SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
-                MQTTTask::publish("boiler/status/pid/autotune/result",
+                MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE_RESULT,
                     "{\"status\":\"aborted\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
                 stats.cycleCount++;
                 continue;
@@ -358,7 +359,7 @@ void BoilerTempControlTask(void* parameter) {
                         // corrected values that must not be overwritten by it
                         SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
                         LOG_WARN(TAG, "Auto-tuning result discarded - heating mode changed during the run");
-                        MQTTTask::publish("boiler/status/pid/autotune/result",
+                        MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE_RESULT,
                             "{\"status\":\"rejected\",\"reason\":\"mode changed\"}", 0, true,
                             MQTTPriority::PRIORITY_HIGH);
                     } else if (controller.applyAutoTuningResults()) {
@@ -392,14 +393,14 @@ void BoilerTempControlTask(void* parameter) {
                                 "{\"status\":\"complete\",\"mode\":\"%s\",\"kp\":%.4f,\"ki\":%.5f,\"kd\":%.4f}",
                                 AutotuneGainTarget::toString(gainTarget),
                                 kp, ki, kd);
-                            MQTTTask::publish("boiler/status/pid/autotune/result", buffer, 0, true,
+                            MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE_RESULT, buffer, 0, true,
                                 MQTTPriority::PRIORITY_HIGH);
                         }
 
                         LOG_INFO(TAG, "Auto-tuning complete - PID gains applied");
                     } else {
                         SRP::setHeatingEventBits(SystemEvents::HeatingEvent::AUTOTUNE_FAILED);
-                        MQTTTask::publish("boiler/status/pid/autotune/result",
+                        MQTTTask::publish(MQTT_STATUS_PID_AUTOTUNE_RESULT,
                             "{\"status\":\"failed\"}", 0, true, MQTTPriority::PRIORITY_HIGH);
                         LOG_ERROR(TAG, "Auto-tuning completed but failed to apply results");
                     }

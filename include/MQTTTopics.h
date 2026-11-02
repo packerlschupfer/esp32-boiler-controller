@@ -3,8 +3,22 @@
 #ifndef MQTT_TOPICS_H
 #define MQTT_TOPICS_H
 
-// Base topic prefix - all topics start with this
+// Base topic prefix - all topics start with this.
+//
+// OVERRIDABLE SINCE 2026-11-02, and the guard is the point. The testbench runs the same
+// firmware against its own broker on bnice. While it was unroutable that was isolation
+// enough; once it was given a working gateway it became able to reach the production
+// broker, and its client ID is deliberately DIFFERENT - which means a misconfigured
+// MQTT_SERVER would have let both devices sit connected to production at once, publishing
+// to the same retained topics. Silent corruption, rather than the obvious client-ID
+// flapping that identical IDs would have caused. A distinct prefix makes that
+// structurally impossible instead of merely unlikely.
+//
+// Cost, accepted: bench payloads are no longer byte-comparable to live ones, so a
+// comparison has to account for the prefix.
+#ifndef MQTT_BASE_PREFIX
 #define MQTT_BASE_PREFIX "boiler"
+#endif
 
 // Status topics (published by device)
 #define MQTT_STATUS_PREFIX              MQTT_BASE_PREFIX "/status"
@@ -30,6 +44,10 @@
 #define MQTT_STATUS_WATER_PRIORITY      MQTT_STATUS_PREFIX "/water/priority"
 #define MQTT_STATUS_PID_AUTOTUNE        MQTT_STATUS_PREFIX "/pid/autotune"
 #define MQTT_STATUS_PID_PARAMS          MQTT_STATUS_PREFIX "/pid/params"
+// These two were published with hardcoded "boiler/status/..." literals, so they ignored
+// MQTT_BASE_PREFIX and leaked into the production tree from a bench build (2026-11-02).
+#define MQTT_STATUS_CONFIG_WARNING      MQTT_STATUS_PREFIX "/config/warning"
+#define MQTT_STATUS_PID_AUTOTUNE_RESULT MQTT_STATUS_PREFIX "/pid/autotune/result"
 #define MQTT_STATUS_ERROR               MQTT_STATUS_PREFIX "/error"
 #define MQTT_STATUS_BURNER              MQTT_STATUS_PREFIX "/burner"
 
@@ -124,6 +142,10 @@
 
 // Configuration topics
 #define MQTT_CONFIG_PREFIX              MQTT_BASE_PREFIX "/config"
+// Parameter tree. MQTTSubscriptionManager used to define its own "boiler/params" because
+// including this header clashed on the prefix names; the clash was the duplication, so the
+// definition lives here now and that file includes this one (2026-11-02).
+#define MQTT_PARAMS_PREFIX              MQTT_BASE_PREFIX "/params"
 
 // Safety configuration command topics
 #define MQTT_CMD_CONFIG_PUMP_PROTECTION  MQTT_CMD_PREFIX "/config/pump_protection_ms"

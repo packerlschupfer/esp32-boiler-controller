@@ -755,12 +755,20 @@ namespace SystemConstants {
     // String Constants
     // ===========================
     namespace Strings {
-        // MQTT Topics
-        constexpr const char* MQTT_TOPIC_STATUS = "status/boiler";
-        constexpr const char* MQTT_TOPIC_SENSORS = "sensors/";
-        constexpr const char* MQTT_TOPIC_RELAYS = "relays/";
-        constexpr const char* MQTT_TOPIC_CONTROL = "control/";
-        constexpr const char* MQTT_TOPIC_ALERT = "alert/";
+        // THE MQTT_TOPIC_* CONSTANTS THAT WERE HERE ARE GONE (2026-11-02), and they were a
+        // landmine rather than merely dead. MQTTTopics.h defines a MACRO named
+        // MQTT_TOPIC_STATUS, and macros ignore namespaces - so any translation unit that
+        // included MQTTTopics.h before this header had its declaration rewritten into
+        // `constexpr const char* "boiler" "/status" = "status/boiler";` and failed to
+        // compile. That is the real reason MQTTSubscriptionManager.cpp carried its own
+        // hardcoded "boiler/..." prefixes under a comment blaming "macro conflicts": the
+        // conflict was real, but it was this, not the prefix names. Those duplicated
+        // prefixes then silently ignored MQTT_BASE_PREFIX, which is how a bench build ended
+        // up subscribing to the production command tree.
+        //
+        // All five were unused, and their values were backwards anyway ("status/boiler"
+        // where every real topic is "boiler/status"). Deleted rather than renamed: a
+        // correctly-named duplicate of MQTTTopics.h would be the same trap again.
         
         // Status messages
         constexpr const char* STATUS_ONLINE = "online";
