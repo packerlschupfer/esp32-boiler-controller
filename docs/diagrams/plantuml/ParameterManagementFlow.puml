@@ -1,6 +1,12 @@
 @startuml ParameterManagementFlow
 !include theme.puml
 
+' Rendered 5787 px / 4190 px wide on 2026-11-04. Stock PlantUML silently CROPS at
+' 4096 px - it exits 0 and writes a truncated image, so the loss is invisible unless
+' you check the pixel size. gDiagram renders it whole either way; this cap is for
+' everyone else (CI, a plain `plantuml -tpng`, anyone who opens the file elsewhere).
+scale max 4000 width
+
 ' File-local: stock PlantUML gives storage and database a light fill, which
 ' leaves the theme's white text unreadable.
 skinparam storage {

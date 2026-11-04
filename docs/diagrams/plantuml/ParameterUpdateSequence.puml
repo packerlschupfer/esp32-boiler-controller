@@ -39,6 +39,32 @@ else out of range
     Storage -> Storage : value rejected\n(response format not verified)
 end
 
+== Room target: the SAME field, two durabilities ==
+
+Client -> Broker : boiler/cmd/room_target 19.2\n(or boiler/cmd/heating 19.2)
+Broker -> MQTTTask : deliver
+MQTTTask -> PSTask : PersistentStorageTask_SetRoomTarget\n(value, **Temporary**)
+PSTask -> PSTask : take settings mutex\nflag FIRST, then value
+PSTask -> Module : live target changes now
+note right of PSTask
+  The SHADOW is left alone, so the next saveAll()
+  writes the last PERSISTED target, not this one.
+  A reboot therefore reverts to the configured value.
+  Owner decision: the HA climate card is a temporary
+  override, not a setting.
+end note
+
+Client -> Broker : boiler/params/set/heating/targetTemp 192
+Broker -> MQTTTask : deliver
+MQTTTask -> PSTask : parameter message
+PSTask -> Storage : handleMqttCommand
+Storage -> Storage : range check 100-300
+Storage -> Module : setOnChange: live = shadow,\nand CLEAR the temporary flag
+Storage -> NVS : debounced saveAll()
+note right of Storage
+  **This is the only durable path.** Value in TENTHS.
+end note
+
 == Save ==
 
 Client -> Broker : publish boiler/params/save
@@ -58,9 +84,16 @@ MQTTTask -> Broker : publish
 Broker -> Client : values
 
 note over Client, Module
-  52 registered parameters: system 5, heating 8, h/ 4, w/ 2,
-  wheater 7, pid 9, sensor/offset 9, syslog 8.
+  62 registered parameters (counted 2026-11-04; this said 52 and
+  omitted three groups): system 5, heating 8, h/ 6, w/ 4,
+  wheater 6, pid 9, sensor/offset 8, syslog 8, preheat 6,
+  pump 1, boiler 1.
   heating/targetTemp is an int in tenths of °C, range 100-300.
+  FIVE writers once touched that one field and only two marked
+  their write, so whether a change survived a reboot could depend
+  on which had run last. Since 2026-10-30 they all go through
+  PersistentStorageTask_SetRoomTarget(value, Temporary|Durable),
+  which records the durability inside the same locked write.
   Other saves: setOnChange callbacks and StateManager::markSettingsDirty()
   (enable, priority, override changes) request saveAll() from PersistentStorageTask.
   boiler/cmd/config outside_heating_threshold / room_overheat_margin use the set path.

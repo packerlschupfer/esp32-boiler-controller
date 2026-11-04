@@ -49,19 +49,31 @@ if (Any usable reading below 5.0 °C?) then (no)
 else (yes)
 endif
 
-fork
-  :flow OR room cold\n-> heatDemand();
-  :Space heating demand\nOVERRIDES heating_enabled;
-fork again
-  :tank cold\n-> waterDemand();
-  :DHW CHARGE\nOVERRIDES water_enabled;
-  note right
-    The tank used to ask for SPACE heating, which
-    warms the house and does nothing for the tank.
-  end note
-end fork
+:flow, room OR tank below 5.0 C\n-> FrostProtection::demand();
+:Space heating demand\nOVERRIDES heating_enabled\n(but NOT boiler_enabled);
+note right
+  ONE latch, three inputs, one outcome - corrected
+  2026-11-04. This flow used to fork into heatDemand()
+  and waterDemand(), with a cold tank starting a DHW
+  CHARGE. That second latch existed only briefly and
+  was reverted on 2026-10-26; evaluate() now folds
+  flow, tank and room into the single demand() and
+  "request[s] minimum flow regardless of the heating
+  switch".
 
-:Latched until the release threshold;
+  SO BE CLEAR ABOUT WHAT A COLD TANK DOES: it asks for
+  SPACE heating, not a charge. That warms the circuit
+  and the house and does little for the cylinder. It is
+  a known limitation of the revert, not a fixed problem
+  - the older note here claimed the opposite.
+
+  Each source has its own freshness test. Flow and tank
+  are MB8ART channels and share its timestamp; the room
+  uses insideTempGoodMs, deliberately not the shared
+  lastUpdateTimestamp that the MB8ART also writes.
+end note
+
+:Latched until the release threshold (10.0 C);
 
 stop
 
@@ -72,20 +84,13 @@ floating note right
   Latching, with a static_assert that release is
   above trigger.
 
-  ONE LATCH (corrected 2026-10-30). The API is
-  FrostProtection::evaluate() + demand(), and demand()
-  is set by the boiler water, the room OR the tank. It
-  drives SPACE HEATING.
+  ONE LATCH. The API is FrostProtection::evaluate()
+  + demand(); demand() is set by the boiler water, the
+  room OR the tank, and it drives SPACE HEATING. The
+  history of the short-lived second latch is on the
+  demand node itself, so it is not repeated here.
 
-  This block used to describe two independent latches,
-  heatDemand() and waterDemand(), with the tank driving
-  a DHW charge. A second tank latch did exist briefly
-  and was removed on 2026-10-26 - see the note in
-  FrostProtection.h. waterDemand() does not exist; a
-  cold tank now contributes to the single latch instead
-  of charging the cylinder on its own.
-
-  NEITHER overrides boiler_enabled. A drained-for-service
+  IT DOES NOT override boiler_enabled. A drained-for-service
   system is a likely reason to switch the boiler off, and
   firing into a drained boiler is worse than frost.
 

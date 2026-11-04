@@ -60,7 +60,7 @@ RUNNING_HIGH --> ERROR : safety interlock failure\nor emergencyStop()
 
 MODE_SWITCHING --> RUNNING_HIGH : relays switched\n(high power requested and allowed)
 MODE_SWITCHING --> RUNNING_LOW : relays switched (low power), or\ndemand reverted and the ON bits\nselect the running mode
-MODE_SWITCHING --> POST_PURGE : explicit disable,\nno request for the new mode,\nrelay switch failed,\nrevert not confirmed after 15 s,\nor 30 s hard timeout
+MODE_SWITCHING --> POST_PURGE : explicit disable,\nno request for the new mode,\nheat demand ended (SWITCH_NO_DEMAND),\nrelay switch failed,\nrevert not confirmed after 15 s,\nor 30 s hard timeout
 MODE_SWITCHING --> ERROR : safety failure
 
 POST_PURGE --> IDLE : after postPurgeMs (90 s)
@@ -72,7 +72,14 @@ ERROR --> IDLE : recovery delay over,\nEMERGENCY_STOP released,\nsafety conditio
 note right of IDLE
   A latched heat demand without an active mode
   request (HEATING_ON + HEATING request, or
-  WATER_ON + WATER request) is ignored.
+  WATER_ON + WATER request) is ignored here
+  (STALE_DEMAND), and since 2026-10-30
+  BurnerControlTask also CLEARS such an orphan
+  after a 15 s grace with an ERROR naming it.
+  Before that it sat until the 10 min request
+  watchdog, whose answer was a full emergency
+  shutdown - a catastrophic reply to a
+  bookkeeping error.
 end note
 
 note right of RUNNING_HIGH
@@ -101,7 +108,10 @@ end note
 note right of ERROR
   emergencyStop() leads here from any state;
   safety interlocks are checked continuously
-  in IGNITION, RUNNING_LOW and RUNNING_HIGH.
+  in every LIT state - burnerLit() - which
+  since 2026-10-30 includes MODE_SWITCHING.
+  It did not before, so a flame burning through
+  a handover ran unmonitored for up to 30 s.
 
   While EMERGENCY_STOP is latched the burner
   stays in ERROR, also after the recovery delay.
@@ -113,6 +123,20 @@ note right of MODE_SWITCHING
   Leaving MODE_SWITCHING records the power level
   for anti-flapping, so a restart after a stop
   from here keeps the 20 s minimum off-time.
+
+  **MODE_SWITCHING IS A LIT STATE.** running()
+  only enters it when flameDetected() is true,
+  so the gas valve is open throughout. It is the
+  state everyone forgets: burnerLit() in
+  BurnerSMState.h is now the ONE definition of
+  "could a flame be burning", because two call
+  sites had each open-coded the lit set as
+  IGNITION + RUNNING_LOW/HIGH and so treated a
+  live handover as flame-out. One reset the dead
+  band mid-burn and cut a good flame; the other
+  skipped safety monitoring. If a new lit state
+  is ever added, add it to burnerLit() and
+  nowhere else.
 end note
 
 @enduml
