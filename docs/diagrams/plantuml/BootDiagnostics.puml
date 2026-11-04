@@ -1,0 +1,102 @@
+@startuml BootDiagnostics
+!include theme.puml
+
+' File-local: stock PlantUML draws section dividers as a white box, which
+' leaves the theme's white text unreadable.
+skinparam sequenceDividerBackgroundColor #2F4F4F
+skinparam sequenceDividerBorderColor #708090
+skinparam sequenceDividerFontColor #ffffff
+
+title Boot Diagnostics - why did the controller restart?\nCaptured at boot, published on connect (added 2026-10-30)
+
+participant "Reset\n(hardware / software)" as Reset
+participant "setup()\nmain.cpp" as Setup
+participant "NVS\nnamespace: boot" as NVS
+participant "Serial\n921600" as Serial
+participant "MQTTTask" as MQTTTask
+participant "Broker" as Broker
+participant "Observer\n(HA, operator)" as Obs
+
+autonumber
+
+== At boot, before any task starts ==
+
+Reset -> Setup : ESP32 starts
+Setup -> Setup : nvs_flash_init()
+note right of Setup
+  The capture sits immediately AFTER this, because it is
+  the first point at which Preferences can be opened -
+  and before any task exists, so the two globals it fills
+  need no mutex.
+end note
+
+Setup -> Setup : esp_reset_reason()
+Setup -> Setup : 9 static_asserts pin our codes\nto esp_reset_reason_t
+note right of Setup
+  ESP-IDF renumbering its enum would silently mislabel a
+  fault report. The asserts turn that into a build failure.
+  The real enum has 16 enumerators, not the 11 one might
+  assume - it was read from the framework header, not
+  from memory.
+end note
+
+Setup -> NVS : begin("boot"), count = count + 1\nput count, put last
+NVS --> Setup : boots
+Setup -> Serial : BOOT #43 reason=task_wdt (code 6)  <-- ABNORMAL
+
+== Later, on every MQTT connect ==
+
+MQTTTask -> MQTTTask : BootReason::format(buf, 96, code, boots)
+MQTTTask -> Broker : publish **retained**\nboiler/status/device/boot
+Broker -> Obs : {"reason":"task_wdt","code":6,\n"boots":43,"abnormal":true}
+MQTTTask -> Serial : LOG_ERROR if abnormal,\nLOG_INFO otherwise
+
+note over MQTTTask, Obs
+  RETAINED, and republished on EVERY connect rather than once.
+  The reboot that prompted this facility was noticed hours
+  later, and a reconnect must not leave a broker-side gap in
+  the only record of it.
+end note
+
+note over Reset, Obs
+  **WHAT COUNTS AS ABNORMAL** - the classification is the
+  whole value of this, so it is deliberate, not a default:
+
+  NOT abnormal: poweron, sw_restart, ext_pin, deepsleep,
+  sdio, usb, jtag. sw_restart covers every OTA, every
+  cmd/diagnostics reboot and the NVS erase - flagging those
+  would make the signal useless in the week you reboot most.
+  A power cut is a fact about the house, not a firmware fault.
+
+  ABNORMAL: panic, int_wdt, task_wdt, wdt, brownout, efuse,
+  pwr_glitch, cpu_lockup - **and unknown**. An unexplained
+  restart is the case this exists for; defaulting it to
+  "fine" would reproduce the silence it was added to break.
+end note
+
+note over Setup, NVS
+  **WHY IT WAS ADDED.** Before 2026-10-30 nothing in the tree
+  ever called esp_reset_reason(). A watchdog, a brownout, a
+  panic and a commanded reboot were indistinguishable after
+  the fact - the device restarted mid-session on 2026-11-01
+  and the question simply had no answer.
+
+  It costs more than curiosity: a reboot resets uptime, every
+  task's stack high-water mark, and the Modbus error counters.
+  Conclusions had twice been drawn from counters that a
+  reboot had already cleared.
+
+  CAVEAT, measured on the bench: the counter lives in its own
+  boot namespace so a parameter-store wipe does not touch
+  it, but boiler/cmd/system nvs_erase erases the WHOLE NVS
+  partition and does reset it to 1. The namespace buys less
+  protection than it sounds like.
+
+  Source: include/modules/diagnostics/BootReason.h (pure,
+  natively tested), capture in main.cpp, publish in
+  MQTTTask.cpp. 8 native tests cover the labels, the
+  classification, the payload shape, the 96 B worst case and
+  the overflow-clears-the-buffer path.
+end note
+
+@enduml

@@ -1,15 +1,17 @@
 @startuml TaskOrchestration
 !include theme.puml
 
-title Task Orchestration - 19 FreeRTOS Tasks\nEvent-Driven Architecture with Shared Resources
+title Task Orchestration - 32 live FreeRTOS tasks\n18 of ours running (20 created), 2 from libraries, 12 from the framework
 
 left to right direction
 
 '' P = FreeRTOS priority. Stack in bytes for the default env esp32dev_usb_debug_selective
 ' (ProjectConfig.h; stack sizes differ per build profile). Cores from TaskInitializer, main.cpp.
-package "Core 0" #2F4F4F {
-    component [TimerSchedulerTask\nTimer schedules\nP:2, Stack:3072] as SchedulerTask
-    component [MonitoringTask\nSystem Health\nP:2, Stack:3584] as MonitorTask
+package "Core 0 - pinned" #2F4F4F {
+    component [TimerSchedulerTask\nTimer schedules\nP:2, Stack:3584] as SchedulerTask
+    component [MonitoringTask\nSystem Health + stack scan\nP:2, Stack:4096] as MonitorTask
+    component [HeatingControlTask\nSpace heating, frost evaluate()\nP:3, Stack:4096] as HeatingTask
+    component [PersistentStorageTask\nParameters, NVS\nP:2, Stack:5120] as StorageTask
 }
 
 package "Core 1 - Hardware Interface" #8B4513 {
@@ -17,30 +19,49 @@ package "Core 1 - Hardware Interface" #8B4513 {
     component [MB8ARTProcessingTask\nData Processing\nP:3, Stack:3072] as MB8ARTProc
     component [ANDRTF3Task\nRoom Sensor\nP:3, Stack:3584] as ANDRTF3Task
     component [RelayControlTask\nRelay Commands\nP:4, Stack:4096] as RelayTask
-    component [RYN4ProcessingTask\nRelay Modbus I/O\nP:3, Stack:2560] as RYN4Proc
+    component [RYN4ProcessingTask\nRelay Modbus I/O + DELAY renewal\nP:3, Stack:3584] as RYN4Proc
 }
 
 package "Core 1 - Control Logic" #4682B4 {
     component [BurnerControlTask\nState Machine\nP:4, Stack:4096] as BurnerTask
-    component [BoilerTempControlTask\nHeat demand arming + power level\nevery boiler sensor update (~2.5 s)\nP:4, Stack:3072] as BoilerTempTask
+    component [BoilerTempControlTask\nHeat demand arming + power level\nevery boiler sensor update (~2.5 s)\nP:4, Stack:4096] as BoilerTempTask
 }
 
 package "Core 1 - Services" #52BE80 {
-    component [NTPTask\nTime Sync\nP:2, Stack:4096] as NTPTask
-    component [MQTTTask\nCommunication\nP:2, Stack:3584] as MQTTTask
-    component [OTATask\nFirmware Update\nP:1, Stack:3072] as OTATask
+    component [NTPTask\nTime Sync + DS3231 write\nP:2, Stack:3584] as NTPTask
+    component [MQTTTask\nCommunication\nP:2, Stack:4096] as MQTTTask
+    component [OTATask\nFirmware Update\nP:1, Stack:4096] as OTATask
 }
 
-package "Not pinned to a core" #708090 {
-    component [HeatingControlTask\nSpace Heating\nP:3, Stack:3584] as HeatingTask
-    component [WheaterControlTask\nWater Heating\nP:3, Stack:3584] as WaterTask
-    component [ControlTask\nRemote control\nP:3, Stack:3584] as ControlTask
-    component [HeatingPumpTask\nPumpControlModule\nP:3, Stack:2048] as HeatPumpTask
-    component [WaterPumpTask\nPumpControlModule\nP:3, Stack:2048] as WaterPumpTask
-    component [PersistentStorageTask\nParameter Saves\nP:2, Stack:5120] as StorageTask
-    component [SyslogTask\nRemote logging\nP:1, Stack:4096] as SyslogTask
-    component [Arduino loop()] as LoopTask
+package "Unpinned (tskNO_AFFINITY)" #708090 {
+    component [WheaterControlTask\nWater Heating\nP:3, Stack:4096] as WaterTask
+    component [ControlTask\nRemote control\nP:3, Stack:4096] as ControlTask
+    component [HeatingPumpTask\nPumpControlModule\nP:3, Stack:3072] as HeatPumpTask
+    component [WaterPumpTask\nPumpControlModule\nP:3, Stack:3072] as WaterPumpTask
 }
+
+package "Created, then gone" #5D4037 {
+    component [NetworkMonitorTask\nraw xTaskCreate, self-deletes\nStack:3072] as NetMonTask
+    component [SyslogTask\nholds 4096 B until NETWORK_READY\n+ STORAGE_READY, then self-deletes\nwhile syslogEnabled is false] as SyslogTask
+}
+
+package "Not ours" #37474F {
+    component [Logger (library)\nP:2, Core 1] as LoggerTask
+    component [ModbusRTU (library)\nP:5, Core 1] as ModbusRTUTask
+    component [Arduino loopTask\nP:1, Core 1] as LoopTask
+    component [11 more framework tasks\nIDLE0/1, ipc0/1, esp_timer, sys_evt,\ntiT, arduino_events, mqtt_task,\nTmr Svc, emac_rx] as FwTasks
+}
+
+note bottom of NetMonTask
+  WHY THESE TWO ARE DRAWN AT ALL. Neither appears in a
+  steady-state task dump, so a census taken from the device
+  misses them - but both HOLD THEIR STACK during boot, when
+  DRAM is tightest and the other tasks are being created.
+  SyslogTask blocks on NETWORK_READY | STORAGE_READY for up
+  to 30 s BEFORE it reaches the disabled branch, so its
+  4096 B overlap the pumps and MonitoringTask. That is a
+  boot-window DRAM item, not spare steady-state capacity.
+end note
 
 
 package "Shared Data Structures\n(Mutex Protected)" #8B7355 {
