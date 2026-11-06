@@ -78,8 +78,8 @@ note over Setup, NVS
   **WHY IT WAS ADDED.** Before 2026-10-30 nothing in the tree
   ever called esp_reset_reason(). A watchdog, a brownout, a
   panic and a commanded reboot were indistinguishable after
-  the fact - the device restarted mid-session on 2026-11-01
-  and the question simply had no answer.
+  the fact - the device restarted mid-session during that
+  night's review and the question simply had no answer.
 
   It costs more than curiosity: a reboot resets uptime, every
   task's stack high-water mark, and the Modbus error counters.
