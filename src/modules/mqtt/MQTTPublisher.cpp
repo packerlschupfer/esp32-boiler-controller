@@ -301,8 +301,17 @@ void publishSensorData() {
         SharedRelayReadings relays = SRP::getRelayReadings();
         xSemaphoreGive(SRP::getRelayReadingsMutex());
 
-        // Compact format: combine relay states into a single byte
-        // Bit 0: burner, 1: heating_pump, 2: water_pump, 3: half_power, 4: water_mode
+        // Compact format: combine relay states into a single byte.
+        // Bit 0: burner_enable, 1: heating_pump, 2: water_pump, 3: POWER_BOOST, 4: water_mode
+        //
+        // Bit 3 was labelled "half_power" here, which is backwards: the bit is set from
+        // relayPowerBoost, so 1 = stage 2 (FULL, ~34 kW) and 0 = stage 1. Corrected
+        // 2026-11-06 after the label sent me to the wrong bit while verifying h/boostMin.
+        //
+        // NOTE: these bit positions are NOT RelayIndex values. RelayIndex::POWER_BOOST is 1
+        // (physical relay 2); here POWER_BOOST is bit 3 (0x08). Two numbering schemes for the
+        // same relay - always read this block, never infer a bit from RelayIndices.h.
+        // boiler/cmd/system's pre-flash gate r&17 is bits 0 and 4: burner enable + water mode.
         uint8_t relayBits = 0;
         if (relays.relayBurnerEnable) relayBits |= 0x01;
         if (relays.relayHeatingPump) relayBits |= 0x02;
