@@ -177,20 +177,31 @@ static bool performNTPSync() {
         if (driftTracker.lastSyncTime > 0 && driftTracker.lastSyncMillis > 0) {
             uint32_t millisElapsed = millis() - driftTracker.lastSyncMillis;
             if (millisElapsed > 60000) {  // Only calculate drift after at least 1 minute
-                time_t expectedTime = driftTracker.lastSyncTime + (millisElapsed / 1000);
-                int64_t timeDiffSeconds = (int64_t)lastSyncTime - (int64_t)expectedTime;
+                // REWRITTEN 2026-11-07. The previous computation had three independent
+                // defects and its output could not be trusted at all; a reported 361.6 ppm
+                // prompted a "is the crystal bad?" investigation that the number could never
+                // have supported. See the block comment above the bookkeeping at the end of
+                // this function for the worst of them (mismatched epochs).
+                //
+                // What drift IS: time(nullptr) has just been corrected by the NTP sync above,
+                // so it is truth. millis() is free-running off the same crystal and is NOT
+                // corrected. Their difference over the interval is the accumulated drift,
+                // positive when the local clock ran FAST.
+                const time_t nowWall = time(nullptr);
+                const int64_t wallElapsedMs =
+                    (int64_t)(nowWall - driftTracker.lastSyncTime) * 1000;
 
-                // Protect against overflow - clamp drift calculation to reasonable range
-                // Normal drift should be < 60 seconds; larger differences indicate clock jump
                 int32_t driftMs;
-                if (timeDiffSeconds > 3600 || timeDiffSeconds < -3600) {
-                    LOG_WARN(TAG, "Clock jumped by %lld seconds - skipping drift calc", timeDiffSeconds);
+                if (wallElapsedMs > 3600000 || wallElapsedMs < -3600000) {
+                    LOG_WARN(TAG, "Clock jumped by %llds - skipping drift calc",
+                             (long long)(wallElapsedMs / 1000));
                     driftMs = 0;  // Don't accumulate bogus drift
                 } else {
-                    driftMs = (int32_t)(timeDiffSeconds * 1000) + (int32_t)(millisElapsed % 1000);
-                    // Subtract the NTP offset - we want actual drift, not the correction applied
-                    // The offset is what NTP corrected, which artificially inflates drift
-                    driftMs -= result.offsetMs;
+                    driftMs = (int32_t)((int64_t)millisElapsed - wallElapsedMs);
+                    // NO offset subtraction. The old code removed result.offsetMs "so we
+                    // measure drift, not the correction" - but nowWall is read AFTER the
+                    // correction landed, so the correction is already accounted for and
+                    // subtracting it again double-counted it.
                 }
                 
                 // Update drift statistics
@@ -204,7 +215,13 @@ static bool performNTPSync() {
                 //          result.serverUsed, result.offsetMs, result.syncUsec/1000, result.roundTripMs);
                 LOG_INFO(TAG, "Time synced from %s, offset %ldms, RTT %dms",
                          result.serverUsed, result.offsetMs, result.roundTripMs);
-                LOG_INFO(TAG, "Clock drift: %ldms over %lus (%.1f ppm), avg: %ldms",
+                // The +/-278 ppm note is not padding: wall elapsed is a difference of two
+                // time_t values, so it is quantised to whole SECONDS, and one second over a
+                // 3600 s sync interval IS 278 ppm. A single-sample ppm figure therefore
+                // cannot distinguish a healthy crystal (tens of ppm) from a bad one. Read the
+                // per-sample ppm as an order of magnitude only; `avg` over many samples is
+                // the figure with real resolution.
+                LOG_INFO(TAG, "Clock drift: %ldms over %lus (%.1f ppm, +/-278 quantisation), avg: %ldms",
                          driftMs, millisElapsed / 1000, driftPpm, avgDriftMs);
                 
                 // Warn if drift is excessive (>1000 ppm = 0.1%)
@@ -225,11 +242,17 @@ static bool performNTPSync() {
             LOG_INFO(TAG, "Initial time sync from %s, offset %ldms, RTT %dms",
                      result.serverUsed, result.offsetMs, result.roundTripMs);
         }
+        // THE PAIR MUST BE CAPTURED AT THE SAME MOMENT. This used to read
+        //     driftTracker.lastSyncTime  = lastSyncTime;   // the PREVIOUS sync's wall time
+        //     driftTracker.lastSyncMillis = millis();      // but millis from NOW
+        // which stored a wall time and a millis value from DIFFERENT syncs. The drift
+        // calculation then compared one interval's wall duration against a different
+        // interval's millis duration, so it was only ever right when consecutive sync
+        // intervals happened to be equal - and silently wrong after any retry, backoff or
+        // missed sync, which is exactly when a drift number would be worth reading.
+        lastSyncTime = time(nullptr);
         driftTracker.lastSyncTime = lastSyncTime;
         driftTracker.lastSyncMillis = millis();
-        
-        // Store the actual sync time - use the current time after sync
-        lastSyncTime = time(nullptr);
         
         // Update RTC if callback is set
         if (rtcUpdateCallback) {
