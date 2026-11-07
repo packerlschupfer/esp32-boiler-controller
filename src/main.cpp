@@ -395,10 +395,11 @@ void setup() {
     LOG_INFO(TAG, "==================================");
     LOG_INFO(TAG, "Ready");
 
-    // Send boot announcement to syslog (bypasses minLevel filter)
-    if (auto* syslog = SRP::getSyslog()) {
-        syslog->sendUnfiltered(ESP_LOG_INFO, TAG, "Ready");
-    }
+    // The syslog boot announcement that used to sit here is GONE (2026-11-07). Remote logging
+    // is a bounded window now, and a window cannot be open during setup() - nothing constructs
+    // the instance until an operator asks - so getSyslog() was guaranteed nullptr here and the
+    // call could never fire. Leaving it would have added one more never-taken branch to a
+    // codebase that has already had to hunt down five of them.
 
     // Wait for logs to output before re-enabling rate limiting
     #ifndef LOG_NO_CUSTOM_LOGGER

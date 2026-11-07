@@ -14,6 +14,7 @@
 #include <MQTTManager.h>                           // OTA DRAM: stop MQTT for the transfer
 #include "core/SystemResourceProvider.h"
 #include <esp_heap_caps.h>
+#include "modules/diagnostics/SyslogWindow.h"  // free the window's DRAM for the transfer
 
 static const char* TAG = "OTA";
 
@@ -25,6 +26,14 @@ static bool s_mqttStoppedForOta = false;
 // OTA callback implementations
 void OTATask::onOTAStart() {
     LOG_INFO(TAG, "OTA update starting");
+
+    // Give the syslog window's ~1.4 kB back before the transfer needs it. The OTA path drops
+    // the largest free DRAM block to ~1.5 kB until the teardown below frees memory, and the
+    // September 2026 OTA watchdog reboot was exactly that starvation. SyslogWindowPolicy
+    // refuses to OPEN a window during an OTA; this is the other half, and it has to be a
+    // teardown rather than a refusal because by the time this callback runs the update is
+    // already accepted. No-op when no window is open.
+    SyslogWindow::closeForOTA();
 
     {
         SemaphoreGuard guard(otaStatusMutex, pdMS_TO_TICKS(100));

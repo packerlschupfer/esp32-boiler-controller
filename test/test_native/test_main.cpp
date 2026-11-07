@@ -305,6 +305,26 @@ void test_boost_gate_degenerate_ends_of_the_parameter_range();
 void test_boost_denied_for_invalid_or_zero_target();
 void test_boost_water_and_autotune_override_an_invalid_target();
 
+// Syslog window policy (bounded remote-logging window)
+void test_syslog_window_clamp_zero_takes_the_default_not_the_minimum();
+void test_syslog_window_clamp_bounds();
+void test_syslog_window_clamp_passes_values_in_range_unchanged();
+void test_syslog_window_opens_when_all_conditions_are_met();
+void test_syslog_window_refused_during_ota();
+void test_syslog_window_refused_when_no_server_is_configured();
+void test_syslog_window_refused_when_dram_block_too_small();
+void test_syslog_window_dram_threshold_is_inclusive();
+void test_syslog_window_refused_when_master_switch_is_off();
+void test_syslog_window_disabled_outranks_every_other_refusal();
+void test_syslog_window_refusal_precedence_ota_first();
+void test_syslog_window_expiry_basic();
+void test_syslog_window_expiry_survives_millis_rollover();
+void test_syslog_window_seconds_left_rounds_up();
+void test_syslog_window_relater_extends_never_shortens();
+void test_syslog_window_seconds_left_survives_rollover();
+void test_syslog_window_refusal_labels_are_stable();
+void test_syslog_window_cap_can_span_a_real_burn();
+
 void test_charge_delta_bounds_match_what_the_parameter_is_registered_with();
 void test_charge_delta_valid_range_is_inclusive_at_both_ends();
 void test_charge_delta_rejects_nan_and_inf();
@@ -1017,6 +1037,26 @@ int main(int argc, char **argv) {
     RUN_TEST(test_boost_gate_degenerate_ends_of_the_parameter_range);
     RUN_TEST(test_boost_denied_for_invalid_or_zero_target);
     RUN_TEST(test_boost_water_and_autotune_override_an_invalid_target);
+
+    // Syslog window policy
+    RUN_TEST(test_syslog_window_clamp_zero_takes_the_default_not_the_minimum);
+    RUN_TEST(test_syslog_window_clamp_bounds);
+    RUN_TEST(test_syslog_window_clamp_passes_values_in_range_unchanged);
+    RUN_TEST(test_syslog_window_opens_when_all_conditions_are_met);
+    RUN_TEST(test_syslog_window_refused_during_ota);
+    RUN_TEST(test_syslog_window_refused_when_no_server_is_configured);
+    RUN_TEST(test_syslog_window_refused_when_dram_block_too_small);
+    RUN_TEST(test_syslog_window_dram_threshold_is_inclusive);
+    RUN_TEST(test_syslog_window_refused_when_master_switch_is_off);
+    RUN_TEST(test_syslog_window_disabled_outranks_every_other_refusal);
+    RUN_TEST(test_syslog_window_refusal_precedence_ota_first);
+    RUN_TEST(test_syslog_window_expiry_basic);
+    RUN_TEST(test_syslog_window_expiry_survives_millis_rollover);
+    RUN_TEST(test_syslog_window_seconds_left_rounds_up);
+    RUN_TEST(test_syslog_window_relater_extends_never_shortens);
+    RUN_TEST(test_syslog_window_seconds_left_survives_rollover);
+    RUN_TEST(test_syslog_window_refusal_labels_are_stable);
+    RUN_TEST(test_syslog_window_cap_can_span_a_real_burn);
 
     // Scheduler clock (RTC UTC -> local schedule wall-clock, DST rule)
     RUN_TEST(test_scheduler_clock_spring_forward_skips_an_hour);

@@ -2,7 +2,8 @@
 #include "MQTTPublisher.h"
 #include "modules/tasks/MQTTTask.h"
 #include "core/SystemResourceProvider.h"
-#include "core/ModbusBusRelease.h"  // bus-release expiry backstop and its status topic
+#include "core/ModbusBusRelease.h"             // bus-release expiry backstop and its status topic
+#include "modules/diagnostics/SyslogWindow.h"  // syslog-window expiry and its status topic
 #include "MQTTTopics.h"
 #include "modules/tasks/MonitoringTask.h"
 #include "modules/control/CentralizedFailsafe.h"  // centralized topic macros - see the note below
@@ -53,6 +54,13 @@ void publishSystemStatus() {
     // everything. Worth knowing rather than believing the stronger claim.
     ModbusBusRelease::expireIfDue();
 
+    // The syslog window's ONLY expiry path. Unlike the bus release there is no second ticker:
+    // nothing else runs on a schedule that needs to know. If this publisher stops, a window
+    // outlives its deadline - which costs the ~1.4 kB and the per-line stack frame, but
+    // nothing unsafe, since a stale window only sends logs. An OTA closes it regardless
+    // (SyslogWindow::closeForOTA), and that is the case the DRAM actually matters in.
+    SyslogWindow::expireIfDue();
+
     auto mqttManager = SRP::getMQTTManager();
     if (!mqttManager || !mqttManager->isConnected()) {
         return;
@@ -74,6 +82,22 @@ void publishSystemStatus() {
             }
         }
         MQTTTask::publish(MQTT_STATUS_BUS, busBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
+    }
+
+    if (SyslogWindow::consumeStateChange()) {
+        char sysBuf[96];
+        if (SyslogWindow::isOpen()) {
+            snprintf(sysBuf, sizeof(sysBuf), "{\"open\":true,\"left\":%lu}",
+                     static_cast<unsigned long>(SyslogWindow::secondsLeft()));
+        } else {
+            const SyslogWindow::Ended how = SyslogWindow::lastEnd();
+            snprintf(sysBuf, sizeof(sysBuf), "{\"open\":false,\"end\":\"%s\"}",
+                     SyslogWindow::endedToString(how));
+            if (how == SyslogWindow::Ended::BY_TIMEOUT) {
+                LOG_WARN(TAG, "Syslog window expired - remote logging off, DRAM returned");
+            }
+        }
+        MQTTTask::publish(MQTT_STATUS_SYSLOG, sysBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
     }
 
     // The failsafe level, which until 2026-10-25 was visible nowhere at all -

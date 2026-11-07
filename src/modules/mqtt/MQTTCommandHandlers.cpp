@@ -19,7 +19,8 @@
 #include "utils/CriticalDataStorage.h"
 #include "core/SystemResourceProvider.h"
 #include "core/StateManager.h"
-#include "core/ModbusBusRelease.h"  // boiler/cmd/system -> bus_release / bus_acquire
+#include "core/ModbusBusRelease.h"       // boiler/cmd/system -> bus_release / bus_acquire
+#include "modules/diagnostics/SyslogWindow.h"  // boiler/cmd/system -> syslog_window / syslog_close
 #include "monitoring/HealthMonitor.h"  // boiler/cmd/diagnostics -> "health"
 #include "modules/tasks/ANDRTF3Task.h"   // boiler/cmd/diagnostics -> "room_sensor"
 #include <nvs_flash.h>  // For nvs_flash_erase()
@@ -170,6 +171,43 @@ void handleSystemCommand(const char* payload) {
                      BusReleasePolicy::toString(refusal));
         }
         MQTTTask::publish(MQTT_STATUS_BUS, buf, 0, true, MQTTPriority::PRIORITY_HIGH);
+    } else if (strncmp(payload, "syslog_window", 13) == 0) {
+        // "syslog_window" or "syslog_window <seconds>" - open a BOUNDED remote-logging window.
+        // Same verb-on-cmd/system placement and the same parse as bus_release above, so the
+        // two read alike; see SyslogWindowPolicy.h for why logging is a window and not a
+        // setting. Re-issuing while open EXTENDS it.
+        uint32_t seconds = 0;  // 0 = take the policy default
+        const char* arg = payload + 13;
+        while (*arg == ' ' || *arg == '=' || *arg == ':') {
+            arg++;
+        }
+        if (*arg != '\0') {
+            char* end = nullptr;
+            const long parsed = strtol(arg, &end, 10);
+            if (end == arg || parsed < 0) {
+                LOG_WARN(TAG_CMD, "syslog_window: cannot parse '%s' as seconds", arg);
+                MQTTTask::publish(MQTT_STATUS_SYSLOG,
+                                  "{\"open\":false,\"refused\":\"bad_duration\"}",
+                                  0, true, MQTTPriority::PRIORITY_HIGH);
+                return;
+            }
+            seconds = static_cast<uint32_t>(parsed > 100000 ? 100000 : parsed);
+        }
+
+        const SyslogWindowPolicy::Refusal refusal = SyslogWindow::open(seconds);
+        char buf[96];
+        if (refusal == SyslogWindowPolicy::Refusal::NONE) {
+            snprintf(buf, sizeof(buf), "{\"open\":true,\"left\":%lu}",
+                     static_cast<unsigned long>(SyslogWindow::secondsLeft()));
+        } else {
+            snprintf(buf, sizeof(buf), "{\"open\":false,\"refused\":\"%s\"}",
+                     SyslogWindowPolicy::toString(refusal));
+        }
+        MQTTTask::publish(MQTT_STATUS_SYSLOG, buf, 0, true, MQTTPriority::PRIORITY_HIGH);
+    } else if (strcmp(payload, "syslog_close") == 0) {
+        SyslogWindow::close();
+        MQTTTask::publish(MQTT_STATUS_SYSLOG, "{\"open\":false,\"end\":\"command\"}",
+                          0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "bus_acquire") == 0) {
         ModbusBusRelease::acquire();
         LOG_INFO(TAG_CMD, "Remote command: RS485 bus reacquired");

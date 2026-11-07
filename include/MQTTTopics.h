@@ -34,6 +34,7 @@
 // RS485 bus ownership. Retained, published on every transition: a released bus means the
 // controller is deliberately out of service, and that must not be invisible.
 #define MQTT_STATUS_BUS                 MQTT_STATUS_PREFIX "/bus"
+#define MQTT_STATUS_SYSLOG              MQTT_STATUS_PREFIX "/syslog"   // bounded remote-logging window
 
 // Boiler system status topics
 #define MQTT_STATUS_SYSTEM              MQTT_STATUS_PREFIX "/system"

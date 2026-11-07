@@ -478,9 +478,24 @@ static_assert(sizeof(FIRMWARE_VERSION) <= FIRMWARE_VERSION_MAX_LEN,
 // SyslogTask does not appear in a steady-state dump because SYSLOG_ENABLED_DEFAULT is
 // false and it eventually self-deletes, but it does NOT self-delete promptly: it blocks on
 // xEventGroupWaitBits(NETWORK_READY | STORAGE_READY, 30000) first, so it holds all 4096 B
-// across boot - and it is created BEFORE the pumps and MonitoringTask. Kept at 4096
-// because syslog_enabled is runtime-settable (post-reboot) and the task is then
-// persistent, needing EthernetUDP plus Syslog::sendInternal's 1088 B frame.
+// across boot - and it is created BEFORE the pumps and MonitoringTask.
+//
+// CORRECTED 2026-11-07 (esp32-syslog peer, verified here): "the task is then persistent" was
+// WRONG. The vTaskDelete(NULL) at the end of SyslogInitializer's task body sits AFTER the
+// #endif, so it runs unconditionally - the task self-deletes whether syslog is enabled or
+// not. The 4096 B is a BOOT-TIME cost in both branches, never steady state.
+//
+// Nor does this task carry Syslog::sendInternal's 1088 B frame any more. Since
+// LOG_DEFERRED_FORMAT moved to [base_debug_selective] (a75499d, 2026-10-18),
+// startSubscriberTask() creates nothing - the Logger task already exists and subscribers run
+// synchronously on it, so sendInternal nests on the LOGGER task's 5120 B stack instead.
+// Measured there 2026-11-07: 3036 B free high-water mark, with syslog never yet enabled on
+// this firmware - so that mark does NOT include the syslog path.
+//
+// So 4096 here is now probably oversized. NOT trimmed, deliberately: this exact constant was
+// already cut once on a false premise (see above), the saving is boot-time only, and the
+// number to justify any new value is a static bound from tools/stack_walker.py, not an
+// estimate.
 #define STACK_SIZE_SYSLOG_TASK           4096
 #define STACK_SIZE_MODBUS_INIT_TASK      4096
 

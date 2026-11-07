@@ -31,7 +31,6 @@
 #include "modules/tasks/BurnerControlTask.h"
 #include "modules/tasks/BoilerTempControlTask.h"
 #include "modules/tasks/PersistentStorageTask.h"
-#include "SyslogInitializer.h"
 
 // Pump control (independent from burner)
 #include "modules/control/PumpControlModule.h"
@@ -112,40 +111,17 @@ Result<void> TaskInitializer::initializeTasks(SystemInitializer* initializer) {
         LOG_WARN(TAG, "Failed to create persistent storage task");
     }
 
-    // Syslog task (waits for NETWORK_READY and STORAGE_READY)
-    TaskManager::WatchdogConfig syslogWdtConfig = TaskManager::WatchdogConfig::disabled();
-    if (SRP::getTaskManager().startTask(
-        SyslogInitializer::SyslogTask,
-        "SyslogTask",
-        // Do NOT trim this to fund another task. It was briefly cut to 3072 on
-        // 2026-09-17 on the false premise that it had ~50% spare - that 2064 B figure
-        // actually belonged to LogSub, the Logger library's subscriber task, which is
-        // a different task entirely. SyslogTask does not appear in a steady-state task
-        // dump: syslogEnabled defaults false (SYSLOG_ENABLED_DEFAULT), so this task
-        // eventually hits the disabled branch in SyslogInitializer::SyslogTask and calls
-        // vTaskDelete(NULL), releasing its stack. Trimming it therefore frees nothing at
-        // steady state.
-        //
-        // CORRECTED 2026-09-18 - it does NOT self-delete promptly. SyslogInitializer.cpp
-        // blocks on xEventGroupWaitBits(NETWORK_READY | STORAGE_READY, ..., 30000) BEFORE
-        // reaching that branch, so all 4096 B are held until those bits arrive, or for a
-        // full 30 s if Ethernet never comes up. This task is created here, i.e. BEFORE
-        // the pumps and MonitoringTask in this same function, so the allocation overlaps
-        // theirs during boot. 4096 also exceeds the 3828 B largest free block measured
-        // after the pump increase, so startTask can simply fail (LOG_WARN below, nothing
-        // else). Kept at 4096 anyway: syslogEnabled is runtime-settable via
-        // boiler/cmd/config/syslog_enabled, and although that requires a reboot to take
-        // effect, the task is then persistent and needs the full size for EthernetUDP
-        // plus Syslog::sendInternal's 1088 B frame. Revisit as a boot-window DRAM item,
-        // not as spare steady-state capacity.
-        STACK_SIZE_SYSLOG_TASK,  // EthernetUDP + message formatting; see ProjectConfig.h
-        nullptr,
-        1,  // Low priority
-        syslogWdtConfig)) {
-        LOG_INFO(TAG, "Syslog task started");
-    } else {
-        LOG_WARN(TAG, "Failed to start syslog task");
-    }
+    // SYSLOG TASK REMOVED 2026-11-07. Remote logging is now a bounded window
+    // (SyslogWindow / SyslogWindowPolicy, opened by boiler/cmd/system syslog_window), so there
+    // is nothing to do at boot: no instance to construct, no subscriber to register, and no
+    // NETWORK_READY/STORAGE_READY wait.
+    //
+    // This reclaims a real BOOT-WINDOW cost, not a steady-state one. The task held all 4096 B
+    // of STACK_SIZE_SYSLOG_TASK while blocked on xEventGroupWaitBits(..., 30000) - a full 30 s
+    // if Ethernet never came up - and it was created HERE, before the pumps and MonitoringTask,
+    // so that allocation overlapped theirs during the tightest part of boot. It also exceeded
+    // the 3828 B largest free block measured after the pump increase, so its own creation
+    // could simply fail.
 
     // Fallback: Ensure BurnerControlTask is created
     TaskHandle_t existingBurnerTask = SRP::getTaskManager().getTaskHandleByName("BurnerControl");
