@@ -202,6 +202,7 @@ sensor:
   - name: "Boiler Heap Free"
     unique_id: boiler_diag_heap
     state_topic: "boiler/status/health"
+    expire_after: 300  # health arrives every 60 s; go unavailable instead of freezing
     unit_of_measurement: "bytes"
     value_template: "{{ value_json.heap_dram | default(value_json.heap_free) }}"
     entity_category: diagnostic
@@ -209,6 +210,7 @@ sensor:
   - name: "Boiler Heap Largest Block"
     unique_id: boiler_diag_heap_blk
     state_topic: "boiler/status/health"
+    expire_after: 300  # health arrives every 60 s; go unavailable instead of freezing
     unit_of_measurement: "bytes"
     value_template: "{{ value_json.heap_dram_blk | default(value_json.heap_max_blk) }}"
     entity_category: diagnostic
@@ -219,6 +221,7 @@ sensor:
   - name: "Boiler Min Free DRAM (since boot)"
     unique_id: boiler_diag_heap_min
     state_topic: "boiler/status/health"
+    expire_after: 300  # health arrives every 60 s; go unavailable instead of freezing
     unit_of_measurement: "bytes"
     value_template: "{{ value_json.heap_dram_min | default(value_json.heap_min) }}"
     entity_category: diagnostic
@@ -226,6 +229,7 @@ sensor:
   - name: "Boiler Uptime"
     unique_id: boiler_diag_uptime
     state_topic: "boiler/status/health"
+    expire_after: 300  # health arrives every 60 s; go unavailable instead of freezing
     unit_of_measurement: "s"
     device_class: duration
     value_template: "{{ value_json.uptime }}"
@@ -572,6 +576,7 @@ binary_sensor:
   - name: "Boiler Low Memory"
     unique_id: boiler_low_memory
     state_topic: "boiler/status/health"
+    expire_after: 300  # health arrives every 60 s; go unavailable instead of freezing
     value_template: "{{ 'ON' if (value_json.heap_dram_blk | default(9999) | int) < 2560 else 'OFF' }}"
     payload_on: "ON"
     payload_off: "OFF"
@@ -584,10 +589,24 @@ binary_sensor:
   - name: "Boiler Memory Critical"
     unique_id: boiler_memory_critical
     state_topic: "boiler/status/health"
+    expire_after: 300  # health arrives every 60 s; go unavailable instead of freezing
     value_template: "{{ 'ON' if (value_json.heap_dram_blk | default(9999) | int) < 1536 else 'OFF' }}"
     payload_on: "ON"
     payload_off: "OFF"
     device_class: problem
+    entity_category: diagnostic
+
+  # ON while boiler/status/health keeps arriving (every 60 s); unavailable after 5 min without it.
+  # The health payload is ~232 B against the firmware's hard 256 B MQTT drop, so it can stop
+  # silently while the rest of the boiler keeps publishing. Automation boiler_health_stale warns.
+  - name: "Boiler Health Reporting"
+    unique_id: boiler_health_reporting
+    state_topic: "boiler/status/health"
+    expire_after: 300
+    value_template: "ON"
+    payload_on: "ON"
+    payload_off: "OFF"
+    device_class: connectivity
     entity_category: diagnostic
 
   # Safety-critical sensor fault: a missing boiler-output reading stops the burner within

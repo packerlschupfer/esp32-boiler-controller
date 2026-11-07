@@ -283,7 +283,7 @@ def parse_relay_bits(bits):
         'burner': bool(bits & 0x01),
         'heating_pump': bool(bits & 0x02),
         'water_pump': bool(bits & 0x04),
-        'half_power': bool(bits & 0x08),
+        'power_boost': bool(bits & 0x08),  # relay 2: 1 = full power (stage 2)
         'water_mode': bool(bits & 0x10)
     }
 

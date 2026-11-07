@@ -561,35 +561,6 @@
                 </div>
             </div>
 
-            <!-- Manual Relay Control -->
-            <div class="card">
-                <h2><span class="icon">🔌</span> Manual Relay Control</h2>
-                <div class="relay-controls">
-                    <div class="relay-btn" id="relay_burner" onclick="toggleRelay('burner')">
-                        <span class="icon">🔥</span>
-                        <span class="name">Burner</span>
-                        <span class="state">OFF</span>
-                    </div>
-                    <div class="relay-btn" id="relay_half_power" onclick="toggleRelay('half_power')">
-                        <span class="icon">½</span>
-                        <span class="name">Half Power</span>
-                        <span class="state">OFF</span>
-                    </div>
-                    <div class="relay-btn" id="relay_heating_pump" onclick="toggleRelay('heating_pump')">
-                        <span class="icon">♨️</span>
-                        <span class="name">Heating Pump</span>
-                        <span class="state">OFF</span>
-                    </div>
-                    <div class="relay-btn" id="relay_water_pump" onclick="toggleRelay('water_pump')">
-                        <span class="icon">💧</span>
-                        <span class="name">Water Pump</span>
-                        <span class="state">OFF</span>
-                    </div>
-                </div>
-                <p style="font-size: 11px; color: var(--text-dim); margin-top: 12px; text-align: center;">
-                    ⚠️ Manual control overrides automatic operation
-                </p>
-            </div>
 
             <!-- Device Health -->
             <div class="card">
@@ -1319,25 +1290,6 @@
             closeConfirmModal();
         }
 
-        // Relay toggle
-        const relayState = { burner: false, half_power: false, heating_pump: false, water_pump: false };
-        async function toggleRelay(relay) {
-            const newState = !relayState[relay];
-            const topic = `cmd/relay/${relay}`;
-            await sendCmd(topic, newState ? 'on' : 'off');
-        }
-        function updateRelayButtons(relays) {
-            if (!relays) return;
-            for (const [key, value] of Object.entries(relays)) {
-                relayState[key] = value;
-                const btn = document.getElementById(`relay_${key}`);
-                if (btn) {
-                    btn.classList.toggle('active', value);
-                    btn.querySelector('.state').textContent = value ? 'ON' : 'OFF';
-                }
-            }
-        }
-
         // Format bytes to KB
         function formatBytes(bytes) {
             if (bytes === undefined || bytes === null) return '--';
@@ -1441,11 +1393,11 @@
             // Update relay status
             if (state.relays) {
                 const r = state.relays;
-                document.getElementById('sys_burner').innerHTML = statusIndicator(r.burner, r.burner ? (r.half_power ? 'LOW' : 'HIGH') : 'OFF');
+                // Burner fires with bit0 (heating) or bit4 (water mode); bit3 = power boost = full power
+                const firing = r.burner || r.water_mode;
+                document.getElementById('sys_burner').innerHTML = statusIndicator(firing, firing ? (r.power_boost ? 'HIGH' : 'LOW') : 'OFF');
                 document.getElementById('sys_hpump').innerHTML = statusIndicator(r.heating_pump);
                 document.getElementById('sys_wpump').innerHTML = statusIndicator(r.water_pump);
-                // Update relay toggle buttons
-                updateRelayButtons(r);
             }
 
             // Update device health
@@ -1477,11 +1429,19 @@
                     document.getElementById('health_uptime').querySelector('.value').textContent = formatUptime(h.uptime);
                 }
                 if (h.health) {
-                    if (h.health.stack_hwm !== undefined) {
+                    // Firmware publishes stack_min (lowest stack high-water mark of any task, bytes)
+                    // plus stack_min_task; stack_hwm was the old name.
+                    const sm = (h.health.stack_min !== undefined) ? h.health.stack_min : h.health.stack_hwm;
+                    if (sm !== undefined) {
                         const stackEl = document.getElementById('health_stack');
-                        stackEl.querySelector('.value').textContent = h.health.stack_hwm + ' B';
-                        stackEl.classList.toggle('warning', h.health.stack_hwm < 200);
-                        stackEl.classList.toggle('danger', h.health.stack_hwm < 100);
+                        stackEl.querySelector('.value').textContent = sm + ' B';
+                        // Lowest free stack since boot (only falls until reboot). stack_min_age is sent
+                        // only when non-zero = minutes the figure is stale (scans skipped).
+                        const age = h.health.stack_min_age;
+                        stackEl.querySelector('.value').textContent = sm + ' B' + (age ? ' (' + age + ' min old)' : '');
+                        stackEl.title = 'Lowest free stack since boot' + (h.health.stack_min_task ? ', task ' + h.health.stack_min_task : '') + (age ? '. Not updated for ' + age + ' min' : '');
+                        stackEl.classList.toggle('warning', sm < 200);
+                        stackEl.classList.toggle('danger', sm < 100);
                     }
                     if (h.health.tasks !== undefined) {
                         document.getElementById('health_tasks').querySelector('.value').textContent = h.health.tasks;

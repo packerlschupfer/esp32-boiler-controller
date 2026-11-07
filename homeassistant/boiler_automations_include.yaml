@@ -29,3 +29,41 @@
               topic: "boiler/params/get/{{ repeat.item }}"
               payload: ""
           - delay: 1.5
+
+- id: boiler_health_stale
+  alias: "Boiler health data stopped"
+  description: "Warn when boiler/status/health stops arriving while the boiler is otherwise online (payload near the 256 B firmware limit); clear when it returns"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.boiler_health_reporting
+      to: "unavailable"
+      for: "00:10:00"
+      id: stale
+    - platform: state
+      entity_id: binary_sensor.boiler_health_reporting
+      to: "on"
+      id: back
+  action:
+    - choose:
+        - conditions:
+            - condition: trigger
+              id: stale
+            - condition: template
+              value_template: "{{ states('sensor.boiler_output_temp_2') not in ['unavailable', 'unknown'] }}"
+          sequence:
+            - service: persistent_notification.create
+              data:
+                notification_id: boiler_health_stale
+                title: "Boiler health data stopped"
+                message: >-
+                  No boiler/status/health message for over 10 minutes, but the boiler is still
+                  publishing sensor data. Memory and uptime readings are not current. Likely cause:
+                  the health payload grew past the firmware's 256 B MQTT limit.
+        - conditions:
+            - condition: trigger
+              id: back
+          sequence:
+            - service: persistent_notification.dismiss
+              data:
+                notification_id: boiler_health_stale
+  mode: single
