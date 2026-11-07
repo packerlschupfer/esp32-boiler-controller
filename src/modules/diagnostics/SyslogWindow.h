@@ -45,6 +45,20 @@ namespace SyslogWindow {
     /// Close the window if its deadline has passed. Call periodically.
     void expireIfDue();
 
+    /**
+     * @brief Keep a window open when syslog/always is set. Call periodically, after
+     *        expireIfDue(), from the same place.
+     *
+     * Re-arms a CLOSED window rather than holding one open without a deadline, so every
+     * re-arm re-runs SyslogWindowPolicy::mayOpen(). The DRAM gate and the OTA refusal are
+     * therefore re-evaluated continuously instead of being checked once at boot and trusted
+     * forever - and an OTA's closeForOTA() is simply followed by a re-arm once it finishes.
+     *
+     * Silent on refusal. If DRAM is low or an OTA is running this does nothing and tries
+     * again next tick; logging a refusal on every tick would be its own problem.
+     */
+    void maintainAlwaysOn();
+
     /// Seconds remaining, 0 when closed.
     uint32_t secondsLeft();
 

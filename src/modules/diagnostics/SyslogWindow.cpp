@@ -193,6 +193,23 @@ void expireIfDue() {
     // and reached the collector anyway. Both behaviours are the same mechanism.
 }
 
+void maintainAlwaysOn() {
+    if (!SRP::getSystemSettings().syslogAlwaysOn) {
+        return;
+    }
+    if (s_open.load(std::memory_order_acquire)) {
+        // Re-issue well before the deadline so there is no gap at the seam. open() extends
+        // and never shortens, so this is just a deadline push - no reallocation, no churn.
+        if (secondsLeft() > 120u) {
+            return;
+        }
+    }
+    // Deliberately ignores the refusal. A refused re-arm (low DRAM, OTA in progress) is the
+    // gate doing its job, and this runs often enough that logging it would produce a line per
+    // tick for as long as the condition lasts.
+    (void)open(SyslogWindowPolicy::MAX_SECONDS);
+}
+
 uint32_t secondsLeft() {
     if (!s_open.load(std::memory_order_acquire)) {
         return 0;

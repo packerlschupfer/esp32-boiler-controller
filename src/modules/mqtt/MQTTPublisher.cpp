@@ -61,6 +61,10 @@ void publishSystemStatus() {
     // (SyslogWindow::closeForOTA), and that is the case the DRAM actually matters in.
     SyslogWindow::expireIfDue();
 
+    // Re-arm when syslog/always is set. After expireIfDue(), so a window that just timed out
+    // is re-opened on the same tick rather than leaving a one-cycle hole in the log.
+    SyslogWindow::maintainAlwaysOn();
+
     auto mqttManager = SRP::getMQTTManager();
     if (!mqttManager || !mqttManager->isConnected()) {
         return;

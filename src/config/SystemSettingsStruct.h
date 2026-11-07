@@ -194,6 +194,19 @@ struct SystemSettings {
     uint8_t syslogFacility = 16;                      // LOCAL0 = 16 (LOCAL0-7 = 16-23)
     uint8_t syslogMinLevel = SYSLOG_MIN_LEVEL;
 
+    // Keep a logging window permanently open, re-arming it whenever it is found closed.
+    //
+    // NOT a second enable switch: syslogEnabled still gates everything, and this does nothing
+    // while that is false. It exists because the window's own cap is 1800 s, and an operator
+    // who wants continuous logging should not have to re-issue a command every half hour.
+    //
+    // Deliberately implemented as RE-ARMING rather than as a window with no deadline. Every
+    // re-arm goes through SyslogWindowPolicy::mayOpen() again, so the DRAM gate and the OTA
+    // refusal are re-evaluated continuously instead of being checked once and then trusted
+    // forever. An OTA still closes the window (closeForOTA) and it simply comes back
+    // afterwards. A true no-expiry window would skip all of that.
+    bool syslogAlwaysOn = false;
+
     // Constructor
     SystemSettings(
         bool wheaterPriorityEnabled = true,

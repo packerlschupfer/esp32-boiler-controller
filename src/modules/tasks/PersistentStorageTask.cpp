@@ -596,6 +596,8 @@ void PersistentStorageTask(void* pvParameters) {
     // Note: syslogEnabled uses bool directly, others use int32_t shadows
     storage->registerBool("syslog/enabled", &settings.syslogEnabled,
                           "Syslog forwarding enabled");
+    storage->registerBool("syslog/always", &settings.syslogAlwaysOn,
+                          "Keep the syslog window permanently open (re-arms itself)");
     storage->registerInt("syslog/serverIP0", &syslog_serverIP0, 0, 255, "Syslog server IP octet 0");
     storage->registerInt("syslog/serverIP1", &syslog_serverIP1, 0, 255, "Syslog server IP octet 1");
     storage->registerInt("syslog/serverIP2", &syslog_serverIP2, 0, 255, "Syslog server IP octet 2");
@@ -741,6 +743,7 @@ void PersistentStorageTask(void* pvParameters) {
         lastChangeTime = millis();
     };
     storage->setOnChange("syslog/enabled", boolParamCallback);
+    storage->setOnChange("syslog/always", boolParamCallback);
     storage->setOnChange("syslog/serverIP0", syslogCallback);
     storage->setOnChange("syslog/serverIP1", syslogCallback);
     storage->setOnChange("syslog/serverIP2", syslogCallback);
