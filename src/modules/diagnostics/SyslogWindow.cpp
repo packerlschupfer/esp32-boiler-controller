@@ -176,6 +176,21 @@ void expireIfDue() {
     // No logging here. This runs from a periodic caller, and one LOG_* costs ~1312 B of stack
     // on this project - the same reason ModbusBusRelease::expireIfDue() is silent. The
     // publisher reports the transition via consumeStateChange().
+    //
+    // CONSEQUENCE, so nobody reads the silence as a bug (the HA side did, reasonably, on the
+    // first live window): A CLOSE IS NEVER VISIBLE IN SYSLOG ITSELF. There is no "window
+    // closed" line on the wire for either exit path - on timeout because this function does
+    // not log, and on command because close()'s LOG_WARN runs after endWindow() has already
+    // deregistered the subscriber. The MQTT status topic is the record of a close, not syslog.
+    //
+    // The same decoupling loses a little more than that, and it is worth stating because it
+    // looks like loss and is not. With LOG_DEFERRED_FORMAT a LOG_* only QUEUES a record; the
+    // Logger task pops it later and only THEN invokes subscribers. So delivery time, not log
+    // time, decides whether a line reaches the wire. Lines logged in the last few ms before a
+    // close are dropped, and - symmetrically, and visibly in the live trace - a line logged
+    // BEFORE the subscriber was registered still arrives: the "Control command ...
+    // syslog_window 120" line that opened the very first window was logged before open() ran
+    // and reached the collector anyway. Both behaviours are the same mechanism.
 }
 
 uint32_t secondsLeft() {

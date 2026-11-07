@@ -60,10 +60,23 @@ namespace SyslogWindowPolicy {
     constexpr uint32_t MIN_SECONDS     = 60;
     constexpr uint32_t MAX_SECONDS     = 1800;  // 30 minutes, hard cap
 
-    /// What opening a window actually allocates: the message buffer (SYSLOG_MAX_MESSAGE_SIZE,
-    /// 512 B by default), the EthernetUDP shim object including its own 512 B buffer, and the
-    /// lwIP socket. ~1.4 kB measured; 2048 carries margin for fragmentation.
-    constexpr size_t WINDOW_DRAM_NEED = 2048;
+    /// What opening a window actually allocates.
+    ///
+    /// MEASURED on hardware 2026-11-07, not estimated - the estimate here was 2048 and it was
+    /// too low. Live heap_dram either side of the first window of a boot:
+    ///
+    ///   before open 16432 free / 14324 largest block
+    ///   while open  13912 / 12788   -> 2520 B consumed
+    ///   after close 15376 / 13812   -> only 1464 B returned
+    ///
+    /// The 1056 B difference is a ONE-TIME first-use cost, not a leak: a second window moved
+    /// the figure by zero bytes (15376 / 13812 identical before and after). It is almost
+    /// certainly newlib's tzset allocating the timezone string on the first localtime_r call
+    /// inside Syslog::getTimestamp, which is never freed.
+    ///
+    /// So a FIRST window needs 2520 B and every later one needs ~1464 B. Sized for the first,
+    /// since that is the worst case and the one that runs on a freshly booted controller.
+    constexpr size_t WINDOW_DRAM_NEED = 2560;
 
     /// Left free AFTER the window's own allocation. Mirrors
     /// SystemConstants::System::MIN_DRAM_BLOCK_CRITICAL (1536 B) - not #included, to keep this
