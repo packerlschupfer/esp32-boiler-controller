@@ -236,10 +236,29 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
             }
 
             if (!readOk) {
-                // Hold every decision this block makes. Next tick is 1 s away, and the
-                // genuinely-dead-sensor case still reaches the blind timer through
-                // isBoilerTempOutputValid once a read succeeds.
-                emergencyDissipation = latched ? dissipating : dissipatingAfterRelease;
+                // Hold the DECISION - a missed read is not evidence, and the next tick is 1 s
+                // away. But the TIME CAP still applies, because holding alone would mean a
+                // mutex that never returned froze the pumps in whatever state they were in,
+                // with nothing left to end dissipation. The policy's blind branches are
+                // `since < max`; this reproduces exactly that bound without needing a reading.
+                //
+                // Added 2026-11-08 after the Fable review. Its own refuter found no mechanism
+                // in src/ that holds this mutex forever, so this guards a state nobody has
+                // shown to be reachable - but the cost is two comparisons on a path that
+                // already runs every second, and the failure it prevents is pumps stuck on or
+                // off indefinitely with no sensor. Cheap insurance against a grep'd absence.
+                if (latched) {
+                    if (millis() - latchStartMs >=
+                            EmergencyStopRelease::MAX_BLIND_DISSIPATION_MS) {
+                        dissipating = false;
+                    }
+                    emergencyDissipation = dissipating;
+                } else {
+                    if (millis() - releaseTimeMs >= SRP::getSystemSettings().pumpCooldownMs) {
+                        dissipatingAfterRelease = false;
+                    }
+                    emergencyDissipation = dissipatingAfterRelease;
+                }
             } else {
             // RESIDUAL, deliberately not widened here: isSensorStale() takes the same mutex
             // again and reports stale when IT misses, so a miss in that second call still
