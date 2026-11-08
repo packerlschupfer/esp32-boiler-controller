@@ -208,16 +208,44 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
 
         bool emergencyDissipation = false;
         if (latched || dissipatingAfterRelease) {
+            // A MUTEX MISS IS NOT A SENSOR FAULT - it is this tick learning nothing. The
+            // distinction matters because the "no usable reading" branches in
+            // EmergencyStopRelease are TIME-based and ignore the previous state: with
+            // outputUsable false, dissipationPumpOn() returns `sinceLatchMs < MAX_BLIND`
+            // whatever wasOn said. So a single failed read could RESUME dissipation that had
+            // correctly finished, and log "Emergency heat dissipation resumed (boiler output
+            // 0.0°C)" - a state change and a temperature, both invented by a read that never
+            // happened. The holder is real: MQTTPublisher has been measured holding this
+            // mutex over 100 ms.
+            //
+            // Same correction as 07a191f made in SafetyInterlocks, where the equivalent
+            // conflation caused a latched emergency stop on healthy sensors. This site is far
+            // milder - the fail direction here is "keep circulating", which is safe - but the
+            // spurious state flip is real, so hold instead of deciding blind. S3, 2026-11-08.
+            bool readOk = false;
             bool outputUsable = false;
             Temperature_t output = 0;
             {
                 MutexGuard guard(SRP::getSensorReadingsMutex(), pdMS_TO_TICKS(50));
                 if (guard.hasLock()) {
+                    readOk = true;
                     const SharedSensorReadings& readings = SRP::getSensorReadings();
                     outputUsable = readings.isBoilerTempOutputValid;
                     output = readings.boilerTempOutput;
                 }
             }
+
+            if (!readOk) {
+                // Hold every decision this block makes. Next tick is 1 s away, and the
+                // genuinely-dead-sensor case still reaches the blind timer through
+                // isBoilerTempOutputValid once a read succeeds.
+                emergencyDissipation = latched ? dissipating : dissipatingAfterRelease;
+            } else {
+            // RESIDUAL, deliberately not widened here: isSensorStale() takes the same mutex
+            // again and reports stale when IT misses, so a miss in that second call still
+            // reaches the blind branch. It is the safe direction and one level removed from
+            // the bug above; fixing it means giving StateManager an "unknown" answer, which
+            // is a larger change than this one.
             outputUsable = outputUsable &&
                            !StateManager::isSensorStale(StateManager::SensorChannel::BOILER_OUTPUT);
 
@@ -239,6 +267,7 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
                 }
                 emergencyDissipation = dissipatingAfterRelease;
             }
+            }  // readOk
         }
         if (!latched) {
             dissipating = true;  // next onset starts dissipating
