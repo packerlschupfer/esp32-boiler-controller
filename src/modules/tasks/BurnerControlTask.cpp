@@ -236,6 +236,11 @@ void BurnerControlTask(void* parameter) {
         // Critical task without watchdog protection - enter degraded mode
         CentralizedFailsafe::triggerFailsafe(
             CentralizedFailsafe::FailsafeLevel::DEGRADED,
+            // NO RELEASE EXISTS FOR THIS, AND THAT IS CORRECT - checked 2026-11-08 while
+            // fixing the other two unreleasable DEGRADED causes. Watchdog registration
+            // happens once at task start; if it failed, this task runs unprotected for its
+            // whole life and nothing later makes that untrue. A reboot IS the resolution, so
+            // a clearDegradedForCause() here would be a lie about the fault having cleared.
             SystemError::WATCHDOG_INIT_FAILED,
             "BurnerControlTask watchdog registration failed"
         );

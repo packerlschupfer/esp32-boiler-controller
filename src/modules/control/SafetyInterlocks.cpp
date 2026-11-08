@@ -245,7 +245,24 @@ bool SafetyInterlocks::checkTemperatureLimits(Temperature_t maxAllowedTemp) {
         return true;
     }
     // Mutex acquired successfully - reset failure counter
+    // THE MUTEX CAME BACK, so a DEGRADED this check raised has demonstrably resolved.
+    //
+    // Without this the level was UNRELEASABLE SHORT OF A REBOOT. Of the seven sites that
+    // raise DEGRADED, only RELAY_OPERATION_FAILED had a clearer (BurnerStateMachine's
+    // onEnterRunningLow/High); MUTEX_TIMEOUT, WATCHDOG_INIT_FAILED and SYSTEM_LOW_MEMORY had
+    // none. And DEGRADED is what withholds stage 2 (CentralizedFailsafe::fullPowerPermitted,
+    // consulted in BoilerTempControlTask), so a burst of mutex contention capped the boiler
+    // at stage 1 - about 19 kW against 34 - permanently and silently, the only symptom being
+    // that high fire never arrives again.
+    //
+    // The contention is real, not theoretical: MQTTPublisher has been measured holding this
+    // same mutex for over 100 ms, which is what MAX_CONSECUTIVE_MUTEX_FAILURES exists for.
+    //
+    // Cause-matched, so it cannot clear a DEGRADED that something else raised. Same shape and
+    // same justification as the relay-fault clearer. Found by the S3/backlog sweep 2026-11-08;
+    // the 2026-10-30 review flagged this as an open question and it turned out to be a defect.
     tempLimitsMutexFailures = 0;
+    CentralizedFailsafe::clearDegradedForCause(SystemError::MUTEX_TIMEOUT);
     {
         const auto& readings = SRP::getSensorReadings();
 
@@ -315,7 +332,10 @@ bool SafetyInterlocks::checkThermalShock(Temperature_t maxDifferential) {
         return true;
     }
     // Mutex acquired successfully - reset failure counter
+    // Same release as checkTemperatureLimits above - see the note there for why an
+    // unreleasable DEGRADED silently halves the boiler's output.
     thermalShockMutexFailures = 0;
+    CentralizedFailsafe::clearDegradedForCause(SystemError::MUTEX_TIMEOUT);
     {
         const auto& readings = SRP::getSensorReadings();
 

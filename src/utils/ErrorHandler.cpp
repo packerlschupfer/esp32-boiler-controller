@@ -128,6 +128,11 @@ bool ErrorHandler::attemptMemoryRecovery() {
         }
     } else {
         LOG_INFO("MEMORY", "Memory recovery successful - %d bytes free", freeHeapAfter);
+        // Memory came back, so a DEGRADED this function raised has demonstrably resolved.
+        // Without it the level was unreleasable short of a reboot, and DEGRADED withholds
+        // stage 2 - so one transient low-memory episode capped the boiler at ~19 kW for
+        // good. Cause-matched, so it cannot clear a DEGRADED something else raised.
+        CentralizedFailsafe::clearDegradedForCause(SystemError::SYSTEM_LOW_MEMORY);
         // Clear memory error event bit
         xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),
                             SystemEvents::Error::MEMORY);
