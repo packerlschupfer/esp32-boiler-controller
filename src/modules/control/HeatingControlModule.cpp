@@ -205,32 +205,23 @@ Temperature_t HeatingControlModule::calculateSpaceHeatingTargetTemp(
     return result;
 }
 
-bool HeatingControlModule::checkHeatingConditions(const SharedSensorReadings& readings, Temperature_t targetTemperature, Temperature_t hysteresis) const {
-    bool heatingRequired = false;
-    EventBits_t currentSystemState = xEventGroupGetBits(SRP::getSystemStateEventGroup());
-
-    // Check if heating is enabled
-    if ((currentSystemState & SystemEvents::SystemState::HEATING_ENABLED) != 0) {
-
-        // Determine if heating should be turned on or off based on temperature and hysteresis
-        if (readings.insideTemp < tempSub(targetTemperature, hysteresis)) {
-            heatingRequired = true;
-        } else if (readings.insideTemp >= tempAdd(targetTemperature, hysteresis)) {
-            heatingRequired = false;
-        }
-    } else {
-        // Heating is disabled; ensure it's off
-        heatingRequired = false;
-    }
-
-    char insideBuf[16], targetBuf[16], hystBuf[16];
-    formatTemp(insideBuf, sizeof(insideBuf), readings.insideTemp);
-    formatTemp(targetBuf, sizeof(targetBuf), targetTemperature);
-    formatTemp(hystBuf, sizeof(hystBuf), hysteresis);
-    LOG_DEBUG(TAG, "Heating required: %s (inside: %s, target: %s, hyst: %s)",
-             heatingRequired ? "Yes" : "No", insideBuf, targetBuf, hystBuf);
-    return heatingRequired;
-}
+// checkHeatingConditions() DELETED 2026-11-08 (S2).
+//
+// It was a THIRD copy of the room-thermostat rule, it had no firmware callers, and all three
+// copies disagreed on their thresholds:
+//
+//                                      turn ON below        turn OFF at/above
+//   SpaceHeatingPolicy::roomThermostatWantsHeat (LIVE)   setpoint      setpoint + hysteresis
+//   HeatingControlModule::checkHeatingConditions (this)  target - hyst target + hysteresis
+//   MockHeatingControl::checkHeatingConditions (tests)   target - hyst target
+//
+// Only the first one runs. This one also read readings.insideTemp RAW with no validity check,
+// and TEMP_INVALID is INT16_MIN - so on a dead room sensor it returned "heating required"
+// unconditionally and forever. Dead, duplicated and wrong.
+//
+// The live path is HeatingControlTask.cpp:1050, which checks isInsideTempValid first and then
+// calls the shared predicate. The tests that used to exercise this now exercise that predicate
+// through the mock - see test/test_native/mocks/MockHeatingControl.h.
 
 void HeatingControlModule::startHeating() {
     LOG_INFO(TAG, "Starting heating...");

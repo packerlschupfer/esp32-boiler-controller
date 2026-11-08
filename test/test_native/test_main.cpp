@@ -306,6 +306,13 @@ void test_boost_denied_for_invalid_or_zero_target();
 void test_boost_water_and_autotune_override_an_invalid_target();
 
 // Syslog window policy (bounded remote-logging window)
+void test_deadband_turns_on_strictly_below_the_setpoint();
+void test_deadband_stays_on_until_setpoint_plus_hysteresis();
+void test_deadband_is_asymmetric_which_is_the_point();
+void test_deadband_the_three_points_the_old_mock_got_wrong();
+void test_deadband_zero_hysteresis_collapses_to_a_plain_threshold();
+void test_deadband_at_the_deployed_room_target();
+
 void test_charge_floor_lets_a_rising_target_through();
 void test_charge_floor_blocks_a_falling_target();
 void test_charge_floor_is_inclusive_at_the_floor();
@@ -1047,6 +1054,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_boost_water_and_autotune_override_an_invalid_target);
 
     // Syslog window policy
+    RUN_TEST(test_deadband_turns_on_strictly_below_the_setpoint);
+    RUN_TEST(test_deadband_stays_on_until_setpoint_plus_hysteresis);
+    RUN_TEST(test_deadband_is_asymmetric_which_is_the_point);
+    RUN_TEST(test_deadband_the_three_points_the_old_mock_got_wrong);
+    RUN_TEST(test_deadband_zero_hysteresis_collapses_to_a_plain_threshold);
+    RUN_TEST(test_deadband_at_the_deployed_room_target);
     RUN_TEST(test_charge_floor_lets_a_rising_target_through);
     RUN_TEST(test_charge_floor_blocks_a_falling_target);
     RUN_TEST(test_charge_floor_is_inclusive_at_the_floor);

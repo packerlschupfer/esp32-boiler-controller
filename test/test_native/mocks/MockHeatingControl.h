@@ -7,6 +7,7 @@
 #define MOCK_HEATING_CONTROL_H
 
 #include "../../include/shared/Temperature.h"
+#include "../../include/modules/control/SpaceHeatingPolicy.h"  // the rule the FIRMWARE runs
 #include "MockSharedSensorReadings.h"
 #include "MockSystemSettings.h"
 
@@ -16,6 +17,7 @@ private:
     float integral_;
     float lastError_;
     bool pidEnabled_;
+    bool currentlyHeating_ = false;
     
 public:
     HeatingControlModule() 
@@ -52,25 +54,40 @@ public:
         return tempFromFloat(target);
     }
     
+    /**
+     * @brief Does the room thermostat want heat?
+     *
+     * REWIRED 2026-11-08 (S2). This used to REIMPLEMENT the rule, and it reimplemented it
+     * WRONGLY - it turned off at `target` while the firmware turns off at
+     * `setpoint + hysteresis`, and it ignored the current heating state entirely, which is
+     * the whole point of asymmetric hysteresis. So every test that called it was asserting
+     * the behaviour of the mock, not of the controller, and would have passed no matter what
+     * the firmware did.
+     *
+     * There were three copies of this rule in the tree and all three disagreed. The dead one
+     * in HeatingControlModule has been deleted; this now DELEGATES to the single live
+     * predicate so these tests exercise the real thing.
+     *
+     * Validity is the caller's business, exactly as in the firmware: HeatingControlTask
+     * checks isInsideTempValid before calling the predicate, so the mock does too rather
+     * than hiding a dead sensor behind a plausible answer.
+     */
     bool checkHeatingConditions(
         const SharedSensorReadings& readings,
         Temperature_t targetTemperature,
         Temperature_t hysteresis) const {
-        
-        Temperature_t currentTemp = readings.insideTemp;
-        Temperature_t threshold = targetTemperature - hysteresis;
-        
-        // Simple hysteresis logic
-        if (currentTemp < threshold) {
-            return true;  // Turn on
-        } else if (currentTemp >= targetTemperature) {
-            return false; // Turn off
+
+        if (!readings.isInsideTempValid) {
+            return false;  // no measurement, no demand - fail safe, as the live path does
         }
-        
-        // In dead band - maintain current state (simplified)
-        return false;
+        return SpaceHeatingPolicy::roomThermostatWantsHeat(
+            currentlyHeating_, readings.insideTemp, targetTemperature, hysteresis);
     }
-    
+
+    /// The state the asymmetric hysteresis depends on. Tests that care about the dead band
+    /// must set it; the firmware threads the real heating state into the same argument.
+    void setCurrentlyHeating(bool on) { currentlyHeating_ = on; }
+
     float calculatePIDOutput(float setpoint, float current, float dt) {
         if (!pidEnabled_) {
             return (setpoint > current) ? 100.0f : 0.0f;

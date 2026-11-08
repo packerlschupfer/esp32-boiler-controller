@@ -82,7 +82,6 @@ public:
                                                   CurveDebug* debugOut = nullptr) const;
 
     // Check if heating conditions are met based on temperature and hysteresis
-    bool checkHeatingConditions(const SharedSensorReadings& readings, Temperature_t targetTemperature, Temperature_t hysteresis) const;
 
     // Start and stop heating
     void startHeating();

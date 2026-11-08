@@ -99,8 +99,17 @@ void SpaceHeatingScheduleAction::onPreheatingStart(const TimerSchedule& schedule
     // Get current room temperature (fixed-point)
     Temperature_t currentTemp = tempFromWhole(20);  // Default 20.0°C if sensor unavailable
 
+    // THE VALID FLAG, not just the mutex. This used to take the mutex and then assign
+    // insideTemp unconditionally, so the "if sensor unavailable" default above only ever
+    // applied to a MUTEX MISS - never to the case it names. ANDRTF3Task sets
+    // insideTemp = TEMP_INVALID (INT16_MIN, -32768) after three consecutive failed reads, so
+    // a dead room sensor handed this function -3276.8 °C and every comparison below went the
+    // same way forever. Found by the S2 sweep, 2026-11-08.
     if (SRP::takeSensorReadingsMutex(pdMS_TO_TICKS(100))) {
-        currentTemp = SRP::getSensorReadings().insideTemp;
+        const SharedSensorReadings& r = SRP::getSensorReadings();
+        if (r.isInsideTempValid) {
+            currentTemp = r.insideTemp;
+        }
         SRP::giveSensorReadingsMutex();
     }
 
