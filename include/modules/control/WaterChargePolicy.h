@@ -5,6 +5,12 @@
 #include <cstdint>
 #include <cmath>
 
+// Temperature_t for holdChargeTarget(). Added 2026-11-07: this header previously used only
+// float and uint32_t, so it compiled inside the firmware purely because every translation
+// unit that included it had already pulled Temperature.h in. The native test suite - which
+// includes it first and alone - is what exposed that. Keep the header self-contained.
+#include "shared/Temperature.h"
+
 /**
  * @brief Tank charge limits (header-only, native-testable). Tenths of °C.
  *
@@ -106,6 +112,49 @@ namespace WaterChargePolicy {
      * rather than the number being exact.
      */
     constexpr uint32_t MAX_CHARGE_MS = 10800000;  // 3 h
+
+    /**
+     * @brief Never let a charge target fall below where the charge started.
+     *
+     * WHY (measured 2026-11-07, then quantified over 22 charges)
+     *
+     * The charge target is tank + chargeDelta, recomputed continuously, so it normally
+     * RISES as the tank warms. A hot-water DRAW inverts that: cold mains arrives at the
+     * sensor and the tank reading collapses - 13.4 C in the observed case, 46.3 down to
+     * 32.9 during a shower - so the target follows it DOWN, lands under the already-hot
+     * boiler, and the +4.0 water dead band cuts the burner mid-draw. It then waits for the
+     * recovering tank to push the target back above the coasting boiler before relighting.
+     *
+     * That is a burner shutting off at the exact moment the most hot water is being used.
+     *
+     * Measured over the 10-day baseline, water path byte-identical throughout:
+     *   7 draw-free charges: ALL exactly 2 bursts  <- inherent, NOT addressed here
+     *   15 draw charges:     2 bursts in 9, 3 in 4, 4 in 2
+     *   the 3-4 burst charges are the DEEP draws (fall 9.7-22.7 C, target min 41-50)
+     *
+     * So this targets the EXTRA bursts only. It cannot and should not remove the base
+     * 2-burst split, which happens with no draw at all and comes from the dead band plus
+     * boiler mass - a different change, needing its own justification.
+     *
+     * DURING A DRAW THE TANK READING IS NOT A TANK TEMPERATURE. It is the temperature of
+     * cold inflow passing the sensor, and it is meaningless as a heating setpoint. Holding
+     * the floor is not ignoring the sensor; it is declining to steer by a number that has
+     * temporarily stopped describing the thing it names.
+     *
+     * NOT a draw detector. It detects nothing and infers nothing - it simply never lowers
+     * the target within a charge. That matters: a draw-detection heuristic was tried in
+     * October and retracted as a false positive. This sidesteps that failure rather than
+     * repeating it.
+     *
+     * SAFETY IS UNCHANGED. The floor is a FLOOR, not a new ceiling: calculateBoilerTarget()
+     * still clamps to w/hLo..w/hHi afterwards, the tank stop limit still ends the charge,
+     * the 3 h cap still bounds it, and every burner interlock is downstream and untouched.
+     * The worst case is that the boiler runs at its charge-start target through a draw -
+     * which is exactly what it was doing one tick before the draw began.
+     */
+    inline Temperature_t holdChargeTarget(Temperature_t computed, Temperature_t chargeFloor) {
+        return (computed < chargeFloor) ? chargeFloor : computed;
+    }
 
     inline bool chargeOverran(uint32_t chargeElapsedMs,
                               uint32_t maxMs = MAX_CHARGE_MS) {

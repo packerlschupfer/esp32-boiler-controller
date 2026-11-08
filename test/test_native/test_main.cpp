@@ -306,6 +306,14 @@ void test_boost_denied_for_invalid_or_zero_target();
 void test_boost_water_and_autotune_override_an_invalid_target();
 
 // Syslog window policy (bounded remote-logging window)
+void test_charge_floor_lets_a_rising_target_through();
+void test_charge_floor_blocks_a_falling_target();
+void test_charge_floor_is_inclusive_at_the_floor();
+void test_charge_floor_would_have_kept_the_burner_lit();
+void test_charge_floor_does_nothing_without_a_draw();
+void test_charge_floor_zero_floor_is_inert();
+void test_charge_floor_holds_through_a_deep_draw();
+
 void test_syslog_window_clamp_zero_takes_the_default_not_the_minimum();
 void test_syslog_window_clamp_bounds();
 void test_syslog_window_clamp_passes_values_in_range_unchanged();
@@ -1039,6 +1047,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_boost_water_and_autotune_override_an_invalid_target);
 
     // Syslog window policy
+    RUN_TEST(test_charge_floor_lets_a_rising_target_through);
+    RUN_TEST(test_charge_floor_blocks_a_falling_target);
+    RUN_TEST(test_charge_floor_is_inclusive_at_the_floor);
+    RUN_TEST(test_charge_floor_would_have_kept_the_burner_lit);
+    RUN_TEST(test_charge_floor_does_nothing_without_a_draw);
+    RUN_TEST(test_charge_floor_zero_floor_is_inert);
+    RUN_TEST(test_charge_floor_holds_through_a_deep_draw);
     RUN_TEST(test_syslog_window_clamp_zero_takes_the_default_not_the_minimum);
     RUN_TEST(test_syslog_window_clamp_bounds);
     RUN_TEST(test_syslog_window_clamp_passes_values_in_range_unchanged);

@@ -47,6 +47,10 @@ static struct {
     // this bounds the physical one (a fouled coil, a tank sensor reading low, or the boiler's
     // own thermostat cutting the flame below the commanded flow).
     uint32_t chargeStartMs = 0;
+    // The target this charge began with. A charge target may rise but NEVER fall below this
+    // (WaterChargePolicy::holdChargeTarget) - see that function for why a draw makes the tank
+    // reading stop describing the tank. Armed with chargeStartMs; meaningless while WheaterOff.
+    Temperature_t chargeFloorTarget = 0;
     // Set when a charge is abandoned for overrunning its 3 h cap. Without it the abandon is
     // cosmetic: the cap drops lastHeatingNeeded, but nextChargeNeeded()'s START branch is
     // simply tankTemp < tempLimitLow, which is still true - that is the whole premise of an
@@ -408,6 +412,9 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
                 waterState.state = WheaterOn;
                 waterState.lastBoilerTarget = boilerTargetTemp;
                 waterState.chargeStartMs = millis();
+                // Armed in the same block as chargeStartMs, deliberately: both describe THIS
+                // charge and a path that set one without the other would be a latent bug.
+                waterState.chargeFloorTarget = boilerTargetTemp;
                 if (controlBits & SystemEvents::ControlRequest::WATER_ON_OVERRIDE) {
                     // Forced charge: charge up to tempLimitHigh instead of ending on the
                     // next cycle because the tank is already above tempLimitLow
@@ -568,6 +575,30 @@ static void processWaterHeatingState(EventBits_t pendingControl) {
                 }
                 SharedSensorReadings readings = SRP::getSensorReadings();
                 Temperature_t newBoilerTarget = calculateBoilerTarget(settingsSnap, readings);
+
+                // HOLD THE FLOOR. During a hot-water draw the tank sensor reads cold inflow,
+                // not the tank, and the raw target follows it DOWN under the already-hot
+                // boiler - the dead band then cuts the burner at the moment most hot water is
+                // being used. Measured 2026-11-07: a shower dropped the tank 13.4 C and the
+                // target 55 -> 49, cutting the burner for 4.5 min mid-charge.
+                const Temperature_t rawTarget = newBoilerTarget;
+                newBoilerTarget = WaterChargePolicy::holdChargeTarget(newBoilerTarget,
+                                                                      waterState.chargeFloorTarget);
+                static bool floorHeldLogged = false;
+                if (newBoilerTarget != rawTarget) {
+                    if (!floorHeldLogged) {
+                        char rawBuf[16], floorBuf[16], tankBuf[16];
+                        formatTemp(rawBuf, sizeof(rawBuf), rawTarget);
+                        formatTemp(floorBuf, sizeof(floorBuf), newBoilerTarget);
+                        formatTemp(tankBuf, sizeof(tankBuf), readings.waterHeaterTempTank);
+                        LOG_INFO(TAG, "Charge target held at %s°C (raw %s°C, tank %s°C) - the "
+                                      "tank reading is falling during a charge, which means a "
+                                      "draw, not a cooling tank", floorBuf, rawBuf, tankBuf);
+                        floorHeldLogged = true;
+                    }
+                } else {
+                    floorHeldLogged = false;
+                }
 
                 // Update if target changed by more than 1°C OR every 5 minutes to refresh watchdog
                 Temperature_t diff = tempAbs(tempSub(newBoilerTarget, waterState.lastBoilerTarget));
