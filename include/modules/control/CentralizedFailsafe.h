@@ -147,6 +147,11 @@ private:
     static void setLevel(FailsafeLevel level);
     static std::atomic<EmergencyStopRelease::Cause> latchCause_;
     static SystemError lastError;
+
+    /// Set once a WATCHDOG_INIT_FAILED raised DEGRADED; blocks every cause-matched clear
+    /// thereafter. lastError has a single slot, so without this a later MUTEX_TIMEOUT would
+    /// overwrite the cause and let its clear release a level raised by an unprotected task.
+    static std::atomic<bool> watchdogDegradedSticky_;
     static uint32_t failsafeStartTime;
     static uint32_t recoveryAttempts;
     static SystemState savedState;

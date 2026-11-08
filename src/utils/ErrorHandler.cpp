@@ -129,9 +129,19 @@ bool ErrorHandler::attemptMemoryRecovery() {
     } else {
         LOG_INFO("MEMORY", "Memory recovery successful - %d bytes free", freeHeapAfter);
         // Memory came back, so a DEGRADED this function raised has demonstrably resolved.
-        // Without it the level was unreleasable short of a reboot, and DEGRADED withholds
-        // stage 2 - so one transient low-memory episode capped the boiler at ~19 kW for
-        // good. Cause-matched, so it cannot clear a DEGRADED something else raised.
+        // Cause-matched, so it cannot clear a DEGRADED something else raised.
+        //
+        // THIS WHOLE FUNCTION IS CURRENTLY UNREACHABLE, and 223ba9c's claim to have fixed two
+        // unreleasable DEGRADED causes was therefore one. attemptMemoryRecovery() is called
+        // only from ErrorHandler::handleCriticalError(SYSTEM_LOW_MEMORY); that is called only
+        // from ErrorHandlingStrategy.h:71; and ErrorHandlingStrategy has NO USERS anywhere in
+        // the tree. So neither the DEGRADED raise above nor this release can fire today.
+        // HealthMonitor detects low DRAM but deliberately only counts and logs it.
+        //
+        // Kept rather than deleted because the raise and the release are a matched pair: if
+        // the memory path is ever wired up, it must arrive with its release already attached.
+        // Corrected after the 2026-11-08 review - I fixed this without checking it was
+        // reachable, which is the rule I had written down that same day.
         CentralizedFailsafe::clearDegradedForCause(SystemError::SYSTEM_LOW_MEMORY);
         // Clear memory error event bit
         xEventGroupClearBits(SRP::getErrorNotificationEventGroup(),

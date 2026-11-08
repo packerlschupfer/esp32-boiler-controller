@@ -31,6 +31,7 @@ std::atomic<CentralizedFailsafe::FailsafeLevel> CentralizedFailsafe::currentLeve
 std::atomic<bool> CentralizedFailsafe::levelChanged_{true};
 std::atomic<EmergencyStopRelease::Cause> CentralizedFailsafe::latchCause_{EmergencyStopRelease::Cause::NONE};
 SystemError CentralizedFailsafe::lastError = SystemError::SUCCESS;
+std::atomic<bool> CentralizedFailsafe::watchdogDegradedSticky_{false};
 uint32_t CentralizedFailsafe::failsafeStartTime = 0;
 uint32_t CentralizedFailsafe::recoveryAttempts = 0;
 CentralizedFailsafe::SystemState CentralizedFailsafe::savedState;
@@ -96,6 +97,10 @@ void CentralizedFailsafe::registerSubsystem(Subsystem subsystem, FailsafeCallbac
 }
 
 void CentralizedFailsafe::triggerFailsafe(FailsafeLevel level, SystemError reason, const char* details) {
+    if (level == FailsafeLevel::DEGRADED && reason == SystemError::WATCHDOG_INIT_FAILED) {
+        // See clearDegradedForCause(): a task left unprotected stays unprotected until reboot.
+        watchdogDegradedSticky_.store(true, std::memory_order_release);
+    }
     // Round 20 Issue #10: Protect state access with mutex.
     // F11: track whether the take actually succeeded; a timed-out task must NOT
     // give the mutex (give-by-non-holder hits configASSERT and reboots the
@@ -724,6 +729,18 @@ void CentralizedFailsafe::setLevel(FailsafeLevel level) {
 
 bool CentralizedFailsafe::clearDegradedForCause(SystemError cause) {
     if (currentLevel.load() != FailsafeLevel::DEGRADED) {
+        return false;
+    }
+    // WATCHDOG_INIT_FAILED IS STICKY. lastError has ONE slot, so if a watchdog registration
+    // failure raised DEGRADED at boot and a MUTEX_TIMEOUT later raises it again, lastError now
+    // reads MUTEX_TIMEOUT - and the cause-matched clear added in 223ba9c would release the
+    // level while a task is STILL running unprotected. Cause-matching is only as good as the
+    // slot it matches against, which the 2026-11-08 review pointed out and 223ba9c's own
+    // comment ("a reboot IS the resolution") assumed without enforcing.
+    //
+    // A watchdog registration failure cannot resolve without a reboot, so once it has been
+    // seen, nothing short of a reboot may downgrade DEGRADED.
+    if (watchdogDegradedSticky_.load(std::memory_order_acquire)) {
         return false;
     }
     // lastError is read without stateMutex_. It is a single aligned enum written under the

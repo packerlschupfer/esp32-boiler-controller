@@ -27,14 +27,13 @@ static bool s_mqttStoppedForOta = false;
 void OTATask::onOTAStart() {
     LOG_INFO(TAG, "OTA update starting");
 
-    // Give the syslog window's ~1.4 kB back before the transfer needs it. The OTA path drops
-    // the largest free DRAM block to ~1.5 kB until the teardown below frees memory, and the
-    // September 2026 OTA watchdog reboot was exactly that starvation. SyslogWindowPolicy
-    // refuses to OPEN a window during an OTA; this is the other half, and it has to be a
-    // teardown rather than a refusal because by the time this callback runs the update is
-    // already accepted. No-op when no window is open.
-    SyslogWindow::closeForOTA();
-
+    // THE FLAG FIRST, THEN THE TEARDOWN. This used to call closeForOTA() before storing
+    // otaUpdateInProgress, which left a window in which SyslogWindow::maintainAlwaysOn() -
+    // running on the MQTT publisher - saw otaActive still false, passed
+    // SyslogWindowPolicy::mayOpen(), and RE-OPENED the window the line above had just closed,
+    // taking back the ~1.4 kB the transfer needs. That is the DRAM-starvation shape of the
+    // September 2026 OTA watchdog reboot, and the mutual exclusion I claimed when adding
+    // closeForOTA() did not actually hold. Found by the 2026-11-08 review.
     {
         SemaphoreGuard guard(otaStatusMutex, pdMS_TO_TICKS(100));
         if (guard.hasLock()) {
@@ -43,6 +42,9 @@ void OTATask::onOTAStart() {
             LOG_ERROR(TAG, "Failed to acquire OTA status mutex on start");
         }
     }
+
+    // Now safe: any re-arm attempt from here on is refused by the OTA gate.
+    SyslogWindow::closeForOTA();
 
     // F38: initiate a graceful burner shutdown BEFORE the flash completes and
     // reboots. Without this, an OTA pushed while the burner is RUNNING reboots

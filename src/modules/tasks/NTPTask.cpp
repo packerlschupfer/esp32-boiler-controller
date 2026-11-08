@@ -191,13 +191,22 @@ static bool performNTPSync() {
                 const int64_t wallElapsedMs =
                     (int64_t)(nowWall - driftTracker.lastSyncTime) * 1000;
 
+                // GUARD THE DISCREPANCY, NOT THE ELAPSED TIME. The previous rewrite (efad0dc,
+                // earlier tonight) kept the old +/-3600000 threshold but applied it to
+                // wallElapsedMs - and SYNC_INTERVAL_MS is 3600000, so a perfectly normal
+                // hourly sync sat exactly on the limit and any jitter past it was reported as
+                // "Clock jumped", zeroing the drift sample and logging a WARN every hour. The
+                // ORIGINAL code guarded timeDiffSeconds, which was a DISCREPANCY; I changed
+                // the quantity and carried its threshold across unexamined. Found by the
+                // 2026-11-08 review.
+                const int64_t discrepancyMs = (int64_t)millisElapsed - wallElapsedMs;
                 int32_t driftMs;
-                if (wallElapsedMs > 3600000 || wallElapsedMs < -3600000) {
+                if (discrepancyMs > 3600000 || discrepancyMs < -3600000) {
                     LOG_WARN(TAG, "Clock jumped by %llds - skipping drift calc",
-                             (long long)(wallElapsedMs / 1000));
+                             (long long)(discrepancyMs / 1000));
                     driftMs = 0;  // Don't accumulate bogus drift
                 } else {
-                    driftMs = (int32_t)((int64_t)millisElapsed - wallElapsedMs);
+                    driftMs = (int32_t)discrepancyMs;
                     // NO offset subtraction. The old code removed result.offsetMs "so we
                     // measure drift, not the correction" - but nowWall is read AFTER the
                     // correction landed, so the correction is already accounted for and
