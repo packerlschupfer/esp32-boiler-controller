@@ -551,8 +551,30 @@ static void processHeatingState(EventBits_t pendingControl) {
             // silent deadlock. startHeating() sets the bit before state becomes HeatingOn, so
             // this cannot fire on a legitimately starting burn. Found 2026-10-30.
             if (!(systemStateBits & SystemEvents::SystemState::HEATING_ON)) {
-                LOG_ERROR(TAG, "HEATING_ON was cleared by something other than this task while "
-                               "heating was active - stopping cleanly and re-evaluating");
+                // SEVERITY DEPENDS ON WHO CLEARED IT, and until 2026-11-09 this did not ask.
+                //
+                // Water priority preempting heating is DESIGNED behaviour - BurnerRequestManager
+                // clears the heating state and logs "Water (priority) preempting heating" one
+                // line earlier. Logging that at ERROR was wrong twice over: it is not an error,
+                // and ERROR maps to syslog severity 3, which is the threshold of the Home
+                // Assistant rolling fault notification. So every normal DHW preemption raised a
+                // "boiler error" notification to the owner. Seen twice on 2026-11-08, the first
+                // full day of permanent remote logging - the logging paid for itself by showing
+                // this.
+                //
+                // A clear by anything OTHER than water is still genuinely unexplained and keeps
+                // ERROR: that is the case this check was added for (an OTA used to clear the bit
+                // and strand this task).
+                const bool waterTookOver =
+                    (SRP::getSystemStateEventBits() & SystemEvents::SystemState::WATER_ON) != 0;
+                if (waterTookOver) {
+                    LOG_INFO(TAG, "HEATING_ON cleared by the water-priority preemption - "
+                                  "stopping cleanly and re-evaluating");
+                } else {
+                    LOG_ERROR(TAG, "HEATING_ON was cleared by something other than this task "
+                                   "while heating was active - stopping cleanly and "
+                                   "re-evaluating");
+                }
                 clearHeatingActive(TAG);
                 break;
             }

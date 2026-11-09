@@ -156,12 +156,29 @@ void publishSystemStatus() {
     // allocator really is: measured 2026-09-16 on this device, 56.9 kB "free" with a
     // 47.9 kB "largest block" while byte-addressable DRAM was 7.0 kB with a 4.2 kB
     // ceiling (93% fragmented). That gap is why an OTA-time malloc(1436) could fail.
-    // Publish the numbers that actually constrain allocation. heap_def is included to
-    // settle what esp_get_free_heap_size() reports - CentralizedFailsafe's low-memory
-    // recovery gate uses it against a 20 kB threshold; drop it once that is known.
+    // Publish the numbers that actually constrain allocation.
+    //
+    // heap_def REMOVED 2026-11-09, its question answered. It was added to settle what
+    // esp_get_free_heap_size() reports, because CentralizedFailsafe's low-memory recovery
+    // gate compares it against a 20 kB threshold. ANSWER: it is IDENTICAL to
+    // heap_caps_get_free_size(MALLOC_CAP_8BIT) - measured live on the device, 13720 B
+    // against 13720 B - so heap_dram already publishes it and the field was a duplicate.
+    //
+    // THE CONSEQUENCE IS WORTH MORE THAN THE FIELD, so it is recorded here rather than lost
+    // with it: this device's HEALTHY steady-state DRAM is about 13-16 kB, and
+    // MIN_FREE_HEAP_WARNING is 20000. So CentralizedFailsafe.cpp:458's
+    // `freeHeap < MIN_FREE_HEAP_WARNING -> canRecover = false` can NEVER pass at normal
+    // operating heap: a SYSTEM_LOW_MEMORY recovery would be refused as "memory still low"
+    // while the device is in perfect health. Latent rather than live - that path is currently
+    // unreachable (ErrorHandlingStrategy has no users, see ErrorHandler.cpp) - but if the
+    // memory path is ever wired up, that threshold must come down to match this hardware
+    // before it is trusted.
+    //
+    // Removing the field buys ~18 B of the health payload's 24 B margin against the hard
+    // 256 B drop, which is why it went now: the "232 B of 256" warning had started firing
+    // hourly.
     doc["heap_dram"] = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     doc["heap_dram_blk"] = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
-    doc["heap_def"] = esp_get_free_heap_size();
     // Minimum DRAM ever seen since boot. Needed before any change that permanently
     // reserves or reclaims DRAM: current free says nothing about the peak demand, and
     // sizing against a stale figure is exactly how the task-stack trim nearly went
