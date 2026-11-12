@@ -227,10 +227,26 @@ void handleSystemCommand(const char* payload) {
             char* end = nullptr;
             const long parsed = strtol(arg, &end, 10);
             if (end == arg || parsed < 0) {
+                // THE REFUSAL MUST NOT CLAIM THE WINDOW IS SHUT. A flat
+                // {"active":false,"refused":"bad_duration"} is what this published at first,
+                // and it is a lie whenever a window is already open - observed live on
+                // 2026-11-13, where a mistyped duration mid-window left the RETAINED payload
+                // saying inactive until the next health tick happened to republish the real
+                // state. The panel reads this topic to decide whether its buttons do
+                // anything, so a false "inactive" disables a working window.
+                //
+                // bus_release and syslog_window have the same flat form in their own
+                // bad_duration branches. It is harmless there (both refuse to re-enter while
+                // active, so the retained lie is about a state nobody acts on) and is left
+                // alone rather than changed blind.
                 LOG_WARN(TAG_CMD, "test_mode: cannot parse '%s' as seconds", arg);
-                MQTTTask::publish(MQTT_STATUS_TESTMODE,
-                                  "{\"active\":false,\"refused\":\"bad_duration\"}",
-                                  0, true, MQTTPriority::PRIORITY_HIGH);
+                char badBuf[96];
+                snprintf(badBuf, sizeof(badBuf),
+                         "{\"active\":%s,\"left\":%lu,\"refused\":\"bad_duration\"}",
+                         TestMode::isActive() ? "true" : "false",
+                         static_cast<unsigned long>(TestMode::secondsLeft()));
+                MQTTTask::publish(MQTT_STATUS_TESTMODE, badBuf, 0, true,
+                                  MQTTPriority::PRIORITY_HIGH);
                 return;
             }
             seconds = static_cast<uint32_t>(parsed > 100000 ? 100000 : parsed);
@@ -248,8 +264,16 @@ void handleSystemCommand(const char* payload) {
         }
         MQTTTask::publish(MQTT_STATUS_TESTMODE, buf, 0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "test_mode_end") == 0) {
+        // Same honesty rule as the bad_duration branch: report what actually happened.
+        // leave() returns early when no window is open, so an unconditional
+        // {"end":"command"} would announce the end of a window that never existed - which on
+        // a retained topic is indistinguishable from a real one and would have a panel
+        // believe it had just closed something.
+        const bool wasActive = TestMode::isActive();
         TestMode::leave();
-        MQTTTask::publish(MQTT_STATUS_TESTMODE, "{\"active\":false,\"end\":\"command\"}",
+        MQTTTask::publish(MQTT_STATUS_TESTMODE,
+                          wasActive ? "{\"active\":false,\"end\":\"command\"}"
+                                    : "{\"active\":false,\"end\":\"not_active\"}",
                           0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "bus_acquire") == 0) {
         ModbusBusRelease::acquire();

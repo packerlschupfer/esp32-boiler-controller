@@ -9,6 +9,9 @@
 #include "shared/SharedResources.h"
 #include "shared/SharedSensorReadings.h"
 #include "shared/SharedRelayReadings.h"
+#include "shared/RelayState.h"              // g_relayState - the relay source of truth
+#include "config/RelayIndices.h"              // relay names, so a re-map moves the labels
+#include "modules/diagnostics/TestMode.h"     // a manual window explains a surprising mask
 #include "EthernetManager.h"
 #include "monitoring/HealthMonitor.h"
 #include "core/SystemResourceProvider.h"
@@ -314,21 +317,75 @@ void RuntimeDiagnostics::dumpSensorInfo(OutputCallback outputCb) {
 
 void RuntimeDiagnostics::dumpRelayInfo(OutputCallback outputCb) {
     output("=== Relay Information ===");
-    
-    // Get relay states
-    if (SRP::takeRelayReadingsMutex(pdMS_TO_TICKS(100)) == pdTRUE) {
-        output("Relay States:");
-        
-        for (int i = 0; i < 8; i++) {
-            // Note: Adjust based on actual SharedRelayReadings structure
-            output("  Relay %d: %s", i + 1, "Unknown");
-        }
-        
-        SRP::giveRelayReadingsMutex();
-    } else {
-        output("Failed to acquire relay readings mutex");
+
+    // THIS USED TO BE A STUB. It took the relay-readings mutex, looped eight times printing
+    // the literal string "Unknown", and carried a `// Note: Adjust based on actual
+    // SharedRelayReadings structure` TODO. So `boiler/cmd/diagnostics relays` has answered
+    // "Relay 1..8: Unknown" for the life of the project while looking like a working report.
+    //
+    // Found 2026-11-13 while testing manual test mode, which is what makes it matter: only
+    // five of the eight relays appear in the published `r` bitmask on boiler/status/sensors
+    // (burner, heating pump, water pump, power boost, water mode). VALVE, SPARE and ALARM are
+    // published NOWHERE, so this report was the only way to see them - and it did not.
+    //
+    // It now reads g_relayState, which is the single source of truth that RYN4ProcessingTask
+    // actually transmits and renews - NOT SharedRelayReadings, which is a lossy second copy
+    // with no alarm field at all and relay numbers that disagree with RelayIndex in its own
+    // comments. The relay-readings mutex is therefore no longer taken: nothing read here
+    // needs it, and these are atomics.
+    //
+    // DESIRED / SENT / ACTUAL are all three printed on purpose, because the difference between
+    // them IS the diagnosis. desired != sent means a write is queued for the next RYN4_SET
+    // tick; sent != actual means the hardware did not follow, which is what
+    // RelayVerificationManager escalates on after MAX_CONSECUTIVE_FAILURES.
+    const uint8_t desired = g_relayState.desired.load(std::memory_order_acquire);
+    const uint8_t sent    = g_relayState.sent.load(std::memory_order_acquire);
+    const uint8_t actual  = g_relayState.actual.load(std::memory_order_acquire);
+
+    output("Masks: desired=0x%02X sent=0x%02X actual=0x%02X%s", desired, sent, actual,
+           (sent != actual) ? "  <-- HARDWARE DID NOT FOLLOW" : "");
+
+    // Indexed assignment, NOT a designated-initialiser array. The first version wrote
+    // `[RelayIndex::VALVE] = "valve"` and friends - a C99 feature GCC happens to accept in
+    // C++, and one that silently requires the index constants to be in INCREASING order. So
+    // the moment someone re-maps the relays into a different order - the exact event these
+    // labels exist to survive - the labels would land on the wrong bits, in a build that
+    // still compiled. Assigning by index is order-independent, and the "?" prefill means a
+    // relay added to RelayIndex without a label here prints "?" rather than a stale pointer.
+    const char* names[RelayIndex::MAX_RELAYS];
+    for (uint8_t i = 0; i < RelayIndex::MAX_RELAYS; i++) {
+        names[i] = "?";
     }
-    
+    names[RelayIndex::BURNER_ENABLE] = "burner_enable";
+    names[RelayIndex::POWER_BOOST]   = "power_boost";
+    names[RelayIndex::WATER_MODE]    = "water_mode";
+    names[RelayIndex::VALVE]         = "valve";
+    names[RelayIndex::HEATING_PUMP]  = "heating_pump";
+    names[RelayIndex::WATER_PUMP]    = "water_pump";
+    names[RelayIndex::SPARE_7]       = "spare";
+    names[RelayIndex::ALARM]         = "alarm";
+
+    output("Relay States (physical: name = actual, desired if different):");
+    for (uint8_t i = 0; i < RelayIndex::MAX_RELAYS; i++) {
+        const uint8_t bit = static_cast<uint8_t>(1u << i);
+        const bool a = (actual & bit) != 0;
+        const bool d = (desired & bit) != 0;
+        if (a == d) {
+            output("  %u: %-13s %s", RelayIndex::toPhysical(i), names[i], a ? "ON" : "OFF");
+        } else {
+            output("  %u: %-13s %s (desired %s)", RelayIndex::toPhysical(i), names[i],
+                   a ? "ON" : "OFF", d ? "ON" : "OFF");
+        }
+    }
+
+    // Beside the masks because a manual window explains any state that looks wrong, and an
+    // operator reading this report during one needs to know that before anything else.
+    if (TestMode::isActive()) {
+        output("MANUAL TEST MODE ACTIVE - %lu s left. Relays are under operator control; "
+               "the automatic path has stood down.",
+               static_cast<unsigned long>(TestMode::secondsLeft()));
+    }
+
     output(std::string());
 }
 
