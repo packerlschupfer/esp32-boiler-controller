@@ -38,6 +38,7 @@ namespace {
     static constexpr uint8_t SUB_ERRORS = (1 << 3);
     static constexpr uint8_t SUB_SCHEDULER = (1 << 4);
     static constexpr uint8_t SUB_CMD_CONFIG = (1 << 5);  // F36: boiler/cmd/config/+ (safety config)
+    static constexpr uint8_t SUB_CMD_RELAY = (1 << 6);   // boiler/cmd/relay/+ (manual test mode)
     static constexpr uint32_t SUBSCRIPTION_RETRY_DELAY_MS = 5000;  // 5 seconds
     static TimerHandle_t subscriptionRetryTimer = nullptr;
 
@@ -181,6 +182,28 @@ void setupSubscriptions() {
         LOG_INFO(TAG, "Successfully subscribed to %s", cmdConfigTopic);
     }
 
+    // Subscribe to manual relay commands (e.g., boiler/cmd/relay/heating_pump).
+    //
+    // A THIRD subscription is needed for the same reason cmd/config/+ needed a second one:
+    // boiler/cmd/+ matches ONE level, so boiler/cmd/relay/<name> is not covered by it. That
+    // is why the add-on's relay card published into the void for a year - the topic was never
+    // subscribed, not malformed. Recorded in failedSubscriptions so a failure is retried
+    // rather than leaving the feature silently dead, which is the exact history here.
+    char cmdRelayTopic[64];
+    snprintf(cmdRelayTopic, sizeof(cmdRelayTopic), "%s/relay/+", MQTT_CMD_PREFIX);
+
+    result = mqttManager->subscribe(cmdRelayTopic,
+        [](const String& topic, const String& payload) {
+            MQTTCommandHandlers::routeControlCommand(topic.c_str(), payload.c_str());
+        }, 0);  // QoS 0
+
+    if (!result.isOk()) {
+        LOG_ERROR(TAG, "Failed to subscribe to %s, error: %d", cmdRelayTopic, static_cast<int>(result.error()));
+        failedSubscriptions |= SUB_CMD_RELAY;
+    } else {
+        LOG_INFO(TAG, "Successfully subscribed to %s", cmdRelayTopic);
+    }
+
     // Subscribe to configuration updates
     LOG_INFO(TAG, "Step 3/5: Subscribing to %s/+", MQTT_CONFIG_PREFIX);
 
@@ -289,6 +312,20 @@ void retryFailedSubscriptions() {
         if (result.isOk()) {
             failedSubscriptions &= ~SUB_CMD_CONFIG;
             LOG_INFO(TAG, "Retry: %s succeeded", cmdConfigTopic);
+        }
+    }
+
+    // Retry the boiler/cmd/relay/+ subscription if it failed
+    if (failedSubscriptions & SUB_CMD_RELAY) {
+        char cmdRelayTopic[64];
+        snprintf(cmdRelayTopic, sizeof(cmdRelayTopic), "%s/relay/+", MQTT_CMD_PREFIX);
+        auto result = mqttManager->subscribe(cmdRelayTopic,
+            [](const String& topic, const String& payload) {
+                MQTTCommandHandlers::routeControlCommand(topic.c_str(), payload.c_str());
+            }, 0);
+        if (result.isOk()) {
+            failedSubscriptions &= ~SUB_CMD_RELAY;
+            LOG_INFO(TAG, "Retry: %s succeeded", cmdRelayTopic);
         }
     }
 

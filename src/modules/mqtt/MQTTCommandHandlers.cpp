@@ -21,6 +21,7 @@
 #include "core/StateManager.h"
 #include "core/ModbusBusRelease.h"       // boiler/cmd/system -> bus_release / bus_acquire
 #include "modules/diagnostics/SyslogWindow.h"  // boiler/cmd/system -> syslog_window / syslog_close
+#include "modules/diagnostics/TestMode.h"      // boiler/cmd/system -> test_mode, boiler/cmd/relay/*
 #include "monitoring/HealthMonitor.h"  // boiler/cmd/diagnostics -> "health"
 #include "modules/tasks/ANDRTF3Task.h"   // boiler/cmd/diagnostics -> "room_sensor"
 #include <nvs_flash.h>  // For nvs_flash_erase()
@@ -207,6 +208,48 @@ void handleSystemCommand(const char* payload) {
     } else if (strcmp(payload, "syslog_close") == 0) {
         SyslogWindow::close();
         MQTTTask::publish(MQTT_STATUS_SYSLOG, "{\"open\":false,\"end\":\"command\"}",
+                          0, true, MQTTPriority::PRIORITY_HIGH);
+    } else if (strncmp(payload, "test_mode", 9) == 0 &&
+               strcmp(payload, "test_mode_end") != 0) {
+        // "test_mode" or "test_mode <seconds>" - take DIRECT MANUAL CONTROL of the relays.
+        // Third verb of the same shape as bus_release and syslog_window above, with the same
+        // parse, so the three read alike. Re-issuing while active EXTENDS it.
+        //
+        // The test_mode_end exclusion above is load-bearing: strncmp(.., 9) matches it too,
+        // and without it "test_mode_end" would be parsed as "test_mode" with the argument
+        // "end", fail the strtol, and publish bad_duration instead of ending the window.
+        uint32_t seconds = 0;  // 0 = take the policy default
+        const char* arg = payload + 9;
+        while (*arg == ' ' || *arg == '=' || *arg == ':') {
+            arg++;
+        }
+        if (*arg != '\0') {
+            char* end = nullptr;
+            const long parsed = strtol(arg, &end, 10);
+            if (end == arg || parsed < 0) {
+                LOG_WARN(TAG_CMD, "test_mode: cannot parse '%s' as seconds", arg);
+                MQTTTask::publish(MQTT_STATUS_TESTMODE,
+                                  "{\"active\":false,\"refused\":\"bad_duration\"}",
+                                  0, true, MQTTPriority::PRIORITY_HIGH);
+                return;
+            }
+            seconds = static_cast<uint32_t>(parsed > 100000 ? 100000 : parsed);
+        }
+
+        const TestModePolicy::Refusal refusal = TestMode::enter(seconds);
+        char buf[96];
+        if (refusal == TestModePolicy::Refusal::NONE) {
+            snprintf(buf, sizeof(buf), "{\"active\":true,\"left\":%lu}",
+                     static_cast<unsigned long>(TestMode::secondsLeft()));
+        } else {
+            // Refusing is the normal answer on a working boiler - turn heating off first.
+            snprintf(buf, sizeof(buf), "{\"active\":false,\"refused\":\"%s\"}",
+                     TestModePolicy::toString(refusal));
+        }
+        MQTTTask::publish(MQTT_STATUS_TESTMODE, buf, 0, true, MQTTPriority::PRIORITY_HIGH);
+    } else if (strcmp(payload, "test_mode_end") == 0) {
+        TestMode::leave();
+        MQTTTask::publish(MQTT_STATUS_TESTMODE, "{\"active\":false,\"end\":\"command\"}",
                           0, true, MQTTPriority::PRIORITY_HIGH);
     } else if (strcmp(payload, "bus_acquire") == 0) {
         ModbusBusRelease::acquire();
@@ -1331,9 +1374,88 @@ static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     }
 }
 
+/**
+ * @brief boiler/cmd/relay/<name> -> drive one relay by hand. Only inside a test-mode window.
+ *
+ * NAMES, NOT NUMBERS. The override that existed for five commits in June 2025 addressed
+ * relays/<1-8>/control by PHYSICAL NUMBER, so a change to the relay assignment would have
+ * silently redirected a command to different hardware while every topic kept working. These
+ * resolve through TestModePolicy::relayFromName(), which reads RelayIndex - the single source
+ * of truth for the assignment - so a re-map moves the hardware and the name together.
+ *
+ * This is the topic the add-on's "Manual Relay Control" card published to for a year with
+ * nothing on the other end (the card was removed in ba8b675 for exactly that reason). Keeping
+ * the same topic shape means the card can come back unchanged.
+ */
+void handleRelayCommand(const char* topic, const char* payload) {
+    const char* lastSlash = strrchr(topic, '/');
+    if (!lastSlash) {
+        return;
+    }
+    const char* name = lastSlash + 1;
+
+    const uint8_t index = TestModePolicy::relayFromName(name);
+    if (index == 0xFF) {
+        LOG_WARN(TAG_CMD, "Unknown relay name '%s'", name);
+        MQTTTask::publish(MQTT_STATUS_ERROR, "unknown_relay", 0, false,
+                          MQTTPriority::PRIORITY_HIGH);
+        return;
+    }
+
+    bool on = false;
+    if (strcmp(payload, "on") == 0 || strcmp(payload, "1") == 0 ||
+        strcmp(payload, "close") == 0 || strcmp(payload, "ON") == 0) {
+        on = true;
+    } else if (strcmp(payload, "off") == 0 || strcmp(payload, "0") == 0 ||
+               strcmp(payload, "open") == 0 || strcmp(payload, "OFF") == 0) {
+        on = false;
+    } else {
+        LOG_WARN(TAG_CMD, "relay %s: bad payload '%s' (use on/off)", name, payload);
+        MQTTTask::publish(MQTT_STATUS_ERROR, "bad_relay_payload", 0, false,
+                          MQTTPriority::PRIORITY_HIGH);
+        return;
+    }
+
+    // TestMode::setRelay() refuses unless a window is open, and says so in the log. Not
+    // checked again here: one place decides, and that place is the one holding the state.
+    const bool ok = TestMode::setRelay(index, on);
+
+    // Reply on the status topic rather than silently, because the whole reason this feature
+    // exists is to let an operator distinguish "the relay does not work" from "the command did
+    // not arrive". A refusal that looks like nothing happening is the failure mode of the
+    // version this replaces.
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"active\":%s,\"left\":%lu,\"relay\":\"%s\",\"set\":\"%s\",\"ok\":%s}",
+             TestMode::isActive() ? "true" : "false",
+             static_cast<unsigned long>(TestMode::secondsLeft()), name, on ? "on" : "off",
+             ok ? "true" : "false");
+    MQTTTask::publish(MQTT_STATUS_TESTMODE, buf, 0, false, MQTTPriority::PRIORITY_HIGH);
+}
+
 void routeControlCommand(const char* topic, const char* payload) {
     if (!topic || !payload) {
         LOG_ERROR(TAG_CMD, "Invalid control command: null %s", !topic ? "topic" : "payload");
+        return;
+    }
+
+    // THE RELAY ROUTE IS TESTED FIRST, ahead of BOTH the deduplication check and the
+    // single-segment dispatch below. Two separate reasons, both of them real:
+    //
+    //  1. `command` is only the LAST topic segment, so boiler/cmd/relay/status would otherwise
+    //     match strcmp(command, "status") and run the status handler, and
+    //     boiler/cmd/relay/system would reach handleSystemCommand() with "on" as its payload -
+    //     which ENABLES THE BOILER. No relay is named after a command today
+    //     (TestModePolicy::relayFromName rejects both, and a test pins that), but the router
+    //     should not depend on it.
+    //  2. IT MUST NOT BE DEDUPLICATED. The dedup drops a command identical to the immediately
+    //     previous one within 2 s, which is right for "disable" and wrong here: re-asserting a
+    //     relay is a legitimate diagnostic act - it is how you check whether `desired` and the
+    //     hardware agree - and the write is idempotent, so executing twice costs nothing while
+    //     dropping the second silently is the exact failure this feature exists to remove.
+    if (strstr(topic, "/relay/") != nullptr) {
+        LOG_INFO(TAG_CMD, "Relay command on %s: %s", topic, payload);
+        handleRelayCommand(topic, payload);
         return;
     }
 

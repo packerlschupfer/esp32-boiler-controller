@@ -37,6 +37,15 @@ Safety:
   boiler/cmd/system          bus_release 900 # Hand the RS485 bus to another master (30-900 s, default 600)
                                              #   refuses while firing/pumping; ALL relays drop in 10 s
   boiler/cmd/system          bus_acquire     # Take the bus back early
+  boiler/cmd/system          test_mode 300   # MANUAL RELAY CONTROL, NO INTERLOCKS (30-900 s, default 300)
+                                             #   refuses while firing/sequencing/OTA/bus released
+  boiler/cmd/system          test_mode_end   # Hand control back; relays restored to the entry state
+  boiler/cmd/relay/<name>    on|off          # Only inside a test_mode window. Names:
+                                             #   burner power_boost water_mode valve
+                                             #   heating_pump water_pump spare alarm
+                                             #   State + per-command reply on boiler/status/testmode
+                                             #   WARNING: closing "burner" with no pump fires the
+                                             #   boiler into static water. Nothing here stops that.
                                              # Result on boiler/status/burner:
                                              #   emergency_released | emergency_not_active |
                                              #   emergency_release_refused:<temperature_high|sensors_unavailable|system_errors>

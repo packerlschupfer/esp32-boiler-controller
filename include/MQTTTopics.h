@@ -35,6 +35,7 @@
 // controller is deliberately out of service, and that must not be invisible.
 #define MQTT_STATUS_BUS                 MQTT_STATUS_PREFIX "/bus"
 #define MQTT_STATUS_SYSLOG              MQTT_STATUS_PREFIX "/syslog"   // bounded remote-logging window
+#define MQTT_STATUS_TESTMODE            MQTT_STATUS_PREFIX "/testmode" // bounded manual relay window
 
 // Boiler system status topics
 #define MQTT_STATUS_SYSTEM              MQTT_STATUS_PREFIX "/system"

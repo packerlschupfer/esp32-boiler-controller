@@ -4,6 +4,7 @@
 #include "core/SystemResourceProvider.h"
 #include "core/ModbusBusRelease.h"             // bus-release expiry backstop and its status topic
 #include "modules/diagnostics/SyslogWindow.h"  // syslog-window expiry and its status topic
+#include "modules/diagnostics/TestMode.h"      // manual relay window: expiry backstop + status
 #include "MQTTTopics.h"
 #include "modules/tasks/MonitoringTask.h"
 #include "modules/control/CentralizedFailsafe.h"  // centralized topic macros - see the note below
@@ -65,6 +66,14 @@ void publishSystemStatus() {
     // is re-opened on the same tick rather than leaving a one-cycle hole in the log.
     SyslogWindow::maintainAlwaysOn();
 
+    // Backstop for the manual test-mode window. The REAL expiry is on
+    // ModbusCoordinator::processTick()'s 500 ms cadence, which is the only one fast enough for
+    // a window that holds live relays - this covers "the coordinator is stopped", the same
+    // gap the bus-release backstop above covers, and nothing else. If both are gone then
+    // nothing is renewing the RYN4 DELAY watchdog either and the board has already
+    // de-energised every relay by itself.
+    TestMode::expireIfDue();
+
     auto mqttManager = SRP::getMQTTManager();
     if (!mqttManager || !mqttManager->isConnected()) {
         return;
@@ -86,6 +95,25 @@ void publishSystemStatus() {
             }
         }
         MQTTTask::publish(MQTT_STATUS_BUS, busBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
+    }
+
+    if (TestMode::consumeStateChange()) {
+        char tmBuf[96];
+        if (TestMode::isActive()) {
+            snprintf(tmBuf, sizeof(tmBuf), "{\"active\":true,\"left\":%lu}",
+                     static_cast<unsigned long>(TestMode::secondsLeft()));
+        } else {
+            const TestMode::Ended how = TestMode::lastEnd();
+            snprintf(tmBuf, sizeof(tmBuf), "{\"active\":false,\"end\":\"%s\"}",
+                     TestMode::endedToString(how));
+            if (how == TestMode::Ended::BY_TIMEOUT) {
+                // WARN rather than INFO: a window that ran to its deadline means the operator
+                // walked away from a boiler with manually-set relays, and the relays have just
+                // moved under them. Worth a line even though it is the designed behaviour.
+                LOG_WARN(TAG, "Test mode expired - relays restored, automatic control resumed");
+            }
+        }
+        MQTTTask::publish(MQTT_STATUS_TESTMODE, tmBuf, 0, true, MQTTPriority::PRIORITY_HIGH);
     }
 
     if (SyslogWindow::consumeStateChange()) {

@@ -1,6 +1,7 @@
 // src/core/ModbusCoordinator.cpp
 #include "ModbusCoordinator.h"
-#include "core/ModbusBusRelease.h"  // the deliberate hand-over of the bus
+#include "core/ModbusBusRelease.h"       // the deliberate hand-over of the bus
+#include "modules/diagnostics/TestMode.h"  // manual window expires on this tick too
 #include "utils/MutexRetryHelper.h"
 #include <algorithm>
 
@@ -145,6 +146,19 @@ void ModbusCoordinator::processTick() {
     // window cannot outlive its deadline even if the network, the broker or the whole MQTT
     // stack is gone. See BusReleasePolicy.h.
     ModbusBusRelease::expireIfDue();
+
+    // The manual test-mode window expires here too, and for a sharper reason: it is the only
+    // caller that runs often enough. The MQTT publisher is a backstop but fires on the 60 s
+    // health cadence, so a 300 s window relying on it could hold the relays for 360. A window
+    // that energises hardware with no software interlock behind it must not overrun by a
+    // minute, so the deadline is enforced on the 500 ms tick that schedules relay writes.
+    //
+    // Before the bus gate below, deliberately: TestModePolicy::mayEnter() refuses while the
+    // bus is released, so the two windows cannot overlap at entry - but a bus release opened
+    // DURING a test-mode window (nothing forbids it) must not be able to freeze the test-mode
+    // deadline by returning early.
+    TestMode::expireIfDue();
+
     if (ModbusBusRelease::isReleased()) {
         // Keep advancing so a tick stays a unit of time rather than of bus activity.
         currentTick = (currentTick + 1) % TICKS_PER_CYCLE;

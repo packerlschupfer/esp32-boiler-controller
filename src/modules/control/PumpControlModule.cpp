@@ -13,6 +13,7 @@
 #include "modules/control/EmergencyStopRelease.h"  // Emergency heat dissipation rule
 #include "shared/RelayCommandPolicy.h"             // Pump request re-send rule
 #include "shared/RelayState.h"                     // g_relayState (relay desired state)
+#include "modules/diagnostics/TestMode.h"       // manual window: stand down, do not reconcile
 #include "config/RelayIndices.h"
 #include "core/StateManager.h"
 #include "shared/SharedSensorReadings.h"
@@ -373,9 +374,39 @@ void PumpControlModule::PumpControlTask(void* pvParameters) {
             xSemaphoreGive(stateMutex_);
         }
 
+        // THE TEST-MODE STAND-DOWN, and the one that actually carries the feature.
+        //
+        // This module is NOT edge-driven. RelayCommandPolicy::pumpRequestResendDue() re-sends
+        // its request whenever the relay bit disagrees with the state tracked here, every
+        // PUMP_REQUEST_RESEND_MS (2000 ms) - a reconciler, added in September 2026 precisely
+        // so a request lost to pump motor protection could not leave the pump off while the
+        // burner fired. Correct, and it is also the thing that would silently undo a manual
+        // pump command about two seconds after an operator issued it, in EITHER direction.
+        // Blocking at the relay layer cannot fix that, because this module would simply keep
+        // asking; it has to yield here, at the source.
+        //
+        // Everything ABOVE this point still runs - overrun timers, wasModeActive, the
+        // preheat and emergency-dissipation overrides - so desiredState and the module's view
+        // of the world stay coherent. Only the REQUEST is withheld. That is what makes the
+        // handback self-healing: currentStateRef keeps its pre-window value, lastRelayRequestMs
+        // stops advancing, and the moment the window ends either the state-change branch or
+        // the resend branch below fires on the next cycle and puts the pump where the control
+        // logic wants it. Nothing has to be restored by hand, which is why
+        // TestModePolicy::exitMask() deliberately leaves the pump bits alone.
+        //
+        // SAFETY IS UNAFFECTED. CentralizedFailsafe does not go through this module for heat
+        // dissipation - it calls RelayControlTask::setRelayStateEmergency() on both pumps
+        // directly, which bypasses the stand-down, the rate limiter and motor protection. An
+        // emergency during a manual window still gets its pumps.
+        const bool manualHold = TestMode::isActive();
+        if (manualHold) {
+            // Deliberately silent. This runs on the pump task's cycle for the whole window;
+            // one LOG_* costs ~1312 B of stack on this project, and the window is already
+            // announced on boiler/status/testmode and in the log by TestMode::enter().
+        }
         // Update state if changed
         // Motor protection is enforced at RelayControlTask layer (SafetyConfig::pumpProtectionMs)
-        if (desiredState != currentState) {
+        else if (desiredState != currentState) {
             LOG_INFO(TAG, "State change: %s -> %s",
                      currentState == PumpState::On ? "ON" : "OFF",
                      desiredState == PumpState::On ? "ON" : "OFF");

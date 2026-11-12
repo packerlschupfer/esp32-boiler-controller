@@ -15,6 +15,7 @@
 #include "core/SystemResourceProvider.h"
 #include <esp_heap_caps.h>
 #include "modules/diagnostics/SyslogWindow.h"  // free the window's DRAM for the transfer
+#include "modules/diagnostics/TestMode.h"      // end a manual relay window before the reboot
 
 static const char* TAG = "OTA";
 
@@ -45,6 +46,14 @@ void OTATask::onOTAStart() {
 
     // Now safe: any re-arm attempt from here on is refused by the OTA gate.
     SyslogWindow::closeForOTA();
+
+    // The manual test-mode window goes too, for a different reason than DRAM: an OTA ends in a
+    // reboot, nothing about the window is persisted, and manually-set relays would survive the
+    // flash only until the RYN4 DELAY watchdog dropped them ten seconds later. Ending it here
+    // restores the entry relay mask first, so the boiler comes back from the reboot in the
+    // state it was in before the operator started rather than in the middle of their test.
+    // TestModePolicy::mayEnter() refuses to open one during an OTA; this is the other half.
+    TestMode::closeForOTA();
 
     // F38: initiate a graceful burner shutdown BEFORE the flash completes and
     // reboots. Without this, an OTA pushed while the burner is RUNNING reboots

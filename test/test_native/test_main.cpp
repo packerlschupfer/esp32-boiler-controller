@@ -340,6 +340,28 @@ void test_syslog_window_seconds_left_survives_rollover();
 void test_syslog_window_refusal_labels_are_stable();
 void test_syslog_window_cap_can_span_a_real_burn();
 
+// Manual relay test mode (TestModePolicy, 2026-11-12)
+void test_test_mode_window_is_clamped_and_capped();
+void test_test_mode_entry_is_clear_on_a_quiescent_boiler();
+void test_test_mode_entry_refuses_while_the_burner_fires();
+void test_test_mode_entry_refuses_mid_sequence_but_not_when_parked();
+void test_test_mode_entry_refuses_during_ota_and_a_released_bus();
+void test_test_mode_firing_mask_matches_the_bus_release_one();
+void test_stand_down_never_blocks_an_off_command();
+void test_stand_down_blocks_automatic_on_commands();
+void test_stand_down_exempts_the_alarm_and_the_emergency_path();
+void test_exit_mask_restores_the_relays_with_no_automatic_writer();
+void test_exit_mask_always_clears_the_firing_bits();
+void test_exit_mask_takes_the_pump_bits_live_not_from_the_snapshot();
+void test_exit_mask_is_idempotent();
+void test_relay_names_resolve_through_the_relay_index();
+void test_relay_names_reject_everything_else();
+void test_relay_allowed_is_one_tier_covering_all_eight();
+void test_test_mode_expiry_survives_the_millis_rollover();
+void test_test_mode_extending_never_shortens();
+void test_test_mode_seconds_left_rounds_up();
+void test_test_mode_refusal_labels_are_stable();
+
 void test_charge_delta_bounds_match_what_the_parameter_is_registered_with();
 void test_charge_delta_valid_range_is_inclusive_at_both_ends();
 void test_charge_delta_rejects_nan_and_inf();
@@ -1085,6 +1107,26 @@ int main(int argc, char **argv) {
     RUN_TEST(test_syslog_window_seconds_left_survives_rollover);
     RUN_TEST(test_syslog_window_refusal_labels_are_stable);
     RUN_TEST(test_syslog_window_cap_can_span_a_real_burn);
+    RUN_TEST(test_test_mode_window_is_clamped_and_capped);
+    RUN_TEST(test_test_mode_entry_is_clear_on_a_quiescent_boiler);
+    RUN_TEST(test_test_mode_entry_refuses_while_the_burner_fires);
+    RUN_TEST(test_test_mode_entry_refuses_mid_sequence_but_not_when_parked);
+    RUN_TEST(test_test_mode_entry_refuses_during_ota_and_a_released_bus);
+    RUN_TEST(test_test_mode_firing_mask_matches_the_bus_release_one);
+    RUN_TEST(test_stand_down_never_blocks_an_off_command);
+    RUN_TEST(test_stand_down_blocks_automatic_on_commands);
+    RUN_TEST(test_stand_down_exempts_the_alarm_and_the_emergency_path);
+    RUN_TEST(test_exit_mask_restores_the_relays_with_no_automatic_writer);
+    RUN_TEST(test_exit_mask_always_clears_the_firing_bits);
+    RUN_TEST(test_exit_mask_takes_the_pump_bits_live_not_from_the_snapshot);
+    RUN_TEST(test_exit_mask_is_idempotent);
+    RUN_TEST(test_relay_names_resolve_through_the_relay_index);
+    RUN_TEST(test_relay_names_reject_everything_else);
+    RUN_TEST(test_relay_allowed_is_one_tier_covering_all_eight);
+    RUN_TEST(test_test_mode_expiry_survives_the_millis_rollover);
+    RUN_TEST(test_test_mode_extending_never_shortens);
+    RUN_TEST(test_test_mode_seconds_left_rounds_up);
+    RUN_TEST(test_test_mode_refusal_labels_are_stable);
 
     // Scheduler clock (RTC UTC -> local schedule wall-clock, DST rule)
     RUN_TEST(test_scheduler_clock_spring_forward_skips_an_hour);

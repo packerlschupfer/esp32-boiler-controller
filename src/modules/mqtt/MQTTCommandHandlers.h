@@ -85,6 +85,18 @@ void handleSchedulerCommand(const char* topic, const char* payload);
 void handleDiagnosticsCommand(const char* payload);
 
 /**
+ * @brief boiler/cmd/relay/<name> -> drive one relay by hand inside a test-mode window.
+ *
+ * Accepted only while TestMode is active; outside a window the command is refused and said
+ * so on boiler/status/testmode rather than silently dropped. Relay names resolve through
+ * TestModePolicy::relayFromName(). See TestModePolicy.h for what is and is not checked.
+ *
+ * @param topic   Full topic path; the relay name is its last segment
+ * @param payload on|1|close or off|0|open
+ */
+void handleRelayCommand(const char* topic, const char* payload);
+
+/**
  * @brief Main command router - dispatches to specific handlers
  * @param topic Full topic path (e.g., "boiler/cmd/heating")
  * @param payload Command payload

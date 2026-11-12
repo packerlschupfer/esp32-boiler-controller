@@ -32,6 +32,19 @@ public:
     // silently dropped because the pump toggled within the last 15s. Use ONLY
     // from failsafe/emergency paths.
     static bool setRelayStateEmergency(uint8_t relayIndex, bool state);
+    /**
+     * @brief Operator-driven relay set for manual test mode. NO interlocks, NO rate limit,
+     *        NO pump motor protection - see TestModePolicy.h.
+     *
+     * Separate from setRelayStateEmergency() even though both bypass the same protections,
+     * because the two are not the same event and the log has to say which: that one means
+     * "the safety system acted", this one means "a human asked". Sharing it would have put
+     * "EMERGENCY set relay" in the log for every manual click.
+     *
+     * Not routed through setRelayState(): that is where the test-mode stand-down lives, and a
+     * manual command must not be refused by the gate that exists to protect it.
+     */
+    static bool setRelayStateManual(uint8_t relayIndex, bool state);
     static bool setAllRelays(bool state);
     static bool setMultipleRelays(const std::array<bool, 8>& states);  // Using array for type safety
     static bool toggleRelay(uint8_t relayIndex);

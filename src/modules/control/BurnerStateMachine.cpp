@@ -11,6 +11,7 @@
 #include "modules/control/BurnerRuntimeTracker.h"  // Round 21: Extracted runtime tracking
 #include "modules/tasks/RelayControlTask.h"
 #include "core/ModbusBusRelease.h"  // no arming while the bus belongs to another master
+#include "modules/diagnostics/TestMode.h"  // manual test mode also blocks arming
 #include "modules/tasks/MQTTTask.h"  // H15: For error recovery notification
 #include "MQTTTopics.h"  // C1: Centralized topic macros (prevents hardcoded string drift)
 #include "shared/SharedResources.h"
@@ -241,15 +242,24 @@ bool BurnerStateMachine::setHeatDemand(bool demand, Temperature_t target, bool h
     // state machine would walk through PRE_PURGE into IGNITION on stale readings and have
     // its relay writes land the instant the bus came back, with its minimum-on-time already
     // part spent. OFF stays permitted, as always. See BusReleasePolicy.h.
+    //
+    // While MANUAL TEST MODE holds the relays, demand may not be ARMED either, for a reason
+    // that is NOT the bus-release one: here the relays are perfectly reachable. The problem is
+    // that the state machine would walk through PRE_PURGE into IGNITION and start writing
+    // firing bits under the operator's hand, mid-test, having made that decision from readings
+    // the operator may be deliberately disturbing. OFF stays permitted, as always. See
+    // TestModePolicy.h - this is the first of the three stand-downs, and the cheapest.
     const bool busReleased = ModbusBusRelease::isReleased();
+    const bool testMode = TestMode::isActive();
     BurnerDemandGate::DemandSlot slot = {heatDemand, targetTemperature, requestedHighPower};
     const BurnerDemandGate::WriteResult result =
         BurnerDemandGate::applyDemandWrite(slot, demand, target, highPower,
-                                           demandPermitted.load() && !busReleased);
+                                           demandPermitted.load() && !busReleased && !testMode);
     if (result == BurnerDemandGate::WriteResult::REFUSED) {
         LOG_INFO(TAG, "Heat demand ON refused - %s",
                  busReleased ? "RS485 bus released to another master"
-                             : "burner demand not permitted");
+                             : (testMode ? "manual test mode active"
+                                         : "burner demand not permitted"));
         return false;
     }
 

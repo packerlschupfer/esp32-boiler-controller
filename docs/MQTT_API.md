@@ -490,7 +490,7 @@ mosquitto_pub -t "boiler/cmd/system" -m "enable"
 mosquitto_pub -t "boiler/cmd/system" -m "disable"
 ```
 
-Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`, `bus_release [seconds]`, `bus_acquire`.
+Payloads: `on`/`enable`/`1`, `off`/`disable`/`0`, `reboot`/`restart`/`reset` (reboot), `nvs_erase`, `bus_release [seconds]`, `bus_acquire`, `syslog_window [seconds]`, `syslog_close`, `test_mode [seconds]`, `test_mode_end`.
 
 Enable/disable of the boiler, heating and water, water `priority_on`/`priority_off` and the heating/water OFF overrides are saved to NVS immediately and survive a reboot (before 2026-09-15 they stayed in RAM until some other parameter save).
 
@@ -538,6 +538,99 @@ so the first write afterwards cannot re-energise the burner on a decision taken 
 that went stale mid-window. A reboot during a window is safe by construction: nothing is
 persisted, so the controller comes back fully operational with a busy bus and the other
 master's tool fails visibly, which is the right way round.
+
+#### Manual relay test mode
+
+```bash
+mosquitto_pub -t "boiler/cmd/system" -m "test_mode 300"       # seconds; omit for the 300 s default
+mosquitto_pub -t "boiler/cmd/relay/heating_pump" -m "on"
+mosquitto_pub -t "boiler/cmd/relay/valve" -m "off"
+mosquitto_pub -t "boiler/cmd/system" -m "test_mode_end"       # hand control back early
+```
+
+For driving individual relays by hand on a live controller - listening to a pump, confirming a
+valve actually diverts, checking wiring after work, chasing a fault that only shows under load.
+Until 2026-11-12 there was no way to do any of that: the add-on panel's "Manual Relay Control"
+card published `boiler/cmd/relay/<name>` to a topic **nothing had ever subscribed to**, and the
+only real override that ever existed (`relays/<1-8>/control`, live for five commits on
+2025-06-13) was commented out six months before that card was written.
+
+State is published on `boiler/status/testmode` (retained on transitions):
+`{"active":true,"left":300}` / `{"active":false,"end":"timeout"|"command"|"ota"}` /
+`{"active":false,"refused":"<reason>"}`. Each relay command gets its own non-retained reply on
+the same topic: `{"active":true,"left":287,"relay":"heating_pump","set":"on","ok":true}` - so a
+command that was refused is visibly refused rather than silently dropped, which is the failure
+mode of the version this replaces.
+
+Window: default 300 s, minimum 30 s, **maximum 900 s (hard cap)**. Shorter default than
+`bus_release` on purpose: this one energises hardware with no software interlock behind it, so
+the operator is expected to be standing at the boiler. A `test_mode` while already active only
+ever **extends** the window, never shortens it. The window expires on-device, on the 500 ms
+Modbus tick - not on the 60 s publish cadence, which would let a 300 s window run to 360.
+
+**THERE ARE NO INTERLOCKS ON THE COMMANDS.** Owner's decision, 2026-11-12, and the whole point
+of the feature. A relay command inside an open window goes to the hardware: it is not checked
+against overheat, sensor validity, emergency state or pump motor protection, and the toggle
+rate limiter is bypassed too (a diagnostic tool whose commands are silently dropped teaches you
+the hardware is broken when it is not). In particular:
+
+> **Closing `burner` with no pump running fires the boiler into static water.** Nothing in this
+> firmware will stop that. The Vaillant's own overheat cutout is the only remaining protection.
+
+What does still protect you, none of it from this firmware's control logic:
+
+- The **RYN4 DELAY watchdog** de-energises any closed relay within 10 s unless the firmware
+  renews it, so a manual relay cannot outlive the controller that set it.
+- The window **self-expires on-device**, so a dropped network cannot leave it open.
+- The boiler's own thermostat, overheat cutout and flame supervision are untouched. This
+  bypasses *our* interlocks, not the boiler's.
+- **`CentralizedFailsafe` still acts.** It can shut the burner down under the operator and
+  will; its relay OFFs and its emergency pump-ON both bypass the stand-down. That is not a
+  check on what the operator asks for - it is an independent actor that was always there, and
+  leaving it armed is what makes "no interlocks" an acceptable answer.
+
+Relay names, all eight in **one tier** (no safe/hazardous split):
+
+| Name | Physical | Function |
+|------|----------|----------|
+| `burner` / `burner_enable` | 1 | Burner enable - **fires the boiler** |
+| `power_boost` / `half_power` | 2 | Stage 2. `half_power` is the panel's old name and a misnomer: ON means FULL power |
+| `water_mode` | 3 | Water-heating mode - **also fires the boiler** |
+| `valve` | 4 | Diverter valve. No automatic writer exists, so this is the only way it is ever commanded |
+| `heating_pump` | 5 | Heating circulation pump |
+| `water_pump` | 6 | Water circulation pump |
+| `spare` | 7 | Spare |
+| `alarm` | 8 | Alarm/buzzer |
+
+Names, not numbers, deliberately: the 2025 override addressed relays by physical number, so a
+change to the relay assignment would have silently redirected a working topic at different
+hardware. These resolve through `RelayIndex`, the single source of truth, so a re-map moves the
+name and the hardware together. Payloads: `on`/`1`/`close`, `off`/`0`/`open`.
+
+Entry **refuses** on a boiler that is doing something - these are not interlocks on the
+commands, they stop the window opening in the middle of an ignition:
+
+| Refusal | Meaning |
+|---------|---------|
+| `ota_active` | An update is running. Checked first; an OTA ends in a reboot so nothing else matters |
+| `bus_released` | The RS485 bus belongs to another master, so the relays are physically unreachable |
+| `burner_active` | A firing relay is closed (burner enable or water mode). `power_boost` alone does **not** refuse - it cannot light anything |
+| `burner_sequencing` | Mid pre-purge, ignition, running, mode switch or post-purge. LOCKOUT and ERROR do **not** block - they are quiescent and are exactly when you want the relays |
+
+Deliberately **not** refused: a latched emergency stop, a failed sensor, a DEGRADED failsafe, or
+a running pump. Those are the conditions you open this mode to investigate.
+
+While active, three things stand down so a manual command is not reverted under you: heat demand
+**cannot be armed**, `PumpControlModule` stops reconciling (its 2 s re-send would otherwise undo
+a manual pump command in either direction), and the relay layer refuses non-emergency **ON**
+commands. Every **OFF** still goes through, which is what keeps the safety shutdown working.
+
+On exit - by command, by timeout, or because an OTA started - the relays are **put back as they
+were found**: the entry mask is restored with the firing bits forced off, and the pump bits are
+left alone because `PumpControlModule` reconciles them within 2 s anyway. Not "all off", which
+was the first design: `valve` and `alarm` have no automatic writer, so zeroing them would hold a
+diverter closed or an alarm silent until the next lockout edge. Nothing is persisted, so a
+reboot mid-window comes back in full automatic control.
 
 Sensors go stale during the window and the sensor fallback is **deliberately not** escalated
 for it - see `include/modules/control/BusReleasePolicy.h`.
@@ -1169,6 +1262,7 @@ More status topics (system/heating/water replies, sensor fallback, FRAM, alerts)
 | `test/echo` | Echo test | Any string |
 | `boiler/cmd/+` | Control commands (`system`, `heating`, `water`/`wheater`, `room_target`, `pid_autotune`, `burner_reset`, `emergency_reset`, `fram`, `fram_errors`, `status`) | String |
 | `boiler/cmd/config/+` | Configuration commands (see Safety Configuration, Return Preheat, Other Configuration Commands) | Integer (IP string for `syslog_server_ip`) |
+| `boiler/cmd/relay/+` | Manual relay control, **only inside a `test_mode` window** (see Manual relay test mode). A third subscription is needed because `boiler/cmd/+` matches one level only | `on`/`1`/`close`, `off`/`0`/`open` |
 | `boiler/cmd/config/pump_protection_ms` | Pump protection delay | Integer (5000-60000) |
 | `boiler/cmd/config/sensor_stale_ms` | Sensor staleness timeout | Integer (30000-300000) |
 | `boiler/cmd/config/post_purge_ms` | Post-purge duration | Integer (30000-180000) |

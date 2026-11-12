@@ -6,6 +6,7 @@
 #include <esp_task_wdt.h>
 #include "LoggingMacros.h"
 #include "config/ProjectConfig.h"
+#include "modules/diagnostics/TestMode.h"  // the test-mode stand-down in setRelayState()
 #include "config/SafetyConfig.h"
 #include "config/SystemConstants.h"  // FMEA Round 6: For WDT_RELAY_CONTROL_MS
 #include "config/RelayIndices.h"  // For RelayIndex constants
@@ -673,7 +674,27 @@ bool RelayControlTask::setRelayState(uint8_t relayIndex, bool state) {
         LOG_ERROR(TAG, "Invalid relay index: %d", relayIndex);
         return false;
     }
-    
+
+    // THE TEST-MODE STAND-DOWN. While an operator holds the relays, the automatic control
+    // path may not ENERGISE anything behind their back.
+    //
+    // Only ON is blocked, and ALARM is exempt - the full reasoning, including why a blanket
+    // block here would have disabled CentralizedFailsafe's overheat shutdown, is in
+    // TestModePolicy.h beside standDownBlocks() itself. This is the belt-and-braces layer;
+    // the two that actually carry the feature are the demand gate in
+    // BurnerStateMachine::setHeatDemand() and PumpControlModule's reconcile skip.
+    //
+    // DEBUG, not WARN: PumpControlModule re-sends a disagreeing request every 2 s, so a
+    // refusal here is a repeating event for the length of the window, not an incident. It
+    // should not be reachable at all once the pump module stands down - this catches the
+    // writer I did not enumerate.
+    if (TestMode::isActive() &&
+        TestModePolicy::standDownBlocks(static_cast<uint8_t>(relayIndex - 1), state,
+                                        /*isEmergency=*/false)) {
+        LOG_DEBUG(TAG, "Relay %d ON refused - test mode holds the relays", relayIndex);
+        return false;
+    }
+
     // F26: dedup against g_relayState.desired - the single source of truth that
     // RYN4ProcessingTask actually transmits and renews - NOT the currentRelayStates
     // command-history cache, which is a second copy that can silently diverge from
@@ -708,6 +729,23 @@ bool RelayControlTask::setRelayStateEmergency(uint8_t relayIndex, bool state) {
         return false;
     }
     LOG_WARN(TAG, "EMERGENCY set relay %d to %s (protection bypassed)", relayIndex, state ? "ON" : "OFF");
+    return processSingleRelay(relayIndex, state, /*emergencyBypass=*/true);
+}
+
+bool RelayControlTask::setRelayStateManual(uint8_t relayIndex, bool state) {
+    // Manual test mode: same bypass as the emergency path (duplicate skip, toggle rate
+    // limiter, pump motor protection) with its own log line. See the header for why these are
+    // two functions, and TestModePolicy.h for why bypassing is deliberate rather than lazy.
+    if (!initialized || !ryn4Device) {
+        LOG_ERROR(TAG, "Task not initialized (manual relay %d)", relayIndex);
+        return false;
+    }
+    if (relayIndex < 1 || relayIndex > 8) {
+        LOG_ERROR(TAG, "Invalid relay index (manual): %d", relayIndex);
+        return false;
+    }
+    LOG_WARN(TAG, "MANUAL set relay %d to %s (test mode, protections bypassed)",
+             relayIndex, state ? "ON" : "OFF");
     return processSingleRelay(relayIndex, state, /*emergencyBypass=*/true);
 }
 
