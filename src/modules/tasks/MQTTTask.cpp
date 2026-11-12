@@ -736,7 +736,30 @@ bool MQTTTask::publish(const char* topic, const char* payload, int qos, bool ret
             queueHealthTracking.droppedHighPriority++;
         }
     } else if (normalPriorityQueue_) {
-        queued = normalPriorityQueue_->send(&request, 0);
+        // WAIT BRIEFLY RATHER THAN DROP. A zero timeout meant a BURST was lost rather than
+        // delayed: params/get/all republishes 11 groups into a 5-deep DROP_OLDEST queue, so a
+        // dashboard start-up overflowed it and silently discarded parameter publishes. Measured
+        // live 2026-11-11 19:43:53 - "Queue 'mqtt_normal_priority' at 80% capacity" and 7
+        // dropped messages - leaving HA config entities stale for whichever groups were lost.
+        // Same user-visible symptom as the group loss fixed in ce041e3, one layer lower.
+        //
+        // Buying buffer instead would cost RAM this device does not have to spare: a slot is
+        // ~396 B, so 5 -> 16 is ~4.4 kB against ~13 kB free. Slowing the PRODUCER is free, and
+        // the producer is by definition not urgent - CRITICAL and HIGH still take the other
+        // queue with a zero timeout, so no safety or command-reply path can ever block here.
+        //
+        // The bound is small on purpose: if the broker is down the queue stops draining, and
+        // this must not turn every periodic publish into a 25 ms stall for long.
+        //
+        // AND NEVER WAIT ON OUR OWN TASK. MQTTTask publishes to this queue from inside its own
+        // loop (publishSensorData() at :492, the connect-time status burst at :372-385), and
+        // that same loop is what DRAINS it. Blocking there would stop the drainer for the
+        // whole timeout, so the wait could not possibly be satisfied - it would be 25 ms of
+        // guaranteed delay followed by the same drop. External producers, which is where the
+        // params/get/all burst comes from, are the only ones that can usefully wait.
+        const TickType_t waitTicks =
+            (xTaskGetCurrentTaskHandle() == taskHandle_) ? 0 : pdMS_TO_TICKS(25);
+        queued = normalPriorityQueue_->send(&request, waitTicks);
         if (!queued) {
             queueHealthTracking.droppedNormalPriority++;
         }

@@ -1029,6 +1029,21 @@ void publishSafetyConfig() {
 static void handleSafetyConfigCommand(const char* topic, const char* payload) {
     LOG_INFO(TAG_CMD, "Safety config command: %s = %s", topic, payload);
 
+    // A GET IS NOT A SET, and until 2026-11-12 this did not distinguish them. Everything
+    // below parses the payload as a NUMBER, but on boiler/cmd/config/get the payload names
+    // the section to read ("safety") - so a perfectly valid query fell through to
+    // "Invalid numeric value: safety", published invalid_numeric_value to the error topic at
+    // HIGH priority, and never answered. The command looked supported and did nothing.
+    //
+    // Seen live on 2026-11-11 19:43:53 in a dashboard's start-up burst. publishSafetyConfig()
+    // already existed and already publishes the retained boiler/status/safety_config payload;
+    // the GET simply never reached it.
+    if (strstr(topic, "/config/get") != nullptr) {
+        publishSafetyConfig();
+        LOG_INFO(TAG_CMD, "Safety config published on request");
+        return;
+    }
+
     // M2: Proper input validation using strtoul
     char* endptr = nullptr;
     errno = 0;
