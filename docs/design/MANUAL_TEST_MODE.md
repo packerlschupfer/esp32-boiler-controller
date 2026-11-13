@@ -119,7 +119,42 @@ refuse to send while inactive, rather than offering buttons that do nothing outs
 That is the HA peer's call, not firmware's. The per-command reply on `boiler/status/testmode`
 is there for exactly this: the card can show whether a click landed.
 
-**Untested on hardware.** Everything above is reasoned from the code plus 20 native tests. The
-first live window is the real test, and the thing to watch is whether the pump stand-down
-behaves on handback — a manual pump command, then `test_mode_end`, then confirm
-`PumpControlModule` puts the pump back within ~2 s without a flap.
+Nothing. **Hardware-verified 2026-11-13** on fw `0.1.0-1daa479`, 14 live tests:
+
+- refusal outside a window, reported rather than silent; clamp (`1` to 30 s); extend-never-
+  shortens (`300` then `30` leaves 298 left)
+- **the pump stand-down**, which was the open risk: a manual `heating_pump on` held 10+ s, past
+  five of `PumpControlModule`'s 2 s resends. Handback reclaimed the pump within 2 s of
+  `test_mode_end`, no flap.
+- the exit mask: `valve`+`spare` ON gave `desired=sent=actual=0x48`, and both were OFF again
+  after exit. Those are the two relays no observable existed for before this round.
+- `half_power` and `power_boost` address the same relay, in both directions
+- **a live stage-1 burn**: manual `heating_pump on` then `burner on` lit the boiler, confirmed
+  at the boiler by the owner
+- **the exit mask clearing a live FIRING bit on timeout.** Unplanned: the 180 s window expired
+  during the burn with `BURNER_ENABLE` still set, and `r` went to 0 by itself. That is the
+  "operator walks away mid-test" case, measured rather than argued, and it is the single most
+  safety-relevant path in the feature.
+
+`alarm` (relay 8) is the one relay not exercised: **nothing is attached to it** (owner,
+2026-11-13), so there is nothing to observe. Its command path is identical to `spare`.
+
+### A measurement trap, recorded because it cost a wrong call during this very test
+
+**Boiler output FALLS for the first minute of a manual burn, and that is not a failed
+ignition.** Measured, with the flame on the whole time: `bo` 42.2, 39.6, 38.3, 37.2, 36.4,
+36.0, 35.8, 35.8. Starting the pump pushes a whole house loop of ~30 C water through a boiler
+body sitting ~12 K warmer, and a 19 kW stage-1 burn loses that race before it wins it. I read
+the falling sign as "no flame" and said so out loud.
+
+Three readings that get it right, none of which is `bo`'s direction:
+
+- **the rate**, not the value: -1.3, -1.1, -0.8, -0.4, -0.2, 0.0. Deceleration to flat is heat
+  input arriving. An unlit boiler keeps decaying.
+- **`bo` against `br`**: they held an ~5 K standing difference. Unlit, they converge.
+- **the post-burn soak**, the cleanest of the three: with pump AND burner off, `bo` rose 38.3,
+  38.8, 39.3. Only a body that has been fired does that.
+
+The gas-meter pulse counter is the only direct flame proof in the system, and it is an HA
+sensor, **not on the boiler's own broker**, so it is unavailable from a shell test. Ask the HA
+side, or use the soak.
