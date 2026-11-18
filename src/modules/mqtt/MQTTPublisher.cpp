@@ -4,6 +4,7 @@
 #include "core/SystemResourceProvider.h"
 #include "core/ModbusBusRelease.h"             // bus-release expiry backstop and its status topic
 #include "modules/diagnostics/SyslogWindow.h"  // syslog-window expiry and its status topic
+#include "modules/diagnostics/BootReason.h"    // once-per-boot restart log line
 #include "modules/diagnostics/TestMode.h"      // manual relay window: expiry backstop + status
 #include "MQTTTopics.h"
 #include "modules/tasks/MonitoringTask.h"
@@ -65,6 +66,25 @@ void publishSystemStatus() {
     // Re-arm when syslog/always is set. After expireIfDue(), so a window that just timed out
     // is re-opened on the same tick rather than leaving a one-cycle hole in the log.
     SyslogWindow::maintainAlwaysOn();
+
+    // The once-per-boot restart notification. Directly after maintainAlwaysOn() so that on
+    // the first tick after a boot the window it just opened is already open here - that
+    // ordering is the fix: the line used to be logged in the MQTT connect handler, before
+    // this function had ever run, and was lost. Single caller (MQTTTask), so a plain static.
+    // Uptime is in the line so a reader can tell a fresh restart from an old one.
+    static bool s_restartLogged = false;
+    if (BootReason::shouldLogRestart(s_restartLogged, SyslogWindow::isOpen())) {
+        s_restartLogged = true;
+        const unsigned long upS = static_cast<unsigned long>(millis() / 1000UL);
+        if (BootReason::isAbnormal(g_bootReasonCode)) {
+            LOG_ERROR(TAG, "Last restart was ABNORMAL: %s (code %u), boot #%lu, up %lu s",
+                      BootReason::name(g_bootReasonCode), (unsigned)g_bootReasonCode,
+                      (unsigned long)g_bootCount, upS);
+        } else {
+            LOG_INFO(TAG, "Last restart: %s, boot #%lu, up %lu s",
+                     BootReason::name(g_bootReasonCode), (unsigned long)g_bootCount, upS);
+        }
+    }
 
     // Backstop for the manual test-mode window. The REAL expiry is on
     // ModbusCoordinator::processTick()'s 500 ms cadence, which is the only one fast enough for

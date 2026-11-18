@@ -121,6 +121,33 @@ inline size_t format(char* buf, size_t len, uint8_t code, uint32_t bootCount) {
     return static_cast<size_t>(n);
 }
 
+/**
+ * @brief Is now the moment to write the one "Last restart was ..." log line for this boot?
+ *
+ * Exactly once per boot, and only once a syslog window is open. Both halves were learned
+ * from the live alert of 2026-11-18 (boot #81, task_wdt at 2026-11-17 21:47:53Z):
+ *
+ *  - It used to be logged on EVERY MQTT connect. The HA alert is driven by that syslog line,
+ *    so a 3-minute network blip 25 h after the reboot (2026-11-18 22:43-22:45Z) raised
+ *    "Last restart was ABNORMAL: task_wdt" as if the watchdog had just fired. Uptime proved
+ *    it had not.
+ *  - And the connect that mattered never delivered it. syslog/always only re-arms the window
+ *    from MQTTPublisher::publishSystemStatus(), which runs only while connected - so on the
+ *    first connect after a boot the line was logged ~47 s BEFORE the window opened and went
+ *    nowhere. The real reboot reached HA only on a later reconnect. Gating on "once" alone
+ *    would have made that permanent: the only reboot alert would be the one that is lost.
+ *
+ * The retained boiler/status/device/boot topic is unaffected and still published on every
+ * connect - that is the durable record; this line is only the notification.
+ *
+ * If no window ever opens (syslog/always off, nobody opens one) the line is never logged
+ * remotely. That is correct: there is no remote reader to notify, and the retained topic
+ * plus the serial BOOT line still carry it.
+ */
+inline bool shouldLogRestart(bool alreadyLogged, bool syslogWindowOpen) {
+    return !alreadyLogged && syslogWindowOpen;
+}
+
 }  // namespace BootReason
 
 /**

@@ -86,3 +86,18 @@ void test_boot_reason_rejects_null_and_zero_len() {
     char buf[4];
     TEST_ASSERT_EQUAL_UINT32(0, BootReason::format(buf, 0, BootReason::SW, 1));
 }
+
+void test_boot_reason_restart_line_waits_for_the_syslog_window() {
+    // 2026-11-17: the first connect after a task_wdt boot logged the line ~47 s before the
+    // syslog window opened, so the real reboot never reached HA. Not yet open -> not yet.
+    TEST_ASSERT_FALSE(BootReason::shouldLogRestart(false, false));
+    TEST_ASSERT_TRUE(BootReason::shouldLogRestart(false, true));
+}
+
+void test_boot_reason_restart_line_is_logged_once_per_boot() {
+    // 2026-11-18: a 3-minute network blip 25 h after boot re-raised the boot-#81 alert,
+    // because the line was logged on every MQTT connect. Once logged, never again -
+    // whatever the window does afterwards.
+    TEST_ASSERT_FALSE(BootReason::shouldLogRestart(true, true));
+    TEST_ASSERT_FALSE(BootReason::shouldLogRestart(true, false));
+}

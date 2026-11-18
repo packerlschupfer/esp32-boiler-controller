@@ -378,20 +378,16 @@ void MQTTTask::taskFunction(void* parameter) {
             // comes looking - which is the point: the reboot that prompted this was
             // noticed hours later. Published on every connect rather than once, because
             // a reconnect must not leave a broker-side gap in the only record of it.
+            //
+            // The "Last restart was ..." LOG line is NOT here any more: it is written once
+            // per boot from MQTTPublisher::publishSystemStatus(), after the syslog window is
+            // open. See BootReason::shouldLogRestart() for the two failures that caused.
             {
                 char bootPayload[96];
                 if (BootReason::format(bootPayload, sizeof(bootPayload),
                                        g_bootReasonCode, g_bootCount) > 0) {
                     MQTTTask::publish(MQTT_STATUS_DEVICE_BOOT, bootPayload, 0, true,
                                       MQTTPriority::PRIORITY_MEDIUM);
-                }
-                if (BootReason::isAbnormal(g_bootReasonCode)) {
-                    LOG_ERROR(TAG, "Last restart was ABNORMAL: %s (code %u), boot #%lu",
-                              BootReason::name(g_bootReasonCode),
-                              (unsigned)g_bootReasonCode, (unsigned long)g_bootCount);
-                } else {
-                    LOG_INFO(TAG, "Last restart: %s, boot #%lu",
-                             BootReason::name(g_bootReasonCode), (unsigned long)g_bootCount);
                 }
             }
 
