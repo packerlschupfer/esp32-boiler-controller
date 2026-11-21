@@ -159,7 +159,10 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    value_template: "{{ (value_json.t.bt | default(0)) / 10 | round(1) }}"
+    # t.bt = the control loop's current flow target, held at idle (fw >= acfbea7). Absent after a
+    # reboot until the first heat request: render nothing then, so HA keeps the previous value
+    # instead of charting a 0 dip (an empty MQTT sensor value is ignored).
+    value_template: "{{ ((value_json.t.bt / 10) | round(1)) if value_json.t.bt is defined else '' }}"
     availability:
       - topic: "boiler/status/online"
         payload_available: "online"
@@ -955,6 +958,20 @@ button:
 number:
   # Water Heater Temperature Settings (Two-threshold control)
   # Start heating when tank drops below Low Limit, stop when tank rises above High Limit
+  # Hot-water stage-2 policy (fw >= acfbea7), group boiler/params/status/w. w/boostGap is tenths of K
+  # and only applies when w/boost = 2 (warm-up only): stage 2 while output < charge target - gap.
+  - name: "Water Boost Gap"
+    unique_id: boiler_param_w_boost_gap
+    command_topic: "boiler/params/set/w/boostGap"
+    command_template: "{{ (value * 10) | round(0) | int }}"
+    state_topic: "boiler/params/status/w"
+    value_template: "{{ (value_json.boostGap | float) / 10 }}"
+    min: 5
+    max: 40
+    step: 0.5
+    unit_of_measurement: "K"
+    entity_category: config
+
   - name: "Water Tank Low Limit"
     unique_id: boiler_param_wheater_temp_low
     command_topic: "boiler/params/set/wheater/tempLimitLow"
@@ -1170,3 +1187,17 @@ number:
 
   # Sensor Calibration Offsets (in tenths of °C or hundredths of BAR)
   # Use boiler/params/get/all to see current values, boiler/params/save to persist
+
+select:
+  # Hot-water stage-2 (full power) policy, fw >= acfbea7: w/boost 0 = always, 1 = never, 2 = warm-up only.
+  - name: "Water Boost Mode"
+    unique_id: boiler_param_w_boost
+    command_topic: "boiler/params/set/w/boost"
+    command_template: "{{ {'always': 0, 'never': 1, 'warm-up only': 2}[value] }}"
+    state_topic: "boiler/params/status/w"
+    value_template: "{{ {0: 'always', 1: 'never', 2: 'warm-up only'}.get(value_json.boost | int) if value_json.boost is defined else '' }}"
+    options:
+      - "always"
+      - "never"
+      - "warm-up only"
+    entity_category: config

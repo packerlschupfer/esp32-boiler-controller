@@ -78,8 +78,9 @@ turns "no reading" into a plausible measurement. Use presence:
 entity that has a `device_class`. The add-on panel's `formatTemp()` already renders an absent
 key as `--`.
 
-`bt` is the exception that stays `default(0)`-safe, because it is never absent after the first
-target of a boot. It is the control loop's current flow target after the sensor-fallback cap,
+`bt` is absent only after a reboot, until the first heat request of that boot; the HA template
+renders nothing then (`... if value_json.t.bt is defined else ''`), so the sensor keeps its
+previous value instead of charting a 0 °C dip. It is the control loop's current flow target after the sensor-fallback cap,
 updated every cycle whether the burner is firing or coasting, and it **holds its last value**
 while no burner request is active (a dropped key would chart as 0 °C). Until 2026-11-21 it was
 the burner state machine's last *armed* target, which froze while the burner coasted: during
