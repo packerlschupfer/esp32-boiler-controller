@@ -49,7 +49,7 @@ boiler/
     "wt": 551,    // Water tank: 55.1°C
     "o": 125,     // Outside: 12.5°C
     "i": 213,     // Inside/room: 21.3°C
-    "bt": 700     // Burner target: 70.0°C (only while a heat demand state is available)
+    "bt": 700     // Commanded flow setpoint: 70.0°C (live control target; held at idle)
   },
   "p": 152,       // Pressure (hundredths of BAR): 152 = 1.52 BAR
   "r": 21,        // Relay states (bitmask)
@@ -78,8 +78,13 @@ turns "no reading" into a plausible measurement. Use presence:
 entity that has a `device_class`. The add-on panel's `formatTemp()` already renders an absent
 key as `--`.
 
-`bt` is the exception that stays `default(0)`-safe: 0 is its real idle value, so absence and
-zero mean nearly the same thing there.
+`bt` is the exception that stays `default(0)`-safe, because it is never absent after the first
+target of a boot. It is the control loop's current flow target after the sensor-fallback cap,
+updated every cycle whether the burner is firing or coasting, and it **holds its last value**
+while no burner request is active (a dropped key would chart as 0 °C). Until 2026-11-21 it was
+the burner state machine's last *armed* target, which froze while the burner coasted: during
+the 2026-11-20 06:55 tank charge it read 61 °C against a live 65 °C, and kept reading 61 for
+seven minutes after the charge ended.
 
 Optional temperature keys, compiled in only with the matching flag in `src/config/ProjectConfig.h` (all commented out by default): `wtt` water tank top (`ENABLE_SENSOR_WATER_TANK_TOP`), `wr` water return (`ENABLE_SENSOR_WATER_RETURN`), `hr` heating return (`ENABLE_SENSOR_HEATING_RETURN`).
 
@@ -1007,11 +1012,13 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 | Outside threshold | `heating/outsideThreshold` | 50-250 (5.0-25.0°C) | 150 | Weather-compensated heating starts below this and stops at threshold + 1.0°C (hysteresis) |
 | Curve coefficient | `heating/curveCoeff` | 0.5-4.0 | 1.4 | Heating curve slope (float) |
 | Curve shift | `heating/curveShift` | -20.0-40.0 (°C) | 0 | Heating curve parallel shift (float) |
-| Stage-2 lock | `h/boostMin` | 380-750 (38.0-75.0°C) | 500 | Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, ~34 kW measured). Water charges and autotune runs are exempt. 380 (= `h/sLo`) lets every heating target boost; 750 is effectively never |
+| Stage-2 lock | `h/boostMin` | 380-750 (38.0-75.0°C) | 500 | Lowest space-heating flow target allowed to use stage 2 (POWER_BOOST, ~34 kW measured). Water charges (see `w/boost`) and autotune runs are exempt. 380 (= `h/sLo`) lets every heating target boost; 750 is effectively never |
 | Heating dead band, OFF edge | `h/bandOff` | 5-150 (0.5-15.0°C) | 50 | Burner turns OFF once flow reaches `target + this`. With `h/bandOn`, sets the burner start rate: cycle period is proportional to band width, duty is not |
 | Heating dead band, ON edge | `h/bandOn` | 5-150 (0.5-15.0°C) | 30 | Burner relights only once flow falls to `target - this` |
 | Water dead band, OFF edge | `w/bandOff` | 5-150 (0.5-15.0°C) | 40 | As `h/bandOff`, for tank charges. Defaults reproduce measured behaviour rather than changing it |
 | Water dead band, ON edge | `w/bandOn` | 5-150 (0.5-15.0°C) | 30 | As `h/bandOn`, for tank charges |
+| Water stage 2 | `w/boost` | 0-2 | 0 | Stage 2 during tank charges: `0` always (pre-2026-11-21 behaviour), `1` never, `2` only while the boiler output is more than `w/boostGap` below the charge target (warm-up). Autotune keeps its full-power step regardless |
+| Water stage-2 warm-up gap | `w/boostGap` | 50-400 (5.0-40.0°C) | 150 | For `w/boost` 2: stage 2 is allowed while output < target - this |
 | Space heating gains | `pid/spaceHeating/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a heating request |
 | Water heater gains | `pid/waterHeater/kp`, `ki`, `kd` | 0-100 / 0-10 / 0-50 | 1.0 / 0.5 / 0.1 | Boiler PID gains for a water request |
 | Autotune method | `pid/autotune/method` | 0-4 | 0 | 0=ZN_PI, 1=ZN_PID, 2=Tyreus-Luyben, 3=Cohen-Coon, 4=Lambda |
@@ -1024,6 +1031,7 @@ Parameter commands (ESP32-PersistentStorage, prefix `boiler/params`, subscriptio
 - PID gain changes apply on the next boiler control cycle (the PID is reset when the active gains change); no reboot needed.
 - `heating/outsideThreshold` up to 25°C allows weather-compensated heating on a mild day (e.g. for a space-heating autotune).
 - `h/boostMin` exists because a cold radiator circuit saturates the power selector on every space-heating start: the first flow reading after the pump starts is 20-27°C against a shoulder-season target of 38-46°C. With `boiler/pidEnabled` true (the live configuration) that means a PID output above 75 % and therefore stage 2; with it false, a bang-bang error above 10.0°C does the same. Before this gate, measured 2026-10-19: 11 minutes of stage 2 against a 38.0°C setpoint at 11.5°C outside. The gate is the flow target rather than the outside temperature because the target already contains both the outside temperature (via the curve) and the room deficit (via the room-deviation shift), so a cold-morning recovery earns stage 2 back by itself.
+- `w/boost` exists because on this tank the coil, not the burner, sets the charge rate. Across 24 charges (2026-11-10..20) the boiler output-return gap - proportional to the heat the coil takes, at a fixed pump speed - averaged 4-6 K on stage 1 and 3-7 K on stage 2: stage 2 did not raise it. Its extra heat stays in the boiler, reaches `target + w/bandOff` sooner and ends the burn, giving 2-3 starts per charge where 1 would do. All three single-burn charges in that window had 0-2.5 min of stage 2. The default stays `0` until a comparison of real charges says otherwise; `2` keeps stage 2 for the one phase it plausibly helps, a cold boiler the coil cannot use yet.
 - What `h/boostMin` does **not** do: it does not save gas and it does not reduce burner starts. Starts in mild weather come from the boiler PID's 35 % off threshold (empirically target +2.3 to +2.9) against a flow target pinned on the `h/sLo` floor, with burns held near 3 minutes by `MIN_ON_TIME_MS` (120 s, compile-time). That pattern recurs with the lock active - 2026-10-20 09:46-10:30 gave a 37m10s burn ending flow-driven at 43.4 against a 41.0 target, a 3m40s stop, then a 2m00s burn. What the lock buys is less heat-exchanger stress on a cold start and a quieter boiler. See ALGORITHMS.md for the measured windows.
 
 ```bash

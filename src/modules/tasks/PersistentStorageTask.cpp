@@ -4,6 +4,7 @@
 #include "modules/control/AutotuneRelayConfig.h"  // autotune setting ranges
 #include "modules/control/WaterChargePolicy.h"    // charge delta bounds
 #include "modules/control/BurnerHysteresisPolicy.h" // flow dead band bounds
+#include "modules/control/BurnerBoostPolicy.h"      // w/boost modes and w/boostGap bounds
 #include <TaskManager.h>
 #include "LoggingMacros.h"
 #include "core/SystemResourceProvider.h"
@@ -415,6 +416,25 @@ void PersistentStorageTask(void* pvParameters) {
     storage->setOnChange("h/bandOn", [](const std::string&, const void*) {
         SRP::getSystemSettings().heatingFlowOnBelow = static_cast<Temperature_t>(heatBandOn_i32);
     });
+    // Stage 2 during hot-water charges. w/boost: 0 = always (default, pre-2026-11-21
+    // behaviour), 1 = never, 2 = only while the boiler output is more than w/boostGap below
+    // the charge target. 0 is the default ON PURPOSE - a missing key loads as 0 - so there is
+    // no re-apply step for w/boost below. Measurement and rationale in BurnerBoostPolicy.h.
+    static int32_t waterBoostMode_i32 = BurnerBoostPolicy::WATER_BOOST_ALWAYS;
+    static int32_t waterBoostGap_i32  = BurnerBoostPolicy::WATER_BOOST_GAP_DEFAULT;
+    storage->registerInt("w/boost", &waterBoostMode_i32,
+                         BurnerBoostPolicy::WATER_BOOST_ALWAYS, BurnerBoostPolicy::WATER_BOOST_WARMUP,
+                         "Water stage 2: 0=always 1=never 2=warm-up only");
+    storage->registerInt("w/boostGap", &waterBoostGap_i32,
+                         BurnerBoostPolicy::WATER_BOOST_GAP_MIN, BurnerBoostPolicy::WATER_BOOST_GAP_MAX,
+                         "Water stage 2 warm-up: allowed while output < target - this (tenths °C)");
+    storage->setOnChange("w/boost", [](const std::string&, const void*) {
+        SRP::getSystemSettings().water_boost_mode = static_cast<uint8_t>(waterBoostMode_i32);
+    });
+    storage->setOnChange("w/boostGap", [](const std::string&, const void*) {
+        SRP::getSystemSettings().water_boost_gap = static_cast<Temperature_t>(waterBoostGap_i32);
+    });
+
     storage->setOnChange("w/bandOff", [](const std::string&, const void*) {
         SRP::getSystemSettings().waterFlowOffAbove = static_cast<Temperature_t>(waterBandOff_i32);
     });
@@ -781,6 +801,8 @@ void PersistentStorageTask(void* pvParameters) {
     if (heatBandOn_i32 == 0) heatBandOn_i32 = BurnerHysteresisPolicy::DEFAULT_HEATING_ON_BELOW;
     if (waterBandOff_i32 == 0) waterBandOff_i32 = BurnerHysteresisPolicy::DEFAULT_WATER_OFF_ABOVE;
     if (waterBandOn_i32 == 0) waterBandOn_i32 = BurnerHysteresisPolicy::DEFAULT_WATER_ON_BELOW;
+    if (waterBoostGap_i32 == 0) waterBoostGap_i32 = BurnerBoostPolicy::WATER_BOOST_GAP_DEFAULT;
+    // w/boost: no re-apply - 0 is its default AND a valid choice (BurnerBoostPolicy.h)
     if (water_low_i32 == 0) water_low_i32 = 400;
     if (water_high_i32 == 0 || water_high_i32 == 1) water_high_i32 = 900;
     // Weather control defaults (15.0°C threshold, 2.0°C overheat margin)
@@ -796,6 +818,8 @@ void PersistentStorageTask(void* pvParameters) {
     settings.heatingFlowOnBelow = static_cast<Temperature_t>(heatBandOn_i32);
     settings.waterFlowOffAbove = static_cast<Temperature_t>(waterBandOff_i32);
     settings.waterFlowOnBelow = static_cast<Temperature_t>(waterBandOn_i32);
+    settings.water_boost_mode = static_cast<uint8_t>(waterBoostMode_i32);
+    settings.water_boost_gap = static_cast<Temperature_t>(waterBoostGap_i32);
     settings.water_heating_low_limit = static_cast<Temperature_t>(water_low_i32);
     settings.water_heating_high_limit = static_cast<Temperature_t>(water_high_i32);
     settings.outsideTempHeatingThreshold = static_cast<Temperature_t>(outsideHeatingThreshold_i32);

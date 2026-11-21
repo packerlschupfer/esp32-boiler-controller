@@ -1082,7 +1082,11 @@ setpoint, as burn 1 above shows; that is harmless while the room stays satisfied
 where FULL becomes a burner request, requires the space-heating flow target to be at least
 `h/boostMin` (default 50.0°C, about +4°C outside on the 2026-10-19 curve). Exempt:
 
-- **water charges** - the tank is a real heat sink and the target is tank + 10°C, not a curve;
+- **water charges** - the target is tank + delta, not a curve. Water has its own gate instead,
+  `BurnerBoostPolicy::waterFullPowerAllowed()` (`w/boost`: 0 always, 1 never, 2 only while the
+  output is more than `w/boostGap` below target). Added 2026-11-21 after 24 charges showed the
+  coil absorbing no more on stage 2 than on stage 1 (output-return gap 4-6 K vs 3-7 K), so
+  stage 2 only heated the boiler's own water and split charges into 2-3 burns;
 - **autotune runs** - `PIDAutoTuner` needs a full-power step for usable oscillations.
 
 The gate is the flow target, not the outside temperature, because the target already carries
@@ -1109,7 +1113,7 @@ Denying is the fail-safe direction: the burner still runs at stage 1.
 | **Burner Demand Gate** | Heat demand arming | 6s decision age, 1°C tolerance, 10s retry | BurnerDemandGate.h |
 | **Burner Transitions** | Burner state decisions | 10s no-mode grace, 15s/30s mode switch bounds | BurnerTransitions.h |
 | **Heating Curve** | Space heating boiler target, weather/room mode | coeff 1.4, shift 0, outside hysteresis 1.0°C | HeatingCurve.h, SpaceHeatingPolicy.h |
-| **Stage-2 Lock** | No stage 2 (~34 kW) for mild-weather heating | h/boostMin 50.0°C, water/autotune exempt | BurnerBoostPolicy.h |
+| **Stage-2 Lock** | No stage 2 (~34 kW) for mild-weather heating | h/boostMin 50.0°C, autotune exempt; water: w/boost 0/1/2, w/boostGap 15.0 K | BurnerBoostPolicy.h |
 
 ---
 

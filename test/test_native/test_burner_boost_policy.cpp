@@ -80,3 +80,40 @@ void test_boost_water_and_autotune_override_an_invalid_target() {
     TEST_ASSERT_TRUE(fullPowerAllowed(true, false, 0, BOOST_MIN));
     TEST_ASSERT_TRUE(fullPowerAllowed(false, true, 0, BOOST_MIN));
 }
+
+// ===== Water charge gate: w/boost, w/boostGap (2026-11-21) =====
+
+using BurnerBoostPolicy::waterFullPowerAllowed;
+static constexpr Temperature_t GAP = BurnerBoostPolicy::WATER_BOOST_GAP_DEFAULT;  // 15.0 K
+
+void test_water_boost_always_is_the_zero_default() {
+    // 0 must be today's behaviour: a device that never stored w/boost loads 0.
+    TEST_ASSERT_EQUAL(0, BurnerBoostPolicy::WATER_BOOST_ALWAYS);
+    TEST_ASSERT_TRUE(waterFullPowerAllowed(0, 550, 300, true, GAP));
+    TEST_ASSERT_TRUE(waterFullPowerAllowed(0, 550, 590, true, GAP));  // even above target
+}
+
+void test_water_boost_never_denies_every_charge() {
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(BurnerBoostPolicy::WATER_BOOST_NEVER, 550, 300, true, GAP));
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(BurnerBoostPolicy::WATER_BOOST_NEVER, 650, 200, true, GAP));
+}
+
+void test_water_boost_warmup_only_while_boiler_is_cold() {
+    const uint8_t W = BurnerBoostPolicy::WATER_BOOST_WARMUP;
+    // The 2026-11-20 06:55 charge: output 30.4 against a 55.0 target -> 24.6 K short, boost.
+    TEST_ASSERT_TRUE(waterFullPowerAllowed(W, 550, 304, true, GAP));
+    // 07:09 restart at 50.5 against 55.0: 4.5 K short - stage 1 only.
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(W, 550, 505, true, GAP));
+    // Boundary is strict: exactly gap below is no longer "more than gap below".
+    TEST_ASSERT_TRUE(waterFullPowerAllowed(W, 550, 399, true, GAP));
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(W, 550, 400, true, GAP));
+}
+
+void test_water_boost_warmup_fails_safe_to_stage_1() {
+    const uint8_t W = BurnerBoostPolicy::WATER_BOOST_WARMUP;
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(W, 550, 300, false, GAP));          // invalid reading
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(W, 550, TEMP_INVALID, true, GAP));
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(W, 0, 300, true, GAP));             // no target
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(W, TEMP_INVALID, 300, true, GAP));
+    TEST_ASSERT_FALSE(waterFullPowerAllowed(7, 550, 300, true, GAP));           // unknown mode
+}

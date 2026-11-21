@@ -15,6 +15,8 @@
 #include "events/SystemEventsGenerated.h"
 #include "modules/control/TemperatureSensorFallback.h"
 #include "modules/control/BurnerStateMachine.h"
+#include "modules/control/CommandedSetpoint.h"   // t.bt source and hold rule
+#include "modules/tasks/BoilerTempControlTask.h" // getBoilerTempDecision()
 #include "utils/MemoryPool.h"
 #include <SemaphoreGuard.h>
 #include <ArduinoJson.h>
@@ -377,11 +379,32 @@ void publishSensorData() {
     // which tempIsValid() accepts, so the flag belongs here too.
     putTemp("i", sensors.insideTemp, sensors.isInsideTempValid);
 
-    // Add burner target temperature (from BurnerStateMachine)
-    bool burnerDemand = false;
-    Temperature_t burnerTarget = 0;
-    if (BurnerStateMachine::getHeatDemandState(burnerDemand, burnerTarget)) {
-        temps["bt"] = burnerTarget;             // burner target
+    // Commanded flow setpoint: the control loop's current (capped) target, held at idle.
+    // Was BurnerStateMachine's armed target, which froze while the burner coasted - see
+    // CommandedSetpoint.h for the 2026-11-20 charge that showed 61 °C against a live 65.
+    {
+        static Temperature_t heldSetpoint = 0;
+        static bool haveHeldSetpoint = false;
+        bool decisionWantsHeat = false;
+        Temperature_t decisionTarget = 0;
+        uint32_t decisionAgeMs = 0;
+        const bool haveDecision =
+            getBoilerTempDecision(decisionWantsHeat, decisionTarget, decisionAgeMs);
+        if (!haveHeldSetpoint) {
+            // Before the first live decision after boot, seed from the state machine so the
+            // key is not missing (HA would chart the missing key as 0 °C).
+            bool burnerDemand = false;
+            Temperature_t burnerTarget = 0;
+            if (BurnerStateMachine::getHeatDemandState(burnerDemand, burnerTarget) &&
+                CommandedSetpoint::isUsableTarget(burnerTarget)) {
+                heldSetpoint = burnerTarget;
+                haveHeldSetpoint = true;
+            }
+        }
+        if (CommandedSetpoint::select(haveDecision, decisionTarget, decisionAgeMs,
+                                      heldSetpoint, haveHeldSetpoint)) {
+            temps["bt"] = heldSetpoint;
+        }
     }
 
     // Include system pressure if valid (in hundredths of BAR for precision)

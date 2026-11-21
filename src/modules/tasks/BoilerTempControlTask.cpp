@@ -550,9 +550,19 @@ void BoilerTempControlTask(void* parameter) {
                     // heating the flow target must be high enough that stage 2 can actually
                     // leave through the emitters (BurnerBoostPolicy.h - this is the
                     // shoulder-season lock; water charges and autotune runs are exempt).
-                    const bool boostAllowed = BurnerBoostPolicy::fullPowerAllowed(
+                    const bool heatingBoostAllowed = BurnerBoostPolicy::fullPowerAllowed(
                         controller.isWaterMode(), controller.isAutoTuning(), targetTemp,
                         SRP::getSystemSettings().heating_boost_min_target);
+                    // Water has its own gate (w/boost, 2026-11-21): the coil, not the burner,
+                    // sets the charge rate, so stage 2 mostly just ends burns early. Autotune
+                    // keeps its full-power step in either mode.
+                    const bool waterGated = controller.isWaterMode() && !controller.isAutoTuning();
+                    const bool waterBoostAllowed = !waterGated ||
+                        BurnerBoostPolicy::waterFullPowerAllowed(
+                            SRP::getSystemSettings().water_boost_mode, targetTemp, currentTemp,
+                            true /* validity and staleness checked above */,
+                            SRP::getSystemSettings().water_boost_gap);
+                    const bool boostAllowed = heatingBoostAllowed && waterBoostAllowed;
                     // Fourth gate: a DEGRADED-or-worse failsafe withholds stage 2. This is
                     // where "limiting burner to half power" actually happens - in
                     // CentralizedFailsafe it was a log line above an empty comment until the
@@ -565,9 +575,16 @@ void BoilerTempControlTask(void* parameter) {
                     static bool boostDeniedLogged = false;
                     if (output.powerLevel == BoilerTempController::PowerLevel::FULL && !boostAllowed) {
                         if (!boostDeniedLogged) {
-                            LOG_INFO(TAG, "Stage 2 withheld: flow target %.1f below h/boostMin %.1f",
-                                     tempToFloat(targetTemp),
-                                     tempToFloat(SRP::getSystemSettings().heating_boost_min_target));
+                            if (!waterBoostAllowed) {
+                                LOG_INFO(TAG, "Stage 2 withheld: water charge, w/boost %u (output %.1f, target %.1f, gap %.1f)",
+                                         static_cast<unsigned>(SRP::getSystemSettings().water_boost_mode),
+                                         tempToFloat(currentTemp), tempToFloat(targetTemp),
+                                         tempToFloat(SRP::getSystemSettings().water_boost_gap));
+                            } else {
+                                LOG_INFO(TAG, "Stage 2 withheld: flow target %.1f below h/boostMin %.1f",
+                                         tempToFloat(targetTemp),
+                                         tempToFloat(SRP::getSystemSettings().heating_boost_min_target));
+                            }
                             boostDeniedLogged = true;
                         }
                     } else {

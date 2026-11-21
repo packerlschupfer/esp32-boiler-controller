@@ -119,6 +119,75 @@ namespace BurnerBoostPolicy {
         return flowTarget >= minTargetForFull;
     }
 
+    /**
+     * @brief Stage 2 during a hot-water charge: w/boost and w/boostGap.
+     *
+     * fullPowerAllowed() above exempts water from h/boostMin; this is the separate,
+     * water-only gate, ANDed with it at the call site. Added 2026-11-21 from 24 charges
+     * (2026-11-10..20, HA recorder):
+     *
+     *  - The boiler output-return gap - with a fixed-speed pump, proportional to the heat the
+     *    VIH Q 150 coil actually takes - averaged 4-6 K on stage 1 and 3-7 K on stage 2.
+     *    Stage 2 did not raise it. The coil, not the burner, sets the charge rate, so stage 2
+     *    only heats the boiler's own water, reaches target + w/bandOff sooner, and ends the
+     *    burn: 2-3 burner starts per charge instead of 1.
+     *  - All 3 single-burn charges had 0-2.5 min of stage 2. The one draw-free charge with no
+     *    stage 2 took 13.8 min against 11.7-13.3 min for draw-free charges with ~6 min of it.
+     *    One sample - which is why this is a parameter to test, not a new default.
+     *
+     * WARMUP is the one place stage 2 plausibly earns its keep: a cold boiler (2026-11-20
+     * started at 30.4 °C against a 55 °C target) is useless to the coil until its own water
+     * is hot. So stage 2 is allowed only while the boiler output is MORE than w/boostGap below
+     * the charge target, and stage 1 does the rest.
+     *
+     * Encoding puts today's behaviour at 0 ON PURPOSE: PersistentStorage loads a missing key
+     * as 0, so an existing device that has never stored w/boost keeps ALWAYS - no re-apply
+     * step that would also clobber a deliberate choice.
+     */
+    enum WaterBoostMode : uint8_t {
+        WATER_BOOST_ALWAYS = 0,   // default: stage 2 whenever the controller asks (pre-2026-11-21)
+        WATER_BOOST_NEVER  = 1,   // stage 1 only for every charge
+        WATER_BOOST_WARMUP = 2,   // stage 2 only while output < target - w/boostGap
+    };
+
+    /// w/boostGap bounds, tenths °C. Lower bound above 0 so a missing key (0) is detectably
+    /// unset and re-defaulted, unlike w/boost where 0 is a real value.
+    constexpr Temperature_t WATER_BOOST_GAP_MIN     = 50;    // 5.0 K
+    constexpr Temperature_t WATER_BOOST_GAP_MAX     = 400;   // 40.0 K
+    constexpr Temperature_t WATER_BOOST_GAP_DEFAULT = 150;   // 15.0 K
+
+    /**
+     * @param mode          w/boost
+     * @param chargeTarget  the charge's flow target, tenths °C
+     * @param boilerOutput  current boiler output, tenths °C
+     * @param outputValid   boiler output reading is valid and fresh
+     * @param warmupGap     w/boostGap, tenths °C
+     * @return true if stage 2 may be requested for this water charge
+     *
+     * Fail-safe direction is deny, as above: an unknown mode or an unusable reading in
+     * WARMUP costs a slower charge on stage 1, never an overshoot.
+     */
+    inline bool waterFullPowerAllowed(uint8_t mode, Temperature_t chargeTarget,
+                                      Temperature_t boilerOutput, bool outputValid,
+                                      Temperature_t warmupGap) {
+        switch (mode) {
+            case WATER_BOOST_ALWAYS:
+                return true;
+            case WATER_BOOST_NEVER:
+                return false;
+            case WATER_BOOST_WARMUP:
+                if (!outputValid || chargeTarget <= 0 || chargeTarget == TEMP_INVALID ||
+                    boilerOutput == TEMP_INVALID) {
+                    return false;
+                }
+                // int32: target - gap cannot wrap for any int16 pair
+                return static_cast<int32_t>(boilerOutput) <
+                       static_cast<int32_t>(chargeTarget) - static_cast<int32_t>(warmupGap);
+            default:
+                return false;
+        }
+    }
+
 } // namespace BurnerBoostPolicy
 
 #endif // BURNER_BOOST_POLICY_H

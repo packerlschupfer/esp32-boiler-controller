@@ -61,6 +61,12 @@ struct SystemSettings {
     // temperature. 50.0 °C is about +4 °C outside on the 2026-10-19 curve.
     Temperature_t heating_boost_min_target = tempFromFloat(50.0f);
 
+    // Stage 2 during hot-water charges (w/boost, w/boostGap). Default member initializers for
+    // the same reason as above. Mode 0 = ALWAYS is today's behaviour; see
+    // BurnerBoostPolicy::waterFullPowerAllowed() for the 24-charge measurement behind it.
+    uint8_t water_boost_mode = 0;                     // BurnerBoostPolicy::WaterBoostMode
+    Temperature_t water_boost_gap = 150;              // WARMUP: stage 2 while output < target - this
+
     // Flow dead band on the PID path, per mode (tenths °C). Same reason for default member
     // initializers as above. The burner turns OFF at target + offAbove and relights only at
     // target - onBelow; this is what sets the burner start rate. See BurnerHysteresisPolicy.h

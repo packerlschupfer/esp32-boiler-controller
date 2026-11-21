@@ -22,6 +22,30 @@ rejection rather than a silent no-op. The first two are corrections toward docum
 intent rather than breaks of a documented contract. The third is a genuine removal, but of
 a parameter that never affected anything and that Home Assistant never exposed.
 
+### Added: `w/boost` - stage 2 during tank charges is now a choice
+
+`w/boost` 0 = always (unchanged default), 1 = never, 2 = only during warm-up, i.e. while the
+boiler output is more than `w/boostGap` (default 15.0 K) below the charge target. From 24
+charges, 2026-11-10..20: the boiler output-return gap, which measures what the tank coil takes,
+was no higher on stage 2 (3-7 K) than on stage 1 (4-6 K). Stage 2 only heated the boiler's own
+water, reached the dead band's OFF edge sooner and split charges into 2-3 burns; all three
+single-burn charges had 0-2.5 min of stage 2. A parameter, not a new default, until a
+comparison of real charges settles it. Autotune keeps its full-power step in either mode.
+
+### Fixed: "Boiler Commanded Setpoint" (`t.bt`) froze while the burner coasted
+
+`t.bt` was the burner state machine's last armed target. During the 2026-11-20 06:55 charge
+the target rose 61 -> 63 -> 65 °C while the burner coasted, and `t.bt` stayed at 61 - for
+seven more minutes after the charge ended, until heating armed the burner again. It is now the
+control loop's current target (after the sensor-fallback cap), recorded every cycle, and it
+holds its last value at idle rather than disappearing, which HA would chart as 0 °C.
+
+### Fixed: the restart reason was logged on every reconnect, and lost on the real boot
+
+The "Last restart was ABNORMAL" line is now logged once per boot, after the syslog window has
+opened, with uptime in it. Before, a 3-minute network blip re-raised a 25 h old task_wdt alert,
+while the boot itself logged the line ~47 s before the window opened and lost it.
+
 ### Fixed: the three "house goes cold and nothing tells you" findings
 
 From a top-down behavioural review (eight dimensions, adversarial verification, 25 of 28
