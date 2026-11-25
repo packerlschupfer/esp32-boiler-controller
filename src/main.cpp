@@ -373,7 +373,11 @@ void setup() {
     // Initialize NTPTask for network time synchronization (after TimerScheduler registers callback)
     LOG_INFO(TAG, "Initializing NTPTask...");
 
-    // NTPTask manages its own watchdog internally (60s timeout via TaskManager + yield callback)
+    // NTPTask registers with the global task watchdog itself. NOTE: the budget is the GLOBAL
+    // 30 s from initWatchdog(30, true), NOT the 60 s this comment used to claim - and the
+    // yield callback it also claimed was in use had never been wired at all, which is what
+    // let a 15 s blocking NTP sync on a dead link reboot the boiler on 2026-11-25. Both are
+    // real now; see NTPTask.cpp.
     TaskManager::WatchdogConfig ntpWdtConfig = TaskManager::WatchdogConfig::disabled();
 
     if (SRP::getTaskManager().startTaskPinned(

@@ -160,11 +160,18 @@ static bool performNTPSync() {
 
     LOG_DEBUG(TAG, "Performing NTP sync...");
 
-    // Feed watchdog before sync - syncTime() can block up to timeout × num_servers.
-    // All servers now use IPs (no DNS), so 4 × 3s = 12s worst case, well within 60s WDT.
+    // Feed before and after, and - since 2026-11-25 - DURING, via the yield callback wired
+    // in NTPTaskEventDriven(). These two feeds alone were not enough, because they bracket
+    // the entire blocking region rather than interrupting it.
+    //
+    // THE WORST CASE IS 5 ATTEMPTS, NOT 4. NTPClient::syncTime() tries getBestServer()
+    // first and then loops over ALL servers *including that one again*
+    // (NTPClient.cpp:166-182), so four configured servings give 5 x 3 s = 15 s of waiting,
+    // not the 12 s the old comment claimed - against a real 30 s budget, with lwIP send-side
+    // delays on a dead link on top. That is how a broken link became a reboot.
     (void)SRP::getTaskManager().feedWatchdog();
 
-    auto result = ntpClient.syncTime(3000);  // 3s timeout per server (4 servers = 12s max)
+    auto result = ntpClient.syncTime(3000);  // 3 s per attempt; 5 attempts worst case
 
     // Feed again immediately after - covers the blocking period
     (void)SRP::getTaskManager().feedWatchdog();
@@ -355,15 +362,21 @@ static void logNTPStatus() {
 void NTPTaskEventDriven(void* parameter) {
     LOG_INFO(TAG, "Starting event-driven NTP task on core %d", xPortGetCoreID());
 
-    // Enable TaskManager watchdog with generous timeout
-    // Event loop runs every 500ms; NTP sync worst case = 4 servers × 3s = 12s.
-    // WDT is also fed inside performNTPSync() before/after the blocking call.
+    // THE 60000 HERE IS A FEED INTERVAL, NOT A TIMEOUT - and believing otherwise rebooted the
+    // boiler on 2026-11-25.
+    //
+    // WatchdogConfig::enabled(60000) sets only TaskManager's own bookkeeping interval. The
+    // actual hardware task watchdog is global and is armed exactly once, by
+    // SystemInitializer.cpp:115 `initWatchdog(30, true)` - so the real budget is **30 s**,
+    // and panic-on-timeout is ON. The comment this replaces claimed "well within 60s WDT"
+    // and the one at main.cpp went further and claimed a yield callback was already wired.
+    // Neither was true; see performNTPSync() for what actually blocks.
     TaskManager::WatchdogConfig wdtConfig = TaskManager::WatchdogConfig::enabled(60000);
 
     if (!SRP::getTaskManager().registerCurrentTaskWithWatchdog("NTPTask", wdtConfig)) {
         LOG_ERROR(TAG, "WDT reg failed");
     } else {
-        LOG_INFO(TAG, "WDT OK 60000ms");
+        LOG_INFO(TAG, "WDT registered (feed interval 60000 ms; real budget is the global 30 s)");
         (void)SRP::getTaskManager().feedWatchdog();  // Feed immediately after registration
     }
 
@@ -388,6 +401,32 @@ void NTPTaskEventDriven(void* parameter) {
     (void)ntpClient.addServer("162.159.200.1", 123);      // time.cloudflare.com IP - no DNS needed
     (void)ntpClient.addServer("129.6.15.28", 123);        // time.nist.gov IP - no DNS needed
     
+    // FEED THE WATCHDOG *DURING* THE BLOCKING WAIT. This is the fix for the 2026-11-25
+    // task_wdt reboot, and it wires a mechanism that already existed and had never been
+    // called: `setYieldCallback` had ZERO callers anywhere in the firmware, while
+    // main.cpp's comment asserted "60s timeout via TaskManager + yield callback". The
+    // callback is invoked from inside NTPClient::receiveNTPPacket's wait loop, which is
+    // where essentially all of the sync time goes.
+    //
+    // THROTTLED ON PURPOSE. The wait loop calls this roughly every 1 ms (it does
+    // `delay(1); yield();` per iteration), and TaskManager::feedWatchdog() takes a recursive
+    // mutex and walks the whole task list on every call. Feeding unconditionally would be
+    // thousands of mutex acquisitions per sync attempt, on a task that is only waiting. One
+    // feed per second is ~30x the margin the 30 s budget needs.
+    //
+    // Safe to capture nothing and call SRP here: the callback runs synchronously on
+    // NTPTask's own context, inside the syncTime() call below, so feedWatchdog() feeds the
+    // correct task.
+    ntpClient.setYieldCallback([]() {
+        static uint32_t lastFeedMs = 0;
+        const uint32_t now = millis();
+        // Unsigned subtraction, so the 49.7-day millis() rollover cannot wedge this.
+        if (static_cast<uint32_t>(now - lastFeedMs) >= 1000u) {
+            lastFeedMs = now;
+            (void)SRP::getTaskManager().feedWatchdog();
+        }
+    });
+
     // Use UTC in NTPClient - system TZ environment handles timezone
     // This prevents double timezone offset application
     ntpClient.setTimeZone(timeZoneUTC);
